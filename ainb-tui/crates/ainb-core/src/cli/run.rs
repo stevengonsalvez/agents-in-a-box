@@ -40,6 +40,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let work_dir: PathBuf;
     let branch_name: String;
     let session_id = Uuid::new_v4();
+    // Set when the session ends up running directly in the user's checkout.
+    // Kept so the warning can be REPEATED in the post-creation summary: with
+    // `--attach`/`-i` this process execs into tmux, and the copy printed here
+    // is buried under the creation log before the user ever reads it, in
+    // exactly the invocation the warning exists to catch.
+    let mut shared_checkout = false;
 
     // Step 3: Create worktree if requested
     if args.worktree || args.create_branch.is_some() {
@@ -63,7 +69,20 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         println!("Created worktree at: {}", work_dir.display());
     } else {
         work_dir = repo_path.clone();
-        branch_name = get_current_branch(&repo_path).unwrap_or_else(|| "main".to_string());
+        branch_name =
+            crate::git::current_branch_at(&repo_path).unwrap_or_else(|| "main".to_string());
+
+        // No isolation was requested, so this session runs directly in the
+        // checkout the user pointed at. Say so loudly (stderr, never a prompt,
+        // never fatal): the agent shares that branch/index/working tree with
+        // the user's editor and with any other session started there.
+        shared_checkout = matches!(
+            classify_session_root(&work_dir),
+            SessionRoot::SharedCheckout
+        );
+        if shared_checkout {
+            warn_shared_checkout(&work_dir);
+        }
     }
 
     // Step 4: Generate session name
@@ -168,12 +187,41 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     println!("To attach to this session:");
     println!("  tmux attach -t {tmux_name}");
     println!();
+    // Print an id prefix, NOT `session_name`. `--name` only renames the tmux
+    // session; `ainb attach|status|kill` resolve their argument as a session
+    // id, an id prefix, or the *workspace* name (repo-directory derived), so
+    // echoing `session_name` here hands the user a handle that does not
+    // resolve whenever they passed `--name`.
     println!("Or use:");
-    println!("  ainb attach {session_name}");
+    println!("  ainb attach {}", &session_id.to_string()[..8]);
     println!();
+
+    // Repeat the no-isolation warning as the LAST thing before attaching.
+    //
+    // With `--attach`/`-i` the next statement execs tmux, which takes the
+    // terminal over for the whole life of the session; the pre-creation copy
+    // is on screen for a few milliseconds and then buried under the creation
+    // log. Emitting it here puts it immediately above the point where tmux
+    // takes (and later hands back) the terminal, so it is the last thing the
+    // user saw going in and the first thing they see coming out, instead of
+    // being lost mid-log.
+    //
+    // Still advisory: no prompt, no non-zero exit.
+    if shared_checkout {
+        warn_shared_checkout(&work_dir);
+    }
 
     // Step 11: Attach if requested
     if args.attach || args.interactive {
+        // tmux switches to the alternate screen within milliseconds of the
+        // exec below, so without a beat here the warning above is technically
+        // emitted and practically unreadable: the user only meets it after
+        // detaching, by which point the agent has been working in their
+        // checkout for a while. A short pause is the cheapest thing that makes
+        // it legible without turning an advisory into a prompt.
+        if shared_checkout {
+            sleep(Duration::from_secs(2)).await;
+        }
         println!("Attaching to session...");
         attach_to_session(&tmux_name)?;
     }
@@ -340,19 +388,10 @@ async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     Ok(repo_path)
 }
 
-/// Get the current branch name from a repository
-fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
-    use git2::Repository;
-
-    let repo = Repository::open(repo_path).ok()?;
-    let head = repo.head().ok()?;
-
-    if head.is_branch() {
-        head.shorthand().map(std::string::ToString::to_string)
-    } else {
-        head.target().map(|oid| oid.to_string()[..8].to_string())
-    }
-}
+// The current-branch lookup lives in `crate::git::current_branch_at`. It used
+// to be duplicated here with `git2::Repository::open`, which fails for a
+// `--repo <clone>/<subdir>` target (open needs a repository ROOT) and made the
+// session record branch "main" for whatever branch was actually checked out.
 
 /// Normalize only AINB's no-model sentinels. Every other value stays opaque.
 fn requested_model(model: Option<&str>) -> Option<String> {
@@ -467,6 +506,77 @@ fn input_box_ready(pane: &str) -> bool {
     READY_MARKERS.iter().any(|marker| pane.contains(marker))
 }
 
+/// How isolated a candidate session working directory is.
+///
+/// Decided purely from real on-disk git state, by walking ancestors:
+/// a `.git` FILE is git's gitdir pointer and only exists inside a linked
+/// worktree; a `.git` DIRECTORY is the repository itself, i.e. the shared
+/// checkout every other tool in that tree also writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRoot {
+    /// Inside a linked git worktree, so the session has its own branch,
+    /// index and working tree. Nothing to warn about.
+    LinkedWorktree,
+    /// The repository checkout itself (or a subdirectory of one). A session
+    /// rooted here shares the branch, index and working tree with anything
+    /// else operating in that checkout.
+    SharedCheckout,
+    /// Not inside any git repository. `ainb run` still works, but there is no
+    /// worktree to isolate, so the warning would be noise.
+    NotAGitRepo,
+}
+
+/// Classify `path` by walking it and its ancestors for the first `.git` entry.
+///
+/// The nearest `.git` wins, which is exactly how git itself resolves a
+/// directory: a subdirectory of a linked worktree is still isolated, and a
+/// subdirectory of a plain clone is still shared.
+///
+/// ABSOLUTE PATHS ONLY, for the same reason as
+/// [`InteractiveSessionManager::get_source_repository`](crate::interactive::InteractiveSessionManager::get_source_repository):
+/// `Path::ancestors()` on a relative path ends at `""`, and
+/// `Path::new("").join(".git")` is `".git"`, which resolves against the
+/// PROCESS's current directory. The walk would classify whatever tree the
+/// user happened to run `ainb` from, and then warn (or stay silent) about a
+/// directory that is not the session's. `resolve_repo_path` canonicalizes
+/// before this is ever called, so a relative path here means a programming
+/// error, and the honest answer for a path we cannot resolve is "no verdict",
+/// never a warning naming the wrong tree.
+#[must_use]
+pub fn classify_session_root(path: &std::path::Path) -> SessionRoot {
+    if !path.is_absolute() {
+        return SessionRoot::NotAGitRepo;
+    }
+    for ancestor in path.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if dot_git.is_file() {
+            return SessionRoot::LinkedWorktree;
+        }
+        if dot_git.is_dir() {
+            return SessionRoot::SharedCheckout;
+        }
+    }
+    SessionRoot::NotAGitRepo
+}
+
+/// Tell the user the session they just asked for has no isolation.
+///
+/// stderr, not `tracing`: `ainb run` installs the JSONL file log sink, so a
+/// `warn!` alone would never reach the terminal. Advisory only, creation
+/// continues either way.
+fn warn_shared_checkout(work_dir: &std::path::Path) {
+    let dir = work_dir.display();
+    eprintln!();
+    eprintln!("WARNING: this session has no isolation.");
+    eprintln!("  Working dir: {dir}");
+    eprintln!("  It is the checkout itself, not a git worktree, so the agent shares that");
+    eprintln!("  branch, index and working tree with your editor and with every other");
+    eprintln!("  session started there. Concurrent edits will collide.");
+    eprintln!("  Fix: re-run with --worktree, or --create-branch <name> to also cut a branch.");
+    eprintln!();
+    warn!("session root {dir} is a shared checkout, not an isolated worktree");
+}
+
 /// Attach to a tmux session (replaces current process)
 fn attach_to_session(session_name: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -484,6 +594,93 @@ fn attach_to_session(session_name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::cli::Tool;
+
+    use crate::test_support::git_bin;
+
+    /// Run a git command in `dir`, failing the test with git's own stderr.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new(git_bin())
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn {:?} in {}: {e}", git_bin(), dir.display()));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The warn-or-not predicate, exercised against real `git init` /
+    /// `git worktree add` state. Hand-faking `.git` would prove nothing:
+    /// the whole point is that git writes a FILE in a linked worktree and a
+    /// DIRECTORY in a plain clone.
+    #[test]
+    fn classify_session_root_real_git_shapes() {
+        // Shells out to `git`, so it must not run while a sibling test has
+        // swapped `$PATH` out from under the process (see `with_path`).
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize tempdir");
+
+        // A directory outside any repository.
+        let bare_dir = root.join("no-repo");
+        std::fs::create_dir(&bare_dir).unwrap();
+        assert_eq!(
+            classify_session_root(&bare_dir),
+            SessionRoot::NotAGitRepo,
+            "a dir outside any repo must not be warned about"
+        );
+
+        // A plain clone: git writes `.git` as a DIRECTORY.
+        let checkout = root.join("myrepo");
+        std::fs::create_dir(&checkout).unwrap();
+        git(&checkout, &["init", "--initial-branch=main"]);
+        git(&checkout, &["config", "user.email", "t@example.com"]);
+        git(&checkout, &["config", "user.name", "t"]);
+        std::fs::write(checkout.join("README.md"), "hi\n").unwrap();
+        git(&checkout, &["add", "README.md"]);
+        git(&checkout, &["commit", "-m", "init"]);
+
+        assert!(checkout.join(".git").is_dir(), "precondition: plain clone");
+        assert_eq!(
+            classify_session_root(&checkout),
+            SessionRoot::SharedCheckout,
+            "the checkout root itself has no isolation"
+        );
+
+        // A subdirectory of the checkout is equally unisolated. This is the
+        // exact shape that produced the original report.
+        let subdir = checkout.join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        assert_eq!(
+            classify_session_root(&subdir),
+            SessionRoot::SharedCheckout,
+            "a subdir of a plain checkout is still the shared working tree"
+        );
+
+        // A real linked worktree: git writes `.git` as a FILE (gitdir pointer).
+        let wt = root.join("wt-feature");
+        git(
+            &checkout,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+        assert!(wt.join(".git").is_file(), "precondition: linked worktree");
+        assert_eq!(
+            classify_session_root(&wt),
+            SessionRoot::LinkedWorktree,
+            "an isolated worktree must never be warned about"
+        );
+
+        let wt_sub = wt.join("nested");
+        std::fs::create_dir(&wt_sub).unwrap();
+        assert_eq!(
+            classify_session_root(&wt_sub),
+            SessionRoot::LinkedWorktree,
+            "a subdir of a linked worktree is still isolated"
+        );
+    }
 
     #[test]
     fn input_box_ready_detects_prompt_footer_not_splash() {
@@ -812,9 +1009,11 @@ mod tests {
         );
     }
 
-    /// Serialises the tests that swap `$PATH` — `validate_provider_installed`
-    /// resolves against the live environment, and `cargo test` runs a binary's
-    /// tests as threads of ONE process.
+    /// Serialises every test that depends on `$PATH`, both the ones that swap
+    /// it (`validate_provider_installed` resolves against the live
+    /// environment) and the ones that shell out while it must stay intact.
+    /// `cargo test` runs a binary's tests as threads of ONE process, so an
+    /// unguarded PATH swap is visible to every other test.
     static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Run `f` with `$PATH` set to `path`, restoring the original after.

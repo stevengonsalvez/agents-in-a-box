@@ -42,15 +42,15 @@ use std::path::PathBuf;
 
 const EXAMPLES: &str = "\
 EXAMPLES:
-  ainb                            Launch the TUI
-  ainb run --repo . --worktree    Start a session in the current repo
-  ainb run --tool codex --repo .  Use Codex instead of Claude
-  ainb list --format json         List all sessions as JSON
-  ainb status my-project          Inspect a session by workspace name
-  ainb attach my-project          Drop into a running session
+  ainb                                Launch the TUI
+  ainb run --repo . --worktree        Start an isolated session in the current repo
+  ainb run --worktree --tool codex    Use Codex instead of Claude
+  ainb list --format json             List all sessions as JSON
+  ainb status my-project              Inspect a session by workspace name
+  ainb attach my-project              Drop into a running session
   ainb config get authentication.default_model
-  ainb recover list               Find orphaned sessions
-  ainb completion zsh > _ainb     Generate zsh completions
+  ainb recover list                   Find orphaned sessions
+  ainb completion zsh > _ainb         Generate zsh completions
 
 SKILL MANAGER:
   ainb skill browse <query>        Search the skill catalog (skills.sh)
@@ -127,13 +127,18 @@ pub enum OutputFormat {
 #[derive(clap::Args)]
 #[command(after_help = "\
 EXAMPLES:
-  ainb run --repo .                                 Use current directory
-  ainb run --repo . --worktree                      Isolate in a new worktree
-  ainb run --repo . --create-branch feat/new        Create a branch + worktree
-  ainb run --remote-repo owner/repo                 Clone GitHub repo first
-  ainb run --tool codex --repo .                    Use Codex instead of Claude
-  ainb run --repo . -p \"fix the failing tests\"    Send an initial prompt
-  ainb run --repo . --attach                        Drop into tmux after creating")]
+  ainb run --repo . --worktree                       Isolated worktree (recommended)
+  ainb run --repo . --create-branch feat/new         Isolated worktree on a named branch
+  ainb run --repo . --worktree -p \"fix the tests\"    Spawn with an initial prompt
+  ainb run --repo . --worktree --parent tower        Route completions to an orchestrator
+  ainb run --remote-repo owner/repo --worktree       Clone a GitHub repo first, then isolate
+  ainb run --repo . --worktree --tool codex          Use Codex instead of Claude
+  ainb run --repo . --worktree --attach              Drop into tmux after creating
+  ainb run --repo .                                  Shared checkout, NO isolation
+
+Without --worktree (or --create-branch) the session runs directly in the
+checkout you point at: it shares that branch, index and working tree with your
+editor and with every other session started there. Prefer --worktree.")]
 pub struct RunArgs {
     /// Remote repository (e.g., username/repo or full URL)
     #[arg(long)]
@@ -171,7 +176,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub dangerously_skip_permissions: bool,
 
-    /// Custom session name
+    /// Custom tmux session name (NOT an attach/status/kill handle)
+    //
+    // Keep the doc-comment above a SINGLE line: clap turns a multi-line
+    // doc-comment into `long_about`, which would then dominate `--help`.
+    //
+    // This only renames the tmux session. `ainb attach|status|kill` resolve
+    // their argument as a session id, an id prefix, or a *workspace* name
+    // (derived from the repository directory in `run.rs`), never from this
+    // flag. See the "SPAWNING SESSIONS FROM AN AGENT" section of ainb(1).
     #[arg(long)]
     pub name: Option<String>,
 
