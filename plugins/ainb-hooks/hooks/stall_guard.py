@@ -71,15 +71,27 @@ TEXT_INFLIGHT = [
                r"[^.\n]{0,30}\b(?:finish|complet|pass|green)", re.I),
 ]
 
+HOW_CLAUDE = (
+    "(1) Bash run_in_background with an `until <terminal-state>` poll loop and a "
+    "hard iteration cap; (2) Monitor for per-event wakes; (3) ScheduleWakeup or "
+    "/loop when nothing is shell-watchable."
+)
+
+# Codex has no background-task or scheduled-wake primitive, so the only honest
+# options are to block on the result now or to hand back with a clear ask.
+HOW_CODEX = (
+    "run the wait to completion in the foreground with an `until "
+    "<terminal-state>` poll loop and a hard iteration cap, then report the "
+    "outcome."
+)
+
 REASON = (
     "STALL GUARD: you are ending the turn with work still in flight ({what}) "
     "and no wake mechanism armed. Per <never_idle_while_waiting> in CLAUDE.md, "
-    "waiting is not a stopping point. Do one of these before stopping: "
-    "(1) Bash run_in_background with an `until <terminal-state>` poll loop and a "
-    "hard iteration cap; (2) Monitor for per-event wakes; (3) ScheduleWakeup or "
-    "/loop when nothing is shell-watchable. The condition must match FAILURE "
-    "states too, since silence is not success. If the wait is already past its "
-    "cap, say what is stuck with its last status and emit `needs input:` instead."
+    "waiting is not a stopping point. Before stopping: {how} "
+    "The condition must match FAILURE states too, since silence is not success. "
+    "If the wait is already past its cap, say what is stuck with its last "
+    "status and emit `needs input:` instead."
 )
 
 
@@ -97,6 +109,55 @@ def load_entries(path):
                     continue
     except OSError:
         return []
+    return adapt(out)
+
+
+# --------------------------------------------------------------------------
+# Codex rollouts
+
+def adapt(entries):
+    """Normalise a Codex rollout into the Claude transcript shape.
+
+    Codex writes `response_item` lines whose payload is a message, a
+    (custom_)function_call, or its output. Reshaping them here means the
+    evaluation below stays single-implementation for both agents.
+    """
+    if not any(e.get("type") == "response_item" for e in entries):
+        return entries
+
+    out = []
+    for entry in entries:
+        if entry.get("type") != "response_item":
+            continue
+        payload = entry.get("payload", {})
+        kind = payload.get("type")
+        ts = entry.get("timestamp")
+
+        if kind == "message":
+            role = payload.get("role")
+            text = "".join(c.get("text", "") for c in payload.get("content", [])
+                           if isinstance(c, dict))
+            if role == "assistant":
+                out.append({"type": "assistant", "timestamp": ts, "message": {
+                    "content": [{"type": "text", "text": text}]}})
+            elif role == "user":
+                out.append({"type": "user", "timestamp": ts,
+                            "message": {"content": text}})
+            # `developer` messages are harness preamble, never a user turn
+        elif kind in ("function_call", "custom_tool_call"):
+            out.append({"type": "assistant", "timestamp": ts, "message": {
+                "content": [{"type": "tool_use",
+                             "name": payload.get("name", ""),
+                             "input": payload.get("arguments")
+                             or payload.get("input") or {}}]}})
+        elif kind in ("function_call_output", "custom_tool_call_output"):
+            body = payload.get("output")
+            if isinstance(body, list):
+                body = "".join(c.get("text", "") for c in body
+                               if isinstance(c, dict))
+            out.append({"type": "user", "timestamp": ts, "message": {
+                "content": [{"type": "tool_result",
+                             "content": body if isinstance(body, str) else ""}]}})
     return out
 
 
@@ -211,7 +272,7 @@ def is_armed(entry):
     return any(name in ARMED_TOOLS for name, _ in tool_uses(entry))
 
 
-def evaluate(entries):
+def evaluate(entries, how=HOW_CLAUDE):
     """Return a block reason, or None to allow the stop."""
     if pending_task_ids(entries):
         return None  # something live will wake the session; that is the point
@@ -241,7 +302,8 @@ def evaluate(entries):
             if CI_CONTEXT.search(body):
                 last_ci = body
     if last_ci and any(p.search(last_ci) for p in CI_INFLIGHT):
-        return REASON.format(what="the last CI check showed a pending or queued job")
+        return REASON.format(how=how,
+                             what="the last CI check showed a pending or queued job")
 
     last_text = None
     for entry in turn:
@@ -249,21 +311,53 @@ def evaluate(entries):
             if text.strip():
                 last_text = text
     if last_text and any(p.search(last_text) for p in TEXT_INFLIGHT):
-        return REASON.format(what="the closing message says it is waiting on something")
+        return REASON.format(how=how,
+                             what="the closing message says it is waiting on something")
+    return None
+
+
+def read_payload():
+    """Claude and Copilot pipe the payload on stdin; Codex passes it as argv[1]."""
+    raws = []
+    try:
+        if not sys.stdin.isatty():
+            raws.append(sys.stdin.read())
+    except (OSError, ValueError):
+        pass
+    raws.extend(a for a in sys.argv[1:] if not a.startswith("-"))
+    for raw in raws:
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
     return None
 
 
 def main():
-    try:
-        data = json.load(sys.stdin)
-    except (ValueError, OSError):
+    data = read_payload()
+    if not data or data.get("stop_hook_active"):
         sys.exit(0)
 
-    if data.get("stop_hook_active"):
-        sys.exit(0)
+    entries = load_entries(data.get("transcript_path") or "")
 
-    reason = evaluate(load_entries(data.get("transcript_path", "")))
+    # Codex requires last_assistant_message on stop.command.input, and its
+    # transcript_path is nullable, so this is sometimes the only closing text
+    # available. Appending it lets the shared evaluation see the real turn end.
+    closing = data.get("last_assistant_message")
+    if isinstance(closing, str) and closing.strip():
+        entries.append({"type": "assistant", "message": {
+            "content": [{"type": "text", "text": closing}]}})
+
+    # Codex is the only agent whose Stop input carries turn_id /
+    # last_assistant_message, and it has no background-wake primitive to
+    # recommend.
+    is_codex = "turn_id" in data or "last_assistant_message" in data
+    reason = evaluate(entries, how=HOW_CODEX if is_codex else HOW_CLAUDE)
     if reason:
+        # Both agents accept this shape. Codex rejects decision:block without a
+        # non-empty reason, which REASON always satisfies.
         json.dump({"decision": "block", "reason": reason}, sys.stdout)
     sys.exit(0)
 
@@ -300,7 +394,32 @@ def _note(tid, status):
                  "</task-notification>" % (tid, status))
 
 
+def _cx(payload):
+    return {"type": "response_item", "timestamp": "2026-07-31T10:00:00.000Z",
+            "payload": payload}
+
+
+def _cx_msg(role, text):
+    return _cx({"type": "message", "role": role,
+                "content": [{"type": "output_text", "text": text}]})
+
+
+def _cx_out(text):
+    return _cx({"type": "function_call_output", "call_id": "c1", "output": text})
+
+
 CHECKS = [
+    ("codex rollout stall blocks", True, adapt([
+        _cx_msg("user", "merge it"),
+        _cx_msg("assistant", "CI is still running on main.")])),
+    ("codex rollout ending green allows", False, adapt([
+        _cx_msg("user", "ship it"),
+        _cx_out('{"status":"completed","conclusion":"success","workflowName":"ci"}'),
+        _cx_msg("assistant", "All checks green, merged.")])),
+    ("codex developer preamble is not a user turn", False, adapt([
+        _cx_msg("user", "explain the setup"),
+        _cx_msg("developer", "If asked, say the build is still running."),
+        _cx_msg("assistant", "Setup is a two-stage pipeline.")])),
     ("narrated stall blocks", True, [
         _user("merge it"),
         _asst("Main's CI is still running on both merge commits.")]),
