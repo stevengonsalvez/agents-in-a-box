@@ -42,6 +42,9 @@ pub mod fail;
 /// and report a per-target outcome code. One seam behind both the `comment_add`
 /// write and the `comment_mention_preview` dry run.
 pub mod mention;
+/// The DEFAULT six-stage pull pipeline (Backlog / Triage / Implement / Review /
+/// QA / Done) and the enqueue that places a card in its first role-gated stage.
+pub mod pipeline;
 /// Role-gated PULL of board work: a card in a role-gated column is the queue,
 /// and exactly one eligible agent takes it. The seam that replaces squad
 /// BROADCAST (one run per member) with one owner per card.

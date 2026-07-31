@@ -193,7 +193,95 @@ impl PullService {
 
         Ok(Some(pulled))
     }
+
+    /// ADVANCE a card one column to the right after its stage finished.
+    ///
+    /// This is the handoff: the Implement stage completes, the card steps into
+    /// Review, and a DIFFERENT role pulls it on the next tick. Call it when a
+    /// task on `issue_id` reaches `done`.
+    ///
+    /// Advancing exactly one column at a time (never jumping to the end) is what
+    /// the live proof asserts, and it is what lets each stage's
+    /// `excludes_prior_agent` see the previous stage's agent.
+    ///
+    /// The move is refused, leaving the card exactly where it is, when:
+    ///   * the card is not in a role-gated column (it is parked in Backlog/Done,
+    ///     or on a board that predates migration 0074),
+    ///   * the card still has an ACTIVE task, which is what makes a deliberate
+    ///     `--redundant` fan-out advance only once ALL its runs have drained
+    ///     rather than on the first one home,
+    ///   * there is no column to the right (the last stage stays put),
+    ///   * the board's master `auto_move` or the current column's `auto_move` is
+    ///     off, which is the existing operator kill-switch this reuses rather
+    ///     than duplicating.
+    ///
+    /// Returns the `(board_id, new_column_id)` of each card actually moved.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the statement or a row decode fails.
+    #[tracing::instrument(name = "card.advance", skip(pool), fields(issue_id = %issue_id))]
+    pub async fn advance_after_stage(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        let rows = sqlx::query(ADVANCE_SQL).bind(issue_id).fetch_all(pool).await?;
+        rows.iter()
+            .map(|r| Ok((r.try_get("board_id")?, r.try_get("column_id")?)))
+            .collect()
+    }
 }
+
+/// Move a finished card one column to the right.
+///
+/// ONE statement, no transaction, for the reason
+/// [`BoardRepo::auto_move_on_state`](crate::repo::board::BoardRepo::auto_move_on_state)
+/// documents at length: a SELECT-then-UPDATE takes a read snapshot and then
+/// upgrades it to a write, which SQLite fails with `SQLITE_BUSY_SNAPSHOT` (517)
+/// whenever another daemon writer commits in that window, and `busy_timeout`
+/// does NOT cover a stale snapshot. A bare UPDATE takes the write lock
+/// immediately and has no snapshot to invalidate, so the card cannot silently
+/// stay in its old column forever with its stage already finished.
+///
+/// `?1` = `issue_id`. The new `ord` appends the card to the end of its target
+/// column, consistent with a manual `card_move` and with the auto-move hook.
+const ADVANCE_SQL: &str = "\
+UPDATE board_card \
+   SET column_id = ( \
+        SELECT n.id FROM board_column AS n \
+         WHERE n.board_id = board_card.board_id \
+           AND n.ord > (SELECT cur.ord FROM board_column AS cur \
+                         WHERE cur.id = board_card.column_id) \
+         ORDER BY n.ord LIMIT 1), \
+       ord = ( \
+        SELECT COALESCE(MAX(o.ord) + 1, 0) FROM board_card AS o \
+         WHERE o.column_id = ( \
+              SELECT n2.id FROM board_column AS n2 \
+               WHERE n2.board_id = board_card.board_id \
+                 AND n2.ord > (SELECT cur2.ord FROM board_column AS cur2 \
+                                WHERE cur2.id = board_card.column_id) \
+               ORDER BY n2.ord LIMIT 1)) \
+ WHERE board_card.issue_id = ?1 \
+   AND EXISTS ( \
+        SELECT 1 FROM board_column AS cur \
+          JOIN board AS bd ON bd.id = cur.board_id \
+         WHERE cur.id = board_card.column_id \
+           AND cur.services_role IS NOT NULL \
+           AND cur.auto_move = 1 \
+           AND bd.auto_move = 1 \
+       ) \
+   AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS t \
+         WHERE t.issue_id = board_card.issue_id \
+           AND t.status IN ('queued','dispatched','running') \
+       ) \
+   AND EXISTS ( \
+        SELECT 1 FROM board_column AS n3 \
+         WHERE n3.board_id = board_card.board_id \
+           AND n3.ord > (SELECT cur3.ord FROM board_column AS cur3 \
+                          WHERE cur3.id = board_card.column_id) \
+       ) \
+RETURNING board_id, column_id";
 
 /// The atomic pull statement: select the most urgent pullable `(card, agent)`
 /// pair for the runtime and INSERT its `queued` task row in one statement.
