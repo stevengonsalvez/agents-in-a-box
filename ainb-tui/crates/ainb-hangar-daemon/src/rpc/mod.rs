@@ -7716,7 +7716,7 @@ async fn handle_board_card_timeline(
     // The card's newest task (any status) — its run is the one to show.
     let task_id: Option<String> = sqlx::query_scalar(
         "SELECT id FROM agent_task_queue WHERE issue_id = ? AND workspace_id = ? \
-         ORDER BY created_at DESC, id DESC LIMIT 1",
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(&params.issue_id)
     .bind(ws.as_str())
