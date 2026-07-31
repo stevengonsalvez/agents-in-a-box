@@ -1802,7 +1802,11 @@ async fn execute_fleet_start(
                 Some("Codex managed transport is not active".to_string()),
             ),
         },
-        FleetProvider::Claude | FleetProvider::Unknown => (
+        // Codex is the only provider with a managed start transport. Copilot
+        // sits with Claude here: Fleet can SEE a copilot pane, but it cannot
+        // launch one, so a start request is honestly rejected rather than
+        // silently accepted.
+        FleetProvider::Claude | FleetProvider::Copilot | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
@@ -1824,6 +1828,7 @@ fn prospective_start_session_key(
     let provider = match provider {
         ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
         ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
+        ainb_hangar_proto::fleet::FleetProvider::Copilot => "copilot",
         ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
     };
     format!("start:{provider}:{}", stable_fingerprint(request_id))

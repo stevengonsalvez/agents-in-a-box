@@ -904,6 +904,7 @@ fn session_wire(
         provider: match row.provider.as_str() {
             "claude" => wire::FleetProvider::Claude,
             "codex" => wire::FleetProvider::Codex,
+            "copilot" => wire::FleetProvider::Copilot,
             _ => wire::FleetProvider::Unknown,
         },
         provider_session_id: row.provider_session_id.clone(),
@@ -1351,6 +1352,7 @@ fn parse_provider(value: &str) -> Provider {
     match value.to_ascii_lowercase().as_str() {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
+        "copilot" => Provider::Copilot,
         _ => Provider::Unknown,
     }
 }
