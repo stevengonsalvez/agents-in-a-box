@@ -293,3 +293,123 @@ async fn a_dangling_member_still_rejects_the_dispatch_with_zero_rows() {
         .expect("count cards");
     assert_eq!(cards, 0, "and places no card either");
 }
+
+/// `--redundant N` is the SURVIVING form of intentional parallelism: it writes N
+/// runs on one card, all sharing a `run_group`, so a deliberate cluster stays
+/// distinguishable from the accidental broadcast that was removed.
+#[tokio::test]
+async fn redundant_opt_in_writes_n_runs_sharing_one_run_group() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+
+    let out = SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    assert_eq!(task_count(pool).await, 3, "three deliberate runs");
+    assert_eq!(
+        out.members.len(),
+        2,
+        "first copy in leader, the rest in members"
+    );
+
+    // ONE shared run_group across all three, and it is not NULL.
+    let groups: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT run_group FROM agent_task_queue WHERE issue_id='i-1' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read run_group");
+    assert_eq!(groups.len(), 3);
+    let first = groups[0].clone().expect("run_group is stamped, not NULL");
+    assert!(
+        groups.iter().all(|g| g.as_deref() == Some(first.as_str())),
+        "every copy of one deliberate fan-out shares a run_group: {groups:?}"
+    );
+
+    // Three DISTINCT agents, so the copies are genuinely independent attempts.
+    let distinct: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT agent_id) FROM agent_task_queue WHERE issue_id='i-1'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count distinct agents");
+    assert_eq!(distinct, 3);
+}
+
+/// `--redundant 1` is the ordinary single-owner dispatch, and stamps NO
+/// `run_group`: an unclustered row means "nobody asked for parallelism here".
+#[tokio::test]
+async fn redundant_one_is_an_ordinary_single_owner_dispatch() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        1,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("dispatch");
+
+    assert_eq!(task_count(pool).await, 1);
+    let group: Option<String> =
+        sqlx::query_scalar("SELECT run_group FROM agent_task_queue WHERE issue_id='i-1'")
+            .fetch_one(pool)
+            .await
+            .expect("read run_group");
+    assert_eq!(group, None, "an ordinary pull belongs to no cluster");
+}
+
+/// Redundancy is a CEILING, not a quota: asking for more copies than there are
+/// eligible agents dispatches to all of them rather than failing.
+#[tokio::test]
+async fn redundant_more_than_the_roster_dispatches_to_everyone() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        99,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("dispatch");
+
+    assert_eq!(
+        task_count(pool).await,
+        4,
+        "leader plus three members, capped by the roster"
+    );
+}

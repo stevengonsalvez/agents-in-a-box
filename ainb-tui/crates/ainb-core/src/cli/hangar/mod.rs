@@ -1341,10 +1341,12 @@ pub struct SquadAssignArgs {
     /// Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine).
     #[arg(long, default_value_t = 0)]
     pub priority: i64,
-    /// Fan the work out across the WHOLE squad (leader brief + one task per
-    /// distinct `agent` member) instead of briefing the leader alone.
+    /// Dispatch through the squad. Enqueues the card into the first role-gated pipeline column, where ONE eligible agent takes it (no longer one run per member).
     #[arg(long)]
     pub fanout: bool,
+    /// Deliberately run this issue N times in parallel on up to N distinct squad agents, all stamped with one shared `run_group`. Omitted or `1` is a single owner.
+    #[arg(long, value_name = "N")]
+    pub redundant: Option<usize>,
     /// The user the invocation-permission gate judges this assignment by (a user
     /// id or an email). Omitted defaults to the workspace owner — the ordinary
     /// single-operator assign, which the gate always admits.
@@ -5014,24 +5016,35 @@ async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
         // exactly the pre-T4 behaviour.
         ..SquadAssignRequest::default()
     };
-    if args.fanout {
-        let fanout = SquadAssignService::assign_fanout(
+    let copies = args.redundant.unwrap_or(1);
+    if args.fanout || copies > 1 {
+        let fanout = SquadAssignService::assign_redundant(
             store.pool(),
             &ws,
             &args.squad_id,
             &request,
+            copies,
             &SystemIdGen,
             &SystemClock,
         )
         .await
         .map_err(squad_assign_cli_err)?;
+        if fanout.leader.task_id.is_empty() {
+            // The card is enqueued but no agent currently holds the stage's role,
+            // so it waits, visibly, on the board. Reported rather than silently
+            // answering as if a run had started.
+            println!(
+                "enqueued the card into the pipeline; no agent holds the stage's role yet, so it is waiting"
+            );
+            return Ok(());
+        }
         println!(
-            "briefed leader {} with task {} (runtime {})",
-            fanout.leader.leader_agent_id, fanout.leader.task_id, fanout.leader.runtime_id
+            "dispatched task {} to agent {} (runtime {})",
+            fanout.leader.task_id, fanout.leader.leader_agent_id, fanout.leader.runtime_id
         );
         for m in &fanout.members {
             println!(
-                "fanned task {} to member {} (runtime {})",
+                "redundant task {} to agent {} (runtime {})",
                 m.task_id, m.agent_id, m.runtime_id
             );
         }

@@ -452,6 +452,128 @@ impl SquadAssignService {
         })
     }
 
+    /// DELIBERATE redundancy: dispatch the SAME issue to up to `copies` distinct
+    /// agent members at once, every task stamped with one shared `run_group`.
+    ///
+    /// This is the explicit opt-in that keeps intentional parallelism alive now
+    /// that [`Self::assign_fanout`] no longer broadcasts: N independent attempts
+    /// at one problem, or several reviewers over one artifact. The difference
+    /// from the removed defect is entirely in the intent and the evidence. A
+    /// broadcast was the DEFAULT, was unbounded (one run per member, however many
+    /// that happened to be), and left no trace saying the parallelism was wanted.
+    /// This is opt-in, explicitly capped at `copies`, and every row carries the
+    /// `run_group` that identifies the cluster, so "why are there three runs on
+    /// this card" is answerable from the row itself.
+    ///
+    /// `copies <= 1` degrades to the ordinary single-owner dispatch. Fewer
+    /// eligible members than `copies` dispatches to all of them rather than
+    /// failing: redundancy is a ceiling, not a quota.
+    ///
+    /// Every task shares ONE generation, because they are one run: the card-state
+    /// folds and the blocker-finished predicate scope to a generation, so a
+    /// dependent stays blocked until the WHOLE cluster drains rather than
+    /// unblocking on the first copy home.
+    ///
+    /// # Errors
+    ///
+    /// The same rejections as [`Self::assign_fanout`]: an archived squad, a
+    /// human / unknown / dangling leader, a dangling member ref, or a target the
+    /// effective invoker may not invoke. All are pre-flight, so a rejection
+    /// writes zero rows.
+    pub async fn assign_redundant(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+        request: &SquadAssignRequest<'_>,
+        copies: usize,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<SquadFanout, SquadAssignError> {
+        if copies <= 1 {
+            return Self::assign_fanout(pool, workspace, squad_id, request, idgen, clock).await;
+        }
+        if SquadRepo::is_archived(pool, workspace, squad_id).await? {
+            return Err(SquadAssignError::Archived(squad_id.to_string()));
+        }
+        let leader_agent_id = SquadRepo::leader_agent_id(pool, workspace, squad_id)
+            .await?
+            .ok_or(SquadAssignError::NoAgentLeader)?;
+        let leader = Self::agent_in_ws(pool, workspace, &leader_agent_id)
+            .await?
+            .ok_or_else(|| SquadAssignError::LeaderAgentMissing(leader_agent_id.clone()))?;
+        let invoker = Self::effective_invoker(pool, workspace, request).await?;
+        Self::gate(pool, &leader, &invoker).await?;
+
+        // Resolve + gate EVERY candidate before writing, so a bad member ref
+        // rejects the whole cluster rather than leaving a partial fan-out. The
+        // leader leads the candidate list, then distinct agent members in id
+        // order, so `copies` is filled deterministically.
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(leader_agent_id.clone());
+        let mut targets = vec![(leader_agent_id.clone(), leader.runtime_id.clone())];
+        for agent_id in SquadRepo::member_agent_ids(pool, workspace, squad_id).await? {
+            if !seen.insert(agent_id.clone()) {
+                continue;
+            }
+            let member = Self::agent_in_ws(pool, workspace, &agent_id)
+                .await?
+                .ok_or_else(|| SquadAssignError::MemberAgentMissing(agent_id.clone()))?;
+            Self::gate(pool, &member, &invoker).await?;
+            targets.push((agent_id, member.runtime_id));
+        }
+        targets.truncate(copies);
+
+        let run_group = idgen.new_ulid();
+        let mut dispatched = Vec::with_capacity(targets.len());
+        let mut tx = pool.begin().await?;
+        for (agent_id, runtime_id) in targets {
+            let task_id = idgen.new_ulid();
+            TaskRepo::insert_in_tx(
+                &mut tx,
+                &NewTask {
+                    id: task_id.clone(),
+                    workspace_id: workspace.as_str().to_string(),
+                    runtime_id: runtime_id.clone(),
+                    agent_id: agent_id.clone(),
+                    issue_id: request.issue_id.map(str::to_string),
+                    work_dir: request.work_dir.map(str::to_string),
+                    priority: request.priority,
+                    created_at: clock.now_ms(),
+                    autopilot_run_id: None,
+                    generation: request.generation,
+                },
+            )
+            .await?;
+            Self::stamp_dispatch_fields(&mut tx, &task_id, request).await?;
+            TaskRepo::set_squad_id_in_tx(&mut tx, &task_id, squad_id).await?;
+            sqlx::query("UPDATE agent_task_queue SET run_group = ?1 WHERE id = ?2")
+                .bind(&run_group)
+                .bind(&task_id)
+                .execute(&mut *tx)
+                .await?;
+            dispatched.push(SquadMemberDispatch {
+                task_id,
+                agent_id,
+                runtime_id,
+            });
+        }
+        tx.commit().await?;
+
+        // The FIRST copy is reported in the `leader` slot so the wire shape is
+        // unchanged; the rest ride in `members`, which under pull is otherwise
+        // always empty. A non-empty `members` therefore means exactly one thing
+        // now: somebody deliberately asked for redundancy.
+        let first = dispatched.remove(0);
+        Ok(SquadFanout {
+            leader: SquadAssignment {
+                task_id: first.task_id,
+                leader_agent_id: first.agent_id,
+                runtime_id: first.runtime_id,
+            },
+            members: dispatched,
+        })
+    }
+
     /// Attempt ONE pull across every runtime in `workspace`, stopping at the
     /// first that yields.
     ///
