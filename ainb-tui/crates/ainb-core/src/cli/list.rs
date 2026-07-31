@@ -46,7 +46,12 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// Create `SessionInfo` from metadata and status
+    /// Create `SessionInfo` from metadata and status.
+    ///
+    /// `workspace_name` is RE-DERIVED from the worktree path
+    /// ([`SessionMetadata::display_workspace_name`]), not copied from the
+    /// persisted field, so `ainb list` and the TUI session list name the same
+    /// session identically. See that method for why the persisted value drifts.
     #[must_use]
     pub fn from_metadata(
         metadata: &SessionMetadata,
@@ -56,7 +61,7 @@ impl SessionInfo {
         Self {
             session_id: metadata.session_id.to_string(),
             tmux_session_name: metadata.tmux_session_name.clone(),
-            workspace_name: metadata.workspace_name.clone(),
+            workspace_name: metadata.display_workspace_name(),
             worktree_path: metadata.worktree_path.display().to_string(),
             created_at: metadata.created_at,
             is_running,
@@ -261,11 +266,18 @@ mod tests {
 
     #[test]
     fn test_session_info_serialization() {
+        if !crate::test_support::git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        // A REAL checkout, because `workspace_name` is now derived from the
+        // path: a made-up `/tmp/test` would only prove the "(broken)" branch.
+        let fx = crate::test_support::real_git_fixture();
         let metadata = SessionMetadata {
             session_id: Uuid::parse_str("f79e07da-774d-415c-aedf-a2acd0bee0d3").unwrap(),
             tmux_session_name: "tmux_my-session".to_string(),
-            worktree_path: PathBuf::from("/tmp/test"),
-            workspace_name: "my-workspace".to_string(),
+            worktree_path: fx.repo.clone(),
+            workspace_name: "stale-persisted-name".to_string(),
             created_at: Utc::now(),
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
@@ -281,8 +293,77 @@ mod tests {
 
         assert_eq!(json["session_id"], "f79e07da-774d-415c-aedf-a2acd0bee0d3");
         assert_eq!(json["tmux_session_name"], "tmux_my-session");
-        assert_eq!(json["workspace_name"], "my-workspace");
+        assert_eq!(
+            json["workspace_name"], "myrepo",
+            "`ainb list --format json` must publish the DERIVED name, not the persisted one"
+        );
         assert_eq!(json["is_running"], true);
         assert_eq!(json["claude_active"], true);
+    }
+
+    /// F14: `ainb list` and the TUI session tree must name the same session
+    /// identically, for every real on-disk shape.
+    ///
+    /// The CLI used to print the PERSISTED `workspace_name` (the `--repo`
+    /// basename recorded by `ainb run`) while the TUI re-derived the owning
+    /// repository from the path, so the two surfaces disagreed for any session
+    /// rooted at a subdirectory of a checkout. The persisted value here is
+    /// deliberately the wrong-but-realistic one `ainb run --repo <clone>/deep`
+    /// would have written.
+    #[test]
+    fn cli_and_tui_agree_on_workspace_name_for_every_shape() {
+        use crate::interactive::InteractiveSessionManager;
+
+        if !crate::test_support::git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = crate::test_support::real_git_fixture();
+
+        // (label, session root, what `ainb run` would have persisted)
+        let cases = [
+            ("plain checkout root", fx.repo.clone(), "myrepo"),
+            ("subdirectory of a checkout", fx.subdir.clone(), "deep"),
+            (
+                "linked worktree",
+                fx.worktree.clone(),
+                "myrepo--feature--abc123",
+            ),
+        ];
+
+        for (label, worktree_path, persisted) in cases {
+            let metadata = SessionMetadata {
+                session_id: Uuid::new_v4(),
+                tmux_session_name: format!("tmux_{persisted}"),
+                worktree_path: worktree_path.clone(),
+                workspace_name: persisted.to_string(),
+                created_at: Utc::now(),
+                agent_type: SessionAgentType::default(),
+                headroom_enabled: false,
+                rtk_enabled: false,
+                skip_permissions: None,
+                model: None,
+                model_source: Default::default(),
+                codex_model: None,
+            };
+
+            // What the TUI paints: `AppState::load_real_workspaces` longhand.
+            let tui = {
+                let source = InteractiveSessionManager::get_source_repository(&worktree_path)
+                    .unwrap_or_else(|| worktree_path.clone());
+                InteractiveSessionManager::derive_workspace_name(&worktree_path, &source)
+            };
+            // What `ainb list` / `ainb status` print.
+            let cli = SessionInfo::from_metadata(&metadata, false, false).workspace_name;
+
+            assert_eq!(
+                cli, tui,
+                "{label}: `ainb list` says {cli:?}, the TUI says {tui:?}"
+            );
+            assert_eq!(
+                cli, "myrepo",
+                "{label}: both surfaces must name the owning repository"
+            );
+        }
     }
 }

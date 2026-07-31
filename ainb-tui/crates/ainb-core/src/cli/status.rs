@@ -57,11 +57,17 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
         false
     };
 
+    // Re-derived from the worktree path, exactly as the TUI and `ainb list`
+    // do — never the persisted `workspace_name`, which is the `--repo`
+    // basename recorded at creation time. See
+    // `SessionMetadata::display_workspace_name`.
+    let workspace_name = session.display_workspace_name();
+
     match format {
         OutputFormat::Json => {
             let output = StatusOutput {
                 session_id: session.session_id.to_string(),
-                workspace_name: session.workspace_name.clone(),
+                workspace_name: workspace_name.clone(),
                 tmux_session_name: session.tmux_session_name.clone(),
                 worktree_path: session.worktree_path.display().to_string(),
                 created_at: session.created_at.to_rfc3339(),
@@ -88,7 +94,7 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
 
             println!("Session: {}", session.session_id);
             println!("{}", "━".repeat(44));
-            println!("Workspace:    {}", session.workspace_name);
+            println!("Workspace:    {workspace_name}");
             println!("Status:       {status_text}");
             println!("Tmux:         {}", session.tmux_session_name);
             println!("Worktree:     {}", session.worktree_path.display());
@@ -117,15 +123,15 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
 #[allow(clippy::unused_async, clippy::if_not_else)]
 pub async fn kill(args: KillArgs) -> Result<()> {
     let session = find_session(&args.session)?;
+    // Same re-derived name the user just saw in `ainb list` / the TUI, so the
+    // confirmation prompt names the session the way they addressed it.
+    let workspace_name = session.display_workspace_name();
 
     // Check if session is running
     let is_running = tmux_session_exists(&session.tmux_session_name);
 
     if !is_running {
-        println!(
-            "Session '{}' is not running (tmux session not found).",
-            session.workspace_name
-        );
+        println!("Session '{workspace_name}' is not running (tmux session not found).");
         println!("Removing from session store...");
 
         // Still remove from store (locked RMW — pu4)
@@ -138,7 +144,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
 
     // Prompt for confirmation unless --force
     if !args.force {
-        print!("Kill session '{}'? [y/N] ", session.workspace_name);
+        print!("Kill session '{workspace_name}'? [y/N] ");
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -170,7 +176,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     SessionStore::mutate(|store| store.remove_by_session_id(session.session_id))
         .context("Failed to save session store")?;
 
-    println!("Session '{}' removed.", session.workspace_name);
+    println!("Session '{workspace_name}' removed.");
 
     // Note: We don't remove the worktree by default
     // The user can manually clean it up or we could add --cleanup-worktree flag

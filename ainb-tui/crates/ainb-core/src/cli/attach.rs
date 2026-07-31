@@ -27,7 +27,9 @@ pub async fn execute(args: AttachArgs) -> Result<()> {
         anyhow::bail!("Tmux session '{tmux_name}' no longer exists");
     }
 
-    println!("Attaching to session: {}", session.workspace_name);
+    // Re-derived, like every other display of a workspace name (see
+    // `SessionMetadata::display_workspace_name`).
+    println!("Attaching to session: {}", session.display_workspace_name());
     println!("Detach with: Ctrl+B, then D");
     println!();
 
