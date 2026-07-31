@@ -1163,7 +1163,19 @@ async fn restore_tmux_transport(
             session.exact_tmux_target.as_deref() == Some(target)
                 && session.process_start_fingerprint == row.process_start_fingerprint
         });
-        if !live || row.transport_health == "HEALTHY" {
+        // An EXITED row is never restored, even when a pane still matches its
+        // target and fingerprint. Matching here is by (target, fingerprint) —
+        // deliberately, so a MANAGED row whose key is provider-qualified is still
+        // reachable — while the missing-sweep matches by session_key. When those
+        // two disagree the row flip-flops: this loop restores it to HEALTHY, the
+        // sweep's skip (which needs EXITED *and* UNAVAILABLE) then misses, and it
+        // is marked UNAVAILABLE again, one applied event each per tick forever.
+        //
+        // They disagree whenever a pane's session_key changes but the pane does
+        // not — which is exactly what happens when provider detection improves,
+        // since the provider is part of `SessionKey::legacy`. The old row is
+        // orphaned, stays EXITED, and still matches by target+fingerprint.
+        if !live || row.transport_health == "HEALTHY" || row.lifecycle_state == "EXITED" {
             continue;
         }
         let event = NewFleetEvent {
@@ -1449,6 +1461,99 @@ const fn transport_token(value: TransportHealth) -> &'static str {
 mod tests {
     use super::*;
     use crate::events::EventBroker;
+
+    /// An orphaned row must not flip-flop with the missing-sweep, forever.
+    ///
+    /// `restore_tmux_transport` matches by (target, fingerprint) so a MANAGED
+    /// row with a provider-qualified key stays reachable; the missing-sweep
+    /// matches by `session_key`. When a pane's key changes but the pane does
+    /// not — which is what happens when provider detection improves, since the
+    /// provider is part of `SessionKey::legacy` — the old row is orphaned yet
+    /// still matches by target+fingerprint. Restore then set it HEALTHY, the
+    /// sweep's skip (which needs EXITED *and* UNAVAILABLE) missed, and it was
+    /// marked UNAVAILABLE again: two applied events per row per tick, forever.
+    /// Observed live at ~57,600 rows/day for two panes before this guard.
+    #[tokio::test]
+    async fn an_exited_orphan_row_stops_churning_against_a_live_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        // A pane that IS live, and an EXITED orphan row pointing at the very
+        // same target+fingerprint (the shape a provider re-detection leaves).
+        let target = "tmux_demo:1.1";
+        let fingerprint = "pane=%1;pid=101;session_started=1700000000";
+        let discovered = vec![FleetSession {
+            session_key: SessionKey::legacy(Provider::Claude, target, fingerprint),
+            provider: Provider::Claude,
+            provider_session_id: None,
+            cwd: "/repo".to_string(),
+            exact_tmux_target: Some(target.to_string()),
+            pane_pid: Some(101),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            lifecycle: LifecycleState::Running,
+            attention: AttentionState::None,
+            management: ManagementState::Degraded,
+            capabilities: ainb_fleet_core::types::Capabilities::degraded_tmux(),
+            provenance: std::collections::BTreeSet::from([
+                ainb_fleet_core::types::Provenance::Tmux,
+            ]),
+            confidence: ainb_fleet_core::types::Confidence::Inferred,
+            transport_health: ainb_fleet_core::types::TransportHealth::Healthy,
+            first_seen_ms: Some(1_700_000_000_000),
+            last_seen_ms: None,
+            version: 0,
+        }];
+
+        let orphan_key = SessionKey::legacy(Provider::Unknown, target, fingerprint).to_string();
+        FleetRepo::apply_event(
+            pool,
+            &NewFleetEvent {
+                event_id: "seed:orphan".to_string(),
+                session_key: orphan_key.clone(),
+                observed_at: 1,
+                authority: ObservationAuthority::Authoritative,
+                event_type: "seed".to_string(),
+                payload: "{}".to_string(),
+                patch: FleetSessionPatch {
+                    tmux_target: Some(target.to_string()),
+                    process_start_fingerprint: Some(fingerprint.to_string()),
+                    lifecycle_state: Some("EXITED".to_string()),
+                    transport_health: Some("UNAVAILABLE".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .expect("seed orphan");
+
+        let before = FleetRepo::get_session(pool, &orphan_key)
+            .await
+            .expect("get")
+            .expect("orphan present")
+            .version;
+
+        // Two passes of the restore half, exactly as the 3s loop runs it.
+        for tick in 0..2 {
+            restore_tmux_transport(pool, &sink, &discovered, 1_000 + tick)
+                .await
+                .expect("restore");
+        }
+
+        let after = FleetRepo::get_session(pool, &orphan_key)
+            .await
+            .expect("get")
+            .expect("orphan present");
+        assert_eq!(
+            after.version, before,
+            "an EXITED orphan must not be restored, or it flip-flops with the sweep forever"
+        );
+        assert_eq!(
+            after.transport_health, "UNAVAILABLE",
+            "the orphan must stay UNAVAILABLE so the missing-sweep keeps skipping it"
+        );
+    }
 
     #[test]
     fn stop_with_background_work_remains_running() {
