@@ -104,9 +104,6 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: changes
-    if: >-
-      always() && (github.event_name != 'pull_request' ||
-      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -114,11 +111,23 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
       - uses: taiki-e/install-action@nextest
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       # `--lib` alone builds ONLY in-source `#[cfg(test)]` modules, so every
       # integration target under `crates/*/tests/` was invisible here: whole test
       # files could be added — or stop compiling — without any job noticing.
@@ -148,6 +157,9 @@ jobs:
       # run here. `--lib --tests` widened WHICH targets are built; this
       # widens WHICH crates they are built from.
       - run: "cargo nextest run --workspace --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
@@ -208,9 +220,6 @@ jobs:
   ainb-hooks:
     name: ainb-hooks (${{ matrix.os }})
     needs: changes
-    if: >-
-      always() && (github.event_name != 'pull_request' ||
-      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -218,29 +227,56 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
       - name: Install tmux (Linux only; macOS runner ships it)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y tmux jq
       - name: Verify hook script parses on the runner
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: bash -n plugins/ainb-hooks/hooks/notify.sh
       - name: Stall guard compiles + self-check passes
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: |
           python3 -m py_compile plugins/ainb-hooks/hooks/stall_guard.py
           python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test
       - name: Build + lib tests (ainb-plugin-notifyd)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --lib --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: End-to-end hook → socket → SQLite
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --test end_to_end --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Tripwire — Inbox screen open + render
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
 
@@ -256,9 +292,6 @@ jobs:
   hangar-e2e:
     name: hangar-e2e (${{ matrix.os }})
     needs: changes
-    if: >-
-      always() && (github.event_name != 'pull_request' ||
-      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -266,14 +299,26 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
       # macOS runner images do NOT ship tmux (actions/runner-images macos-15
       # README) — without installing it here the macOS leg is vacuously green:
       # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
       - name: Install tmux (apt-get on Linux, brew on macOS)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update && sudo apt-get install -y tmux
@@ -281,18 +326,33 @@ jobs:
             brew install tmux
           fi
       - name: Build hangar daemon binary
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon
         working-directory: ${{ env.WORKING_DIR }}
       - name: Build ainb binary
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb --bin ainb
         working-directory: ${{ env.WORKING_DIR }}
       - name: Stage bundled plugins (incl. hangar-tui)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: bash scripts/build-plugins.sh
         working-directory: ${{ env.WORKING_DIR }}
       - name: CI-lint — assert ci.yml hangar-e2e contract
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: cargo xtask ci-lint
         working-directory: ${{ env.WORKING_DIR }}
       - name: Run all hangar tripwires
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         # Hosted runners render the TUI much slower than a dev box, so the
         # dev-tuned tmux poll budgets time out under the full serial suite (a
         # runner-speed artifact, not a code fault). Widen every budget that
@@ -317,6 +377,9 @@ jobs:
       # hangar_cli_integration, …) live in tests/ — neither the `--lib` test job
       # nor the tripwire suite runs them, so they were CI-ungated. Gate them here.
       - name: Run hangar acceptance tests (framed-socket + CLI)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: bash ../scripts/hangar/run_acceptance_tests.sh
         working-directory: ${{ env.WORKING_DIR }}
 
