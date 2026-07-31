@@ -50,6 +50,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __AINB_STALL_GUARD__",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
