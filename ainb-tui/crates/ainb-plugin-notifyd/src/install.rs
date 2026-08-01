@@ -61,6 +61,12 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// The bash hook script, baked into the binary.
 const HOOK_SCRIPT: &str = include_str!("../../../../plugins/ainb-hooks/hooks/notify.sh");
 
+/// The Stop-hook stall guard, baked into the binary. Claude reaches it through
+/// the plugin directory; Codex has no plugin runtime, so it needs the same
+/// extract-and-point treatment as `notify.sh`.
+const STALL_GUARD_SCRIPT: &str =
+    include_str!("../../../../plugins/ainb-hooks/hooks/stall_guard.py");
+
 /// The Claude plugin manifest, baked into the binary.
 const CLAUDE_PLUGIN_JSON: &str =
     include_str!("../../../../plugins/ainb-hooks/.claude-plugin/plugin.json");
@@ -184,12 +190,26 @@ pub fn canonical_hook_script(paths: &Paths) -> PathBuf {
 /// version of the script (so re-running install always picks up the
 /// latest from the binary).
 pub fn extract_hook_script(paths: &Paths) -> Result<PathBuf> {
-    let dest = canonical_hook_script(paths);
+    extract_script(canonical_hook_script(paths), HOOK_SCRIPT)
+}
+
+/// Canonical on-disk path of the extracted stall guard.
+pub fn canonical_stall_guard(paths: &Paths) -> PathBuf {
+    paths.base.join("hooks").join("stall_guard.py")
+}
+
+/// Extract the embedded `stall_guard.py` alongside `notify.sh`. Same
+/// idempotent overwrite semantics, so re-running install picks up the latest.
+pub fn extract_stall_guard(paths: &Paths) -> Result<PathBuf> {
+    extract_script(canonical_stall_guard(paths), STALL_GUARD_SCRIPT)
+}
+
+fn extract_script(dest: PathBuf, body: &str) -> Result<PathBuf> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::write(&dest, HOOK_SCRIPT).with_context(|| format!("writing {}", dest.display()))?;
+    std::fs::write(&dest, body).with_context(|| format!("writing {}", dest.display()))?;
     let mut perms = std::fs::metadata(&dest)?.permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&dest, perms)?;
@@ -302,6 +322,7 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
         .ensure_base()
         .with_context(|| format!("creating {}", paths.base.display()))?;
     let hook_script = extract_hook_script(paths)?;
+    let stall_guard = extract_stall_guard(paths)?;
 
     let mut record = InstallRecord::load(paths)?;
     record.hook_script = hook_script.clone();
@@ -327,7 +348,7 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 record.claude_plugin_dir = None;
                 push_unique(&mut record.agents, Agent::Claude);
             }
-            Agent::Codex => match install_codex(home, &hook_script) {
+            Agent::Codex => match install_codex(home, &hook_script, &stall_guard) {
                 Ok(hooks_json) => {
                     record.codex_hooks_json = Some(hooks_json);
                     push_unique(&mut record.agents, Agent::Codex);
@@ -446,7 +467,11 @@ fn push_unique<T: PartialEq>(v: &mut Vec<T>, item: T) {
 /// Install Codex hooks: merge our managed block into
 /// `<home>/.codex/hooks.json`. Substitutes the `__AINB_HOOK_SCRIPT__`
 /// placeholder with the canonical script path.
-fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
+fn install_codex(
+    home: &Path,
+    hook_script_canonical: &Path,
+    stall_guard_canonical: &Path,
+) -> Result<PathBuf> {
     let codex_dir = home.join(".codex");
     std::fs::create_dir_all(&codex_dir)?;
     let hooks_json = codex_dir.join("hooks.json");
@@ -471,10 +496,15 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
     };
 
     // Resolve our template against the actual hook script path.
-    let our_block_text = CODEX_HOOKS_TEMPLATE.replace(
-        "__AINB_HOOK_SCRIPT__",
-        &hook_script_canonical.to_string_lossy(),
-    );
+    let our_block_text = CODEX_HOOKS_TEMPLATE
+        .replace(
+            "__AINB_HOOK_SCRIPT__",
+            &hook_script_canonical.to_string_lossy(),
+        )
+        .replace(
+            "__AINB_STALL_GUARD__",
+            &stall_guard_canonical.to_string_lossy(),
+        );
     let our_block: serde_json::Value = serde_json::from_str(&strip_line_comments(&our_block_text))
         .context("parsing embedded codex hooks template")?;
     let our_hooks = our_block
@@ -870,6 +900,18 @@ mod tests {
             !text.contains("\"Notification\""),
             "Codex managed block should not use Claude/Copilot Notification hook: {text}"
         );
+        assert!(
+            !text.contains("__AINB_STALL_GUARD__"),
+            "stall guard placeholder left unresolved: {text}"
+        );
+        assert!(
+            text.contains("stall_guard.py"),
+            "Codex Stop must also run the stall guard: {text}"
+        );
+        assert!(
+            canonical_stall_guard(&p).exists(),
+            "stall guard must be extracted next to notify.sh"
+        );
     }
 
     #[test]
@@ -940,9 +982,14 @@ mod tests {
                 entries.as_array().is_some_and(|entries| entries.iter().all(|entry| {
                     entry["hooks"].as_array().is_some_and(|hooks| {
                         hooks.iter().all(|hook| {
-                            hook["command"]
-                                .as_str()
-                                .is_some_and(|command| command.contains("AINB_AGENT=claude"))
+                            hook["command"].as_str().is_some_and(|command| {
+                                // Every telemetry hook routes through notify.sh
+                                // carrying the agent tag. The stall guard is the
+                                // one entry that is not telemetry: it reads the
+                                // Stop payload and may answer with a block.
+                                command.contains("AINB_AGENT=claude")
+                                    || command.contains("stall_guard.py")
+                            })
                         })
                     })
                 }))

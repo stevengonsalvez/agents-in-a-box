@@ -95,6 +95,8 @@ pub enum FleetProvider {
     Claude,
     /// OpenAI Codex.
     Codex,
+    /// GitHub Copilot CLI.
+    Copilot,
     /// Provider could not be determined.
     #[default]
     Unknown,

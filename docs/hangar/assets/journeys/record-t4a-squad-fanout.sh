@@ -1,5 +1,5 @@
 #!/bin/bash
-# Recording driver for tcp T4a (squad-card fan-out) — one of the remaining tcp
+# Recording driver for tcp T4a (squad card, ONE owner), one of the remaining tcp
 # journeys in the converged-control-center catalogue
 # (docs/hangar/verify-converged-goal.md).
 #
@@ -8,12 +8,19 @@
 # cache, a `shippers` squad (leader `agent-1` + members `agent-m1`/`agent-m2`), and
 # a card ALREADY assigned to that squad on the `Delivery` board. The tape opens
 # Boards (`B`), runs the squad card (`Enter`, `Enter` for Headless), and holds the
-# fan-out running while a background poller shell-verifies the live worktrees
-# (`git branch --list 'ainb/*'` in the seeded repo + the worktree dirs on disk).
-# A background STATE-DRIVEN release (polls `agent_task_queue` for 3 `running`
-# rows, not a blind sleep — vhs's own startup latency is not fully predictable)
-# then touches `$HOME/interactive-go` once the fan-out is actually observed
-# running, so the tape also captures the clean teardown.
+# run live while a background poller shell-verifies the worktree
+# (`git branch --list 'ainb/*'` in the seeded repo + the worktree dir on disk).
+# A background STATE-DRIVEN release (polls `agent_task_queue` for the `running`
+# row, not a blind sleep, since vhs's own startup latency is not fully
+# predictable) then touches `$HOME/interactive-go` once the run is actually
+# observed running, so the tape also captures the clean teardown.
+#
+# CHANGED with migration 0074: this journey used to wait for THREE `running` rows,
+# because a squad card BROADCAST one run per member. That was the reported defect,
+# not a feature, and dispatch is now a role-gated pull with one owner per card. A
+# poller still waiting for 3 would never fire and the tape would hang, so the
+# threshold is 1. The committed GIF still shows the old three-worktree behaviour
+# and is stale until this script is re-run.
 set -euo pipefail
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/stevengonsalvez/.cache/ccc-shared-target}"
@@ -61,7 +68,7 @@ POLL_LOG="$(mktemp /tmp/t4a-worktree-poll.XXXXXX.log)"
 POLL_BG=$!
 
 # Background STATE-DRIVEN release: wait until the DB actually shows all three
-# fanned tasks `running` (never a blind sleep — vhs's own startup latency varies
+# the task `running` (never a blind sleep, since vhs's own startup latency varies
 # run to run), hold 6s more so the tape's "running" screenshot lands, then touch
 # the sentinel to release the three blocked fake-claude agents. `set +e` so a
 # transient sqlite3/find hiccup can never silently kill this loop early (it did,
@@ -70,8 +77,8 @@ POLL_BG=$!
   set +e +o pipefail
   for _ in $(seq 1 240); do
     n=$(sqlite3 "$DB" "SELECT COUNT(*) FROM agent_task_queue WHERE issue_id='issue-squad-card' AND status='running';" 2>/dev/null)
-    if [ "${n:-0}" -ge 3 ] 2>/dev/null; then
-      echo "$(date +%s.%N) observed $n/3 running tasks; holding 6s before release" >> "$POLL_LOG"
+    if [ "${n:-0}" -ge 1 ] 2>/dev/null; then
+      echo "$(date +%s.%N) observed $n/1 running task; holding 6s before release" >> "$POLL_LOG"
       sleep 6
       touch "$HOME_DIR/interactive-go"
       echo "$(date +%s.%N) released interactive-go" >> "$POLL_LOG"
@@ -112,11 +119,11 @@ Enter
 Sleep 1s
 Enter
 Sleep 4s
-Screenshot "t4a-2-fanout-running.png"
+Screenshot "t4a-2-owner-running.png"
 
 # --- hold: three fanned tasks blocked on the release sentinel, each on its own
 #     live ainb/<slug> worktree (shell-verified in t4a-worktree-poll.log); the
-#     state-driven release fires ~6s after it observes 3/3 running ---
+#     state-driven release fires ~6s after it observes the run ---
 Sleep 14s
 Screenshot "t4a-3-fanout-done.png"
 Sleep 1s

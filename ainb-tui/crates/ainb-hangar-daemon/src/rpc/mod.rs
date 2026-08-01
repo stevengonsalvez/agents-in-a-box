@@ -1802,7 +1802,11 @@ async fn execute_fleet_start(
                 Some("Codex managed transport is not active".to_string()),
             ),
         },
-        FleetProvider::Claude | FleetProvider::Unknown => (
+        // Codex is the only provider with a managed start transport. Copilot
+        // sits with Claude here: Fleet can SEE a copilot pane, but it cannot
+        // launch one, so a start request is honestly rejected rather than
+        // silently accepted.
+        FleetProvider::Claude | FleetProvider::Copilot | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
@@ -1824,6 +1828,7 @@ fn prospective_start_session_key(
     let provider = match provider {
         ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
         ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
+        ainb_hangar_proto::fleet::FleetProvider::Copilot => "copilot",
         ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
     };
     format!("start:{provider}:{}", stable_fingerprint(request_id))
@@ -1836,7 +1841,7 @@ async fn launch_managed_codex_tui(
 ) -> Result<(String, ainb_fleet_core::types::FleetSession), String> {
     let tmux_name = managed_codex_tmux_name(thread_id, SystemClock.now_ms());
     let codex_binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
-    let tmux_binary = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let tmux_binary = std::ffi::OsString::from("tmux");
     let command = manager.managed_tui_command(
         &codex_binary,
         [
@@ -1860,7 +1865,7 @@ async fn launch_managed_codex_tui(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        match ainb_fleet_core::discover::discover_from_tmux().await {
+        match ainb_fleet_core::discover::discover_all_tmux_panes().await {
             Ok(sessions) => {
                 if let Some(session) = sessions.into_iter().find(|session| {
                     session
@@ -1913,7 +1918,7 @@ fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
 }
 
 async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
-    let tmux_binary = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let tmux_binary = std::ffi::OsString::from("tmux");
     let output = tokio::process::Command::new(tmux_binary)
         .args(["kill-session", "-t", session_name])
         .output()
@@ -2329,7 +2334,7 @@ async fn exact_live_tmux_session_name(
             "exact tmux process identity is unavailable".to_string(),
         )
     })?;
-    let discovered = ainb_fleet_core::discover::discover_from_tmux()
+    let discovered = ainb_fleet_core::discover::discover_all_tmux_panes()
         .await
         .map_err(|error| crate::fleet_provider::ProviderError::Transport(error.to_string()))?;
     if !discovered.iter().any(|candidate| {
@@ -2603,7 +2608,7 @@ async fn verified_tmux_send(
             Some("exact tmux process identity is unavailable".to_string()),
         );
     };
-    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
@@ -2646,7 +2651,7 @@ async fn verified_tmux_picker(
             Some("exact tmux process identity is unavailable".to_string()),
         );
     };
-    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
@@ -7716,7 +7721,7 @@ async fn handle_board_card_timeline(
     // The card's newest task (any status) — its run is the one to show.
     let task_id: Option<String> = sqlx::query_scalar(
         "SELECT id FROM agent_task_queue WHERE issue_id = ? AND workspace_id = ? \
-         ORDER BY created_at DESC, id DESC LIMIT 1",
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(&params.issue_id)
     .bind(ws.as_str())
@@ -12344,7 +12349,7 @@ mod tests {
         );
         assert_eq!(queue_len().await, 0, "a blocked fan-out writes NO task row");
 
-        // (b) OWNER (default `None` invoker) fans out — leader brief + one member.
+        // (b) OWNER (default `None` invoker) is ADMITTED and dispatches once.
         let owner_run = run_card(
             pool,
             &ws_id,
@@ -12359,8 +12364,15 @@ mod tests {
             DispatchSource::Manual,
         )
         .await;
-        assert!(owner_run.is_ok(), "the owner's squad run must fan out");
-        assert_eq!(queue_len().await, 2, "leader brief + one member task");
+        assert!(owner_run.is_ok(), "the owner's squad run must be admitted");
+        // This test pins the GATE, not the dispatch width. Under the pull
+        // pipeline an admitted squad run yields ONE owner, never one task per
+        // member; it asserted 2 while the broadcast existed.
+        assert_eq!(
+            queue_len().await,
+            1,
+            "an admitted squad run is exactly one task"
+        );
     }
 
     /// Pattern-B handover regression: the create-wizard fires ONE `issue_update`

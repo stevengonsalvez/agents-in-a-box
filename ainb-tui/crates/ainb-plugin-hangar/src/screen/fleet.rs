@@ -255,6 +255,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
             provider: match session.provider {
                 FleetProvider::Claude => "claude",
                 FleetProvider::Codex => "codex",
+                FleetProvider::Copilot => "copilot",
                 FleetProvider::Unknown => "unknown",
             }
             .into(),

@@ -249,9 +249,9 @@ async fn issue_card_fields(
     let (count, last_status, last_at): (i64, Option<String>, Option<i64>) = sqlx::query_as(
         "SELECT COUNT(*), \
          (SELECT status FROM agent_task_queue WHERE issue_id = ?1 \
-            ORDER BY created_at DESC, id DESC LIMIT 1), \
+            ORDER BY created_at DESC, rowid DESC LIMIT 1), \
          (SELECT created_at FROM agent_task_queue WHERE issue_id = ?1 \
-            ORDER BY created_at DESC, id DESC LIMIT 1) \
+            ORDER BY created_at DESC, rowid DESC LIMIT 1) \
          FROM agent_task_queue WHERE issue_id = ?1",
     )
     .bind(issue_id)
@@ -470,7 +470,7 @@ async fn latest_pr_url_for_issue(
            AND result ->> 'pr_url' IS NOT NULL \
            AND generation = (SELECT MAX(generation) FROM agent_task_queue \
                              WHERE issue_id = ?2) \
-         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
+         ORDER BY COALESCE(finished_at, created_at) DESC, rowid DESC \
          LIMIT 1",
     )
     .bind(workspace_id)
@@ -512,7 +512,7 @@ async fn latest_branch_for_issue(
            AND branch IS NOT NULL AND branch <> '' \
            AND generation = (SELECT MAX(generation) FROM agent_task_queue \
                              WHERE issue_id = ?2) \
-         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
+         ORDER BY COALESCE(finished_at, created_at) DESC, rowid DESC \
          LIMIT 1",
     )
     .bind(workspace_id)
@@ -797,7 +797,7 @@ async fn enrich_board_card(
     let latest: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT status, session_name FROM agent_task_queue \
          WHERE issue_id = ? AND workspace_id = ? \
-         ORDER BY created_at DESC, id DESC LIMIT 1",
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(issue_id)
     .bind(workspace_id)

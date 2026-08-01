@@ -213,7 +213,8 @@ Subcommands: run, stop, reap, restart, install, uninstall, status, list
 Hangar managed\-agents control plane (issue / task / beads / daemon)
 .br
 Subcommands: issue, task, beads, daemon, auth, config, skills, templates,
-agent, member, squad, autopilot, workspace, logs, property, comment, inbox
+agent, member, squad, autopilot, workspace, logs, property, comment, inbox,
+pipeline
 .TP
 .B ainb rtk
 RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse
@@ -393,7 +394,7 @@ prints a warning to standard error when it detects this, but it does not refuse:
 the spawn still succeeds, so a script must not rely on a non\-zero exit to catch
 it.
 .TP
-.B Do not pass \-\-name.
+.B Do not treat \-\-name as a handle.
 .B \-\-name
 only overrides the tmux session name. It does
 .I not

@@ -16,6 +16,7 @@
 		A10000000000000000000017 /* CanonicalFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000028 /* CanonicalFixtureTests.swift */; };
 		A10000000000000000000018 /* FleetProjectionReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029 /* FleetProjectionReducerTests.swift */; };
 		A10000000000000000000019 /* FleetSemanticBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */; };
+		A10000000000000000000095 /* FleetWireForwardCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000096 /* FleetWireForwardCompatibilityTests.swift */; };
 		A1000000000000000000001A /* HangarLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002B /* HangarLocation.swift */; };
 		A1000000000000000000001B /* FleetConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002C /* FleetConnection.swift */; };
 		A1000000000000000000001C /* FleetConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002D /* FleetConnectionTests.swift */; };
@@ -63,6 +64,7 @@
 		A10000000000000000000028 /* CanonicalFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanonicalFixtureTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000029 /* FleetProjectionReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetProjectionReducerTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetSemanticBoundaryTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000096 /* FleetWireForwardCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetWireForwardCompatibilityTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000002B /* HangarLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HangarLocation.swift; sourceTree = "<group>"; };
 		A1000000000000000000002C /* FleetConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnection.swift; sourceTree = "<group>"; };
 		A1000000000000000000002D /* FleetConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnectionTests.swift; sourceTree = "<group>"; };
@@ -184,6 +186,7 @@
 				A10000000000000000000028 /* CanonicalFixtureTests.swift */,
 				A10000000000000000000029 /* FleetProjectionReducerTests.swift */,
 				A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */,
+				A10000000000000000000096 /* FleetWireForwardCompatibilityTests.swift */,
 				A1000000000000000000002D /* FleetConnectionTests.swift */,
 				A1000000000000000000002E /* FleetDaemonContractTests.swift */,
 				A10000000000000000000043 /* FleetRosterPresentationTests.swift */,
@@ -363,6 +366,7 @@
 				A10000000000000000000017 /* CanonicalFixtureTests.swift in Sources */,
 				A10000000000000000000018 /* FleetProjectionReducerTests.swift in Sources */,
 				A10000000000000000000019 /* FleetSemanticBoundaryTests.swift in Sources */,
+				A10000000000000000000095 /* FleetWireForwardCompatibilityTests.swift in Sources */,
 				A1000000000000000000001C /* FleetConnectionTests.swift in Sources */,
 				A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */,
 				A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */,

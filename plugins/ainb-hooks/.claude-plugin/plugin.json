@@ -1,7 +1,7 @@
 {
   "name": "ainb-hooks",
-  "version": "0.3.0",
-  "description": "Emit every safely observable Claude Code lifecycle event into Hangar's durable provider log. User-facing events still reach ainb-notifyd over its Unix socket. The same notify.sh powers ATC structured control when installed with AINB_MANAGED=atc.",
+  "version": "0.4.0",
+  "description": "Emit every safely observable Claude Code lifecycle event into Hangar's durable provider log. User-facing events still reach ainb-notifyd over its Unix socket. The same notify.sh powers ATC structured control when installed with AINB_MANAGED=atc. stall_guard.py additionally blocks turn-end when a session would idle on in-flight work with no wake armed, so ATC-managed sessions do not silently park on a running CI job.",
   "author": {
     "name": "Agents-in-a-Box"
   },
@@ -24,7 +24,10 @@
     "SubagentStop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "TaskCreated": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "TaskCompleted": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
-    "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "Stop": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] },
+      { "matcher": "", "hooks": [{ "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/stall_guard.py", "timeout": 10 }] }
+    ],
     "StopFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "TeammateIdle": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "ConfigChange": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],

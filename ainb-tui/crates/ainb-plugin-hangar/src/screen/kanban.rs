@@ -2,9 +2,12 @@
 //!
 //! The Kanban board (hotkey `K`) lays the workspace's task queue out as four
 //! width-aware columns — `queued` / `running` / `done` / `failed` — each holding
-//! the task cards bucketed into it. A card shows `#<short_id>`, the assignee
-//! agent, the task age (`5m` / `2h` / `3d`), and a coloured status chip. Focus
-//! walks columns with `←` / `→` and rows with `↑` / `↓`; `Shift+←` / `Shift+→`
+//! the task cards bucketed into it. A card's ID LINE reads
+//! `#<short_id> · <parent issue title>`; its TITLE line carries the run identity:
+//! the assignee agent BY NAME, the task age (`5m` / `2h` / `3d`), the status, and
+//! the run's durable artifacts (branch + PR chip).
+//!
+//! Focus walks columns with `←` / `→` and rows with `↑` / `↓`; `Shift+←` / `Shift+→`
 //! drags the focused card to the adjacent column, which the plugin glue lifts
 //! into a `hangar/task_transition` daemon RPC (the real store FSM move, not a
 //! local re-bucket).
@@ -27,11 +30,39 @@
 //! An unknown wire token falls into `queued` (fail-visible, not fail-hidden) so a
 //! future status never silently drops a card off the board.
 //!
+//! ## Two ids the card must NOT show raw
+//!
+//! A [`TaskCardRow`] carries an `agent_id` and an `issue_id`, both 26-char ULIDs.
+//! Painted raw they swamp a ~27-char card line and read as noise. Worse, N
+//! dispatch runs of ONE issue (a squad fan-out, or a rerun) become N opaque,
+//! seemingly unrelated cards. Both are therefore resolved CLIENT-SIDE against
+//! snapshots the plugin already holds (the `hangar/agents_list` roster and the
+//! `hangar/issues_list` rows) by [`KanbanState::set_agent_names`] and
+//! [`KanbanState::set_issue_titles`]. No wire field carries the resolved text.
+//!
+//! Both seams are idempotent and order-independent: the three snapshots are fired
+//! in one batch and land in any order, so each is applied from BOTH sides (the
+//! tasks snapshot resolves against the cached rosters, and each roster snapshot
+//! re-resolves the cards already on the board). An id that resolves to nothing
+//! (a deleted agent, an orphan task) falls back to a SHORT form, never the ULID.
+//!
+//! ## Why the parent issue sits on the ID line, not the title
+//!
+//! The card widget wraps its title to exactly TWO lines and ellipsis-cuts the
+//! overflow, while its id line carries `#<short_id>` alone and is ~35 cells of
+//! dead space. Leading the TITLE with the parent issue therefore spent the run's
+//! own budget on context and pushed the tail off the tile: a finished run's `PR ✓`
+//! chip was silently elided (`tripwire_tcp_card_branch_pr_e2e`). The parent is
+//! context and belongs on the identity line beside the id; the title line is the
+//! run (agent, age, status, branch, PR) and keeps its whole two-line budget.
+//!
 //! As with every Hangar screen the reducer ([`reduce_kanban`]) is **pure**: it
 //! folds a directional / move / event input into a new [`KanbanState`] plus an
 //! optional [`KanbanIntent`] the plugin glue lifts into the matching daemon RPC.
 //! The card rows come from the daemon (`hangar/tasks_list`); the plugin owns zero
 //! domain data (`project_ainb_plugin_owns_data_plane`).
+
+use std::collections::BTreeMap;
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow};
 use ainb_hangar_proto::pr_status::{CiRollup, PrStatus};
@@ -117,6 +148,25 @@ pub struct CardSummary {
     pub short_id: String,
     /// The executing agent's id.
     pub agent_id: String,
+    /// The executing agent's HUMAN-READABLE label: the roster `display_name`
+    /// resolved from [`agent_id`](Self::agent_id) by
+    /// [`KanbanState::set_agent_names`].
+    ///
+    /// Seeded to [`short_id`] of the agent id at build time, so a board rendered
+    /// before the `hangar/agents_list` snapshot lands (or a card whose agent was
+    /// deleted from the roster) shows a short `#`-style token rather than a raw
+    /// 26-char ULID that swamps the tile.
+    pub agent_label: String,
+    /// The parent issue this run was dispatched for, or `None` for an orphan task.
+    pub issue_id: Option<String>,
+    /// The parent issue's TITLE, resolved from [`issue_id`](Self::issue_id) by
+    /// [`KanbanState::set_issue_titles`]; `None` for an orphan task or until the
+    /// `hangar/issues_list` snapshot lands.
+    ///
+    /// A dispatch fan-out puts N cards for ONE issue on the board (a squad, or a
+    /// rerun). Without the title those N cards read as N unrelated things; with
+    /// it they visibly share a parent and differ only by agent.
+    pub issue_title: Option<String>,
     /// The raw lifecycle status (drives the status chip colour).
     pub status: String,
     /// Creation timestamp (epoch ms), kept for re-computing age on re-render.
@@ -201,16 +251,61 @@ impl KanbanState {
         state
     }
 
+    /// Resolve every card's [`agent_label`](CardSummary::agent_label) against the
+    /// `agent_id -> display_name` roster the `hangar/agents_list` snapshot carries,
+    /// so a card reads `claude · 7d · done` rather than a raw 26-char ULID.
+    ///
+    /// Idempotent and order-independent: the two snapshots (`hangar/tasks_list`
+    /// and `hangar/agents_list`) are fired in one batch and may land in either
+    /// order, so BOTH `set_tasks` and `set_actors` call this seam. An id with no
+    /// roster entry (a deleted agent) keeps its [`short_id`] fallback, never the
+    /// full ULID.
+    pub fn set_agent_names(&mut self, names: &BTreeMap<String, String>) {
+        if names.is_empty() {
+            return;
+        }
+        for col in &mut self.columns {
+            for card in &mut col.cards {
+                if let Some(name) = names.get(&card.agent_id) {
+                    card.agent_label.clone_from(name);
+                }
+            }
+        }
+    }
+
+    /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
+    /// `issue_id -> title` map the `hangar/issues_list` snapshot carries, so N
+    /// dispatch runs of ONE issue read as N runs of that issue rather than N
+    /// unrelated cards.
+    ///
+    /// Same order-independent contract as [`set_agent_names`](Self::set_agent_names):
+    /// both `set_tasks` and `set_issues` call it, whichever snapshot lands first.
+    /// An orphan task, or one whose issue is not in the snapshot, keeps `None` and
+    /// simply renders the bare `#<short_id>` id line.
+    pub fn set_issue_titles(&mut self, titles: &BTreeMap<String, String>) {
+        if titles.is_empty() {
+            return;
+        }
+        for col in &mut self.columns {
+            for card in &mut col.cards {
+                if let Some(t) = card.issue_id.as_ref().and_then(|id| titles.get(id)) {
+                    card.issue_title = Some(t.clone());
+                }
+            }
+        }
+    }
+
     /// Flatten the four board columns into the shared card-board
     /// [`BoardColumn`](card_board::BoardColumn)s the render paints and the mouse
     /// layer hit-tests against (63l.6), computing each card's age against `now_ms`.
     ///
-    /// Each task card maps onto the card anatomy: the id line is `#<short_id>`, the
-    /// two title lines carry `<agent> · <age> · <status>` (so the bead's required
-    /// id + title + state + age all read on the tile), the priority chip comes from
-    /// the row, and the assignee initial is the agent's first char. The same
-    /// geometry feeds `render_kanban` and the hit-map, so paint + hit-test never
-    /// drift.
+    /// Each task card maps onto the card anatomy: the id line is
+    /// `#<short_id> · <issue>`, the two title lines carry
+    /// `<agent> · <age> · <status>` plus the run's artifacts (so the bead's
+    /// required id + title + state + age all read on the tile), the priority chip
+    /// comes from the row, and the assignee initial is the agent NAME's first char.
+    /// The same geometry feeds `render_kanban` and the hit-map, so paint + hit-test
+    /// never drift.
     #[must_use]
     pub fn board_columns(&self, now_ms: i64) -> Vec<card_board::BoardColumn> {
         self.columns
@@ -222,10 +317,10 @@ impl KanbanState {
                     .map(|c| BoardCard {
                         not_dispatched: false,
                         issue_id: c.task_id.clone(),
-                        display_id: format!("#{}", c.short_id),
+                        display_id: card_id_line(c),
                         title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
-                        assignee_initial: c.agent_id.chars().next(),
+                        assignee_initial: c.agent_label.chars().next(),
                         linked: false,
                         subtasks: None,
                     })
@@ -362,13 +457,43 @@ impl KanbanState {
     }
 }
 
+/// Chars of the parent issue's title the id line shows before eliding.
+///
+/// The id line is `#<short_id> · <issue>` clipped at the card's inner width, which
+/// is 42 on the reference 180-col board and 27 on the narrow 120-col one. Capping
+/// here means a long title ends in a visible `…` rather than being hard-clipped by
+/// the widget mid-word on the wide board.
+const ISSUE_TITLE_CAP: usize = 24;
+
+/// The card's ID line: `#<short_id>`, then the parent issue's title (elided at
+/// [`ISSUE_TITLE_CAP`]) when it has resolved.
+///
+/// The parent names the card so N dispatch runs of ONE issue (a squad fan-out, or
+/// a rerun) read as N runs of that issue rather than N unrelated cards. It rides
+/// the id line (the card's identity row, otherwise ~35 cells of dead space)
+/// rather than the title, which the widget wraps to two lines and ellipsis-cuts:
+/// spending that budget on context is what pushed a finished run's `PR ✓` chip off
+/// the tile. An orphan task, or one whose issue snapshot has not landed, renders
+/// the bare `#<short_id>` with no dangling separator.
+fn card_id_line(c: &CardSummary) -> String {
+    c.issue_title.as_deref().map_or_else(
+        || format!("#{}", c.short_id),
+        |t| format!("#{} · {}", c.short_id, elide(t, ISSUE_TITLE_CAP)),
+    )
+}
+
 /// The card's title line: `<agent> · <age> · <status>`, then the run's durable
-/// artifacts when present (tcp T2) — the `ainb/<slug>` branch it committed on and
-/// a `PR <ci>` chip — so a finished run's branch + PR read on the tile itself.
+/// artifacts when present (tcp T2): the `ainb/<slug>` branch it committed on and a
+/// `PR <ci>` chip, so a finished run's branch + PR read on the tile itself.
+///
+/// Deliberately carries the RUN and nothing else. The widget wraps this to exactly
+/// two lines and ellipsis-cuts the overflow, so every char spent ahead of the
+/// branch is a char of the branch + PR chip that falls off the tile; the parent
+/// issue is on the id line ([`card_id_line`]) for exactly that reason.
 fn card_title(c: &CardSummary, now_ms: i64) -> String {
     let mut title = format!(
         "{} · {} · {}",
-        c.agent_id,
+        c.agent_label,
         age_label(c.created_at, now_ms),
         c.status
     );
@@ -393,6 +518,11 @@ fn cards_for(tasks: &[TaskCardRow], col: BoardColumn, now_ms: i64) -> Vec<CardSu
             task_id: t.id.as_str().to_string(),
             short_id: short_id(t.id.as_str()),
             agent_id: t.agent_id.clone(),
+            // Un-resolved until the roster arrives; never the full ULID.
+            agent_label: short_id(&t.agent_id),
+            issue_id: t.issue_id.clone(),
+            // Unresolved until the issues snapshot lands.
+            issue_title: None,
             status: t.status.clone(),
             created_at: t.created_at,
             branch: t.branch.clone(),
@@ -415,6 +545,19 @@ fn card_pr_chip(card: &CardSummary) -> Option<String> {
         _ => "…",
     };
     Some(format!("PR {ci}"))
+}
+
+/// Clip `s` to at most `cap` CHARS (multi-byte safe), spending the last char on a
+/// `…` when it had to cut. A `cap` of 0 yields the empty string.
+fn elide(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(cap.saturating_sub(1)).collect();
+    if cap > 0 {
+        out.push('…');
+    }
+    out
 }
 
 /// The short id rendered on a card: the last 6 chars of the id (char-safe), or
@@ -635,12 +778,14 @@ fn cards_len_floor(cards: &[CardSummary]) -> usize {
     cards.len().saturating_sub(1)
 }
 
-/// Render the Kanban board into `buf` between rows `top` and `bottom` THROUGH the
-/// shared Linear-style card-board (63l.6) — four status columns (`queued` /
-/// `running` / `done` / `failed`) side by side, each a per-column-scrollable
-/// stack of bordered task cards showing `#<short_id>`, the agent + age + status,
-/// and a priority chip. The hovered (or keyboard-focused) card carries the heavy
-/// clay highlight border.
+/// Render the Kanban board into `buf` between rows `top` and `bottom`.
+///
+/// Paints THROUGH the shared Linear-style card-board (63l.6): four status columns
+/// (`queued` / `running` / `done` / `failed`) side by side, each a
+/// per-column-scrollable stack of bordered task cards whose id line is
+/// `#<short_id> · <parent issue>` and whose title line is the agent NAME + age +
+/// status (+ branch + PR chip), with a priority chip in the footer. The hovered
+/// (or keyboard-focused) card carries the heavy clay highlight border.
 ///
 /// `now_ms` is the render-time clock the card ages are computed against.
 pub fn render_kanban(
@@ -692,18 +837,27 @@ mod tests {
         }
     }
 
+    /// The `agent_id -> display_name` roster the resolve seam takes.
+    fn roster(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+            .collect()
+    }
+
     /// `board_columns` flattens the four buckets into card-board columns whose
     /// cards carry `#<short_id>`, an agent · age · status title, and the column
     /// glyph + label, so the screen renders THROUGH the shared card-board (63l.6).
     #[test]
     fn board_columns_map_tasks_to_card_board_cards() {
-        let state = KanbanState::from_tasks(
+        let mut state = KanbanState::from_tasks(
             &[
                 task("01HANGARTASKQUEUED01", "queued"),
                 task("01HANGARTASKRUNNING03", "running"),
             ],
             NOW,
         );
+        state.set_agent_names(&roster(&[("claude-agent", "claude")]));
         let cols = state.board_columns(NOW);
         assert_eq!(cols.len(), 4, "four board columns");
         assert_eq!(cols[0].name, "queued");
@@ -712,7 +866,7 @@ mod tests {
         assert_eq!(queued_card.issue_id, "01HANGARTASKQUEUED01");
         assert_eq!(queued_card.display_id, "#EUED01");
         assert!(
-            queued_card.title.contains("claude-agent")
+            queued_card.title.contains("claude")
                 && queued_card.title.contains("5m")
                 && queued_card.title.contains("queued"),
             "the card title carries agent · age · status: {:?}",
@@ -757,6 +911,180 @@ mod tests {
             !plain_title.contains("ainb/") && !plain_title.contains("PR "),
             "a card with no run artifacts carries no branch / PR chip: {plain_title:?}"
         );
+    }
+
+    /// REGRESSION PIN: a card names its agent, and NEVER prints the raw 26-char
+    /// agent ULID.
+    ///
+    /// The board read `01KXPM2K4DYDTRZ7RHDGAA9Q9X · 7d · done` in the field,
+    /// interpolating `agent_id` where the doc comment promised the agent. Four
+    /// dispatch runs of one issue became four opaque, seemingly unrelated cards.
+    /// Both halves are asserted: the NAME is present AND the id is absent, so a
+    /// future refactor cannot half-regress by appending the id alongside the name.
+    #[test]
+    fn card_names_the_agent_and_never_prints_the_raw_ulid() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        state.set_agent_names(&roster(&[(AGENT_ULID, "claude")]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert!(
+            card.title.starts_with("claude · "),
+            "the card leads with the agent NAME: {:?}",
+            card.title
+        );
+        assert!(
+            !card.title.contains(AGENT_ULID),
+            "the raw agent ULID must never reach the card: {:?}",
+            card.title
+        );
+        assert_eq!(
+            card.assignee_initial,
+            Some('c'),
+            "the assignee pip is the NAME's initial, not the ULID's"
+        );
+    }
+
+    /// An agent id with no roster entry (a deleted agent, or a board rendered
+    /// before `hangar/agents_list` lands) falls back to the SHORT id: the same
+    /// last-6 convention the `#<short_id>` line uses, never the full ULID.
+    #[test]
+    fn unresolvable_agent_falls_back_to_short_id_not_the_ulid() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        // A roster that knows some OTHER agent: the seam runs, this id misses.
+        state.set_agent_names(&roster(&[("01KY83MQCPZGPH4YGCZ566Q1GR", "test")]));
+
+        let title = &state.board_columns(NOW)[2].cards[0].title;
+        assert!(
+            title.starts_with("AA9Q9X · "),
+            "an unresolved agent shows the last 6 chars: {title:?}"
+        );
+        assert!(
+            !title.contains(AGENT_ULID),
+            "the fallback is still never the full ULID: {title:?}"
+        );
+    }
+
+    /// The two resolve seams are ORDER-INDEPENDENT: the three snapshots are fired
+    /// in one batch, so a roster that arrives AFTER the tasks snapshot must still
+    /// re-label the cards already on the board.
+    #[test]
+    fn roster_arriving_after_the_tasks_snapshot_still_labels_the_cards() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        // Board built with NO roster at all (the tasks snapshot won the race).
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        assert!(state.board_columns(NOW)[2].cards[0].title.starts_with("AA9Q9X · "));
+
+        // The roster lands second and re-labels in place.
+        state.set_agent_names(&roster(&[(AGENT_ULID, "claude")]));
+        let mut titles = BTreeMap::new();
+        titles.insert("issue-1".to_string(), "test".to_string());
+        state.set_issue_titles(&titles);
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert_eq!(card.title, "claude · 5m · done");
+        assert_eq!(card.display_id, "#8CQ051 · test");
+    }
+
+    /// The parent issue's title names the card ON THE ID LINE, so N dispatch runs
+    /// of ONE issue read as N runs of that issue. A long title elides at
+    /// [`ISSUE_TITLE_CAP`]; an unresolved issue leaves the bare `#<short_id>` with
+    /// no dangling separator. The title line stays the RUN and nothing else.
+    #[test]
+    fn issue_title_names_the_card_on_the_id_line_and_elides() {
+        let mut state = KanbanState::from_tasks(
+            &[
+                task("01HANGARTASKDONE0001", "done"),
+                task("01HANGARTASKDONE0002", "done"),
+            ],
+            NOW,
+        );
+        state.set_agent_names(&roster(&[("claude-agent", "claude")]));
+        let mut titles = BTreeMap::new();
+        titles.insert(
+            "issue-1".to_string(),
+            "Fix kanban card rendering showing raw ULIDs".to_string(),
+        );
+        state.set_issue_titles(&titles);
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert_eq!(
+            card.display_id, "#NE0001 · Fix kanban card renderi…",
+            "the parent issue names the card on the id line, elided at the cap"
+        );
+        assert_eq!(
+            card.title, "claude · 5m · done",
+            "the title line carries the RUN only, so the artifacts keep their budget"
+        );
+
+        // An orphan / unresolved issue leaves the bare id, no dangling separator.
+        let mut orphan = KanbanState::from_tasks(&[task("01HANGARTASKDONE0003", "done")], NOW);
+        orphan.set_agent_names(&roster(&[("claude-agent", "claude")]));
+        orphan.set_issue_titles(&BTreeMap::new());
+        let orphan_card = &orphan.board_columns(NOW)[2].cards[0];
+        assert_eq!(orphan_card.display_id, "#NE0003");
+        assert_eq!(orphan_card.title, "claude · 5m · done");
+    }
+
+    /// The two-line title budget at the reference 180-col board: four columns of
+    /// 45, each ceding a gutter cell and two border cells, leaves 42 content cells
+    /// per line and the widget paints exactly two of them.
+    const TWO_LINE_TITLE_BUDGET: usize = 84;
+
+    /// REGRESSION PIN (tcp T2): a finished run's `ainb/<task-ulid>` branch AND its
+    /// `PR ✓` chip both fit the card's two-line title budget.
+    ///
+    /// The widget ellipsis-cuts whatever overflows line two, silently and without
+    /// error. Leading this line with the parent issue title pushed a real run's
+    /// title to 88 chars and ate the `PR ✓` chip off the tile: green unit tests,
+    /// a board that had quietly stopped surfacing PR state
+    /// (`tripwire_tcp_card_branch_pr_e2e`). Any future segment added ahead of the
+    /// branch must keep this budget.
+    #[test]
+    fn a_finished_run_keeps_its_branch_and_pr_chip_inside_the_title_budget() {
+        const TASK_ULID: &str = "01KYTV3EWKS8C5G66G850SCAKH";
+        let mut t = task(TASK_ULID, "done");
+        t.branch = Some(format!("ainb/{TASK_ULID}"));
+        t.pr_url = Some("https://github.com/o/r/pull/8".into());
+        t.pr_status = Some(PrStatus {
+            ci: CiRollup::Pass,
+            ..PrStatus::default()
+        });
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        // A 12-char roster name, the longest the real fixtures dispatch under.
+        state.set_agent_names(&roster(&[("claude-agent", "claude-agent")]));
+        state.set_issue_titles(&BTreeMap::from([(
+            "issue-1".to_string(),
+            "Cardbranchprtripwire".to_string(),
+        )]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert!(
+            card.title.contains(&format!("ainb/{TASK_ULID}")) && card.title.ends_with("PR ✓"),
+            "branch + PR chip both on the title: {:?}",
+            card.title
+        );
+        assert!(
+            card.title.chars().count() <= TWO_LINE_TITLE_BUDGET,
+            "the title must fit the two-line budget of {TWO_LINE_TITLE_BUDGET} or the \
+             widget elides the PR chip off the tile ({} chars): {:?}",
+            card.title.chars().count(),
+            card.title
+        );
+        // The parent issue still names the card, on the id line, where it costs
+        // the run's artifacts nothing.
+        assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
     }
 
     /// A captured PR whose CI has not resolved yet (or is unknown) renders the

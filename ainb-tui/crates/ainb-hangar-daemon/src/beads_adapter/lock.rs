@@ -18,6 +18,23 @@
 //! sampling that window takes the crash-recovery path, deletes a *live* holder's
 //! pidfile and acquires alongside it — two holders, two concurrent `bd`
 //! processes, the git-head race the lock exists to prevent.
+//!
+//! **An absent pidfile is not stale, it is free.** Atomic publication closed the
+//! empty-file window but not the second route to the same double-hold: the
+//! crash-recovery path decided "stale" from a *failed read*, then unlinked the
+//! path. Absent reads that way too, and between that read and the unlink another
+//! contender can publish — so the unlink deletes a brand-new live holder's
+//! pidfile and the stealer acquires alongside it. Removal must therefore be
+//! driven by what the file SAYS (a dead PID, or unusable content), never by the
+//! read merely failing. [`PidfileRead`] keeps the two apart.
+//!
+//! **Judging a file stale and reclaiming it must be ONE step.** Even reading a
+//! genuinely dead PID is not enough to justify an unlink: two contenders can
+//! sample the SAME stale pidfile, both conclude "crashed", and both remove it —
+//! the first republishes, and the second's unlink deletes that brand-new live
+//! holder's pidfile. Third route, same double-hold. [`BdLock::steal_atomically`]
+//! therefore reclaims with `rename`, which is winner-take-all: only one caller
+//! can move a given inode aside, and every loser simply retries.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -71,11 +88,16 @@ impl BdLock {
                     });
                 }
                 Ok(false) => {
-                    if self.steal_if_stale() {
-                        continue;
-                    }
+                    // The deadline bounds EVERY path, including the immediate
+                    // retry. `steal_if_stale` now reports "free, retry now" for
+                    // an absent pidfile, which under contention is common rather
+                    // than rare — leaving that branch to `continue` unchecked
+                    // would let a contender spin without ever timing out.
                     if Instant::now() >= deadline {
                         return Err(BdError::LockTimeout(self.path.clone()));
+                    }
+                    if self.steal_if_stale() {
+                        continue;
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
@@ -117,16 +139,54 @@ impl BdLock {
     /// Returns `true` when a stale file was removed (caller should retry the
     /// exclusive create immediately).
     fn steal_if_stale(&self) -> bool {
-        let Some(pid) = read_pid(&self.path) else {
-            // Crash-recovery backstop only: an unreadable/empty pidfile can no
-            // longer come from a live holder (publication is atomic), so it is
-            // either a pre-fix leftover or a truncated file, i.e. stale.
-            return std::fs::remove_file(&self.path).is_ok();
+        let pid = match read_pid(&self.path) {
+            Ok(pid) => pid,
+            // The pidfile vanished between our failed publish and this read: the
+            // previous holder released. There is nothing to steal, and removing
+            // is actively WRONG — by the time the unlink lands a new holder may
+            // have published, and we would delete a live holder's pidfile and
+            // acquire alongside it. That is the very double-hold atomic
+            // publication was introduced to kill, reachable through this branch
+            // instead of through the create-then-write window. Just retry.
+            Err(PidfileRead::Absent) => return true,
+            // The file exists but says nothing usable. Publication is atomic, so
+            // a live holder cannot produce this — it is a pre-fix leftover or a
+            // truncated file. Genuine crash-recovery territory.
+            Err(PidfileRead::Unreadable) => return self.steal_atomically(),
         };
         if pid_alive(pid) {
             return false;
         }
-        std::fs::remove_file(&self.path).is_ok()
+        self.steal_atomically()
+    }
+
+    /// Take a pidfile we have judged stale OUT of the way, winner-take-all.
+    ///
+    /// A blind `remove_file` here is not safe, and this is the third route to
+    /// the same double-hold the module doc describes. Two contenders can sample
+    /// the SAME stale pidfile and both conclude it is dead: the first unlinks it
+    /// and republishes, and the second's unlink then deletes that brand-new LIVE
+    /// holder's pidfile, so both hold.
+    ///
+    /// `rename` collapses judge-and-remove into one atomic step. Only one caller
+    /// can move a given inode aside; every loser gets `NotFound` and simply
+    /// retries, by which point the winner's own pidfile is in place and is
+    /// evaluated on its merits like any other holder.
+    fn steal_atomically(&self) -> bool {
+        static STEAL_SEQ: AtomicU64 = AtomicU64::new(0);
+        let name = self.path.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("bd");
+        let claimed = self.path.with_file_name(format!(
+            ".{name}.steal.{}.{}",
+            std::process::id(),
+            STEAL_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if std::fs::rename(&self.path, &claimed).is_err() {
+            // Lost the race, or it vanished on its own. Either way the path is
+            // no longer ours to reclaim; retry the publish instead.
+            return false;
+        }
+        let _ = std::fs::remove_file(&claimed);
+        true
     }
 }
 
@@ -142,12 +202,29 @@ impl Drop for BdLockGuard {
     }
 }
 
-/// Read the PID written into the pidfile, or `None` if absent/unparseable.
-fn read_pid(path: &Path) -> Option<i32> {
-    let mut f = std::fs::File::open(path).ok()?;
+/// Why a pidfile yielded no PID.
+///
+/// The two cases demand OPPOSITE handling, which is why they are not one
+/// `Option`: an absent file must never be removed (a new holder may already own
+/// that path), while an unreadable one is genuine crash debris.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidfileRead {
+    /// No file at the path — the holder released.
+    Absent,
+    /// A file is there but carries no usable PID.
+    Unreadable,
+}
+
+/// Read the PID written into the pidfile.
+fn read_pid(path: &Path) -> Result<i32, PidfileRead> {
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(PidfileRead::Absent),
+        Err(_) => return Err(PidfileRead::Unreadable),
+    };
     let mut buf = String::new();
-    f.read_to_string(&mut buf).ok()?;
-    buf.trim().parse().ok()
+    f.read_to_string(&mut buf).map_err(|_| PidfileRead::Unreadable)?;
+    buf.trim().parse().map_err(|_| PidfileRead::Unreadable)
 }
 
 /// Is `pid` backed by a live process? Uses `kill(pid, 0)`: success or `EPERM`
@@ -189,7 +266,7 @@ mod tests {
         let guard = lock.acquire().expect("acquire");
         assert_eq!(
             read_pid(&path),
-            Some(i32::try_from(std::process::id()).unwrap())
+            Ok(i32::try_from(std::process::id()).unwrap())
         );
         drop(guard);
         assert!(!path.exists(), "guard drop releases the lock");
@@ -227,6 +304,8 @@ mod tests {
         let lock = BdLock::new(dir.path().join("bd.pid"));
         let holders = Arc::new(AtomicUsize::new(0));
         let overlaps = Arc::new(AtomicUsize::new(0));
+        let entered_occupied = Arc::new(AtomicUsize::new(0));
+        let joined_during_hold = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(THREADS));
 
         let handles: Vec<_> = (0..THREADS)
@@ -234,6 +313,8 @@ mod tests {
                 let lock = lock.clone();
                 let holders = Arc::clone(&holders);
                 let overlaps = Arc::clone(&overlaps);
+                let entered_occupied = Arc::clone(&entered_occupied);
+                let joined_during_hold = Arc::clone(&joined_during_hold);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     for _ in 0..ROUNDS {
@@ -246,6 +327,18 @@ mod tests {
                         drop(guard);
                         if before != 0 || during != 1 {
                             overlaps.fetch_add(1, Ordering::SeqCst);
+                            // Record WHICH invariant broke. `before != 0` means a
+                            // holder was already counted when we acquired; `during
+                            // != 1` means one joined while we held. They implicate
+                            // different windows, and this test only fails on CI
+                            // Linux, so a bare count is undiagnosable after the
+                            // fact (see agents-in-a-box-hp8).
+                            if before != 0 {
+                                entered_occupied.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if during != 1 {
+                                joined_during_hold.fetch_add(1, Ordering::SeqCst);
+                            }
                         }
                     }
                 })
@@ -257,7 +350,110 @@ mod tests {
         assert_eq!(
             overlaps.load(Ordering::SeqCst),
             0,
-            "the lock admitted concurrent holders"
+            "the lock admitted concurrent holders \
+             (entered-occupied={}, joined-during-hold={}, of {} acquisitions)",
+            entered_occupied.load(Ordering::SeqCst),
+            joined_during_hold.load(Ordering::SeqCst),
+            THREADS * ROUNDS
+        );
+    }
+
+    /// A pidfile that is simply GONE is not "stolen" — nothing is removed.
+    ///
+    /// Regression for the second double-hold window. `steal_if_stale` used to
+    /// treat any unreadable pidfile, including an absent one, as crash debris
+    /// and unlink the path. Between that failed read and the unlink another
+    /// contender can publish, so the unlink deletes a LIVE holder's pidfile and
+    /// the stealer acquires alongside it. Absent must mean "retry", never
+    /// "remove".
+    #[test]
+    fn an_absent_pidfile_is_retried_not_removed() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("bd.pid");
+        let lock = BdLock::new(path.clone());
+
+        assert_eq!(read_pid(&path), Err(PidfileRead::Absent));
+        assert!(
+            lock.steal_if_stale(),
+            "an absent pidfile means the lock is free, so retry immediately"
+        );
+
+        // The decisive part: a holder that publishes between the failed read and
+        // the steal decision must survive it.
+        let guard = lock.acquire().expect("acquire");
+        assert!(
+            !lock.steal_if_stale(),
+            "a live holder's pidfile must never be stolen"
+        );
+        assert!(path.exists(), "the live holder's pidfile was deleted");
+        drop(guard);
+    }
+
+    /// A pidfile that exists but carries no usable PID is still crash debris.
+    #[test]
+    fn an_unreadable_pidfile_is_still_stolen() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("bd.pid");
+        std::fs::write(&path, "not-a-pid").expect("seed corrupt pidfile");
+
+        assert_eq!(read_pid(&path), Err(PidfileRead::Unreadable));
+        assert!(BdLock::new(path.clone()).steal_if_stale());
+        assert!(!path.exists(), "corrupt pidfile should be removed");
+    }
+
+    /// Only ONE of many contenders may steal the same stale pidfile.
+    ///
+    /// Third route to the module's double-hold: two contenders sample the same
+    /// dead PID, both conclude "crashed", and both unlink. The first republishes
+    /// and the second's unlink deletes that LIVE pidfile.
+    ///
+    /// Exercises `steal_atomically` DIRECTLY rather than through
+    /// `steal_if_stale`, because the latter also returns `true` for an absent
+    /// pidfile ("free, retry") — which would conflate "I reclaimed it" with "it
+    /// was already gone" and make the count mean two different things.
+    #[test]
+    fn only_one_contender_can_steal_the_same_stale_pidfile() {
+        const CONTENDERS: usize = 8;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("bd.pid");
+        std::fs::write(&path, dead_pid().to_string()).expect("seed stale pidfile");
+
+        let lock = BdLock::new(path.clone());
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|_| {
+                let lock = lock.clone();
+                let barrier = Arc::clone(&barrier);
+                let winners = Arc::clone(&winners);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if lock.steal_atomically() {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "exactly one contender may reclaim a stale pidfile; more than one \
+             means two holders can publish over each other"
+        );
+        assert!(!path.exists(), "the stale pidfile is gone after the steal");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "steal left files behind: {leftovers:?}"
         );
     }
 
@@ -277,7 +473,7 @@ mod tests {
         );
         assert_eq!(
             read_pid(&path),
-            Some(i32::try_from(std::process::id()).unwrap())
+            Ok(i32::try_from(std::process::id()).unwrap())
         );
         drop(guard);
     }

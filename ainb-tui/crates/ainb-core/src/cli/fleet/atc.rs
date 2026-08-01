@@ -1475,7 +1475,7 @@ fn resolve_matcher(
 
 fn current_tmux_identity() -> Option<(String, String)> {
     let pane = std::env::var_os("TMUX_PANE").filter(|value| !value.is_empty())?;
-    let tmux = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let tmux = std::ffi::OsString::from("tmux");
     let output = std::process::Command::new(tmux)
         .args([
             std::ffi::OsStr::new("display-message"),
@@ -2261,20 +2261,36 @@ mod tests {
 
     // --- H-A1: the hook NEVER returns Err (always exit 0) --------------------
 
-    #[tokio::test]
-    async fn hook_returns_ok_even_on_unrelated_session() {
-        // The public hook() entry point must resolve to Ok(()) → process exit 0,
-        // so a global Stop hook can never wedge an unrelated host session. We
-        // build the ArgMatches the registry declares for the `hook` verb.
-        let m = clap::Command::new("hook")
-            .arg(clap::Arg::new("event").long("event"))
-            .arg(clap::Arg::new("session-id").long("session-id").default_value(""))
-            .arg(clap::Arg::new("cwd").long("cwd").default_value(""))
-            .arg(clap::Arg::new("matcher").long("matcher").default_value(""))
-            .get_matches_from(vec!["hook", "--event", "Stop", "--session-id", "unrelated"]);
+    #[test]
+    fn hook_returns_ok_even_on_unrelated_session() {
+        // A global Stop hook must never wedge an unrelated host session: the
+        // outcome the real `hook()` derives has to be exit 0 even when the home
+        // holds no ATC instance and no inbox for the session.
+        //
+        // We drive `hook_core` against a tempdir rather than calling `hook()`,
+        // because `hook_inner` resolves the process-wide `ainb_home()` — calling
+        // it here would append a synthetic Stop event and a raw-payload sidecar
+        // to the DEVELOPER'S live `~/.agents-in-a-box`, which the daemon then
+        // ingests into `fleet_provider_event`. `swallow_hook_result` is the same
+        // wrapper `hook()` applies, so the exit-0 guarantee is still the thing
+        // under test.
+        let home = TempDir::new().unwrap();
+        let result = hook_core(
+            home.path(),
+            "Stop",
+            "unrelated",
+            "",
+            None,
+            None,
+            1,
+            "{}",
+            None,
+        );
+        let (exit_ok, emitted) = swallow_hook_result(result);
+        assert!(exit_ok, "hook must always yield exit 0");
         assert!(
-            hook(&m).await.is_ok(),
-            "hook must always return Ok → exit 0"
+            emitted.is_none(),
+            "an unrelated session emits no decision JSON"
         );
     }
 

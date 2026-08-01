@@ -780,6 +780,9 @@ impl ScreenStates {
     /// Replace the issue-list rows from an `hangar/issues_list` snapshot.
     pub fn set_issues(&mut self, issues: Vec<IssueRow>) {
         self.issue_list = IssueListState::with_rows(issues);
+        // Re-label any Kanban card already on the board with its parent issue's
+        // title: the tasks snapshot may have landed before this one did.
+        self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
     }
 
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
@@ -798,6 +801,12 @@ impl ScreenStates {
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
         self.kanban = KanbanState::from_tasks(tasks, 0);
+        // Resolve each card's agent id to its roster name, and its issue id to
+        // that issue's title, against the cached snapshots. All three snapshots
+        // are fired in one batch and land in any order, so `set_actors` and
+        // `set_issues` re-apply their half the other way round.
+        self.kanban.set_agent_names(&agent_names(&self.actors));
+        self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -1014,6 +1023,10 @@ impl ScreenStates {
         next_agents.set_note(note);
         self.agents = next_agents;
         self.actors = actors;
+        // Re-label any Kanban card already on the board: the tasks snapshot may
+        // have landed before this roster did, in which case its cards are still
+        // on the short-id fallback.
+        self.kanban.set_agent_names(&agent_names(&self.actors));
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1214,6 +1227,31 @@ impl ScreenStates {
     pub const fn take_pending_fleet_intent(&mut self) -> Option<FleetIntent> {
         self.pending_fleet_intent.take()
     }
+}
+
+/// The `agent_id -> display_name` roster the Kanban cards label themselves from,
+/// projected out of the cached `hangar/agents_list` actor snapshot.
+///
+/// Members are skipped (a task never runs as a human) and the canonical
+/// `agent:<id>` actor-ref is unwrapped back to the bare `agent.id` a
+/// [`TaskCardRow`] carries, so the lookup key matches the wire row directly.
+fn agent_names(actors: &[ActorRow]) -> std::collections::BTreeMap<String, String> {
+    actors
+        .iter()
+        .filter(|a| a.is_agent)
+        .filter_map(|a| {
+            a.actor_ref
+                .strip_prefix("agent:")
+                .map(|id| (id.to_string(), a.display_name.clone()))
+        })
+        .collect()
+}
+
+/// The `issue_id -> title` map the Kanban cards name their parent from, projected
+/// out of the cached `hangar/issues_list` snapshot (which enumerates every issue
+/// state, so a card's parent resolves whatever state it is in).
+fn issue_titles(rows: &[IssueRow]) -> std::collections::BTreeMap<String, String> {
+    rows.iter().map(|r| (r.id.as_str().to_string(), r.title.clone())).collect()
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be

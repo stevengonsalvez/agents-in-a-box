@@ -511,11 +511,27 @@ impl SquadRepo {
     /// is also listed as a member yields that agent once in this list; the fan-out
     /// caller dedupes it against the already-dispatched leader.
     ///
-    /// **Role-blind by design (D3, migration 0053).** `squad_member.role` is
-    /// advisory metadata the LEADER reads in its briefing; it never filters this
-    /// query, so every agent member is still dispatched to regardless of role —
-    /// matching multica, where nothing gates dispatch on role either. Selective
-    /// routing is parity item #16, a separate product question.
+    /// **Role-blind, and that is now a property of THIS QUERY only, not of
+    /// dispatch (D3 REVERSED by migration 0074).**
+    ///
+    /// D3 (migration 0053) said `squad_member.role` was advisory metadata the
+    /// leader read in its briefing, and that dispatch never filtered on it, so
+    /// every agent member was dispatched to regardless of role. That was the
+    /// broadcast contract, and it was the reported defect: one issue became one
+    /// run per member, each in its own worktree, all doing the same work.
+    ///
+    /// Dispatch IS role-gated now. `role` is matched against
+    /// `board_column.services_role` in
+    /// [`PullService`](crate::service::pull::PullService), which is the consumer
+    /// that field had been waiting for, and
+    /// [`SquadAssignService::assign_fanout`](crate::service::squad_assign::SquadAssignService::assign_fanout)
+    /// no longer emits a task per member at all.
+    ///
+    /// This query stays role-blind because it answers a narrower question,
+    /// "which agents are in this squad", and is still the right shape for the
+    /// leader briefing and for the explicit `--redundant N` fan-out. Callers that
+    /// need role selection go through the pull predicate; do not re-add filtering
+    /// here.
     ///
     /// # Errors
     ///

@@ -1,17 +1,30 @@
-//! Recording harness for the T4a (squad-card fan-out) journey
+//! Recording harness for the T4a SQUAD-CARD journey
 //! (docs/hangar/assets/journeys/t4-squad-fanout.gif).
 //!
-//! NOT a test and NOT shipped — mirrors `seed_t1_worktree_journey.rs`, but seeds
-//! the exact fixture the tcp T4 squad-fanout tripwire
+//! NOT a test and NOT shipped, mirrors `seed_t1_worktree_journey.rs`, but seeds
+//! the exact fixture the tcp T4 squad tripwire
 //! (`tests/tripwire_tcp_squad_card_fanout_e2e.rs`, via `tripwire_p4_common.rs`'s
 //! `prepare_pipeline_squad_card`) drives: a real git repo (`testrepo`) in the `@`
 //! scan-cache roster, a `shippers` squad (leader `agent-1` + two members
 //! `agent-m1`/`agent-m2`), a card ALREADY assigned to that squad and placed on the
 //! `Delivery` board's Todo column, and a claim-enabled daemon running a headless
-//! fake-claude that BLOCKS every fanned run until the recording script touches
-//! `$HOME/interactive-go` — so the recording can hold all three fanned runs (leader
-//! + two members, each on its own `ainb/<slug>` worktree) live at once before
-//! releasing them to finish and tear down.
+//! fake-claude that BLOCKS the run until the recording script touches
+//! `$HOME/interactive-go`, so the recording can hold the run live before releasing
+//! it to finish and tear down.
+//!
+//! # What this journey now shows (it changed)
+//!
+//! It used to hold THREE fanned runs live at once (leader + both members, each on
+//! its own `ainb/<slug>` worktree). That was the broadcast, and it was the
+//! reported defect rather than a feature: one card became three agents in three
+//! worktrees doing the same work. Migration 0074 replaced it with a role-gated
+//! pull, so this fixture now produces ONE owner and ONE worktree.
+//!
+//! The committed GIF at the path above still shows the OLD three-worktree
+//! behaviour and is therefore stale. Re-record it with
+//! `docs/hangar/assets/journeys/record-t4a-squad-fanout.sh` before citing it.
+//! The seeding below is unchanged and still correct; only what the daemon does
+//! with the fixture has changed.
 //!
 //! Usage: `seed_t4a_squad_fanout_journey <HOME_DIR> <DAEMON_BIN>`
 

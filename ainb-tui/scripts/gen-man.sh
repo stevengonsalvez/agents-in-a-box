@@ -376,7 +376,7 @@ prints a warning to standard error when it detects this, but it does not refuse:
 the spawn still succeeds, so a script must not rely on a non\-zero exit to catch
 it.
 .TP
-.B Do not pass \-\-name.
+.B Do not treat \-\-name as a handle.
 .B \-\-name
 only overrides the tmux session name. It does
 .I not

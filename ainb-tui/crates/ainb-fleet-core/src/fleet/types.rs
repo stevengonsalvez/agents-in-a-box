@@ -25,6 +25,7 @@ pub enum SessionSource {
 pub enum Provider {
     Claude,
     Codex,
+    Copilot,
     Unknown,
 }
 
@@ -34,6 +35,7 @@ impl Provider {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
             Self::Unknown => "unknown",
         }
     }

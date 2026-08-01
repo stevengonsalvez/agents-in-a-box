@@ -279,6 +279,56 @@ pub async fn auto_move_after_terminal(pool: &SqlitePool, task: &Task) {
         }
     };
     auto_move_after_transition(pool, task, &state).await;
+
+    // PIPELINE STAGE ADVANCE. Folded in here rather than added at each of the
+    // five terminal call sites, so a future terminal path cannot acquire the
+    // auto-move hook and silently miss the advance, which would strand a card
+    // mid-pipeline with its stage already finished.
+    //
+    // Only a `done` aggregate advances: a stage that FAILED or was CANCELLED
+    // leaves the card in its column so the work can be retried by the same role
+    // rather than being handed to the next stage half-finished.
+    if state == "done" {
+        advance_pipeline_stage(pool, task).await;
+    }
+}
+
+/// Step the task's card ONE role-gated column to the right now its stage is done.
+///
+/// This is the handoff that makes a pipeline a pipeline: Implement finishes, the
+/// card lands in Review, and on the next daemon tick a DIFFERENT role pulls it.
+///
+/// Best-effort, exactly like its sibling hooks: the task's terminal state has
+/// already committed, and a board write must never down the claim loop. A card
+/// that is not in a role-gated column, that is at the last stage, or whose board
+/// has auto-move off is a logged no-op.
+async fn advance_pipeline_stage(pool: &SqlitePool, task: &Task) {
+    use ainb_hangar_store::service::pull::PullService;
+
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    match PullService::advance_after_stage(pool, issue_id).await {
+        Ok(moved) if !moved.is_empty() => {
+            for (board_id, column_id) in &moved {
+                tracing::info!(
+                    task_id = %task.id,
+                    issue_id = %issue_id,
+                    board_id = %board_id,
+                    column_id = %column_id,
+                    "pipeline card advanced to the next stage"
+                );
+            }
+        }
+        Ok(_) => tracing::info!(
+            task_id = %task.id,
+            issue_id = %issue_id,
+            "pipeline advance: no card moved (not role-gated, last stage, or auto-move off)"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e, task_id = %task.id, "pipeline advance failed"
+        ),
+    }
 }
 
 /// When ANY task of a card reaches a TERMINAL state, re-evaluate every card that

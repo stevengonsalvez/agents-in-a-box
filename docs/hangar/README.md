@@ -9,6 +9,7 @@ Hangar is the proposed evolution of ainb from a local CLI/TUI into a managed-age
 ```
 docs/hangar/
 ├── README.md                ← you are here
+├── pull-pipeline.md         ← role-gated pull pipeline (shipped; how squads execute)
 ├── hangar-plan.html         ← rich HTML explainer (open in browser)
 ├── diagrams/                ← 6 SVG architecture + flow diagrams
 │   ├── 01-multica-arch.svg
