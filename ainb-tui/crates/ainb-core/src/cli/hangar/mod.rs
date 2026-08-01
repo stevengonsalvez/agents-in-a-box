@@ -2403,6 +2403,8 @@ pub enum DaemonCommand {
     Restart,
     /// One-command bring-up: ensure the store + socket-auth token, then `start`.
     Setup,
+    /// Rebuild one stale Claude structured interview from durable hook history.
+    ReprojectClaudeInterview(ReprojectClaudeInterviewArgs),
     /// View + edit the daemon's user-config knobs (`list`/`get`/`set`).
     #[command(subcommand)]
     Config(DaemonConfigCommand),
@@ -2410,6 +2412,20 @@ pub enum DaemonCommand {
     /// into confined headless runs (`status`/`set`/`clear`).
     #[command(subcommand)]
     Cred(DaemonCredCommand),
+}
+
+/// Arguments for one controlled Claude interview reprojection.
+#[derive(Args, Debug)]
+pub struct ReprojectClaudeInterviewArgs {
+    /// Exact Fleet session key, for example `claude:<provider-session-id>`.
+    #[arg(long)]
+    pub session_key: String,
+    /// Exact version observed before this mutation. Rejects stale inspection.
+    #[arg(long)]
+    pub expected_version: i64,
+    /// Required acknowledgement that this appends a recovery projection.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 /// `hangar daemon cred <verb>` — the daemon-level claude credential.
@@ -7861,9 +7877,35 @@ async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()>
         DaemonCommand::Stop => run_daemon_stop(),
         DaemonCommand::Restart => run_daemon_restart(),
         DaemonCommand::Setup => run_daemon_setup().await,
+        DaemonCommand::ReprojectClaudeInterview(args) => {
+            run_daemon_reproject_claude_interview(args).await
+        }
         DaemonCommand::Config(c) => dispatch_daemon_config(c, format).await,
         DaemonCommand::Cred(c) => dispatch_daemon_cred(c).await,
     }
+}
+
+/// Rebuild a stale Claude interview without talking to Claude or the broker.
+async fn run_daemon_reproject_claude_interview(args: ReprojectClaudeInterviewArgs) -> Result<()> {
+    if !args.apply {
+        anyhow::bail!("refusing recovery mutation: rerun with --apply");
+    }
+    let store = Store::open_default().await.context("open hangar database")?;
+    let broker = ainb_hangar_daemon::events::EventBroker::new();
+    let result = ainb_hangar_daemon::fleet::reproject_claude_interview(
+        store.pool(),
+        &broker.sink(),
+        &args.session_key,
+        args.expected_version,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .context("reproject Claude interview")?;
+    println!(
+        "reprojected Claude interview: session={} revision={} version={}",
+        args.session_key, result.revision, result.session_version
+    );
+    Ok(())
 }
 
 /// Dispatch the `hangar daemon cred` verbs against the platform secret store.
@@ -10784,6 +10826,27 @@ mod tests {
     fn parses_daemon_status() {
         let cmd = parse_hangar(&["ainb", "hangar", "daemon", "status"]);
         assert!(matches!(cmd, HangarCommand::Daemon(DaemonCommand::Status)));
+    }
+
+    #[test]
+    fn parses_daemon_reproject_claude_interview() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "daemon",
+            "reproject-claude-interview",
+            "--session-key",
+            "claude:session-1",
+            "--expected-version",
+            "13",
+            "--apply",
+        ]);
+        let HangarCommand::Daemon(DaemonCommand::ReprojectClaudeInterview(args)) = cmd else {
+            panic!("expected Claude interview reprojection command");
+        };
+        assert_eq!(args.session_key, "claude:session-1");
+        assert_eq!(args.expected_version, 13);
+        assert!(args.apply);
     }
 
     #[test]

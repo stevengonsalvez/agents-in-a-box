@@ -644,6 +644,22 @@ impl FleetRepo {
         rows.iter().map(event_from_row).collect()
     }
 
+    /// Read one session's durable event history in projection order.
+    pub async fn events_for_session(
+        pool: &SqlitePool,
+        session_key: &str,
+    ) -> Result<Vec<FleetEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT revision, event_id, session_key, observed_at, authority, event_type, \
+                    payload, session_version, applied \
+             FROM fleet_event WHERE session_key = ? ORDER BY revision ASC",
+        )
+        .bind(session_key)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(event_from_row).collect()
+    }
+
     /// Read a bounded, payload-free Fleet timeline after a global revision.
     ///
     /// The query joins visible Fleet sessions and filters the closed raw type
