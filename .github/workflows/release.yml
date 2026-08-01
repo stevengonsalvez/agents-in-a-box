@@ -205,7 +205,16 @@ jobs:
           if git push origin "${BRANCH}"; then
             if gh pr create --base main --head "${BRANCH}" \
                  --title "chore(release): sync v${VERSION}" --body "${BODY}"; then
-              echo "Sync PR opened for ${BRANCH}"
+              # Auto-merge so a release needs no follow-up by hand. The PR still
+              # waits for the ruleset's required checks; this only says "merge it
+              # when they pass". If auto-merge is unavailable the PR just stays
+              # open, which is the previous behaviour, so this never blocks a
+              # release.
+              if gh pr merge "${BRANCH}" --auto --merge --delete-branch; then
+                echo "Sync PR opened for ${BRANCH} and queued to auto-merge"
+              else
+                echo "::warning::Sync PR for v${VERSION} is open but could not be queued to auto-merge. Merge ${BRANCH} to bring Cargo.toml and CHANGELOG.md back in step."
+              fi
             else
               echo "::warning::v${VERSION} is tagged and releasing, but the sync PR could not be opened. Open one from ${BRANCH} to bring Cargo.toml and CHANGELOG.md back in step."
             fi
