@@ -13,6 +13,6 @@ pub mod worktree_manager;
 pub use branch_list::BranchEntry;
 pub use remote_repo_manager::{RemoteBranch, RemoteRepoError, RemoteRepoManager};
 pub use repo_source::{ParsedRepo, RepoSource, RepoSourceError};
-pub use repository::RepositoryManager;
+pub use repository::{RepositoryManager, current_branch_at};
 pub use workspace_scanner::{RepositoryCache, WorkspaceScanner};
 pub use worktree_manager::{WorktreeError, WorktreeInfo, WorktreeManager};

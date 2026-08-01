@@ -68,6 +68,7 @@ heuristics for ASK/IDLE; ERR (pane) and WAIT (summary) work for all.
 
 | Sub-skill | What it does |
 |---|---|
+| [`/ainb-fleet:ainb-spawn`](skills/ainb-spawn/SKILL.md) | Spawn a session correctly with `ainb run` (worktree always, and the `--parent` shapes that silently misfire) |
 | [`/ainb-fleet:standup`](skills/standup/SKILL.md) | List every session — merged across ainb · peers · bg jobs |
 | [`/ainb-fleet:needs`](skills/needs/SKILL.md) | Show sessions blocked on you (ASK / ERR / IDLE / WAIT) |
 | [`/ainb-fleet:broadcast`](skills/broadcast/SKILL.md) | Send one prompt to many selected sessions |

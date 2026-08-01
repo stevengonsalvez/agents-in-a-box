@@ -32,7 +32,7 @@
     {
       "name": "ainb-fleet",
       "source": "./plugins/ainb-fleet",
-      "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, and the auto-continue daemon. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
+      "description": "LLM-facing skill teaching agents how to spawn ainb sessions correctly and how to use `ainb fleet ...` orchestration subcommands. Spawning covers the `ainb run` contract (always into a git worktree, plus the `--parent` shapes that silently misfire). Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, the auto-continue daemon, and ATC. Replaces the deprecated `popa` plugin: the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
       "strict": false,
       "keywords": [
         "ainb",
@@ -42,7 +42,10 @@
         "orchestration",
         "control-plane",
         "broadcast",
-        "multi-session"
+        "multi-session",
+        "atc",
+        "spawn",
+        "worktree"
       ]
     },
     {

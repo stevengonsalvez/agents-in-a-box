@@ -265,3 +265,135 @@ pub fn claude_jsonl_turn(branch: Option<&str>, model: &str, in_tok: u64, out_tok
 pub fn cli_usage_report_json(data: &UsageData) -> serde_json::Value {
     crate::cli::usage::report_json(data)
 }
+
+/// Absolute path to the `git` binary, resolved once per process.
+///
+/// Why not `Command::new("git")`: `cargo test` runs a binary's tests as
+/// threads of ONE process, and several tests in this crate deliberately swap
+/// `$PATH` (see `cli::run::tests::with_path`). A sibling test shelling out to
+/// a bare `"git"` can lose that race and fail with a bare `NotFound`, or, if
+/// it gates on a `git --version` probe, silently SKIP itself. Resolving to an
+/// absolute path once removes the ambient dependency for both shapes.
+pub fn git_bin() -> &'static std::path::Path {
+    static GIT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        which::which("git")
+            .ok()
+            .or_else(|| {
+                [
+                    "/usr/bin/git",
+                    "/opt/homebrew/bin/git",
+                    "/usr/local/bin/git",
+                ]
+                .iter()
+                .map(std::path::PathBuf::from)
+                .find(|p| p.exists())
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("git"))
+    })
+}
+
+/// Is a usable `git` on this machine? Tests that build real git state skip
+/// themselves when it is not.
+pub fn git_available() -> bool {
+    std::process::Command::new(git_bin())
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Run `git` in `cwd` with the developer's own config fully neutralised
+/// (no global/system config, no signing, deterministic identity and default
+/// branch). Returns whether git succeeded.
+pub fn git_ok(cwd: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new(git_bin())
+        .args([
+            "-c",
+            "user.name=ainb-test",
+            "-c",
+            "user.email=ainb@test.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// The four on-disk shapes a session root can have, built with the REAL `git`
+/// CLI. Hand-faked `.git` fixtures are exactly how the "(broken)"
+/// misclassification survived review: they only ever modelled the
+/// linked-worktree shape (`.git` as a FILE), so the plain-checkout shape
+/// (`.git` as a DIRECTORY) was never exercised.
+pub struct GitFixture {
+    /// Keeps the temp tree alive; drop order removes everything.
+    pub tmp: tempfile::TempDir,
+    /// Plain checkout, `.git` is a DIRECTORY, branch `main`.
+    pub repo: std::path::PathBuf,
+    /// `<repo>/nested/deep`: a subdirectory of the plain checkout, the shape
+    /// `ainb run --repo <clone>/<subdir>` produces.
+    pub subdir: std::path::PathBuf,
+    /// Linked worktree off `repo`, `.git` is a FILE, branch `feature`.
+    pub worktree: std::path::PathBuf,
+    /// A directory that exists inside NO git repository at all.
+    pub repo_less: std::path::PathBuf,
+}
+
+/// Build a [`GitFixture`]. Panics if `git` misbehaves, so a broken fixture can
+/// never masquerade as a passing assertion.
+pub fn real_git_fixture() -> GitFixture {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().canonicalize().expect("canonicalize tempdir");
+
+    let repo = root.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(git_ok(&repo, &["init"]), "git init failed");
+    std::fs::write(repo.join("README.md"), "hi").unwrap();
+    assert!(git_ok(&repo, &["add", "README.md"]), "git add failed");
+    assert!(
+        git_ok(&repo, &["commit", "-m", "init"]),
+        "git commit failed"
+    );
+    assert!(
+        repo.join(".git").is_dir(),
+        "a plain clone must have `.git` as a DIRECTORY"
+    );
+
+    let subdir = repo.join("nested/deep");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    let worktree = root.join("myrepo--feature--abc123");
+    assert!(
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        ),
+        "git worktree add failed"
+    );
+    assert!(
+        worktree.join(".git").is_file(),
+        "a linked worktree must have `.git` as a FILE"
+    );
+
+    let repo_less = root.join("dead-worktree");
+    std::fs::create_dir_all(repo_less.join(".vite")).unwrap();
+
+    GitFixture {
+        tmp,
+        repo,
+        subdir,
+        worktree,
+        repo_less,
+    }
+}

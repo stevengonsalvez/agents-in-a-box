@@ -92,19 +92,24 @@ Options:
   -p, --prompt <PROMPT>                Initial prompt to send
   -a, --attach                         Attach to session after creation
       --dangerously-skip-permissions   Skip permission prompts (dangerous!)
-      --name <NAME>                    Custom session name
+      --name <NAME>                    Custom tmux session name (NOT an attach/status/kill handle)
   -i, --interactive                    Run in interactive mode (spawn tmux and attach)
       --parent <PARENT>                Parent session id — links this session to an orchestrator (e.g. ATC) so its completions route to the parent's durable inbox (event-driven plumbing). Exported into the session as `AINB_PARENT_SESSION`
   -h, --help                           Print help
 
 EXAMPLES:
-  ainb run --repo .                                 Use current directory
-  ainb run --repo . --worktree                      Isolate in a new worktree
-  ainb run --repo . --create-branch feat/new        Create a branch + worktree
-  ainb run --remote-repo owner/repo                 Clone GitHub repo first
-  ainb run --tool codex --repo .                    Use Codex instead of Claude
-  ainb run --repo . -p "fix the failing tests"    Send an initial prompt
-  ainb run --repo . --attach                        Drop into tmux after creating
+  ainb run --repo . --worktree                       Isolated worktree (recommended)
+  ainb run --repo . --create-branch feat/new         Isolated worktree on a named branch
+  ainb run --repo . --worktree -p "fix the tests"    Spawn with an initial prompt
+  ainb run --repo . --worktree --parent tower        Route completions to an orchestrator
+  ainb run --remote-repo owner/repo --worktree       Clone a GitHub repo first, then isolate
+  ainb run --repo . --worktree --tool codex          Use Codex instead of Claude
+  ainb run --repo . --worktree --attach              Drop into tmux after creating
+  ainb run --repo .                                  Shared checkout, NO isolation
+
+Without --worktree (or --create-branch) the session runs directly in the
+checkout you point at: it shares that branch, index and working tree with your
+editor and with every other session started there. Prefer --worktree.
 ```
 
 ## `ainb list`
@@ -5535,14 +5540,15 @@ daemon/hook entrypoints rather than everyday verbs. Run `<cmd> --help` for each:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. |
-| `1` | Runtime error (the command ran but failed). |
-| `2` | Usage error (bad flags/args), or a required plugin/tool is not installed. |
+| `1` | Runtime error (the command ran but failed). This includes a missing provider CLI: `ainb run --tool codex` with no `codex` on `PATH` exits `1`, not `2`. |
+| `2` | Usage error (bad flags/args), or a required *plugin* is not installed (e.g. `ainb usage` / `ainb learnings` with nothing staged under `dist/plugins/`). |
 
 ## Scripting recipes
 
 ```bash
 # List running sessions as JSON and pull workspace names
-ainb list --running --format json | jq -r '.[].workspace'
+# (the field is `workspace_name`; see `ainb list --format json`)
+ainb list --running --format json | jq -r '.[].workspace_name'
 
 # Spawn a session in an isolated worktree with an initial prompt
 ainb run --repo . --worktree -p "fix the failing tests"

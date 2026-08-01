@@ -151,7 +151,7 @@ order by the Stop hook:
 
 ```bash
 # Spawn a child linked to the ATC instance "tower":
-ainb run --repo . --parent tower -p "fix the failing tests"
+ainb run --repo . --worktree --parent tower -p "fix the failing tests"
 ```
 
 ---

@@ -32,11 +32,19 @@ ainb run --repo . --worktree --attach
 Useful variants:
 
 ```bash
-ainb run --repo .                              # current directory, no worktree
-ainb run --repo . --create-branch feat/new     # new branch + worktree
-ainb run --tool codex --repo .                  # use Codex instead of Claude
-ainb run --remote-repo owner/repo               # clone a GitHub repo first
-ainb run --repo . -p "fix the failing tests"  # send an initial prompt
+ainb run --repo . --create-branch feat/new        # isolated worktree on a named branch
+ainb run --repo . --worktree -p "fix the tests"   # spawn with an initial prompt
+ainb run --repo . --worktree --tool codex         # use Codex instead of Claude
+ainb run --remote-repo owner/repo --worktree      # clone a GitHub repo first, then isolate
+```
+
+Without `--worktree` (or `--create-branch`) the session runs directly in the
+checkout you point at, sharing that branch, index and working tree with your
+editor and with every other session started there. Reach for that only when you
+deliberately want the shared checkout:
+
+```bash
+ainb run --repo .                                 # shared checkout, NO isolation
 ```
 
 ## 4. Attach, detach, reattach

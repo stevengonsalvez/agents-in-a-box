@@ -241,8 +241,14 @@ jobs:
           mkdir -p out
           cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} out/
           cp -R dist/plugins out/plugins
+          # ainb(1). The checkout is the full repo and this step's
+          # working-directory is ainb-tui, so the committed page is one level
+          # up. share/ is a top-level member of the tarball: install.sh reads
+          # share/man/man1/ainb.1 and the Homebrew formula does man1.install.
+          mkdir -p out/share/man/man1
+          cp ../docs/man/${BINARY_NAME}.1 out/share/man/man1/
           cd out
-          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}" plugins
+          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}" plugins share
           shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
 
       - name: Upload artifacts
@@ -283,7 +289,7 @@ jobs:
 
       - name: Clone pinned ainb-toolkit
         env:
-          AINB_TOOLKIT_REF: v1.6.0
+          AINB_TOOLKIT_REF: v1.7.0
         run: |
           git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
             https://github.com/stevengonsalvez/ainb-toolkit.git \
@@ -296,7 +302,7 @@ jobs:
         # pattern. --release-tag MUST equal the cloned ainb-toolkit ref so the
         # owned install_uris pin the same bytes the checkout was cut from.
         env:
-          AINB_TOOLKIT_REF: v1.6.0
+          AINB_TOOLKIT_REF: v1.7.0
           TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
           OUT_DIR: ${{ github.workspace }}/artifacts
         run: cargo run -p xtask -- gen-catalog-index --toolkit-root "${TOOLKIT_DIR}" --release-tag "${AINB_TOOLKIT_REF}" --out "${OUT_DIR}/catalog-index.json"
@@ -322,8 +328,13 @@ jobs:
             ### Homebrew (macOS / Linux)
             ```bash
             brew tap stevengonsalvez/agents-in-a-box
+            brew trust stevengonsalvez/agents-in-a-box   # once per machine
             brew install ainb
             ```
+            > Recent Homebrew refuses to load a formula from a third-party tap
+            > until that tap is trusted, so `brew install` fails with "Refusing
+            > to load formula ... from untrusted tap" without the middle line.
+            > It is a trust gate, not a broken formula.
 
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
@@ -414,6 +425,9 @@ jobs:
               # user-set AINB_PLUGIN_ROOT still wins.
               libexec.install "ainb"
               libexec.install "plugins" if File.directory?("plugins")
+              # ainb(1). Guarded so this formula still installs an older
+              # tarball that predates the man page.
+              man1.install "share/man/man1/ainb.1" if File.exist?("share/man/man1/ainb.1")
               (bin/"ainb").write <<~WRAPPER
                 #!/bin/bash
                 export AINB_PLUGIN_ROOT="${AINB_PLUGIN_ROOT:-#{libexec}/plugins}"

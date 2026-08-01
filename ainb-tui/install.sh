@@ -176,6 +176,27 @@ main() {
         sudo chmod +x "${install_dir}/${BINARY_NAME}"
     fi
 
+    # Man page (best-effort). Sibling of the bin dir, so /usr/local/bin gives
+    # /usr/local/share/man/man1 and ~/.local/bin gives ~/.local/share/man/man1,
+    # both on the default manpath. Older release tarballs have no share/, so a
+    # missing page is skipped silently and never fails the install.
+    local man_installed=""
+    if [ -f "${tmp_dir}/share/man/man1/${BINARY_NAME}.1" ]; then
+        local man_dir="$(dirname "$install_dir")/share/man/man1"
+        if mkdir -p "$man_dir" 2>/dev/null && [ -w "$man_dir" ]; then
+            cp "${tmp_dir}/share/man/man1/${BINARY_NAME}.1" "${man_dir}/${BINARY_NAME}.1" \
+                && man_installed="$man_dir"
+        elif sudo mkdir -p "$man_dir" 2>/dev/null; then
+            sudo cp "${tmp_dir}/share/man/man1/${BINARY_NAME}.1" "${man_dir}/${BINARY_NAME}.1" \
+                && man_installed="$man_dir"
+        fi
+        if [ -n "$man_installed" ]; then
+            info "Man page installed to ${man_installed}/${BINARY_NAME}.1 (run: man ${BINARY_NAME})"
+        else
+            warn "Could not install the man page (skipping); ${BINARY_NAME} itself is fine."
+        fi
+    fi
+
     # Verify installation
     if command -v "$BINARY_NAME" &> /dev/null; then
         success "Installation complete!"
@@ -196,7 +217,19 @@ main() {
         fi
     fi
 
+    # `man ainb` only works if the man dir is on the manpath. man-db (Linux)
+    # derives ~/.local/share/man from ~/.local/bin automatically; macOS's man
+    # does not always, so hint when we installed under $HOME.
+    if [ -n "$man_installed" ] && ! man -w "$BINARY_NAME" &> /dev/null; then
+        warn "Add the man page directory to your MANPATH to use 'man ${BINARY_NAME}':"
+        echo ""
+        echo "  # Add to ~/.bashrc or ~/.zshrc:"
+        echo "  export MANPATH=\"$(dirname "$man_installed"):\$MANPATH\""
+        echo ""
+    fi
+
     echo -e "${BLUE}Documentation:${NC} https://github.com/${REPO}"
+    echo -e "${BLUE}Manual:${NC}        man ${BINARY_NAME}"
     echo ""
 }
 

@@ -57,7 +57,7 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
                     format!(
                         "  {} ({})",
                         &s.session_id.to_string()[..8],
-                        s.workspace_name
+                        s.display_workspace_name()
                     )
                 })
                 .collect();
@@ -69,11 +69,21 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
         _ => {}
     }
 
-    // Try workspace name prefix match (case-insensitive)
+    // Try workspace name prefix match (case-insensitive).
+    //
+    // Matches the DISPLAYED name (re-derived from the worktree path, what
+    // `ainb list` and the TUI print) OR the name persisted at creation time.
+    // Displayed alone would strand legacy records whose path has moved;
+    // persisted alone would mean a name the user just read off `ainb list`
+    // does not resolve, which is precisely the drift this pair of surfaces is
+    // supposed to have stopped having.
     let name_matches: Vec<&SessionMetadata> = store
         .sessions
         .values()
-        .filter(|s| s.workspace_name.to_lowercase().starts_with(&id_lower))
+        .filter(|s| {
+            s.display_workspace_name().to_lowercase().starts_with(&id_lower)
+                || s.workspace_name.to_lowercase().starts_with(&id_lower)
+        })
         .collect();
 
     match name_matches.len() {
@@ -84,7 +94,7 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
                 .map(|s| {
                     format!(
                         "  {} ({})",
-                        s.workspace_name,
+                        s.display_workspace_name(),
                         &s.session_id.to_string()[..8]
                     )
                 })
@@ -105,7 +115,7 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
             format!(
                 "  {} ({})",
                 &s.session_id.to_string()[..8],
-                s.workspace_name
+                s.display_workspace_name()
             )
         })
         .collect();

@@ -26,6 +26,7 @@ The daemon skill describes a long-running watcher that scans each session's rece
 | Skill | Purpose |
 |---|---|
 | `ainb-fleet` | Overview / router — at-a-glance map of the five fleet verbs, discovery sources, and global flags |
+| `ainb-fleet:ainb-spawn` | Spawn contract for `ainb run`: the two legal shapes (repo root plus `--worktree --create-branch`, or an existing worktree passed bare), the flag-by-flag rationale, the trap table (bare checkout, empty `--parent`, unset `--parent` eating the next token), and the post-spawn verify loop |
 | `ainb-fleet:standup` | List every claude session on the host, merged + deduped across ainb · peers broker · bg jobs |
 | `ainb-fleet:broadcast` | Fan one prompt out to selected sessions (requires `--all`, `--filter <regex>`, or `--cwd <substring>`) |
 | `ainb-fleet:sequence` | Send ordered multi-step prompts, ack-gated between steps via JSONL turn-end detection |
