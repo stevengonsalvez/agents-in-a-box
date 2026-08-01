@@ -80,12 +80,18 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
-  # CLI reference + man page freshness. docs/tui/cli.md and docs/man/ainb.1 are
-  # both generated from `ainb --help`. Fails if either drifts, so the binary
-  # stays the single source of truth. One job: the build is paid for once.
+  # Generated-docs freshness. docs/tui/cli.md AND docs/man/ainb.1 are both
+  # generated from `ainb --help`. Fails if either drifts, so the binary stays
+  # the single source of truth. One job: the build is paid for once.
+  #
+  # DO NOT RENAME `name:`. It is a required status check in the `main` ruleset,
+  # matched by the literal string below. A renamed job reports under the new
+  # name, the required context stays "Expected" forever, and every PR is
+  # unmergeable until the ruleset is edited to match. Widening what this job
+  # covers is free; renaming it is not.
   # ────────────────────────────────────────────────────────────────────────────
   cli-docs:
-    name: CLI reference + man freshness
+    name: CLI reference freshness
     needs: changes
     if: >-
       always() && (github.event_name != 'pull_request' ||
