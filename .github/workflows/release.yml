@@ -289,7 +289,7 @@ jobs:
 
       - name: Clone pinned ainb-toolkit
         env:
-          AINB_TOOLKIT_REF: v1.6.0
+          AINB_TOOLKIT_REF: v1.7.0
         run: |
           git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
             https://github.com/stevengonsalvez/ainb-toolkit.git \
@@ -302,7 +302,7 @@ jobs:
         # pattern. --release-tag MUST equal the cloned ainb-toolkit ref so the
         # owned install_uris pin the same bytes the checkout was cut from.
         env:
-          AINB_TOOLKIT_REF: v1.6.0
+          AINB_TOOLKIT_REF: v1.7.0
           TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
           OUT_DIR: ${{ github.workspace }}/artifacts
         run: cargo run -p xtask -- gen-catalog-index --toolkit-root "${TOOLKIT_DIR}" --release-tag "${AINB_TOOLKIT_REF}" --out "${OUT_DIR}/catalog-index.json"
@@ -328,8 +328,13 @@ jobs:
             ### Homebrew (macOS / Linux)
             ```bash
             brew tap stevengonsalvez/agents-in-a-box
+            brew trust stevengonsalvez/agents-in-a-box   # once per machine
             brew install ainb
             ```
+            > Recent Homebrew refuses to load a formula from a third-party tap
+            > until that tap is trusted, so `brew install` fails with "Refusing
+            > to load formula ... from untrusted tap" without the middle line.
+            > It is a trust gate, not a broken formula.
 
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
