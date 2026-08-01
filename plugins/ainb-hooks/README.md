@@ -102,7 +102,7 @@ one place each:
 
 | | Claude Code | Codex CLI |
 |---|---|---|
-| payload delivery | stdin | `argv[1]` |
+| payload delivery | stdin | stdin (Stop; probed live as `argc=0`) |
 | transcript | `transcript_path` JSONL | rollout JSONL, `response_item` lines (nullable path) |
 | closing text | last assistant entry | `last_assistant_message`, required on input |
 | advice given | background Bash, Monitor, ScheduleWakeup | foreground poll loop (no background primitive) |
@@ -114,6 +114,37 @@ which `ainb-notifyd install --codex` substitutes after extracting the script to
 `~/.agents-in-a-box/hooks/stall_guard.py` next to `notify.sh`.
 
 Copilot is not wired: its hook format has no Stop-with-decision contract.
+
+### Codex hook trust (required, or the guard never runs)
+
+Codex will not run a hook it has not trusted. Every hook is pinned in
+`~/.codex/config.toml` under `[hooks.state]`, keyed by
+`<hooks.json path>:<event>:<group index>:<hook index>`, with a `trusted_hash`:
+
+```toml
+[hooks.state."/Users/you/.codex/hooks.json:stop:3:0"]
+trusted_hash = "sha256:…"
+```
+
+An untrusted or changed entry is **skipped silently** — no error, no log line,
+no hook output. Writing `hooks.json` therefore installs the hook without
+enabling it, and everything looks fine until you notice turns are not being
+blocked. This was diagnosed by wiring a probe wrapper in place of the guard and
+watching it never get invoked while three sibling `Stop` hooks ran.
+
+After `ainb-notifyd install --codex`, start `codex` once and approve the
+startup hooks review (`tui/src/startup_hooks_review.rs`, shown when "hooks are
+new or changed"). That writes the `trusted_hash` entries.
+
+For non-interactive automation, `codex exec --dangerously-bypass-hook-trust`
+runs enabled hooks without persisted trust. That is how the end-to-end
+verification below was done; it is not a substitute for trusting the hook.
+
+Verified end to end on Codex with trust bypassed: a turn closing with "The CI
+checks are still running on main." produced
+`{"decision":"block",…}` on the first Stop (`stop_hook_active: false`) and
+silence on the second (`stop_hook_active: true`), and the turn was re-run —
+exactly the one-nudge design.
 
 Run the self-check after editing it:
 

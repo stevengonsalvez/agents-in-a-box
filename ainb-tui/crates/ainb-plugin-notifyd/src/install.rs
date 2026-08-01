@@ -352,6 +352,17 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 Ok(hooks_json) => {
                     record.codex_hooks_json = Some(hooks_json);
                     push_unique(&mut record.agents, Agent::Codex);
+                    // Writing hooks.json is only half a Codex install. Codex
+                    // pins every hook in config.toml by `trusted_hash` and
+                    // SILENTLY skips any entry it has not trusted — no error,
+                    // no log line, the hook simply never runs. Say so, or the
+                    // install looks complete while doing nothing.
+                    eprintln!(
+                        "note: Codex only runs hooks it has trusted. Start `codex` once and \
+                         approve the startup hooks review, otherwise the ainb hooks (including \
+                         the stall guard) are skipped silently. Non-interactive automation can \
+                         pass --dangerously-bypass-hook-trust instead."
+                    );
                 }
                 Err(e) => failures.push((Agent::Codex, e)),
             },

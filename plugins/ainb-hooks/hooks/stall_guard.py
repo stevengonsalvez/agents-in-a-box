@@ -332,11 +332,14 @@ def evaluate(entries, how=HOW_CLAUDE):
 
 
 def read_payload():
-    """Claude and Copilot pipe the payload on stdin; Codex passes it as argv[1].
+    """Read the hook payload from wherever the host put it.
 
-    argv is tried FIRST and stdin is never touched when it wins. A hook launched
-    with an inherited-but-idle stdin (Codex's delivery) would otherwise block in
-    read() until the host's hook timeout killed it, on every single Stop.
+    Measured, not assumed: Codex delivers the Stop payload on stdin with an
+    empty argv (probed live — `argc=0`), and Claude pipes it on stdin too.
+    argv is still tried first because other Codex hook events are documented to
+    pass JSON in argv[1], and because reading stdin first would block forever
+    against a host that leaves stdin open and idle. The bounded select() below
+    is what actually guarantees this never hangs a turn.
     """
     for raw in sys.argv[1:]:
         if raw.startswith("-"):
