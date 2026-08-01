@@ -188,6 +188,60 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         }),
         4_000_000_000_300,
     );
+    // Claude emits both of these around AskUserQuestion. They must not
+    // downgrade the active structured interview to WAITING.
+    hangar.apply_hook(
+        "fleet-panel-ask-permission",
+        "fleet-panel-ask-1",
+        &home_tmp.path().join("fleet-tripwire-project"),
+        "PermissionRequest",
+        serde_json::json!({
+            "matcher": "AskUserQuestion",
+            "payload": {
+                "tool_input": {
+                    "questions": [
+                        {
+                            "id": "scope",
+                            "question": "What release scope should Fleet use?",
+                            "header": "Scope",
+                            "options": [
+                                {"label": "Focused", "description": "ship only verified Fleet work"},
+                                {"label": "Broad", "description": "include adjacent changes"}
+                            ]
+                        },
+                        {
+                            "id": "validation",
+                            "question": "Which proof should gate launch?",
+                            "header": "Validation",
+                            "multiSelect": true,
+                            "options": [
+                                {"label": "Tests", "description": "run targeted Rust coverage"},
+                                {"label": "Tripwire", "description": "capture live terminal truth"}
+                            ]
+                        },
+                        {
+                            "id": "rollout",
+                            "question": "When should the release launch?",
+                            "header": "Rollout",
+                            "options": [
+                                {"label": "Now", "description": "start after proof completes"},
+                                {"label": "Later", "description": "hold for a manual window"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }),
+        4_000_000_000_301,
+    );
+    hangar.apply_hook(
+        "fleet-panel-ask-notification",
+        "fleet-panel-ask-1",
+        &home_tmp.path().join("fleet-tripwire-project"),
+        "Notification",
+        serde_json::json!({ "payload": { "notification_type": "permission_prompt" } }),
+        4_000_000_000_302,
+    );
     hangar.apply_hook(
         "fleet-panel-wait",
         "fleet-panel-wait-1",
