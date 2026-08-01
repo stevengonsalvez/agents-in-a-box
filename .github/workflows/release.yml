@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The sync PR below is opened with GITHUB_TOKEN.
+      pull-requests: write
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
       version: ${{ steps.version.outputs.version }}
@@ -157,19 +159,59 @@ jobs:
           echo "Updated CHANGELOG.md"
           cat CHANGELOG.md
 
-      - name: Commit version changes
-        working-directory: ${{ env.WORKING_DIR }}
+      # Commit the bump on a release BRANCH, tag that commit, and push the tag.
+      # Then open a PR to sync main.
+      #
+      # Why not push straight to main, as this job used to: the `main` ruleset
+      # requires changes to arrive via pull request with 7 status checks, so the
+      # push is rejected (GH013) and no release can ever be cut. The ruleset
+      # cannot exempt this job either — `github-actions[bot]` is an Integration,
+      # and GitHub only accepts Integration bypass actors on org-owned rulesets,
+      # which a personal repo has no way to satisfy (422 on PUT).
+      #
+      # Tags are not governed by that ruleset (it targets ~DEFAULT_BRANCH), and
+      # neither are non-default branches, so both pushes below succeed. The tag
+      # points at the commit that carries the version bump, which is what the
+      # build and release jobs check out, so the published binaries report the
+      # version being released even though main has not merged the sync PR yet.
+      - name: Commit the bump, tag it, and open the sync PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git add Cargo.toml CHANGELOG.md
-          git commit -m "chore(release): prepare v${VERSION}" || echo "No changes to commit"
-          git push
+          BRANCH="chore/release-v${VERSION}"
 
-      - name: Create and push tag
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          git checkout -b "${BRANCH}"
+          git add "${WORKING_DIR}/Cargo.toml" "${WORKING_DIR}/CHANGELOG.md"
+          git commit -m "chore(release): prepare v${VERSION}"
+
+          # Tag FIRST: it is the artifact the rest of the pipeline consumes, so
+          # a failure here must stop the run before anything is published.
           git tag -a "v${VERSION}" -m "Release v${VERSION}"
           git push origin "v${VERSION}"
+          git push origin "${BRANCH}"
+
+          # Everything from here is bookkeeping. The tag is pushed, so the
+          # release is already reproducible; a failure syncing main must warn,
+          # never fail the run. Hence the explicit `if` rather than `&&`/`||`
+          # chains, which would abort the step under `set -e` before the
+          # warning could be printed.
+          BODY="Version bump and changelog for v${VERSION}, already tagged and built."
+          BODY="${BODY} Opened by the release workflow: the \`main\` ruleset requires"
+          BODY="${BODY} a pull request, so the bump reaches main this way rather than by"
+          BODY="${BODY} direct push. Merging keeps \`Cargo.toml\` in step with the latest"
+          BODY="${BODY} tag; until then main reports the previous version."
+
+          if git push origin "${BRANCH}"; then
+            if gh pr create --base main --head "${BRANCH}" \
+                 --title "chore(release): sync v${VERSION}" --body "${BODY}"; then
+              echo "Sync PR opened for ${BRANCH}"
+            else
+              echo "::warning::v${VERSION} is tagged and releasing, but the sync PR could not be opened. Open one from ${BRANCH} to bring Cargo.toml and CHANGELOG.md back in step."
+            fi
+          else
+            echo "::warning::v${VERSION} is tagged and releasing, but ${BRANCH} could not be pushed. main will keep reporting the previous version until the bump lands."
+          fi
 
   build:
     name: Build ${{ matrix.target }}
