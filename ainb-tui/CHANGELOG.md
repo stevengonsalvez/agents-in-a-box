@@ -7,6 +7,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-08-01
+### Added
+- Merge pull request #522 from stevengonsalvez/codex/ainb-fleet-macos-contract-v2
+- Merge pull request #523 from stevengonsalvez/codex/ainb-fleet-macos-app-only
+- Merge pull request #524 from stevengonsalvez/codex/ainb-fleet-macos-app-only
+- Merge pull request #525 from stevengonsalvez/codex/ainb-fleet-macos-app-only
+- Merge pull request #527 from stevengonsalvez/codex/ainb-fleet-macos-app-only
+- Merge pull request #528 from stevengonsalvez/codex/ainb-fleet-macos-app-only
+- Merge pull request #531 from stevengonsalvez/f/atc
+- Merge pull request #536 from stevengonsalvez/f/hooks-event-ingestion
+- Merge pull request #537 from stevengonsalvez/codex/fleet-open-window-fix
+- Merge pull request #547 from stevengonsalvez/feat/hangar-role-gated-pull
+- Merge pull request #551 from stevengonsalvez/feat/stall-guard-stop-hook
+- Merge pull request #560 from stevengonsalvez/f/fleet-stale-reaper
+- Merge pull request #563 from stevengonsalvez/f/provider-copilot
+- **ainb-hooks**: add stall guard for idle turn-ends
+- **ainb-hooks**: register the stall guard as a Stop hook
+- **ainb-hooks**: run the stall guard on Codex Stop
+- **ainb-hooks**: teach the stall guard to speak Codex
+- **codex**: reap orphaned app-servers at boot and cap concurrent spawns
+- **codex**: reap orphaned plugin brokers on SessionStart
+- **fleet**: add ATC migration
+- **fleet**: add Provider::Copilot
+- **fleet**: add RPC contract
+- **fleet**: add a one-shot process-table snapshot
+- **fleet**: add app ATC contract
+- **fleet**: add app controls contract
+- **fleet**: add app timeline contract
+- **fleet**: add contract migration
+- **fleet**: admit copilot panes to the roster
+- **fleet**: discover real agent panes with real states
+- **fleet**: resolve the tmux binary in one place
+- **fleet**: retire sessions nothing can observe any more
+- **fleet-macos**: render Copilot as a first-class provider
+- **hangar**: daemon pull tick, stage advance hook, and --redundant N
+- **hangar-plugin**: name the parent issue on kanban cards
+- **hangar-store**: default six-stage pipeline and stage advance
+- **hangar-store**: migration 0074 role-gated pull pipeline columns
+- **hangar-store**: role-gated pull with one owner per card
+- **macos**: add app component
+- **macos**: add app metadata
+- **macos**: add floating Fleet notch panel
+- **macos**: add keyboard Fleet commands
+- **macos**: add notification quiet hours
+- **macos**: attach Fleet control to screen edge
+- **macos**: configure lifecycle notifications
+- **macos**: define lifecycle notification policy
+- **macos**: deliver grouped Fleet notifications
+- **macos**: emit lifecycle notification events
+- **macos**: expose toolbar controls
+- **macos**: launch Fleet from notch panel
+- **macos**: open sessions from notifications
+- **macos**: persist notification preferences
+- **macos**: polish Fleet session controls
+- **macos**: redesign Fleet roster cockpit
+- **macos**: refresh Fleet before deep links
+- **macos**: refresh notification targets
+- **macos**: request notification permission from settings
+- **macos**: route notification responses
+- **macos**: route notification session links
+- **macos**: support narrower Fleet windows
+- **plugin-notifyd**: extract the stall guard for Codex installs
+- add the ainb-spawn fleet skill
+- capture provider hook events
+- reduce provider lifecycle events
+- show active Fleet workloads
+- store provider event ledger
+- warn when a session runs in a shared checkout
+
+### Fixed
+- Merge pull request #521 from stevengonsalvez/fix/no-orphaned-codex-app-servers
+- Merge pull request #526 from stevengonsalvez/codex/ainb-fleet-macos-migration-fix
+- Merge pull request #539 from stevengonsalvez/f/hooks-event-ingestion-hardening
+- Merge pull request #541 from stevengonsalvez/fix/store-migrations-rerun-if-changed
+- Merge pull request #542 from stevengonsalvez/fix/managed-subprocess-reap-on-shutdown
+- Merge pull request #543 from stevengonsalvez/codex/fix-managed-subprocess-reap
+- Merge pull request #545 from stevengonsalvez/fix/kanban-card-agent-name
+- Merge pull request #546 from stevengonsalvez/f/atc-2
+- Merge pull request #549 from stevengonsalvez/f/fleet-tmux-bin
+- Merge pull request #550 from stevengonsalvez/f/bd-lock-absent-pidfile
+- Merge pull request #552 from stevengonsalvez/f/dispatch-attempt-order
+- Merge pull request #553 from stevengonsalvez/f/task-queue-order
+- Merge pull request #554 from stevengonsalvez/f/fleet-restore-churn
+- Merge pull request #555 from stevengonsalvez/f/bd-lock-atomic-steal
+- Merge pull request #557 from stevengonsalvez/f/swift-wire-tolerance
+- Merge pull request #559 from stevengonsalvez/f/prune-fleet-event-churn
+- Merge pull request #564 from stevengonsalvez/f/ainb-skill
+- **ainb-hooks**: stop the guard hanging and rescanning whole transcripts
+- **atc**: fence scheduler claim leases
+- **atc**: supply scheduler generation fields
+- **beads**: bound the immediate-retry path by the acquire deadline
+- **beads**: never steal a pidfile just because the read failed
+- **beads**: reclaim a stale pidfile atomically
+- **codex**: reap race-loser app-server on shared socket
+- **codex**: spare proxy-backed servers
+- **fleet**: assign unique request migration version
+- **fleet**: assign unique scheduler migration version
+- **fleet**: drive discovery, send and read through tmux_bin()
+- **fleet**: force unlimited ps column width
+- **fleet**: issue unique notification requests
+- **fleet**: keep liveness checks on the ungated pane roster
+- **fleet**: never restore transport for an EXITED row
+- **fleet**: preserve macOS recovery state
+- **fleet**: prevent macOS socket termination
+- **fleet**: recover abandoned operation claims
+- **fleet**: restrict managed starts to Codex
+- **fleet**: stop reconciling lifecycle the hooks own
+- **fleet**: stop the hook test writing to the real home
+- **fleet**: treat an empty payload sidecar as absent
+- **fleet**: use unique start response identifier
+- **fleet-macos**: decode unknown wire enum values instead of throwing
+- **hangar**: order dispatch attempts by rowid, not by ULID
+- **hangar**: pick a card's last run by rowid, not by task id
+- **hangar**: prune the tmux flip-flop artefacts from fleet_event
+- **hangar**: stabilize card refusal order
+- **hangar-plugin**: move the kanban parent issue to the card's id line
+- **hangar-plugin**: render the agent NAME on kanban cards, not the raw ULID
+- **hangar-store**: rebuild on migration file changes
+- **hangar-store**: squad dispatch enqueues one owner, never one run per member
+- **hangar-store**: take the run provider from the agent, not its runtime
+- **macos**: activate Fleet window from status bar
+- **macos**: attach keyboard commands to menu scene
+- **macos**: encode notification deep links
+- **macos**: handle missing audit elements
+- **macos**: handle session links in Fleet window
+- **macos**: improve empty state contrast
+- **macos**: present Fleet dashboard above apps
+- **macos**: receive notification links in menu
+- **macos**: respect notification sound setting
+- **macos**: restore notch mode after close
+- **macos**: return audit exception result
+- **macos**: route notification links to notch panel
+- **macos**: select filtered Fleet session
+- **macos**: simplify notch notification lifecycle
+- **macos**: use unique notification project identifiers
+- **plugin-abtop**: resolve detection before serving stdio
+- **plugin-burndown**: build date-filter fixtures in the host's timezone
+- **plugin-runtime**: avoid blocking plugin reaper
+- **plugin-runtime**: reap managed children outside the registry lock
+- **plugin-runtime**: waitpid killed managed children before runtime teardown
+- **run**: send the initial prompt once the input box is ready
+- count unavailable Fleet attention
+- derive one workspace name across every CLI surface
+- order workload projections separately
+- recover provider source events
+- replay Codex source projections
+- resolve session workspace from the owning repository
+- test(tripwire): pin AINB_HOME explicitly in the drift-glyph live tripwire
+
+### Documentation
+- Merge pull request #510 from stevengonsalvez/docs/parity-status-final
+- Merge pull request #516 from stevengonsalvez/docs/starlight-glob-conventions
+- Merge pull request #548 from stevengonsalvez/f/provider-event-retention-policy
+- **ainb-hooks**: document the Codex wiring
+- **ainb-hooks**: document the stall guard
+- **ainb-hooks**: update the self-check case count
+- **ainb-tui**: document contract-test never-rerun-to-green policy
+- **ainb-tui**: note default-members gap in contract-test policy
+- **cli**: regenerate reference for hangar pipeline init/show
+- **codex**: document daemon-owned cleanup
+- **codex**: document the orphaned app-server fix and rationale
+- **fleet**: record the provider-event retention decision
+- **hangar**: document the role-gated pull pipeline
+- **hangar-store**: record that migration 0074 reverses decision D3
+- **parity**: record the finish run, all 30 gaps closed, CI gate green
+- **site**: guard the hangar/architecture allowlist exception
+- **site**: replace per-file glob exclusions with directory conventions
+- add Fleet contract page metadata
+- add Starlight title frontmatter to fleet-bridge and atc-plumbing
+- define Fleet macOS contract
+- describe provider hook capture
+- fix learnings frontmatter and mark wizard incident resolved
+- regenerate the CLI reference
+- ship an ainb(1) man page
+- spawn into a worktree in every example
+
+### Other
+- Merge pull request #558 from stevengonsalvez/f/delete-tmux-bin
+- assign Fleet contract owners
+- gitignore agent skill scratch
+- **codex**: reap orphans on the daemon sweeper, drop the SessionStart hook
+- **fleet**: delete AINB_TMUX_BIN
+- **fleet**: read AINB_TMUX_BIN through the shared resolver
+- resolve the current branch with discover, not open
+
+
 ## [1.17.0] - 2026-07-27
 ### Added
 - Merge pull request #458 from stevengonsalvez/merge/fleet-atc-main-20260723
