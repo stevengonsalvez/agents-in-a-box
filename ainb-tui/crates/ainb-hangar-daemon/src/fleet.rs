@@ -54,6 +54,16 @@ pub async fn apply_hook(
     let provider = parse_provider(observation.provider);
     let session_key = SessionKey::managed(provider, observation.provider_session_id);
     let source_event_id = observation.event_id.clone();
+    // Claude emits a PermissionRequest and then a generic notification around an
+    // AskUserQuestion. They describe the same picker, not two operator actions.
+    let event_type = canonical_hook_event_type(observation.event_type, observation.payload);
+    let preserve_active_request = observation.event_type == "Notification"
+        && FleetRepo::get_session(pool, session_key.as_str())
+            .await?
+            .is_some_and(|session| {
+                matches!(session.attention_state.as_str(), "ASK" | "APPROVAL")
+                    && session.current_request_fingerprint.is_some()
+            });
     let tmux_target = observation
         .payload
         .get("tmux_target")
@@ -67,11 +77,14 @@ pub async fn apply_hook(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
-    let (lifecycle_state, attention_state) =
-        states_for_hook(observation.event_type, observation.payload);
+    let (lifecycle_state, attention_state) = if preserve_active_request {
+        (None, None)
+    } else {
+        states_for_hook(event_type, observation.payload)
+    };
     let request_fingerprint = match attention_state {
         Some(AttentionState::Ask | AttentionState::Approval) => {
-            let fingerprint = match (provider, observation.event_type) {
+            let fingerprint = match (provider, event_type) {
                 (Provider::Claude, "AskUserQuestion") => {
                     claude_request_identity(observation.payload).map_or_else(
                         || fingerprint_value(observation.payload),
@@ -98,7 +111,7 @@ pub async fn apply_hook(
         session_key: session_key.to_string(),
         observed_at: observation.observed_at,
         authority: ObservationAuthority::Authoritative,
-        event_type: observation.event_type.to_string(),
+        event_type: event_type.to_string(),
         payload: serde_json::to_string(observation.payload).unwrap_or_else(|_| "{}".to_string()),
         patch: FleetSessionPatch {
             provider: Some(provider.as_str().to_string()),
@@ -1386,6 +1399,25 @@ fn states_for_hook(
     }
 }
 
+fn canonical_hook_event_type<'a>(event_type: &'a str, payload: &Value) -> &'a str {
+    if event_type == "PermissionRequest"
+        && claude_hook_tool_name(payload) == Some("AskUserQuestion")
+    {
+        "AskUserQuestion"
+    } else {
+        event_type
+    }
+}
+
+fn claude_hook_tool_name(payload: &Value) -> Option<&str> {
+    let hook = payload.get("payload").unwrap_or(payload);
+    payload
+        .get("matcher")
+        .or_else(|| hook.get("tool_name"))
+        .or_else(|| hook.get("tool"))
+        .and_then(Value::as_str)
+}
+
 fn has_active_background_work(payload: &Value) -> bool {
     let hook = payload.get("payload").unwrap_or(payload);
     [
@@ -1826,6 +1858,74 @@ mod tests {
             states_for_hook("SessionEnd", &serde_json::json!({})),
             (Some(LifecycleState::Exited), Some(AttentionState::None))
         );
+    }
+
+    #[tokio::test]
+    async fn claude_interview_stays_answerable_through_permission_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let question = serde_json::json!({
+            "questions": [{
+                "question": "When?",
+                "options": [{"label": "August"}]
+            }]
+        });
+        let ask = serde_json::json!({ "payload": { "tool_input": question.clone() } });
+
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "ask".into(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "AskUserQuestion",
+                payload: &ask,
+                observed_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let expected = FleetRepo::get_session(store.pool(), "claude:session-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .current_request_fingerprint;
+
+        let permission = serde_json::json!({
+            "matcher": "AskUserQuestion",
+            "payload": { "tool_input": question.clone() }
+        });
+        let notification = serde_json::json!({
+            "payload": { "notification_type": "permission_prompt" }
+        });
+        for (event_id, event_type, payload, observed_at) in [
+            ("permission", "PermissionRequest", &permission, 2),
+            ("notification", "Notification", &notification, 3),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.into(),
+                    provider: "claude",
+                    provider_session_id: "session-1",
+                    cwd: "/repo",
+                    event_type,
+                    payload,
+                    observed_at,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let session =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(session.attention_state, "ASK");
+        assert_eq!(session.current_request_fingerprint, expected);
     }
 
     #[test]
