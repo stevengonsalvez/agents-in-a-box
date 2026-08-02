@@ -1663,13 +1663,7 @@ fn claude_questions(payload: &Value) -> Option<&Vec<Value>> {
 
 fn claude_permission_identity(payload: &Value) -> Option<(String, String)> {
     let hook = payload.get("payload").unwrap_or(payload);
-    let tool = payload
-        .get("matcher")
-        .or_else(|| hook.get("tool_name"))
-        .or_else(|| hook.get("tool"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let tool = claude_hook_tool_name(payload).unwrap_or_default().to_string();
     let context = hook
         .get("tool_input")
         .or_else(|| hook.get("input"))
