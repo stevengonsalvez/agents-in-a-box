@@ -219,6 +219,17 @@ impl DaemonClient {
         Ok(result.receipt)
     }
 
+    /// Rebuild one stale Claude interview through the live daemon.
+    pub async fn fleet_reproject_claude_interview(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewResult, DaemonError> {
+        let value =
+            serde_json::to_value(params).expect("FleetReprojectClaudeInterviewParams serializes");
+        let result = self.call(methods::FLEET_REPROJECT_CLAUDE_INTERVIEW, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
     /// Broadcast text to explicit stable Fleet targets.
     pub async fn fleet_broadcast(
         &self,

@@ -352,6 +352,27 @@ impl FleetRepo {
         pool: &SqlitePool,
         event: &NewFleetEvent,
     ) -> Result<ApplyFleetEventResult, FleetRepoError> {
+        Self::apply_event_at_version(pool, event, None).await
+    }
+
+    /// Apply one normalized event only if the existing session has `expected_version`.
+    ///
+    /// Duplicate event ids remain idempotent and return before the version gate.
+    /// This is for recovery mutations that must not overwrite a newer provider
+    /// observation between inspection and commit.
+    pub async fn apply_event_if_version(
+        pool: &SqlitePool,
+        event: &NewFleetEvent,
+        expected_version: i64,
+    ) -> Result<ApplyFleetEventResult, FleetRepoError> {
+        Self::apply_event_at_version(pool, event, Some(expected_version)).await
+    }
+
+    async fn apply_event_at_version(
+        pool: &SqlitePool,
+        event: &NewFleetEvent,
+        expected_version: Option<i64>,
+    ) -> Result<ApplyFleetEventResult, FleetRepoError> {
         let mut tx = pool.begin().await?;
 
         if let Some(prior) = event_by_id(&mut tx, &event.event_id).await? {
@@ -375,6 +396,21 @@ impl FleetRepo {
         }
 
         let prior = session_by_key_tx(&mut tx, &event.session_key).await?;
+        if let Some(expected) = expected_version {
+            let actual = prior
+                .as_ref()
+                .ok_or_else(|| FleetRepoError::SessionNotFound {
+                    session_key: event.session_key.clone(),
+                })?
+                .version;
+            if actual != expected {
+                return Err(FleetRepoError::StaleVersion {
+                    session_key: event.session_key.clone(),
+                    expected,
+                    actual,
+                });
+            }
+        }
         let is_new = prior.is_none();
         let (mut session, changed) = match prior {
             Some(mut row) => {
@@ -639,6 +675,22 @@ impl FleetRepo {
         )
         .bind(after_revision)
         .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(event_from_row).collect()
+    }
+
+    /// Read one session's durable event history in projection order.
+    pub async fn events_for_session(
+        pool: &SqlitePool,
+        session_key: &str,
+    ) -> Result<Vec<FleetEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT revision, event_id, session_key, observed_at, authority, event_type, \
+                    payload, session_version, applied \
+             FROM fleet_event WHERE session_key = ? ORDER BY revision ASC",
+        )
+        .bind(session_key)
         .fetch_all(pool)
         .await?;
         rows.iter().map(event_from_row).collect()
@@ -1238,6 +1290,51 @@ mod tests {
         assert_eq!(
             FleetRepo::events_after(store.pool(), 0, 100).await.unwrap().len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn version_guard_rejects_recovery_after_newer_observation() {
+        let (_dir, store) = store().await;
+        let created = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-created",
+                "claude:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    attention_state: Some("WAITING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let recovery = event(
+            "e-recovery",
+            "claude:s-1",
+            200,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                attention_state: Some("ASK".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+
+        assert!(matches!(
+            FleetRepo::apply_event_if_version(
+                store.pool(),
+                &recovery,
+                created.session_version + 1,
+            )
+            .await,
+            Err(FleetRepoError::StaleVersion { .. })
+        ));
+        assert_eq!(
+            FleetRepo::events_after(store.pool(), 0, 100).await.unwrap().len(),
+            1,
+            "stale recovery must append no event"
         );
     }
 

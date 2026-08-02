@@ -2403,6 +2403,8 @@ pub enum DaemonCommand {
     Restart,
     /// One-command bring-up: ensure the store + socket-auth token, then `start`.
     Setup,
+    /// Rebuild one stale Claude structured interview from durable hook history.
+    ReprojectClaudeInterview(ReprojectClaudeInterviewArgs),
     /// View + edit the daemon's user-config knobs (`list`/`get`/`set`).
     #[command(subcommand)]
     Config(DaemonConfigCommand),
@@ -2410,6 +2412,20 @@ pub enum DaemonCommand {
     /// into confined headless runs (`status`/`set`/`clear`).
     #[command(subcommand)]
     Cred(DaemonCredCommand),
+}
+
+/// Arguments for one controlled Claude interview reprojection.
+#[derive(Args, Debug)]
+pub struct ReprojectClaudeInterviewArgs {
+    /// Exact Fleet session key, for example `claude:<provider-session-id>`.
+    #[arg(long)]
+    pub session_key: String,
+    /// Exact version observed before this mutation. Rejects stale inspection.
+    #[arg(long)]
+    pub expected_version: i64,
+    /// Required acknowledgement that this appends a recovery projection.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 /// `hangar daemon cred <verb>` — the daemon-level claude credential.
@@ -7861,9 +7877,61 @@ async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()>
         DaemonCommand::Stop => run_daemon_stop(),
         DaemonCommand::Restart => run_daemon_restart(),
         DaemonCommand::Setup => run_daemon_setup().await,
+        DaemonCommand::ReprojectClaudeInterview(args) => {
+            run_daemon_reproject_claude_interview(args, format).await
+        }
         DaemonCommand::Config(c) => dispatch_daemon_config(c, format).await,
         DaemonCommand::Cred(c) => dispatch_daemon_cred(c).await,
     }
+}
+
+/// Rebuild a stale Claude interview through the live daemon broker.
+async fn run_daemon_reproject_claude_interview(
+    args: ReprojectClaudeInterviewArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    if !args.apply {
+        anyhow::bail!("refusing recovery mutation: rerun with --apply");
+    }
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .context("connect to live hangar daemon")?;
+    let result = client
+        .fleet_reproject_claude_interview(
+            ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewParams {
+                session_key: args.session_key.clone(),
+                expected_version: args.expected_version,
+            },
+        )
+        .await
+        .context("reproject Claude interview")?;
+    print!(
+        "{}",
+        render_daemon_reproject_claude_interview(&args.session_key, &result, format)?
+    );
+    Ok(())
+}
+
+fn render_daemon_reproject_claude_interview(
+    session_key: &str,
+    result: &ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewResult,
+    format: OutputFormat,
+) -> Result<String> {
+    if format == OutputFormat::Json {
+        return Ok(format!(
+            "{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "session_key": session_key,
+                "revision": result.revision,
+                "session_version": result.session_version,
+                "applied": result.applied,
+                "duplicate": result.duplicate,
+            }))?
+        ));
+    }
+    Ok(format!(
+        "reprojected Claude interview: session={session_key} revision={} version={} applied={} duplicate={}\n",
+        result.revision, result.session_version, result.applied, result.duplicate
+    ))
 }
 
 /// Dispatch the `hangar daemon cred` verbs against the platform secret store.
@@ -10784,6 +10852,55 @@ mod tests {
     fn parses_daemon_status() {
         let cmd = parse_hangar(&["ainb", "hangar", "daemon", "status"]);
         assert!(matches!(cmd, HangarCommand::Daemon(DaemonCommand::Status)));
+    }
+
+    #[test]
+    fn parses_daemon_reproject_claude_interview() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "daemon",
+            "reproject-claude-interview",
+            "--session-key",
+            "claude:session-1",
+            "--expected-version",
+            "13",
+            "--apply",
+        ]);
+        let HangarCommand::Daemon(DaemonCommand::ReprojectClaudeInterview(args)) = cmd else {
+            panic!("expected Claude interview reprojection command");
+        };
+        assert_eq!(args.session_key, "claude:session-1");
+        assert_eq!(args.expected_version, 13);
+        assert!(args.apply);
+    }
+
+    #[test]
+    fn reproject_output_reports_mutation_and_honors_json() {
+        let result = ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewResult {
+            revision: 23,
+            session_version: 7,
+            applied: true,
+            duplicate: false,
+        };
+        let text = render_daemon_reproject_claude_interview(
+            "claude:session-1",
+            &result,
+            OutputFormat::Text,
+        )
+        .unwrap();
+        assert!(text.contains("applied=true duplicate=false"));
+
+        let json = render_daemon_reproject_claude_interview(
+            "claude:session-1",
+            &result,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["session_key"], "claude:session-1");
+        assert_eq!(parsed["applied"], true);
+        assert_eq!(parsed["duplicate"], false);
     }
 
     #[test]

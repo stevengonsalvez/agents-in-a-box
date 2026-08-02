@@ -671,6 +671,28 @@ pub struct FleetActionResult {
     pub receipt: FleetActionReceipt,
 }
 
+/// Parameters for `fleet/reproject_claude_interview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReprojectClaudeInterviewParams {
+    /// Exact managed Claude session to recover.
+    pub session_key: String,
+    /// Version observed before requesting recovery.
+    pub expected_version: i64,
+}
+
+/// Result for `fleet/reproject_claude_interview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReprojectClaudeInterviewResult {
+    /// Durable Fleet revision of the recovery event.
+    pub revision: i64,
+    /// Session version after recovery.
+    pub session_version: i64,
+    /// Whether recovery changed canonical state.
+    pub applied: bool,
+    /// Whether this request reused a prior recovery event.
+    pub duplicate: bool,
+}
+
 /// Parameters for `fleet/receipt_list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetReceiptListParams {

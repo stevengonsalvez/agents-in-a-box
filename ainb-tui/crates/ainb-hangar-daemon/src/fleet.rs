@@ -45,6 +45,137 @@ pub struct HookObservation<'a> {
     pub observed_at: i64,
 }
 
+/// Reprojecting an old Claude interview failed its explicit safety gate.
+#[derive(Debug, thiserror::Error)]
+pub enum FleetReprojectError {
+    /// Session was absent.
+    #[error("Fleet session {0:?} was not found")]
+    SessionNotFound(String),
+    /// Recovery only accepts managed Claude sessions.
+    #[error("Fleet session {0:?} is not a managed Claude session")]
+    NotManagedClaude(String),
+    /// Caller must pin the version inspected before mutation.
+    #[error("Fleet session {session_key:?} version is {actual}, expected {expected}")]
+    StaleVersion {
+        /// Target session.
+        session_key: String,
+        /// Version supplied by caller.
+        expected: i64,
+        /// Current version.
+        actual: i64,
+    },
+    /// Only a stale waiting projection may be recovered.
+    #[error("Fleet session {0:?} is not waiting for recovery")]
+    NotWaiting(String),
+    /// Durable history has no unresolved structured interview.
+    #[error("Fleet session {0:?} has no recoverable Claude interview")]
+    NoRecoverableInterview(String),
+    /// Store failure.
+    #[error(transparent)]
+    Store(#[from] FleetRepoError),
+    /// Query failure.
+    #[error(transparent)]
+    Sql(#[from] sqlx::Error),
+}
+
+/// Rebuild one stale Claude interview from its durable hook history.
+///
+/// This only appends a canonical recovery event. It never calls the broker,
+/// writes to tmux, or sends a provider response.
+pub async fn reproject_claude_interview(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session_key: &str,
+    expected_version: i64,
+    observed_at: i64,
+) -> Result<ApplyFleetEventResult, FleetReprojectError> {
+    let session = FleetRepo::get_session(pool, session_key)
+        .await?
+        .ok_or_else(|| FleetReprojectError::SessionNotFound(session_key.to_string()))?;
+    if session.provider != "claude" || session.management_state != "MANAGED" {
+        return Err(FleetReprojectError::NotManagedClaude(
+            session_key.to_string(),
+        ));
+    }
+    if session.version != expected_version {
+        return Err(FleetReprojectError::StaleVersion {
+            session_key: session_key.to_string(),
+            expected: expected_version,
+            actual: session.version,
+        });
+    }
+    if session.attention_state != "WAITING" {
+        return Err(FleetReprojectError::NotWaiting(session_key.to_string()));
+    }
+
+    let mut active_request = None;
+    for event in FleetRepo::events_for_session(pool, session_key).await? {
+        if event.event_id.starts_with("fleet-reproject:") {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<Value>(&event.payload) else {
+            continue;
+        };
+        let event_type = canonical_hook_event_type(&event.event_type, &payload);
+        let (_, attention) = states_for_hook(event_type, &payload);
+        match attention {
+            Some(AttentionState::Ask)
+                if claude_request_identity(&payload).is_some()
+                    && claude_questions(&payload).is_some() =>
+            {
+                active_request = Some((event.event_id, payload));
+            }
+            // A generic notification caused the original lost projection. It
+            // carries no provider completion signal, so it cannot invalidate
+            // an earlier unresolved interview.
+            Some(AttentionState::Waiting) | None => {}
+            Some(_) => active_request = None,
+        }
+    }
+    let Some((source_event_id, payload)) = active_request else {
+        return Err(FleetReprojectError::NoRecoverableInterview(
+            session_key.to_string(),
+        ));
+    };
+    let fingerprint = claude_request_identity(&payload)
+        .map(|identity| ainb_plugin_notifyd::broker::request_fingerprint(&identity))
+        .ok_or_else(|| FleetReprojectError::NoRecoverableInterview(session_key.to_string()))?;
+    let result = FleetRepo::apply_event_if_version(
+        pool,
+        &NewFleetEvent {
+            event_id: format!("fleet-reproject:{session_key}:{source_event_id}"),
+            session_key: session_key.to_string(),
+            observed_at,
+            authority: ObservationAuthority::Authoritative,
+            event_type: "AskUserQuestion".to_string(),
+            payload: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+            patch: FleetSessionPatch {
+                lifecycle_state: Some(state_token(LifecycleState::Idle)),
+                attention_state: Some(attention_token(AttentionState::Ask)),
+                current_request_fingerprint: Some(Some(fingerprint)),
+                ..FleetSessionPatch::default()
+            },
+        },
+        expected_version,
+    )
+    .await
+    .map_err(|error| match error {
+        FleetRepoError::StaleVersion { actual, .. } => FleetReprojectError::StaleVersion {
+            session_key: session_key.to_string(),
+            expected: expected_version,
+            actual,
+        },
+        FleetRepoError::SessionNotFound { .. } => {
+            FleetReprojectError::SessionNotFound(session_key.to_string())
+        }
+        error => FleetReprojectError::Store(error),
+    })?;
+    if !result.duplicate {
+        events.emit_fleet_revision(result.revision);
+    }
+    Ok(result)
+}
+
 /// Apply one exact provider hook and wake revision subscribers after commit.
 pub async fn apply_hook(
     pool: &SqlitePool,
@@ -54,6 +185,16 @@ pub async fn apply_hook(
     let provider = parse_provider(observation.provider);
     let session_key = SessionKey::managed(provider, observation.provider_session_id);
     let source_event_id = observation.event_id.clone();
+    // Claude emits a PermissionRequest and then a generic notification around an
+    // AskUserQuestion. They describe the same picker, not two operator actions.
+    let event_type = canonical_hook_event_type(observation.event_type, observation.payload);
+    let preserve_active_request = observation.event_type == "Notification"
+        && FleetRepo::get_session(pool, session_key.as_str())
+            .await?
+            .is_some_and(|session| {
+                matches!(session.attention_state.as_str(), "ASK" | "APPROVAL")
+                    && session.current_request_fingerprint.is_some()
+            });
     let tmux_target = observation
         .payload
         .get("tmux_target")
@@ -67,11 +208,14 @@ pub async fn apply_hook(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
-    let (lifecycle_state, attention_state) =
-        states_for_hook(observation.event_type, observation.payload);
+    let (lifecycle_state, attention_state) = if preserve_active_request {
+        (None, None)
+    } else {
+        states_for_hook(event_type, observation.payload)
+    };
     let request_fingerprint = match attention_state {
         Some(AttentionState::Ask | AttentionState::Approval) => {
-            let fingerprint = match (provider, observation.event_type) {
+            let fingerprint = match (provider, event_type) {
                 (Provider::Claude, "AskUserQuestion") => {
                     claude_request_identity(observation.payload).map_or_else(
                         || fingerprint_value(observation.payload),
@@ -98,7 +242,7 @@ pub async fn apply_hook(
         session_key: session_key.to_string(),
         observed_at: observation.observed_at,
         authority: ObservationAuthority::Authoritative,
-        event_type: observation.event_type.to_string(),
+        event_type: event_type.to_string(),
         payload: serde_json::to_string(observation.payload).unwrap_or_else(|_| "{}".to_string()),
         patch: FleetSessionPatch {
             provider: Some(provider.as_str().to_string()),
@@ -1386,6 +1530,25 @@ fn states_for_hook(
     }
 }
 
+fn canonical_hook_event_type<'a>(event_type: &'a str, payload: &Value) -> &'a str {
+    if event_type == "PermissionRequest"
+        && claude_hook_tool_name(payload) == Some("AskUserQuestion")
+    {
+        "AskUserQuestion"
+    } else {
+        event_type
+    }
+}
+
+fn claude_hook_tool_name(payload: &Value) -> Option<&str> {
+    let hook = payload.get("payload").unwrap_or(payload);
+    payload
+        .get("matcher")
+        .or_else(|| hook.get("tool_name"))
+        .or_else(|| hook.get("tool"))
+        .and_then(Value::as_str)
+}
+
 fn has_active_background_work(payload: &Value) -> bool {
     let hook = payload.get("payload").unwrap_or(payload);
     [
@@ -1489,15 +1652,18 @@ fn claude_request_identity(payload: &Value) -> Option<Value> {
     }))
 }
 
+fn claude_questions(payload: &Value) -> Option<&Vec<Value>> {
+    let hook = payload.get("payload").unwrap_or(payload);
+    hook.get("tool_input")
+        .or_else(|| hook.get("input"))?
+        .get("questions")?
+        .as_array()
+        .filter(|questions| !questions.is_empty())
+}
+
 fn claude_permission_identity(payload: &Value) -> Option<(String, String)> {
     let hook = payload.get("payload").unwrap_or(payload);
-    let tool = payload
-        .get("matcher")
-        .or_else(|| hook.get("tool_name"))
-        .or_else(|| hook.get("tool"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let tool = claude_hook_tool_name(payload).unwrap_or_default().to_string();
     let context = hook
         .get("tool_input")
         .or_else(|| hook.get("input"))
@@ -1825,6 +1991,165 @@ mod tests {
         assert_eq!(
             states_for_hook("SessionEnd", &serde_json::json!({})),
             (Some(LifecycleState::Exited), Some(AttentionState::None))
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_interview_stays_answerable_through_permission_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let question = serde_json::json!({
+            "questions": [{
+                "question": "When?",
+                "options": [{"label": "August"}]
+            }]
+        });
+        let ask = serde_json::json!({ "payload": { "tool_input": question.clone() } });
+
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "ask".into(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "AskUserQuestion",
+                payload: &ask,
+                observed_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let expected = FleetRepo::get_session(store.pool(), "claude:session-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .current_request_fingerprint;
+
+        let permission = serde_json::json!({
+            "matcher": "AskUserQuestion",
+            "payload": { "tool_input": question.clone() }
+        });
+        let notification = serde_json::json!({
+            "payload": { "notification_type": "permission_prompt" }
+        });
+        for (event_id, event_type, payload, observed_at) in [
+            ("permission", "PermissionRequest", &permission, 2),
+            ("notification", "Notification", &notification, 3),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.into(),
+                    provider: "claude",
+                    provider_session_id: "session-1",
+                    cwd: "/repo",
+                    event_type,
+                    payload,
+                    observed_at,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let session =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(session.attention_state, "ASK");
+        assert_eq!(session.current_request_fingerprint, expected);
+    }
+
+    #[tokio::test]
+    async fn reproject_claude_interview_recovers_old_waiting_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let broker = EventBroker::new();
+        let sink = broker.sink();
+        let question = serde_json::json!({
+            "questions": [{
+                "question": "When?",
+                "options": [{"label": "August"}]
+            }]
+        });
+        let ask = serde_json::json!({ "payload": { "tool_input": question.clone() } });
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "ask".into(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "AskUserQuestion",
+                payload: &ask,
+                observed_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        let permission = serde_json::json!({
+            "matcher": "AskUserQuestion",
+            "payload": { "tool_input": question.clone() }
+        });
+        for (event_id, event_type, payload, patch, observed_at) in [
+            (
+                "old-permission",
+                "PermissionRequest",
+                permission,
+                FleetSessionPatch {
+                    attention_state: Some("APPROVAL".to_string()),
+                    current_request_fingerprint: Some(Some("fnv1a64:old".to_string())),
+                    ..FleetSessionPatch::default()
+                },
+                2,
+            ),
+            (
+                "old-notification",
+                "Notification",
+                serde_json::json!({ "payload": { "notification_type": "permission_prompt" } }),
+                FleetSessionPatch {
+                    attention_state: Some("WAITING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+                3,
+            ),
+        ] {
+            FleetRepo::apply_event(
+                store.pool(),
+                &NewFleetEvent {
+                    event_id: event_id.to_string(),
+                    session_key: "claude:session-1".to_string(),
+                    observed_at,
+                    authority: ObservationAuthority::Authoritative,
+                    event_type: event_type.to_string(),
+                    payload: serde_json::to_string(&payload).unwrap(),
+                    patch,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let stale =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(stale.attention_state, "WAITING");
+        let mut revisions = broker.subscribe_fleet();
+
+        let result =
+            reproject_claude_interview(store.pool(), &sink, "claude:session-1", stale.version, 4)
+                .await
+                .unwrap();
+        assert!(!result.duplicate);
+        assert_eq!(revisions.recv().await.unwrap(), result.revision);
+        let projection = FleetRepo::subscription_projection(store.pool(), 0, 100).await.unwrap();
+        let restored = &projection.sessions[0];
+        assert_eq!(restored.session.attention_state, "ASK");
+        assert_eq!(
+            restored.current_request.as_ref().unwrap()["payload"]["tool_input"]["questions"][0]["question"],
+            "When?"
         );
     }
 
