@@ -7904,7 +7904,10 @@ async fn run_daemon_reproject_claude_interview(
         )
         .await
         .context("reproject Claude interview")?;
-    print!("{}", render_daemon_reproject_claude_interview(&args.session_key, &result, format)?);
+    print!(
+        "{}",
+        render_daemon_reproject_claude_interview(&args.session_key, &result, format)?
+    );
     Ok(())
 }
 
