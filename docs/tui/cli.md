@@ -3478,15 +3478,16 @@ Inspect the Hangar control-plane daemon
 Usage: ainb hangar daemon [OPTIONS] <COMMAND>
 
 Commands:
-  status   Report whether the daemon is running (PID file + socket) and the database is reachable
-  run      Run the daemon in the FOREGROUND (boot + claim loop until interrupted)
-  start    Start the daemon as a BACKGROUND child, recording its PID
-  stop     Stop the running daemon: signal the exact recorded PID, then remove the PID file
-  restart  Restart the daemon: `stop` (if running) then `start`
-  setup    One-command bring-up: ensure the store + socket-auth token, then `start`
-  config   View + edit the daemon's user-config knobs (`list`/`get`/`set`)
-  cred     Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
-  help     Print this message or the help of the given subcommand(s)
+  status                      Report whether the daemon is running (PID file + socket) and the database is reachable
+  run                         Run the daemon in the FOREGROUND (boot + claim loop until interrupted)
+  start                       Start the daemon as a BACKGROUND child, recording its PID
+  stop                        Stop the running daemon: signal the exact recorded PID, then remove the PID file
+  restart                     Restart the daemon: `stop` (if running) then `start`
+  setup                       One-command bring-up: ensure the store + socket-auth token, then `start`
+  reproject-claude-interview  Rebuild one stale Claude structured interview from durable hook history
+  config                      View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+  cred                        Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
+  help                        Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3597,6 +3598,29 @@ Usage: ainb hangar daemon setup [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar daemon reproject-claude-interview`
+
+Rebuild one stale Claude structured interview from durable hook history
+
+```console
+$ ainb hangar daemon reproject-claude-interview --help
+Rebuild one stale Claude structured interview from durable hook history
+
+Usage: ainb hangar daemon reproject-claude-interview [OPTIONS] --session-key <SESSION_KEY> --expected-version <EXPECTED_VERSION>
+
+Options:
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --session-key <SESSION_KEY>
+          Exact Fleet session key, for example `claude:<provider-session-id>`
+      --expected-version <EXPECTED_VERSION>
+          Exact version observed before this mutation. Rejects stale inspection
+      --apply
+          Required acknowledgement that this appends a recovery projection
+  -h, --help
+          Print help
 ```
 
 #### `ainb hangar daemon config`
