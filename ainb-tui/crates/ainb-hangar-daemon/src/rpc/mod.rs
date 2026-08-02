@@ -929,6 +929,9 @@ async fn handle(
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
+        methods::FLEET_REPROJECT_CLAUDE_INTERVIEW => {
+            handle_fleet_reproject_claude_interview(pool, req, events).await
+        }
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -1047,6 +1050,41 @@ async fn handle_fleet_action(
         parse_params(req, "{ session_key, expected_version, request_id, action }")?;
     let receipt = execute_fleet_action(pool, params, None, events).await?;
     to_value(&ainb_hangar_proto::fleet::FleetActionResult { receipt })
+}
+
+/// Rebuild one stale Claude interview and publish its committed revision.
+async fn handle_fleet_reproject_claude_interview(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FleetReprojectClaudeInterviewParams, FleetReprojectClaudeInterviewResult,
+    };
+
+    let params: FleetReprojectClaudeInterviewParams =
+        parse_params(req, "{ session_key, expected_version }")?;
+    if params.session_key.trim().is_empty() {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    if params.expected_version < 0 {
+        return Err(invalid_params("expected_version must be non-negative"));
+    }
+    let result = crate::fleet::reproject_claude_interview(
+        pool,
+        events,
+        &params.session_key,
+        params.expected_version,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(fleet_reproject_err)?;
+    to_value(&FleetReprojectClaudeInterviewResult {
+        revision: result.revision,
+        session_version: result.session_version,
+        applied: result.applied,
+        duplicate: result.duplicate,
+    })
 }
 
 const FLEET_RECEIPT_LIST_MAX: u32 = 100;
@@ -2943,6 +2981,14 @@ fn fleet_repo_err(error: ainb_hangar_store::repo::fleet::FleetRepoError) -> RpcE
         | FleetRepoError::RequestFingerprintMismatch { .. }
         | FleetRepoError::ReceiptCollision { .. }
         | FleetRepoError::EventIdCollision { .. } => invalid_params(&error.to_string()),
+    }
+}
+
+fn fleet_reproject_err(error: crate::fleet::FleetReprojectError) -> RpcError {
+    match error {
+        crate::fleet::FleetReprojectError::Sql(error) => store_err(&error),
+        crate::fleet::FleetReprojectError::Store(error) => fleet_repo_err(error),
+        error => invalid_params(&error.to_string()),
     }
 }
 
@@ -9313,6 +9359,58 @@ mod tests {
             method: method.into(),
             params,
         }
+    }
+
+    #[tokio::test]
+    async fn fleet_reproject_uses_daemon_broker_for_live_revision() {
+        use ainb_hangar_proto::fleet::{
+            FleetReprojectClaudeInterviewParams, FleetReprojectClaudeInterviewResult,
+        };
+        use ainb_hangar_store::repo::fleet::{
+            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let source = NewFleetEvent {
+            event_id: "ask".to_string(),
+            session_key: "claude:session-1".to_string(),
+            observed_at: 1,
+            authority: ObservationAuthority::Authoritative,
+            event_type: "AskUserQuestion".to_string(),
+            payload: serde_json::json!({
+                "payload": { "tool_input": { "questions": [{ "question": "When?" }] } }
+            })
+            .to_string(),
+            patch: FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                management_state: Some("MANAGED".to_string()),
+                attention_state: Some("WAITING".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        };
+        let stale = FleetRepo::apply_event(store.pool(), &source).await.unwrap();
+        let broker = EventBroker::new();
+        let mut revisions = broker.subscribe_fleet();
+        let response = dispatch(
+            store.pool(),
+            &req(
+                methods::FLEET_REPROJECT_CLAUDE_INTERVIEW,
+                serde_json::to_value(FleetReprojectClaudeInterviewParams {
+                    session_key: "claude:session-1".to_string(),
+                    expected_version: stale.session_version,
+                })
+                .unwrap(),
+            ),
+            &health(),
+            &broker.sink(),
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{response:?}");
+        let result: FleetReprojectClaudeInterviewResult =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(revisions.recv().await.unwrap(), result.revision);
     }
 
     #[tokio::test]

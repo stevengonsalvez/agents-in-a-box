@@ -7885,22 +7885,22 @@ async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()>
     }
 }
 
-/// Rebuild a stale Claude interview without talking to Claude or the broker.
+/// Rebuild a stale Claude interview through the live daemon broker.
 async fn run_daemon_reproject_claude_interview(args: ReprojectClaudeInterviewArgs) -> Result<()> {
     if !args.apply {
         anyhow::bail!("refusing recovery mutation: rerun with --apply");
     }
-    let store = Store::open_default().await.context("open hangar database")?;
-    let broker = ainb_hangar_daemon::events::EventBroker::new();
-    let result = ainb_hangar_daemon::fleet::reproject_claude_interview(
-        store.pool(),
-        &broker.sink(),
-        &args.session_key,
-        args.expected_version,
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .await
-    .context("reproject Claude interview")?;
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .context("connect to live hangar daemon")?;
+    let result = client
+        .fleet_reproject_claude_interview(
+            ainb_hangar_proto::fleet::FleetReprojectClaudeInterviewParams {
+                session_key: args.session_key.clone(),
+                expected_version: args.expected_version,
+            },
+        )
+        .await
+        .context("reproject Claude interview")?;
     println!(
         "reprojected Claude interview: session={} revision={} version={}",
         args.session_key, result.revision, result.session_version

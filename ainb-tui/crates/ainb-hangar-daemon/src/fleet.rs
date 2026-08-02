@@ -93,7 +93,9 @@ pub async fn reproject_claude_interview(
         .await?
         .ok_or_else(|| FleetReprojectError::SessionNotFound(session_key.to_string()))?;
     if session.provider != "claude" || session.management_state != "MANAGED" {
-        return Err(FleetReprojectError::NotManagedClaude(session_key.to_string()));
+        return Err(FleetReprojectError::NotManagedClaude(
+            session_key.to_string(),
+        ));
     }
     if session.version != expected_version {
         return Err(FleetReprojectError::StaleVersion {
@@ -131,12 +133,14 @@ pub async fn reproject_claude_interview(
         }
     }
     let Some((source_event_id, payload)) = active_request else {
-        return Err(FleetReprojectError::NoRecoverableInterview(session_key.to_string()));
+        return Err(FleetReprojectError::NoRecoverableInterview(
+            session_key.to_string(),
+        ));
     };
     let fingerprint = claude_request_identity(&payload)
         .map(|identity| ainb_plugin_notifyd::broker::request_fingerprint(&identity))
         .ok_or_else(|| FleetReprojectError::NoRecoverableInterview(session_key.to_string()))?;
-    let result = FleetRepo::apply_event(
+    let result = FleetRepo::apply_event_if_version(
         pool,
         &NewFleetEvent {
             event_id: format!("fleet-reproject:{session_key}:{source_event_id}"),
@@ -152,8 +156,20 @@ pub async fn reproject_claude_interview(
                 ..FleetSessionPatch::default()
             },
         },
+        expected_version,
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        FleetRepoError::StaleVersion { actual, .. } => FleetReprojectError::StaleVersion {
+            session_key: session_key.to_string(),
+            expected: expected_version,
+            actual,
+        },
+        FleetRepoError::SessionNotFound { .. } => {
+            FleetReprojectError::SessionNotFound(session_key.to_string())
+        }
+        error => FleetReprojectError::Store(error),
+    })?;
     if !result.duplicate {
         events.emit_fleet_revision(result.revision);
     }
@@ -2056,7 +2072,8 @@ mod tests {
     async fn reproject_claude_interview_recovers_old_waiting_projection() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let sink = EventBroker::new().sink();
+        let broker = EventBroker::new();
+        let sink = broker.sink();
         let question = serde_json::json!({
             "questions": [{
                 "question": "When?",
@@ -2122,28 +2139,24 @@ mod tests {
             .await
             .unwrap();
         }
-        let stale = FleetRepo::get_session(store.pool(), "claude:session-1")
-            .await
-            .unwrap()
-            .unwrap();
+        let stale =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
         assert_eq!(stale.attention_state, "WAITING");
+        let mut revisions = broker.subscribe_fleet();
 
-        let result = reproject_claude_interview(
-            store.pool(),
-            &sink,
-            "claude:session-1",
-            stale.version,
-            4,
-        )
-        .await
-        .unwrap();
+        let result =
+            reproject_claude_interview(store.pool(), &sink, "claude:session-1", stale.version, 4)
+                .await
+                .unwrap();
         assert!(!result.duplicate);
-        let projection = FleetRepo::subscription_projection(store.pool(), 0, 100)
-            .await
-            .unwrap();
+        assert_eq!(revisions.recv().await.unwrap(), result.revision);
+        let projection = FleetRepo::subscription_projection(store.pool(), 0, 100).await.unwrap();
         let restored = &projection.sessions[0];
         assert_eq!(restored.session.attention_state, "ASK");
-        assert_eq!(restored.current_request.as_ref().unwrap()["payload"]["tool_input"]["questions"][0]["question"], "When?");
+        assert_eq!(
+            restored.current_request.as_ref().unwrap()["payload"]["tool_input"]["questions"][0]["question"],
+            "When?"
+        );
     }
 
     #[test]

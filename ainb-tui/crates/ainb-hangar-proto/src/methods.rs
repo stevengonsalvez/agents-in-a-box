@@ -410,6 +410,8 @@ pub const FLEET_RECEIPT_GET: &str = "fleet/receipt_get";
 pub const FLEET_START: &str = "fleet/start";
 /// Read bounded, payload-free Fleet revision timeline entries.
 pub const FLEET_TIMELINE: &str = "fleet/timeline";
+/// Rebuild one stale Claude interview through the live daemon broker.
+pub const FLEET_REPROJECT_CLAUDE_INTERVIEW: &str = "fleet/reproject_claude_interview";
 
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &["fleet/resync_required"];
@@ -1657,6 +1659,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_RECEIPT_GET,
     FLEET_START,
     FLEET_TIMELINE,
+    FLEET_REPROJECT_CLAUDE_INTERVIEW,
     // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
     // tail, append-only wire.
     HANGAR_DISPATCH_ATTEMPTS_LIST,
@@ -1937,6 +1940,7 @@ mod tests {
             FLEET_RECEIPT_GET,
             FLEET_START,
             FLEET_TIMELINE,
+            FLEET_REPROJECT_CLAUDE_INTERVIEW,
             HANGAR_DISPATCH_ATTEMPTS_LIST,
             HANGAR_ISSUE_TIMELINE,
             HANGAR_PROPERTIES_LIST,
