@@ -1497,6 +1497,10 @@ async fn execute_fleet_action(
             request_fingerprint,
             ..
         }
+        | ControlAction::DismissStructured {
+            request_fingerprint,
+            ..
+        }
         | ControlAction::Approve {
             request_fingerprint,
             ..
@@ -1622,6 +1626,12 @@ async fn execute_fleet_action(
                 } if session.provider == "claude" => {
                     execute_claude_structured(pool, &session, request_fingerprint, answers).await
                 }
+                ControlAction::DismissStructured {
+                    request_fingerprint,
+                    ..
+                } if session.provider == "claude" => {
+                    execute_claude_structured_dismiss(&session, request_fingerprint).await
+                }
                 ControlAction::Approve {
                     request_fingerprint,
                     ..
@@ -1650,6 +1660,7 @@ async fn execute_fleet_action(
                     }
                 }
                 ControlAction::StructuredAnswer { .. }
+                | ControlAction::DismissStructured { .. }
                 | ControlAction::Approve { .. }
                 | ControlAction::Deny { .. } => (
                     ActionReceiptStatus::Unknown,
@@ -2611,6 +2622,47 @@ async fn execute_claude_structured(
     }
 }
 
+async fn execute_claude_structured_dismiss(
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    let session_id = session.provider_session_id.clone().unwrap_or_default();
+    let fingerprint = request_fingerprint.to_string();
+    let socket = match approve_socket_path() {
+        Ok(socket) => socket,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    match tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_dismiss_structured(
+            &socket,
+            &session_id,
+            &fingerprint,
+            "rejected from Fleet",
+        )
+    })
+    .await
+    {
+        Ok(Ok(ack)) if ack.matched => (
+            ActionReceiptStatus::Delivered,
+            Some("claude structured rejection broker".to_string()),
+        ),
+        Ok(Ok(ack)) if ack.stale => (
+            ActionReceiptStatus::Failed,
+            Some("Claude structured request is stale".to_string()),
+        ),
+        Ok(Ok(ack)) => (
+            ActionReceiptStatus::Failed,
+            ack.error.or_else(|| Some("Claude request no longer waiting".to_string())),
+        ),
+        Ok(Err(error)) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
 fn approve_socket_path() -> std::io::Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(path) = APPROVE_SOCKET_OVERRIDE
@@ -2913,6 +2965,7 @@ fn action_capability(
     use ainb_hangar_proto::fleet::ControlAction;
     match action {
         ControlAction::StructuredAnswer { .. } => capabilities.structured_answer,
+        ControlAction::DismissStructured { .. } => capabilities.structured_dismiss,
         ControlAction::Approve { .. } | ControlAction::Deny { .. } => capabilities.approvals,
         ControlAction::VerifiedPicker { .. } => capabilities.verified_picker,
         ControlAction::SendPrompt { .. } => capabilities.send_prompt || capabilities.tmux_text,

@@ -182,6 +182,26 @@ final class FleetConnectionTests: XCTestCase {
         XCTAssertTrue(FleetOperatorAction.sendPrompt.isAvailable(in: capabilities))
     }
 
+    func testStructuredDismissWirePreservesExactIdentityAndOldCapabilitiesDefaultOff() throws {
+        let action = ControlAction.dismissStructured(
+            requestFingerprint: "sha256:request",
+            requestIdentity: FleetRequestIdentity(
+                requestID: .string("request-1"),
+                threadID: "thread-1",
+                turnID: "turn-2",
+                itemID: "item-3"
+            )
+        )
+        let data = try JSONEncoder().encode(action)
+        let encoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(encoded?["action"] as? String, "dismiss_structured")
+        XCTAssertEqual(encoded?["request_fingerprint"] as? String, "sha256:request")
+        XCTAssertEqual(try JSONDecoder().decode(ControlAction.self, from: data), action)
+
+        let legacy = try JSONDecoder().decode(FleetCapabilities.self, from: Data("{}".utf8))
+        XCTAssertFalse(legacy.structuredDismiss)
+    }
+
     @MainActor
     func testBroadcastReceiptMergePreservesDaemonInputOrder() {
         let existing = [receipt("old")]

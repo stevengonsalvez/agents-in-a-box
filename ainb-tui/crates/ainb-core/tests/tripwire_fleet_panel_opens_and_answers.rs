@@ -492,23 +492,23 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     send_key(&session, "Down");
     send_key(&session, "Space");
     demo_pause();
-    send_key(&session, "Tab");
+    send_key(&session, "Right");
     let tabbed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
         c.contains("Rollout") && c.contains("When should the release launch?")
     });
     assert!(
         tabbed.is_some(),
-        "Tab did not move to Rollout:\n{}",
+        "Right arrow did not move to Rollout:\n{}",
         capture_pane(&session)
     );
     demo_pause();
     send_key(&session, "Enter");
     let answered = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
-        c.contains("answered ask: Delivered") && c.contains("claude structured hook broker")
+        c.contains("waiting for Fleet snapshot confirmation") && c.contains("STRUCTURED INTERVIEW")
     });
     let Some(answer_cap) = answered else {
         let last = capture_pane(&session);
-        panic!("Fleet answer dispatch feedback never rendered; last capture:\n---\n{last}\n---");
+        panic!("Fleet answer confirmation never rendered; last capture:\n---\n{last}\n---");
     };
     assert!(
         !answer_cap.contains("no live session matched"),

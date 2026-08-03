@@ -99,6 +99,33 @@ indirect enum JSONValue: Codable, Equatable {
     }
 }
 
+extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        guard case let .object(value) = self else { return nil }
+        return value
+    }
+
+    var arrayValue: [JSONValue]? {
+        guard case let .array(value) = self else { return nil }
+        return value
+    }
+
+    var stringValue: String? {
+        guard case let .string(value) = self else { return nil }
+        return value
+    }
+
+    var boolValue: Bool? {
+        guard case let .bool(value) = self else { return nil }
+        return value
+    }
+
+    func value(_ names: String...) -> JSONValue? {
+        guard let object = objectValue else { return nil }
+        return names.lazy.compactMap { object[$0] }.first
+    }
+}
+
 struct FleetProtocolRange: Codable, Equatable {
     let min: UInt32
     let max: UInt32
@@ -182,7 +209,63 @@ struct FleetCapabilities: Codable, Equatable {
     let tmuxAttach: Bool
     let tmuxText: Bool
     let verifiedPicker: Bool
-    private enum CodingKeys: String, CodingKey { case structuredAnswer = "structured_answer", approvals, sendPrompt = "send_prompt", continueTurn = "continue_turn", retry, interrupt, start, stop, restart, kill, archive, tmuxAttach = "tmux_attach", tmuxText = "tmux_text", verifiedPicker = "verified_picker" }
+    let structuredDismiss: Bool
+    private enum CodingKeys: String, CodingKey { case structuredAnswer = "structured_answer", approvals, sendPrompt = "send_prompt", continueTurn = "continue_turn", retry, interrupt, start, stop, restart, kill, archive, tmuxAttach = "tmux_attach", tmuxText = "tmux_text", verifiedPicker = "verified_picker", structuredDismiss = "structured_dismiss" }
+
+    init(
+        structuredAnswer: Bool,
+        approvals: Bool,
+        sendPrompt: Bool,
+        continueTurn: Bool,
+        retry: Bool,
+        interrupt: Bool,
+        start: Bool,
+        stop: Bool,
+        restart: Bool,
+        kill: Bool,
+        archive: Bool,
+        tmuxAttach: Bool,
+        tmuxText: Bool,
+        verifiedPicker: Bool,
+        structuredDismiss: Bool = false
+    ) {
+        self.structuredAnswer = structuredAnswer
+        self.approvals = approvals
+        self.sendPrompt = sendPrompt
+        self.continueTurn = continueTurn
+        self.retry = retry
+        self.interrupt = interrupt
+        self.start = start
+        self.stop = stop
+        self.restart = restart
+        self.kill = kill
+        self.archive = archive
+        self.tmuxAttach = tmuxAttach
+        self.tmuxText = tmuxText
+        self.verifiedPicker = verifiedPicker
+        self.structuredDismiss = structuredDismiss
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            structuredAnswer: try c.decodeIfPresent(Bool.self, forKey: .structuredAnswer) ?? false,
+            approvals: try c.decodeIfPresent(Bool.self, forKey: .approvals) ?? false,
+            sendPrompt: try c.decodeIfPresent(Bool.self, forKey: .sendPrompt) ?? false,
+            continueTurn: try c.decodeIfPresent(Bool.self, forKey: .continueTurn) ?? false,
+            retry: try c.decodeIfPresent(Bool.self, forKey: .retry) ?? false,
+            interrupt: try c.decodeIfPresent(Bool.self, forKey: .interrupt) ?? false,
+            start: try c.decodeIfPresent(Bool.self, forKey: .start) ?? false,
+            stop: try c.decodeIfPresent(Bool.self, forKey: .stop) ?? false,
+            restart: try c.decodeIfPresent(Bool.self, forKey: .restart) ?? false,
+            kill: try c.decodeIfPresent(Bool.self, forKey: .kill) ?? false,
+            archive: try c.decodeIfPresent(Bool.self, forKey: .archive) ?? false,
+            tmuxAttach: try c.decodeIfPresent(Bool.self, forKey: .tmuxAttach) ?? false,
+            tmuxText: try c.decodeIfPresent(Bool.self, forKey: .tmuxText) ?? false,
+            verifiedPicker: try c.decodeIfPresent(Bool.self, forKey: .verifiedPicker) ?? false,
+            structuredDismiss: try c.decodeIfPresent(Bool.self, forKey: .structuredDismiss) ?? false
+        )
+    }
 }
 
 struct FleetSession: Codable, Equatable {
@@ -304,8 +387,26 @@ struct FleetRequestIdentity: Codable, Equatable {
     private enum CodingKeys: String, CodingKey { case requestID = "request_id", threadID = "thread_id", turnID = "turn_id", itemID = "item_id" }
 }
 
+extension FleetRequestIdentity {
+    static func from(request: JSONValue?) -> FleetRequestIdentity? {
+        guard let request else { return nil }
+        let payload = request.value("payload") ?? request
+        let identity = payload.value("identity") ?? payload
+        guard let requestID = identity.value("requestId", "request_id", "tool_use_id", "id") else {
+            return nil
+        }
+        return FleetRequestIdentity(
+            requestID: requestID,
+            threadID: identity.value("threadId", "thread_id")?.stringValue ?? "",
+            turnID: identity.value("turnId", "turn_id")?.stringValue ?? "",
+            itemID: identity.value("itemId", "item_id")?.stringValue ?? ""
+        )
+    }
+}
+
 enum ControlAction: Codable, Equatable {
     case structuredAnswer(requestFingerprint: String, requestIdentity: FleetRequestIdentity?, answers: [FleetQuestionAnswer])
+    case dismissStructured(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
     case approve(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
     case deny(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
     case verifiedPicker(requestFingerprint: String, key: String)
@@ -315,12 +416,13 @@ enum ControlAction: Codable, Equatable {
     case restart, stop, kill, archive
 
     private enum CodingKeys: String, CodingKey { case action, requestFingerprint = "request_fingerprint", requestIdentity = "request_identity", answers, key, text, provider, cwd, prompt }
-    private enum Tag: String, Codable { case structuredAnswer = "structured_answer", approve, deny, verifiedPicker = "verified_picker", sendPrompt = "send_prompt", `continue`, retry, interrupt, start, restart, stop, kill, archive }
+    private enum Tag: String, Codable { case structuredAnswer = "structured_answer", dismissStructured = "dismiss_structured", approve, deny, verifiedPicker = "verified_picker", sendPrompt = "send_prompt", `continue`, retry, interrupt, start, restart, stop, kill, archive }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Tag.self, forKey: .action) {
         case .structuredAnswer: self = .structuredAnswer(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity), answers: try c.decode([FleetQuestionAnswer].self, forKey: .answers))
+        case .dismissStructured: self = .dismissStructured(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
         case .approve: self = .approve(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
         case .deny: self = .deny(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
         case .verifiedPicker: self = .verifiedPicker(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), key: try c.decode(String.self, forKey: .key))
@@ -341,6 +443,8 @@ enum ControlAction: Codable, Equatable {
         switch self {
         case let .structuredAnswer(fingerprint, identity, answers):
             try c.encode(Tag.structuredAnswer, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity); try c.encode(answers, forKey: .answers)
+        case let .dismissStructured(fingerprint, identity):
+            try c.encode(Tag.dismissStructured, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity)
         case let .approve(fingerprint, identity):
             try c.encode(Tag.approve, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity)
         case let .deny(fingerprint, identity):

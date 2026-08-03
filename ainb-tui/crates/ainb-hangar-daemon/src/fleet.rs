@@ -1569,6 +1569,7 @@ fn managed_capabilities(provider: Provider) -> String {
     let broker = provider == Provider::Claude;
     serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
         structured_answer: broker,
+        structured_dismiss: broker,
         approvals: broker,
         send_prompt: false,
         continue_turn: false,
@@ -1601,6 +1602,7 @@ fn claude_managed_capabilities(exact_tmux_identity: bool) -> String {
 fn codex_managed_capabilities(capabilities: &CodexCapabilities) -> String {
     serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
         structured_answer: capabilities.request_user_input,
+        structured_dismiss: false,
         approvals: capabilities.approvals,
         send_prompt: true,
         continue_turn: true,
