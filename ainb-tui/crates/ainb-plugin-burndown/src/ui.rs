@@ -51,8 +51,11 @@ const BAR_THRESHOLD_MED: f64 = 0.33;
 pub enum UsageTab {
     #[default]
     Burndown,
-    Daily,
-    Weekly,
+    /// GitHub-style contribution heatmap. Replaces the old Daily and Weekly
+    /// tables: the same per-day buckets, read as a year-long canvas instead of
+    /// two scrolling lists, with the exact figures moved into a cursor-driven
+    /// detail strip.
+    Activity,
     Projects,
     Optimize,
     Savings,
@@ -62,8 +65,7 @@ impl UsageTab {
     fn all() -> &'static [UsageTab] {
         &[
             UsageTab::Burndown,
-            UsageTab::Daily,
-            UsageTab::Weekly,
+            UsageTab::Activity,
             UsageTab::Projects,
             UsageTab::Optimize,
             UsageTab::Savings,
@@ -73,8 +75,7 @@ impl UsageTab {
     fn title(&self) -> &'static str {
         match self {
             UsageTab::Burndown => "Burndown",
-            UsageTab::Daily => "Daily",
-            UsageTab::Weekly => "Weekly",
+            UsageTab::Activity => "Activity",
             UsageTab::Projects => "By Project",
             UsageTab::Optimize => "Optimize",
             UsageTab::Savings => "Savings",
@@ -83,9 +84,8 @@ impl UsageTab {
 
     fn next(&self) -> Self {
         match self {
-            UsageTab::Burndown => UsageTab::Daily,
-            UsageTab::Daily => UsageTab::Weekly,
-            UsageTab::Weekly => UsageTab::Projects,
+            UsageTab::Burndown => UsageTab::Activity,
+            UsageTab::Activity => UsageTab::Projects,
             UsageTab::Projects => UsageTab::Optimize,
             UsageTab::Optimize => UsageTab::Savings,
             UsageTab::Savings => UsageTab::Burndown,
@@ -95,9 +95,8 @@ impl UsageTab {
     fn prev(&self) -> Self {
         match self {
             UsageTab::Burndown => UsageTab::Savings,
-            UsageTab::Daily => UsageTab::Burndown,
-            UsageTab::Weekly => UsageTab::Daily,
-            UsageTab::Projects => UsageTab::Weekly,
+            UsageTab::Activity => UsageTab::Burndown,
+            UsageTab::Projects => UsageTab::Activity,
             UsageTab::Optimize => UsageTab::Projects,
             UsageTab::Savings => UsageTab::Optimize,
         }
@@ -266,6 +265,12 @@ pub struct UsageViewState {
     /// True when the zoom view's `/` fuzzy-search overlay is active.
     /// Resets on zoom exit (we deliberately do *not* persist a search
     /// across zoom cycles — the brief is "search clears on zoom exit").
+    /// Metric driving heatmap cell intensity on the Activity tab. Cost by
+    /// default — this is a spend tool — cycled with `M`.
+    pub heat_metric: crate::heatmap::HeatMetric,
+    /// Selected day on the Activity tab. `None` until the first render, which
+    /// seeds it to the most recent day so the cursor never starts off-canvas.
+    pub heatmap_cursor: Option<chrono::NaiveDate>,
     pub zoom_search_active: bool,
     /// Live query buffer for the zoom-mode fuzzy search.
     pub zoom_search_query: String,
@@ -341,6 +346,8 @@ impl Default for UsageViewState {
         Self {
             active_tab: UsageTab::Burndown,
             data: None,
+            heat_metric: crate::heatmap::HeatMetric::default(),
+            heatmap_cursor: None,
             fresh_pivot: false,
             loading: false,
             scroll_offset: 0,
@@ -509,8 +516,9 @@ impl UsageViewState {
         match &self.data {
             None => 0,
             Some(data) => match self.active_tab {
-                UsageTab::Daily => data.daily.len(),
-                UsageTab::Weekly => data.weekly.len(),
+                // The heatmap is a fixed canvas, not a scrolling list: it has
+                // no rows to page through, so scroll keys are inert here.
+                UsageTab::Activity => 0,
                 UsageTab::Projects => data.projects.len(),
                 UsageTab::Burndown => {
                     data.daily.len()
@@ -680,6 +688,47 @@ impl UsageViewState {
     /// resolve the row by index because that's what the user is
     /// looking at when focus is active (we render from filtered_data
     /// at draw time, which is the same source).
+    /// Move the Activity-tab cursor by `dx` weeks / `dy` days, seeding it to
+    /// today on first use. Clamped inside the canvas by the grid itself.
+    pub fn heatmap_move(&mut self, dx: i32, dy: i32) {
+        let today = crate::data::usage::local_now().date_naive();
+        let from = self.heatmap_cursor.unwrap_or(today);
+        let Some(data) = self.data.as_ref() else {
+            self.heatmap_cursor = Some(from);
+            return;
+        };
+        let grid = crate::heatmap::HeatmapGrid::build(
+            data,
+            self.heat_metric,
+            today,
+            crate::heatmap::WEEKS_IN_CANVAS,
+        );
+        self.heatmap_cursor = Some(grid.step(from, dx, dy));
+    }
+
+    /// Cycle the heatmap's intensity metric (cost → tokens → calls → sessions).
+    pub fn heatmap_cycle_metric(&mut self) {
+        self.heat_metric = self.heat_metric.next();
+    }
+
+    /// Pivot every other panel to the selected day.
+    ///
+    /// Implemented as a single-day `Custom` period rather than a new date chip:
+    /// the period range already flows through `filter_usage_data_full`, so this
+    /// needs no new filter machinery, and the chip strip renders the range so
+    /// the narrowed state stays visible.
+    pub fn heatmap_commit_day(&mut self) -> bool {
+        let Some(day) = self
+            .heatmap_cursor
+            .or_else(|| Some(crate::data::usage::local_now().date_naive()))
+        else {
+            return false;
+        };
+        self.period = UsagePeriod::Custom { from: day, to: day };
+        self.scroll_offset = 0;
+        true
+    }
+
     pub fn commit_focused_row(&mut self) -> bool {
         let Some((target, value, owner_project)) = self.resolve_focused_row() else {
             return false;
@@ -1013,12 +1062,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             render_no_data(buf, layout[content_idx], state);
         } else {
             match state.active_tab {
-                UsageTab::Daily => {
-                    render_daily(buf, layout[content_idx], data, state.scroll_offset)
-                }
-                UsageTab::Weekly => {
-                    render_weekly(buf, layout[content_idx], data, state.scroll_offset)
-                }
+                UsageTab::Activity => render_activity(buf, layout[content_idx], data, state),
                 UsageTab::Projects => {
                     render_projects(buf, layout[content_idx], data, state.scroll_offset)
                 }
@@ -1481,147 +1525,269 @@ pub(crate) fn scan_progress_headline(progress: &ScanProgressEvent) -> String {
     }
 }
 
-fn render_daily(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
+/// GitHub-style contribution heatmap: a fixed 53-week canvas, one column per
+/// week, plus a cursor-driven detail strip carrying the exact figures the old
+/// Daily table used to show.
+///
+/// The canvas is deliberately independent of the period chips. A year-long
+/// grid that reflows to 1 column on `1 Today` reads as broken, so the period
+/// selector does not reshape it — Enter is the way this tab narrows the view.
+fn render_activity(buf: &mut Buffer, area: Rect, data: &UsageData, state: &UsageViewState) {
+    use crate::heatmap::{HeatmapGrid, WEEKS_IN_CANVAS};
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .title(Span::styled(
+            " 🔥 Activity ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
         .style(Style::default().bg(DARK_BG));
-
     let inner = block.inner(area);
     ratatui::widgets::Widget::render(block, area, buf);
 
-    if data.daily.is_empty() {
-        let p = Paragraph::new("  No usage data found.").style(Style::default().fg(MUTED_GRAY));
-        ratatui::widgets::Widget::render(p, inner, buf);
+    if inner.width < 24 || inner.height < 8 {
         return;
     }
 
-    // Split into table + bar chart
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(inner);
+    let today = crate::data::usage::local_now().date_naive();
+    let grid = HeatmapGrid::build(data, state.heat_metric, today, WEEKS_IN_CANVAS);
+    let cursor = state.heatmap_cursor.unwrap_or(today);
 
-    // Table
-    let header = Row::new(vec![
-        "Date", "Total", "Input", "Cache", "Output", "Sessions",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
+    // Two chars per column (glyph + gap) keeps the grid readable at terminal
+    // aspect ratios; the day-label gutter costs 4.
+    const GUTTER: u16 = 4;
+    let visible_cols = ((inner.width.saturating_sub(GUTTER)) / 2) as usize;
+    // Truncate the OLDEST weeks when the terminal is too narrow — today must
+    // stay on screen, since a heatmap you can't see the present in is useless.
+    let skip = grid.weeks.len().saturating_sub(visible_cols.max(1));
+    let columns: Vec<_> = grid.weeks.iter().skip(skip).collect();
 
-    let visible_rows = chunks[0].height.saturating_sub(2) as usize;
-    let total_rows = data.daily.len();
-    // Default scroll to bottom (show most recent)
-    let effective_offset = if scroll_offset == 0 && total_rows > visible_rows {
-        total_rows.saturating_sub(visible_rows)
-    } else {
-        scroll_offset
-    };
+    let mut y = inner.y;
 
-    let rows: Vec<Row> = data
-        .daily
-        .iter()
-        .skip(effective_offset)
-        .take(visible_rows)
-        .map(|(date, bucket)| {
-            Row::new(vec![
-                date.format("%Y-%m-%d").to_string(),
-                format_tokens_short(bucket.total()),
-                format_tokens_short(bucket.input_tokens),
-                format_tokens_short(bucket.cache_read_tokens + bucket.cache_creation_tokens),
-                format_tokens_short(bucket.output_tokens),
-                format!("{}", bucket.session_count),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
+    // Metric selector.
+    let mut metric_spans = vec![Span::styled("Metric: ", Style::default().fg(MUTED_GRAY))];
+    for metric in crate::heatmap::HeatMetric::ALL {
+        let selected = *metric == state.heat_metric;
+        // Bracket the active metric as well as highlighting it. Colour alone
+        // is invisible in a monochrome terminal, in a plain-text pane capture,
+        // and to anyone who can't distinguish the highlight — the brackets
+        // make the selection legible everywhere.
+        metric_spans.push(Span::styled(
+            if selected {
+                format!("[{}]", metric.label())
+            } else {
+                format!(" {} ", metric.label())
+            },
+            if selected {
+                Style::default().bg(GOLD).fg(DARK_BG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_GRAY)
+            },
+        ));
+    }
+    metric_spans.push(Span::styled("  M cycle", Style::default().fg(MUTED_GRAY)));
+    ratatui::widgets::Widget::render(
+        Paragraph::new(Line::from(metric_spans)),
+        Rect::new(inner.x, y, inner.width, 1),
+        buf,
+    );
+    y = y.saturating_add(2);
 
-    let widths = [
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(8),
-    ];
+    // Month ruler.
+    let labels = grid.month_labels();
+    let mut ruler = String::from("    ");
+    for (idx, _) in columns.iter().enumerate() {
+        match labels.get(skip + idx).copied().flatten() {
+            // A 3-char month name in a 2-char column would overlap its
+            // neighbour, so a labelled column borrows the next one's space and
+            // the next label is skipped by the grid builder.
+            Some(name) => ruler.push_str(name),
+            None => {
+                if ruler.len() < (4 + (idx + 1) * 2) {
+                    ruler.push_str("  ");
+                }
+            }
+        }
+    }
+    ratatui::widgets::Widget::render(
+        Paragraph::new(Line::from(Span::styled(
+            ruler,
+            Style::default().fg(MUTED_GRAY),
+        ))),
+        Rect::new(inner.x, y, inner.width, 1),
+        buf,
+    );
+    y = y.saturating_add(1);
 
-    let table = Table::new(rows, widths).header(header).column_spacing(1);
+    // Seven day-rows. Only Mon/Wed/Fri are labelled, as GitHub does.
+    for (row, label) in [
+        (0usize, "Mon"),
+        (1, ""),
+        (2, "Wed"),
+        (3, ""),
+        (4, "Fri"),
+        (5, ""),
+        (6, ""),
+    ] {
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        let mut spans = vec![Span::styled(
+            format!("{label:<4}"),
+            Style::default().fg(MUTED_GRAY),
+        )];
+        for week in &columns {
+            let cell = week.get(row).and_then(|c| c.as_ref());
+            let (glyph, style) = match cell {
+                Some(cell) => {
+                    let selected = cell.date == cursor;
+                    let base = heat_style(cell.level);
+                    (
+                        cell.level.glyph(),
+                        if selected {
+                            base.bg(LIST_HIGHLIGHT_BG)
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                        } else {
+                            base
+                        },
+                    )
+                }
+                None => (' ', Style::default()),
+            };
+            spans.push(Span::styled(glyph.to_string(), style));
+            spans.push(Span::raw(" "));
+        }
+        ratatui::widgets::Widget::render(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, y, inner.width, 1),
+            buf,
+        );
+        y = y.saturating_add(1);
+    }
 
-    ratatui::widgets::Widget::render(table, chunks[0], buf);
+    // Legend.
+    y = y.saturating_add(1);
+    if y < inner.y.saturating_add(inner.height) {
+        let mut legend = vec![Span::styled(" Less ", Style::default().fg(MUTED_GRAY))];
+        for level in crate::heatmap::CellLevel::SCALE {
+            legend.push(Span::styled(level.glyph().to_string(), heat_style(*level)));
+            legend.push(Span::raw(" "));
+        }
+        legend.push(Span::styled("More   ", Style::default().fg(MUTED_GRAY)));
+        legend.push(Span::styled(
+            "✗ = activity, no published rate",
+            Style::default().fg(TERMINAL_ACCENT),
+        ));
+        ratatui::widgets::Widget::render(
+            Paragraph::new(Line::from(legend)),
+            Rect::new(inner.x, y, inner.width, 1),
+            buf,
+        );
+        y = y.saturating_add(2);
+    }
 
-    // Bar chart (last N days that fit)
-    render_bar_chart(buf, chunks[1], data);
+    // Detail strip — the exact figures the Daily tab used to carry.
+    if y < inner.y.saturating_add(inner.height) {
+        let height = inner.y.saturating_add(inner.height).saturating_sub(y);
+        render_activity_detail(
+            buf,
+            Rect::new(inner.x, y, inner.width, height),
+            data,
+            &grid,
+            cursor,
+        );
+    }
 }
 
-fn render_weekly(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
+/// Per-day breakdown under the grid: totals plus the day's top models.
+fn render_activity_detail(
+    buf: &mut Buffer,
+    area: Rect,
+    data: &UsageData,
+    grid: &crate::heatmap::HeatmapGrid,
+    cursor: chrono::NaiveDate,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
-        .style(Style::default().bg(DARK_BG));
-
+        .title(Span::styled(
+            format!(" {cursor} "),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(PANEL_BG));
     let inner = block.inner(area);
     ratatui::widgets::Widget::render(block, area, buf);
-
-    if data.weekly.is_empty() {
-        let p = Paragraph::new("  No usage data found.").style(Style::default().fg(MUTED_GRAY));
-        ratatui::widgets::Widget::render(p, inner, buf);
+    if inner.height == 0 {
         return;
     }
 
-    let header = Row::new(vec![
-        "Week Start",
-        "Total",
-        "Input",
-        "Cache",
-        "Output",
-        "Sessions",
-        "Projects",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-
-    let visible_rows = inner.height.saturating_sub(2) as usize;
-    let total_rows = data.weekly.len();
-    let effective_offset = if scroll_offset == 0 && total_rows > visible_rows {
-        total_rows.saturating_sub(visible_rows)
-    } else {
-        scroll_offset
+    let Some(cell) = grid.cell(cursor) else {
+        ratatui::widgets::Widget::render(
+            Paragraph::new(Span::styled(
+                "  No activity on this day.",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            inner,
+            buf,
+        );
+        return;
     };
 
-    let rows: Vec<Row> = data
-        .weekly
-        .iter()
-        .skip(effective_offset)
-        .take(visible_rows)
-        .map(|(date, bucket)| {
-            Row::new(vec![
-                date.format("%Y-%m-%d").to_string(),
-                format_tokens_short(bucket.total()),
-                format_tokens_short(bucket.input_tokens),
-                format_tokens_short(bucket.cache_read_tokens + bucket.cache_creation_tokens),
-                format_tokens_short(bucket.output_tokens),
-                format!("{}", bucket.session_count),
-                format!("{}", bucket.project_count),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" {:<10}", format_cost(cell.cost_usd)),
+            Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{} tokens   ",
+                crate::data::usage::format_tokens_short(cell.tokens)
+            ),
+            Style::default().fg(SOFT_WHITE),
+        ),
+        Span::styled(
+            format!("{} calls   {} sessions", cell.calls, cell.sessions),
+            Style::default().fg(MUTED_GRAY),
+        ),
+    ])];
 
-    let widths = [
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(8),
-    ];
+    // Cap at whatever the strip can actually show, minus the totals row.
+    let model_rows = inner.height.saturating_sub(1) as usize;
+    for (model, cost, tokens) in crate::heatmap::day_model_breakdown(data, cursor, model_rows) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("   {:<28}", truncate_string(&model, 28)),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            Span::styled(
+                format!("{:>10}  ", format_cost(cost)),
+                Style::default().fg(TERMINAL_ACCENT),
+            ),
+            Span::styled(
+                crate::data::usage::format_tokens_short(tokens),
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]));
+    }
 
-    let table = Table::new(rows, widths).header(header).column_spacing(1);
+    ratatui::widgets::Widget::render(Paragraph::new(lines), inner, buf);
+}
 
-    ratatui::widgets::Widget::render(table, inner, buf);
+/// Colour ramp for a heat level. Unpriced gets the accent colour rather than a
+/// green step so it reads as "missing rate", not "quiet day".
+fn heat_style(level: crate::heatmap::CellLevel) -> Style {
+    use crate::heatmap::CellLevel;
+    match level {
+        CellLevel::Empty => Style::default().fg(MUTED_GRAY),
+        CellLevel::L1 => Style::default().fg(Color::Rgb(60, 110, 70)),
+        CellLevel::L2 => Style::default().fg(Color::Rgb(80, 160, 90)),
+        CellLevel::L3 => Style::default().fg(Color::Rgb(110, 200, 120)),
+        CellLevel::L4 => Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        CellLevel::Unpriced => Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+    }
 }
 
 fn render_projects(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
@@ -3345,7 +3511,7 @@ fn render_project_panel(buf: &mut Buffer, area: Rect, rows: &[ProjectUsage], foc
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3365,7 +3531,7 @@ fn render_project_panel(buf: &mut Buffer, area: Rect, rows: &[ProjectUsage], foc
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -3395,7 +3561,7 @@ fn render_branch_panel(buf: &mut Buffer, area: Rect, rows: &[BranchUsage], focus
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3415,7 +3581,7 @@ fn render_branch_panel(buf: &mut Buffer, area: Rect, rows: &[BranchUsage], focus
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -3477,7 +3643,7 @@ fn render_live_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus:
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3503,7 +3669,7 @@ fn render_live_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus:
                 ),
                 Span::styled(" · ", Style::default().fg(MUTED_GRAY)),
                 Span::styled(
-                    format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                    format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                     Style::default().fg(TERMINAL_ACCENT),
                 ),
             ])
@@ -3717,7 +3883,7 @@ fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focu
         .projects
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3753,7 +3919,11 @@ fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focu
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(project.bucket.cost_usd), w = value_w),
+                format!(
+                    "{:>w$}",
+                    format_cost_or_tokens(&project.bucket),
+                    w = value_w
+                ),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -4659,7 +4829,23 @@ fn input_label(mode: UsageInputMode) -> &'static str {
 
 fn format_cost(cost: Option<f64>) -> String {
     cost.map(|value| format!("${value:.2}"))
-        .unwrap_or_else(|| "cost n/a".to_string())
+        // `—` reads as "no published price"; the old `cost n/a` read as "no
+        // data", which is a different thing and sent people looking for a
+        // parsing bug when the real answer was a missing rate.
+        .unwrap_or_else(|| "\u{2014}".to_string())
+}
+
+/// Value column for the ranked bar panels: a dollar figure when we have a rate
+/// for the model, otherwise an em dash plus the token count so the row still
+/// carries its magnitude instead of reading as empty.
+fn format_cost_or_tokens(bucket: &crate::data::usage::TokenBucket) -> String {
+    match bucket.cost_usd {
+        Some(value) => format!("${value:.2}"),
+        None => format!(
+            "\u{2014} {}",
+            crate::data::usage::format_tokens_short(bucket.total())
+        ),
+    }
 }
 
 #[cfg(test)]

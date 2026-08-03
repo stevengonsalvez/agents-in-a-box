@@ -24,6 +24,7 @@ name = "ainb"
 path = "src/lib.rs"
 
 [dependencies]
+ainb-model-rates = { path = "../ainb-model-rates" }
 # Core
 tokio = { workspace = true }
 ratatui = { workspace = true }

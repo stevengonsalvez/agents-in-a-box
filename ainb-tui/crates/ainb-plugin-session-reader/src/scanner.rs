@@ -1202,15 +1202,30 @@ fn week_start(date: NaiveDate) -> NaiveDate {
     date - Duration::days(i64::from(days))
 }
 
+/// Rank rows by cost, sinking rows whose model has no published price.
+///
+/// The `is_some()` term is load-bearing. Ranking on
+/// `cost_usd.unwrap_or(total() as f64)` mixes dollars with raw token counts, and
+/// tokens are ~5 orders of magnitude larger — so a single unpriced model
+/// (`claude-fable-5` before it had a rate, `<synthetic>` always) outranks every
+/// priced row and monopolises every top-N panel. That is the "empty burndown"
+/// bug: the panels weren't empty, they were full of `cost n/a` rows.
 #[allow(clippy::cast_precision_loss)]
 fn sort_by_total_desc<T, F>(mut rows: Vec<T>, key: F) -> Vec<T>
 where
     F: Fn(&T) -> TokenBucket,
 {
     rows.sort_by(|a, b| {
-        let av = key(a).cost_usd.unwrap_or(key(a).total() as f64);
-        let bv = key(b).cost_usd.unwrap_or(key(b).total() as f64);
-        bv.total_cmp(&av)
+        let (ab, bb) = (key(a), key(b));
+        let av = (
+            ab.cost_usd.is_some(),
+            ab.cost_usd.unwrap_or(ab.total() as f64),
+        );
+        let bv = (
+            bb.cost_usd.is_some(),
+            bb.cost_usd.unwrap_or(bb.total() as f64),
+        );
+        bv.0.cmp(&av.0).then_with(|| bv.1.total_cmp(&av.1))
     });
     rows
 }

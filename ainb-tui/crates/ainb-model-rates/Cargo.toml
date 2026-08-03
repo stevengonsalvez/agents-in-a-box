@@ -1,0 +1,9 @@
+[package]
+name = "ainb-model-rates"
+version = "0.1.0"
+edition = "2021"
+
+# Deliberately dependency-free: this crate is linked by the host *and* by
+# subprocess plugins (session-reader, burndown). Adding a dep here adds it to
+# every one of them, so keep it a leaf.
+[dependencies]

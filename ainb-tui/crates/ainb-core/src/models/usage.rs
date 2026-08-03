@@ -1997,8 +1997,9 @@ fn sorted_activities(map: HashMap<ActivityCategory, ActivityAccumulator>) -> Vec
         })
         .collect();
     rows.sort_by(|a, b| {
-        bucket_sort_value(&b.bucket)
-            .total_cmp(&bucket_sort_value(&a.bucket))
+        bucket_has_cost(&b.bucket)
+            .cmp(&bucket_has_cost(&a.bucket))
+            .then_with(|| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)))
             .then_with(|| activity_rank(a.category).cmp(&activity_rank(b.category)))
     });
     rows
@@ -2810,8 +2811,20 @@ fn merge_cost(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     }
 }
 
+/// Ranking weight for a bucket: cost when known, token count as a stand-in when
+/// not — but see [`sort_by_bucket_desc`], which keeps the two apart.
 fn bucket_sort_value(bucket: &TokenBucket) -> f64 {
     bucket.cost_usd.unwrap_or(bucket.total() as f64)
+}
+
+/// `true` when this bucket has a real dollar figure behind it.
+///
+/// Ranking must sort on this *before* the numeric weight. Comparing dollars
+/// against raw token counts puts every unpriced row (a model with no published
+/// rate) above every priced one, because tokens outnumber dollars by ~5 orders
+/// of magnitude — which is what made the top-N panels look empty.
+fn bucket_has_cost(bucket: &TokenBucket) -> bool {
+    bucket.cost_usd.is_some()
 }
 
 /// Sort `rows` in-place by bucket weight (descending), where each row's
@@ -2823,7 +2836,11 @@ fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
 where
     F: Fn(&T) -> &TokenBucket,
 {
-    rows.sort_by(|a, b| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))));
+    rows.sort_by(|a, b| {
+        bucket_has_cost(key(b))
+            .cmp(&bucket_has_cost(key(a)))
+            .then_with(|| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))))
+    });
 }
 
 /// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
@@ -2846,78 +2863,10 @@ where
     *map.entry(key).or_default() += 1;
 }
 
-fn estimate_cost_usd(
-    model: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_tokens: u64,
-    cache_read_tokens: u64,
-    reasoning_tokens: u64,
-) -> Option<f64> {
-    let rates = model_rates(model)?;
-    Some(
-        input_tokens as f64 * rates.input
-            + (output_tokens + reasoning_tokens) as f64 * rates.output
-            + cache_creation_tokens as f64 * rates.cache_write
-            + cache_read_tokens as f64 * rates.cache_read,
-    )
-}
-
-struct ModelRates {
-    input: f64,
-    output: f64,
-    cache_write: f64,
-    cache_read: f64,
-}
-
-fn model_rates(model: &str) -> Option<ModelRates> {
-    let canonical = canonical_model_name(model);
-    let (input_per_million, output_per_million) = if canonical.starts_with("claude-opus") {
-        (15.0, 75.0)
-    } else if canonical.starts_with("claude-sonnet") || canonical.starts_with("claude-3-5-sonnet") {
-        (3.0, 15.0)
-    } else if canonical.starts_with("claude-haiku") || canonical.starts_with("claude-3-5-haiku") {
-        (0.8, 4.0)
-    } else if canonical.starts_with("gpt-5")
-        || canonical.starts_with("gpt-4.1")
-        || canonical.starts_with("gpt-4o")
-    {
-        (1.25, 10.0)
-    } else {
-        return None;
-    };
-
-    let input = input_per_million / 1_000_000.0;
-    let output = output_per_million / 1_000_000.0;
-    Some(ModelRates {
-        input,
-        output,
-        cache_write: input * 1.25,
-        cache_read: input * 0.1,
-    })
-}
-
-fn canonical_model_name(model: &str) -> String {
-    let without_prefix = model
-        .split('@')
-        .next()
-        .unwrap_or(model)
-        .trim_start_matches("anthropic/")
-        .trim_start_matches("openai/")
-        .to_string();
-
-    if without_prefix
-        .rsplit('-')
-        .next()
-        .is_some_and(|suffix| suffix.len() == 8 && suffix.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        without_prefix
-            .rsplit_once('-')
-            .map_or(without_prefix.clone(), |(name, _)| name.to_string())
-    } else {
-        without_prefix
-    }
-}
+// Rates live in `ainb-model-rates` — one table, three consumers. Keeping a
+// local copy here is what let every Opus sit at the retired $15/$75 rate for
+// three model generations.
+use ainb_model_rates::estimate_cost_usd;
 
 /// Format a token count in human-readable form (e.g., "1.2B", "456M", "12K").
 pub fn format_tokens_short(n: u64) -> String {
