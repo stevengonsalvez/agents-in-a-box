@@ -1217,8 +1217,14 @@ where
 {
     rows.sort_by(|a, b| {
         let (ab, bb) = (key(a), key(b));
-        let av = (ab.cost_usd.is_some(), ab.cost_usd.unwrap_or(ab.total() as f64));
-        let bv = (bb.cost_usd.is_some(), bb.cost_usd.unwrap_or(bb.total() as f64));
+        let av = (
+            ab.cost_usd.is_some(),
+            ab.cost_usd.unwrap_or(ab.total() as f64),
+        );
+        let bv = (
+            bb.cost_usd.is_some(),
+            bb.cost_usd.unwrap_or(bb.total() as f64),
+        );
         bv.0.cmp(&av.0).then_with(|| bv.1.total_cmp(&av.1))
     });
     rows

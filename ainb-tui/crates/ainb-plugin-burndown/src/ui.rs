@@ -718,7 +718,9 @@ impl UsageViewState {
     /// needs no new filter machinery, and the chip strip renders the range so
     /// the narrowed state stays visible.
     pub fn heatmap_commit_day(&mut self) -> bool {
-        let Some(day) = self.heatmap_cursor.or_else(|| Some(crate::data::usage::local_now().date_naive()))
+        let Some(day) = self
+            .heatmap_cursor
+            .or_else(|| Some(crate::data::usage::local_now().date_naive()))
         else {
             return false;
         };
@@ -1610,7 +1612,10 @@ fn render_activity(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
         }
     }
     ratatui::widgets::Widget::render(
-        Paragraph::new(Line::from(Span::styled(ruler, Style::default().fg(MUTED_GRAY)))),
+        Paragraph::new(Line::from(Span::styled(
+            ruler,
+            Style::default().fg(MUTED_GRAY),
+        ))),
         Rect::new(inner.x, y, inner.width, 1),
         buf,
     );
@@ -1618,7 +1623,13 @@ fn render_activity(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
 
     // Seven day-rows. Only Mon/Wed/Fri are labelled, as GitHub does.
     for (row, label) in [
-        (0usize, "Mon"), (1, ""), (2, "Wed"), (3, ""), (4, "Fri"), (5, ""), (6, ""),
+        (0usize, "Mon"),
+        (1, ""),
+        (2, "Wed"),
+        (3, ""),
+        (4, "Fri"),
+        (5, ""),
+        (6, ""),
     ] {
         if y >= inner.y.saturating_add(inner.height) {
             break;
@@ -1636,7 +1647,8 @@ fn render_activity(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
                     (
                         cell.level.glyph(),
                         if selected {
-                            base.bg(LIST_HIGHLIGHT_BG).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                            base.bg(LIST_HIGHLIGHT_BG)
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
                         } else {
                             base
                         },
@@ -1679,7 +1691,13 @@ fn render_activity(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
     // Detail strip — the exact figures the Daily tab used to carry.
     if y < inner.y.saturating_add(inner.height) {
         let height = inner.y.saturating_add(inner.height).saturating_sub(y);
-        render_activity_detail(buf, Rect::new(inner.x, y, inner.width, height), data, &grid, cursor);
+        render_activity_detail(
+            buf,
+            Rect::new(inner.x, y, inner.width, height),
+            data,
+            &grid,
+            cursor,
+        );
     }
 }
 
@@ -1724,7 +1742,10 @@ fn render_activity_detail(
             Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{} tokens   ", crate::data::usage::format_tokens_short(cell.tokens)),
+            format!(
+                "{} tokens   ",
+                crate::data::usage::format_tokens_short(cell.tokens)
+            ),
             Style::default().fg(SOFT_WHITE),
         ),
         Span::styled(
@@ -3898,7 +3919,11 @@ fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focu
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost_or_tokens(&project.bucket), w = value_w),
+                format!(
+                    "{:>w$}",
+                    format_cost_or_tokens(&project.bucket),
+                    w = value_w
+                ),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -4816,7 +4841,10 @@ fn format_cost(cost: Option<f64>) -> String {
 fn format_cost_or_tokens(bucket: &crate::data::usage::TokenBucket) -> String {
     match bucket.cost_usd {
         Some(value) => format!("${value:.2}"),
-        None => format!("\u{2014} {}", crate::data::usage::format_tokens_short(bucket.total())),
+        None => format!(
+            "\u{2014} {}",
+            crate::data::usage::format_tokens_short(bucket.total())
+        ),
     }
 }
 

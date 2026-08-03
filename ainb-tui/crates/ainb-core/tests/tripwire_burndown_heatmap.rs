@@ -219,7 +219,10 @@ fn activity_tab_renders_heatmap_and_responds_to_keys() {
         .expect("tmux send launch cmd");
 
     let home_deadline = Instant::now() + Duration::from_secs(90);
-    if poll_capture(&session, home_deadline, |c| c.contains("Stats") && c.contains("[i]")).is_none()
+    if poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
     {
         let last = capture_pane(&session);
         kill_session(&session);

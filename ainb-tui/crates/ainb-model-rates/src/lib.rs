@@ -55,8 +55,7 @@ pub fn model_rates(model: &str) -> Option<ModelRates> {
     let canonical = canonical_model_name(model);
     let m = canonical.as_str();
 
-    let (input_per_million, output_per_million) =
-        anthropic_rates(m).or_else(|| openai_rates(m))?;
+    let (input_per_million, output_per_million) = anthropic_rates(m).or_else(|| openai_rates(m))?;
 
     let input = input_per_million / 1_000_000.0;
     let output = output_per_million / 1_000_000.0;
@@ -255,10 +254,19 @@ mod tests {
         // The ordering trap: every one of these also matches a shorter prefix
         // that appears later in the function. If someone appends a new arm to
         // the bottom instead of ordering it, this test fires.
-        assert_ne!(input_per_million("gpt-5.6-terra"), input_per_million("gpt-5.6-sol"));
-        assert_ne!(input_per_million("gpt-5.4-mini"), input_per_million("gpt-5.4"));
+        assert_ne!(
+            input_per_million("gpt-5.6-terra"),
+            input_per_million("gpt-5.6-sol")
+        );
+        assert_ne!(
+            input_per_million("gpt-5.4-mini"),
+            input_per_million("gpt-5.4")
+        );
         assert_ne!(input_per_million("gpt-5-mini"), input_per_million("gpt-5"));
-        assert_ne!(input_per_million("claude-opus-5"), input_per_million("claude-opus-4-5"));
+        assert_ne!(
+            input_per_million("claude-opus-5"),
+            input_per_million("claude-opus-4-5")
+        );
     }
 
     #[test]

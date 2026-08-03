@@ -546,7 +546,10 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("pragma");
-        assert_eq!(version, SCHEMA_VERSION, "v1 db migrated to the current schema");
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "v1 db migrated to the current schema"
+        );
 
         // v3 drops cached rows on purpose. They carry `cost_usd` frozen at
         // parse time, and their (path, mtime, size) key does not change when a

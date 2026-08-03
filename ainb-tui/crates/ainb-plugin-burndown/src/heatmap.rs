@@ -114,12 +114,12 @@ impl CellLevel {
 /// side can print "n/a" instead of a misleading `$0.00`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayCell {
-    pub date:     NaiveDate,
+    pub date: NaiveDate,
     pub cost_usd: Option<f64>,
-    pub tokens:   u64,
-    pub calls:    usize,
+    pub tokens: u64,
+    pub calls: usize,
     pub sessions: usize,
-    pub level:    CellLevel,
+    pub level: CellLevel,
 }
 
 impl DayCell {
@@ -149,8 +149,8 @@ impl DayCell {
 /// `None`, which keeps the renderer free of any date arithmetic.
 #[derive(Debug, Clone)]
 pub struct HeatmapGrid {
-    pub weeks:     Vec<Vec<Option<DayCell>>>,
-    pub metric:    HeatMetric,
+    pub weeks: Vec<Vec<Option<DayCell>>>,
+    pub metric: HeatMetric,
     pub max_value: f64,
 }
 
@@ -346,8 +346,8 @@ fn local_day(timestamp: chrono::DateTime<chrono::Utc>) -> NaiveDate {
 /// the grid is rebuilt every frame and `calls` can run to six figures.
 struct DayTotals {
     cost_usd: Option<f64>,
-    tokens:   u64,
-    calls:    usize,
+    tokens: u64,
+    calls: usize,
     sessions: usize,
 }
 
@@ -364,8 +364,8 @@ fn daily_totals(
                 *date,
                 DayTotals {
                     cost_usd: bucket.cost_usd,
-                    tokens:   bucket.total(),
-                    calls:    bucket.call_count,
+                    tokens: bucket.total(),
+                    calls: bucket.call_count,
                     sessions: bucket.session_count,
                 },
             )
