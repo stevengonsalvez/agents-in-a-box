@@ -245,6 +245,82 @@ final class FleetStore: ObservableObject {
         }
     }
 
+    func submitStructuredAnswers(_ answers: [FleetQuestionAnswer], on session: FleetSession) {
+        guard !answers.isEmpty else {
+            controlNotice = "Complete every interview question before submit."
+            return
+        }
+        performStructured(
+            .structuredAnswer(
+                requestFingerprint: session.currentRequestFingerprint ?? "",
+                requestIdentity: FleetRequestIdentity.from(request: session.currentRequest),
+                answers: answers
+            ),
+            on: session,
+            allowed: session.capabilities.structuredAnswer,
+            failurePrefix: "Interview"
+        )
+    }
+
+    func dismissStructuredInterview(on session: FleetSession) {
+        performStructured(
+            .dismissStructured(
+                requestFingerprint: session.currentRequestFingerprint ?? "",
+                requestIdentity: FleetRequestIdentity.from(request: session.currentRequest)
+            ),
+            on: session,
+            allowed: session.provider == .claude && session.capabilities.structuredDismiss,
+            failurePrefix: "Interview rejection"
+        )
+    }
+
+    private func performStructured(
+        _ action: ControlAction,
+        on session: FleetSession,
+        allowed: Bool,
+        failurePrefix: String
+    ) {
+        guard canWrite,
+              pendingIntentID == nil,
+              negotiation?.capabilityIDs.contains("fleet.action.execute") == true,
+              selectedSessionKey == session.sessionKey,
+              allowed,
+              !session.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              session.version > 0,
+              let fingerprint = session.currentRequestFingerprint,
+              !fingerprint.isEmpty,
+              let connection else {
+            controlNotice = "Interview action is unavailable or stale."
+            return
+        }
+        guard let current = sessions.first(where: { $0.sessionKey == session.sessionKey }),
+              current.version == session.version,
+              current.currentRequestFingerprint == fingerprint else {
+            controlNotice = "Fleet interview changed. Review current question before sending."
+            return
+        }
+        let requestID = UUID().uuidString
+        pendingIntentID = requestID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                let result = try await connection.action(FleetActionParams(
+                    sessionKey: current.sessionKey,
+                    expectedVersion: current.version,
+                    requestID: requestID,
+                    action: action
+                ))
+                self.record(result.receipt)
+                self.controlNotice = "Delivered. Confirming Fleet state."
+                await self.refreshAuthoritativeState(using: connection)
+            } catch {
+                self.controlNotice = "\(failurePrefix) refused: \(String(describing: error))"
+            }
+        }
+    }
+
     func start(provider: FleetProvider, cwd: String, prompt: String?) {
         let trimmedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canStart,

@@ -543,6 +543,47 @@ impl BrokerState {
             _ => StructuredAnswerAck::unmatched(),
         }
     }
+
+    /// Reject only the exact current structured request. This is deliberately
+    /// separate from answer validation: rejection must never fabricate values.
+    fn dismiss_structured(
+        &self,
+        session_id: &str,
+        request_fingerprint: &str,
+        reason: String,
+    ) -> StructuredAnswerAck {
+        let taken = {
+            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(pending) = map.get(session_id) else {
+                return StructuredAnswerAck::unmatched();
+            };
+            let PendingKind::Structured {
+                request_fingerprint: current,
+                ..
+            } = &pending.kind
+            else {
+                return StructuredAnswerAck::stale();
+            };
+            if current != request_fingerprint {
+                return StructuredAnswerAck::stale();
+            }
+            map.remove(session_id)
+        };
+
+        match taken {
+            Some(Pending {
+                kind: PendingKind::Structured { tx, .. },
+                ..
+            }) => {
+                if tx.send(StructuredResolution::Rejected { reason }).is_ok() {
+                    StructuredAnswerAck::matched()
+                } else {
+                    StructuredAnswerAck::unmatched()
+                }
+            }
+            _ => StructuredAnswerAck::unmatched(),
+        }
+    }
 }
 
 impl Default for BrokerState {
@@ -587,6 +628,13 @@ enum Request {
         session_id: String,
         request_fingerprint: String,
         answers: Vec<StructuredQuestionAnswer>,
+    },
+    /// Human rejects an exact current AskUserQuestion request.
+    #[serde(rename = "dismiss_structured")]
+    DismissStructured {
+        session_id: String,
+        request_fingerprint: String,
+        reason: String,
     },
     /// Dump the pending session ids.
     List,
@@ -699,6 +747,14 @@ async fn handle_connection(stream: UnixStream, state: BrokerState) -> Result<()>
             answers,
         } => {
             let ack = state.answer_structured(&session_id, &request_fingerprint, answers);
+            write_line(reader.get_mut(), &ack).await?;
+        }
+        Request::DismissStructured {
+            session_id,
+            request_fingerprint,
+            reason,
+        } => {
+            let ack = state.dismiss_structured(&session_id, &request_fingerprint, reason);
             write_line(reader.get_mut(), &ack).await?;
         }
         Request::List => {
@@ -888,6 +944,26 @@ pub fn client_answer_structured(
             "session_id": session_id,
             "request_fingerprint": request_fingerprint,
             "answers": answers,
+        }),
+    )?;
+    serde_json::from_value(response)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Reject the current exact structured request without supplying an answer.
+pub fn client_dismiss_structured(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: &str,
+    reason: &str,
+) -> std::io::Result<StructuredAnswerAck> {
+    let response = client_round_trip(
+        sock,
+        &serde_json::json!({
+            "op": "dismiss_structured",
+            "session_id": session_id,
+            "request_fingerprint": request_fingerprint,
+            "reason": reason,
         }),
     )?;
     serde_json::from_value(response)
@@ -1139,6 +1215,56 @@ mod tests {
             serde_json::from_str(round_trip(&sock, &answer_line).await.trim()).unwrap();
         assert!(!second.matched, "first structured answer must win");
         assert!(!second.stale);
+
+        handle.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn structured_dismiss_rejects_only_the_exact_pending_request() {
+        let (sock, _state, handle) = spawn_broker(Duration::from_secs(30)).await;
+        let request = serde_json::json!({
+            "op": "await_structured",
+            "session_id": "ask-dismiss",
+            "request_fingerprint": "fnv1a64:current",
+            "questions": [{"question": "Continue?", "options": ["Yes"]}],
+        });
+        let waiter_sock = sock.clone();
+        let waiter = tokio::spawn(async move {
+            round_trip(&waiter_sock, &serde_json::to_string(&request).unwrap()).await
+        });
+        wait_for_pending(&sock, "ask-dismiss").await;
+
+        let stale: StructuredAnswerAck = serde_json::from_str(
+            round_trip(
+                &sock,
+                r#"{"op":"dismiss_structured","session_id":"ask-dismiss","request_fingerprint":"fnv1a64:stale","reason":"operator rejected"}"#,
+            )
+            .await
+            .trim(),
+        )
+        .unwrap();
+        assert!(stale.stale);
+
+        let accepted: StructuredAnswerAck = serde_json::from_str(
+            round_trip(
+                &sock,
+                r#"{"op":"dismiss_structured","session_id":"ask-dismiss","request_fingerprint":"fnv1a64:current","reason":"operator rejected"}"#,
+            )
+            .await
+            .trim(),
+        )
+        .unwrap();
+        assert!(accepted.matched);
+
+        let resolution: StructuredResolution =
+            serde_json::from_str(waiter.await.unwrap().trim()).unwrap();
+        assert_eq!(
+            resolution,
+            StructuredResolution::Rejected {
+                reason: "operator rejected".into()
+            }
+        );
 
         handle.abort();
         let _ = std::fs::remove_file(&sock);

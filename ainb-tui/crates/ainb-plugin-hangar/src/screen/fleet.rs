@@ -404,6 +404,10 @@ pub enum FleetAction {
         request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
         answers: Vec<ainb_hangar_proto::fleet::FleetQuestionAnswer>,
     },
+    DismissStructured {
+        request_fingerprint: String,
+        request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
+    },
     Approve {
         request_fingerprint: String,
         request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
@@ -442,6 +446,13 @@ impl FleetAction {
                 request_identity,
                 answers,
             },
+            Self::DismissStructured {
+                request_fingerprint,
+                request_identity,
+            } => ControlAction::DismissStructured {
+                request_fingerprint,
+                request_identity,
+            },
             Self::Approve {
                 request_fingerprint,
                 request_identity,
@@ -477,6 +488,7 @@ impl FleetAction {
     fn is_supported_by(&self, capabilities: &FleetCapabilities) -> bool {
         match self {
             Self::StructuredAnswer { .. } => capabilities.contains("structured_answer"),
+            Self::DismissStructured { .. } => capabilities.contains("structured_dismiss"),
             Self::Approve { .. } | Self::Deny { .. } => capabilities.contains("approvals"),
             Self::SendText { .. } => {
                 capabilities.contains("send_prompt") || capabilities.contains("tmux_text")
@@ -495,6 +507,7 @@ impl FleetAction {
     fn capability_label(&self) -> &'static str {
         match self {
             Self::StructuredAnswer { .. } => "structured_answer",
+            Self::DismissStructured { .. } => "structured_dismiss",
             Self::Approve { .. } | Self::Deny { .. } => "approvals",
             Self::SendText { .. } => "send_prompt or tmux_text",
             Self::VerifiedPicker { .. } => "verified_picker",
@@ -511,7 +524,10 @@ impl FleetAction {
     fn is_structured(&self) -> bool {
         matches!(
             self,
-            Self::StructuredAnswer { .. } | Self::Approve { .. } | Self::Deny { .. }
+            Self::StructuredAnswer { .. }
+                | Self::DismissStructured { .. }
+                | Self::Approve { .. }
+                | Self::Deny { .. }
         )
     }
 
@@ -585,6 +601,7 @@ impl Default for BroadcastState {
 enum FleetMode {
     Browse,
     Answer(AnswerState),
+    AnswerDismissConfirm(AnswerState),
     Start(StartState),
     Prompt {
         text: String,
@@ -629,6 +646,13 @@ struct AnswerState {
     selections: Vec<BTreeSet<usize>>,
     texts: Vec<String>,
     editing_text: bool,
+    delivery: AnswerDelivery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerDelivery {
+    Ready,
+    Confirming,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,8 +782,9 @@ impl FleetPaneState {
     }
 
     fn discard_stale_answer(&mut self) {
-        let FleetMode::Answer(answer) = &self.mode else {
-            return;
+        let answer = match &self.mode {
+            FleetMode::Answer(answer) | FleetMode::AnswerDismissConfirm(answer) => answer,
+            _ => return,
         };
         let fresh = self
             .roster
@@ -846,6 +871,17 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         FleetEvent::Key(key) => reduce_key(&mut next, key),
         FleetEvent::RequestAction(action) => request_action(&mut next, action),
         FleetEvent::ActionSucceeded { session_key } => {
+            if let FleetMode::Answer(answer) = &next.mode {
+                if answer.session_key == session_key
+                    && answer.delivery == AnswerDelivery::Confirming
+                {
+                    next.feedback = Some("delivered, confirming authoritative Fleet state".into());
+                    return FleetReduction {
+                        state: next,
+                        intent: None,
+                    };
+                }
+            }
             next.feedback = Some(format!("action succeeded: {session_key}"));
             select_next_needs_input(&mut next, &session_key);
             None
@@ -854,6 +890,11 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
             session_key,
             detail,
         } => {
+            if let FleetMode::Answer(answer) = &mut next.mode {
+                if answer.session_key == session_key {
+                    answer.delivery = AnswerDelivery::Ready;
+                }
+            }
             next.feedback = Some(format!("action failed: {session_key}: {detail}"));
             None
         }
@@ -884,6 +925,7 @@ fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> 
     match state.mode.clone() {
         FleetMode::Browse => reduce_browse_key(state, key),
         FleetMode::Answer(answer) => reduce_answer_key(state, answer, key),
+        FleetMode::AnswerDismissConfirm(answer) => reduce_answer_dismiss_key(state, answer, key),
         FleetMode::Start(start) => reduce_start_key(state, start, key),
         FleetMode::Prompt { text } => reduce_prompt_key(state, text, key),
         FleetMode::Broadcast(broadcast) => reduce_broadcast_key(state, broadcast, key),
@@ -975,6 +1017,7 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         selections,
         texts,
         editing_text,
+        delivery: AnswerDelivery::Ready,
     });
 }
 
@@ -1075,20 +1118,39 @@ fn reduce_answer_key(
         state.mode = FleetMode::Browse;
         return None;
     }
+    if answer.delivery == AnswerDelivery::Confirming {
+        state.feedback = Some("waiting for authoritative Fleet state".into());
+        state.mode = FleetMode::Answer(answer);
+        return None;
+    }
+    if key == FleetKey::Char('x') {
+        let can_dismiss = state
+            .roster
+            .iter()
+            .find(|row| row.session_key == answer.session_key)
+            .is_some_and(|row| row.capabilities.contains("structured_dismiss"));
+        if can_dismiss {
+            state.mode = FleetMode::AnswerDismissConfirm(answer);
+        } else {
+            state.feedback = Some("provider does not expose safe interview dismissal".into());
+            state.mode = FleetMode::Answer(answer);
+        }
+        return None;
+    }
     let Some(question) = answer.questions.get(answer.question_index) else {
         state.mode = FleetMode::Browse;
         state.feedback = Some("structured question changed before answer".into());
         return None;
     };
     match key {
-        FleetKey::Tab => {
+        FleetKey::Tab | FleetKey::Right => {
             answer.question_index = (answer.question_index + 1) % answer.questions.len();
             answer.option_cursor = 0;
             answer.editing_text = answer.questions[answer.question_index].options.is_empty();
             state.mode = FleetMode::Answer(answer);
             return None;
         }
-        FleetKey::BackTab => {
+        FleetKey::BackTab | FleetKey::Left => {
             answer.question_index = answer
                 .question_index
                 .checked_sub(1)
@@ -1155,6 +1217,36 @@ fn reduce_answer_key(
     None
 }
 
+fn reduce_answer_dismiss_key(
+    state: &mut FleetPaneState,
+    mut answer: AnswerState,
+    key: FleetKey,
+) -> Option<FleetIntent> {
+    match key {
+        FleetKey::Esc => {
+            state.mode = FleetMode::Answer(answer);
+            None
+        }
+        FleetKey::Enter => {
+            answer.delivery = AnswerDelivery::Confirming;
+            let intent = FleetIntent::Execute {
+                session_key: answer.session_key.clone(),
+                expected_version: answer.expected_version,
+                action: FleetAction::DismissStructured {
+                    request_fingerprint: answer.request_fingerprint.clone(),
+                    request_identity: answer.request_identity.clone(),
+                },
+            };
+            state.mode = FleetMode::Answer(answer);
+            Some(intent)
+        }
+        _ => {
+            state.mode = FleetMode::AnswerDismissConfirm(answer);
+            None
+        }
+    }
+}
+
 fn advance_or_submit_answer(
     state: &mut FleetPaneState,
     mut answer: AnswerState,
@@ -1203,7 +1295,8 @@ fn advance_or_submit_answer(
             }
         })
         .collect();
-    state.mode = FleetMode::Browse;
+    answer.delivery = AnswerDelivery::Confirming;
+    state.mode = FleetMode::Answer(answer.clone());
     Some(FleetIntent::Execute {
         session_key: answer.session_key,
         expected_version: answer.expected_version,
@@ -2279,6 +2372,18 @@ fn render_mode(
     match &state.mode {
         FleetMode::Browse => {}
         FleetMode::Answer(answer) => render_interview(buffer, area_width, top, bottom, answer),
+        FleetMode::AnswerDismissConfirm(answer) => render_modal(
+            buffer,
+            area_width,
+            top,
+            bottom,
+            "Reject structured interview",
+            &[
+                format!("session: {}", answer.session_key),
+                "This returns a rejected result to Claude.".into(),
+                "Enter rejects, Esc returns to draft".into(),
+            ],
+        ),
         FleetMode::Start(start) => render_modal(
             buffer,
             area_width,
@@ -2364,7 +2469,14 @@ fn render_interview(
     let left = 2;
     let right = area_width.saturating_sub(2);
     let title_y = top.saturating_add(1);
-    put_str(buffer, left, title_y, "STRUCTURED INTERVIEW", GOLD, right);
+    put_str(
+        buffer,
+        left,
+        title_y,
+        "ANSWER QUEUE  ·  STRUCTURED INTERVIEW",
+        GOLD,
+        right,
+    );
     let answered = answer
         .questions
         .iter()
@@ -2434,7 +2546,16 @@ fn render_interview(
         y = y.saturating_add(1);
     }
     y = y.saturating_add(1);
-    if answer.editing_text {
+    if answer.delivery == AnswerDelivery::Confirming {
+        put_str(
+            buffer,
+            left,
+            y,
+            "● delivered, waiting for Fleet snapshot confirmation",
+            GOLD,
+            right,
+        );
+    } else if answer.editing_text {
         put_str(
             buffer,
             left,
@@ -2490,12 +2611,14 @@ fn render_interview(
     for x in left..right {
         put_char(buffer, x, bottom.saturating_sub(2), '─', BLUE);
     }
-    let help = if answer.editing_text {
-        "Type answer  Enter next  Tab question  Esc cancel"
+    let help = if answer.delivery == AnswerDelivery::Confirming {
+        "Refreshing authoritative state, Esc leaves queue"
+    } else if answer.editing_text {
+        "Type answer  Enter next  ←→ card  x reject  Esc leave"
     } else if question.multi_select {
-        "Up/Down move  Space toggle  Enter next  Tab question  Esc cancel"
+        "↑↓ move  Space toggle  Enter next  ←→ card  x reject  Esc leave"
     } else {
-        "Up/Down move  Enter next  o Other text  Tab question  Esc cancel"
+        "↑↓ move  Enter next  o Other text  ←→ card  x reject  Esc leave"
     };
     put_str(buffer, left, bottom.saturating_sub(1), help, MUTED, right);
 }
@@ -3085,16 +3208,16 @@ mod tests {
         state.set_sessions(vec![row]);
 
         state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
-        state = apply(&state, FleetEvent::Key(FleetKey::Tab)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Left)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
-        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
-        assert!(matches!(state.mode, FleetMode::Answer(_)));
-        assert_eq!(
-            state.feedback(),
-            Some("complete every interview question before submit")
-        );
-
-        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let FleetMode::Answer(answer) = &state.mode else {
+            panic!("arrow navigation must keep interview open");
+        };
+        assert_eq!(answer.question_index, 1);
+        assert_eq!(answer.selections[0], BTreeSet::from([0]));
+        assert_eq!(answer.selections[1], BTreeSet::from([0]));
         let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
         let Some(FleetIntent::Execute {
             action: FleetAction::StructuredAnswer { answers, .. },
@@ -3106,6 +3229,86 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(answers[0].selected_options, ["Focused"]);
         assert_eq!(answers[1].selected_options, ["Tests"]);
+    }
+
+    #[test]
+    fn delivered_interview_stays_open_until_authoritative_snapshot_changes() {
+        let mut row = session("claude:confirm", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("before".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+        let FleetMode::Answer(answer) = &submitted.state.mode else {
+            panic!("delivered interview must remain visible");
+        };
+        assert_eq!(answer.delivery, AnswerDelivery::Confirming);
+
+        let delivered = apply(
+            &submitted.state,
+            FleetEvent::ActionSucceeded {
+                session_key: "claude:confirm".into(),
+            },
+        )
+        .state;
+        assert!(matches!(delivered.mode, FleetMode::Answer(_)));
+        assert_eq!(
+            delivered.feedback(),
+            Some("delivered, confirming authoritative Fleet state")
+        );
+
+        row.current_request_fingerprint = Some("after".into());
+        row.version += 1;
+        let closed = apply(&delivered, FleetEvent::Snapshot(vec![row])).state;
+        assert!(matches!(closed.mode, FleetMode::Browse));
+    }
+
+    #[test]
+    fn claude_can_confirm_rejection_but_codex_cannot_fabricate_one() {
+        let mut claude = session("claude:reject", "claude", "IDLE", "ASK", "managed");
+        claude.current_request_fingerprint = Some("request".into());
+        claude.current_request = Some(serde_json::json!({
+            "tool_use_id": "tool-1",
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        claude.capabilities = FleetCapabilities::List(
+            ["structured_answer", "structured_dismiss"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![claude]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let confirm = apply(&state, FleetEvent::Key(FleetKey::Char('x'))).state;
+        assert!(matches!(confirm.mode, FleetMode::AnswerDismissConfirm(_)));
+        let submitted = apply(&confirm, FleetEvent::Key(FleetKey::Enter));
+        assert!(matches!(
+            submitted.intent,
+            Some(FleetIntent::Execute {
+                action: FleetAction::DismissStructured { .. },
+                ..
+            })
+        ));
+
+        let mut codex = session("codex:reject", "codex", "IDLE", "ASK", "managed");
+        codex.current_request_fingerprint = Some("request".into());
+        codex.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![codex]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let refused = apply(&state, FleetEvent::Key(FleetKey::Char('x'))).state;
+        assert!(matches!(refused.mode, FleetMode::Answer(_)));
+        assert_eq!(
+            refused.feedback(),
+            Some("provider does not expose safe interview dismissal")
+        );
     }
 
     #[test]

@@ -194,6 +194,8 @@ pub enum FleetConfidence {
 pub struct FleetCapabilities {
     /// Answer exact structured provider requests.
     pub structured_answer: bool,
+    /// Reject an exact structured request without fabricating an answer.
+    pub structured_dismiss: bool,
     /// Approve or deny exact provider requests.
     pub approvals: bool,
     /// Send generic prompt text.
@@ -529,6 +531,14 @@ pub enum ControlAction {
         /// Complete ordered answers for all questions.
         answers: Vec<FleetQuestionAnswer>,
     },
+    /// Reject exact structured request when provider exposes a safe rejection route.
+    DismissStructured {
+        /// Provider request fingerprint verified against current state.
+        request_fingerprint: String,
+        /// Exact provider routing identity when provider protocol requires it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_identity: Option<FleetRequestIdentity>,
+    },
     /// Approve exact provider request.
     Approve {
         /// Provider request fingerprint verified against current state.
@@ -592,6 +602,7 @@ impl ControlAction {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::StructuredAnswer { .. } => "structured_answer",
+            Self::DismissStructured { .. } => "dismiss_structured",
             Self::Approve { .. } => "approve",
             Self::Deny { .. } => "deny",
             Self::VerifiedPicker { .. } => "verified_picker",
@@ -801,6 +812,24 @@ mod tests {
         assert_eq!(encoded["request_identity"]["request_id"], 41);
         assert_eq!(encoded["answers"][0]["question_id"], "q-1");
         assert_eq!(action.kind(), "structured_answer");
+    }
+
+    #[test]
+    fn structured_dismiss_preserves_exact_request_identity() {
+        let action = ControlAction::DismissStructured {
+            request_fingerprint: "sha256:request".to_string(),
+            request_identity: Some(FleetRequestIdentity {
+                request_id: serde_json::json!(41),
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-2".to_string(),
+                item_id: "item-3".to_string(),
+            }),
+        };
+        let encoded = serde_json::to_value(&action).unwrap();
+        assert_eq!(action.kind(), "dismiss_structured");
+        assert_eq!(encoded["action"], "dismiss_structured");
+        assert_eq!(encoded["request_fingerprint"], "sha256:request");
+        assert_eq!(encoded["request_identity"]["request_id"], 41);
     }
 
     #[test]

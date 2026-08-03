@@ -10,6 +10,7 @@ struct FleetWindowView: View {
     @State private var broadcastPresented = false
     @State private var atcPresented = false
     @State private var timelinePresented = false
+    @State private var answerQueuePresented = false
 
     private var visibleSessions: [FleetSession] {
         FleetRosterPresentation.visibleSessions(
@@ -40,6 +41,7 @@ struct FleetWindowView: View {
         .sheet(isPresented: $atcPresented) { FleetATCList(store: store) }
         .sheet(isPresented: $timelinePresented) { FleetTimelineList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
+        .sheet(isPresented: $answerQueuePresented) { FleetAnswerQueue(store: store) }
         .onAppear(perform: selectFirstVisibleSession)
         .onReceive(store.$sessions) { selectFirstVisibleSession(in: $0) }
         .onChange(of: presentation.filters) { _, _ in selectFirstVisibleSession() }
@@ -131,6 +133,9 @@ struct FleetWindowView: View {
             Button("Start") { startPresented = true }
                 .disabled(!store.canStart)
                 .accessibilityIdentifier("fleet.start.open")
+            Button("Answer queue \(interviewCount)") { answerQueuePresented = true }
+                .disabled(interviewCount == 0)
+                .accessibilityIdentifier("fleet.answer-queue.open")
             Menu {
                 Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts)
                 Button("ATC") { atcPresented = true }.disabled(!store.canReadATC)
@@ -179,6 +184,10 @@ struct FleetWindowView: View {
         }
     }
 
+    private var interviewCount: Int {
+        store.sessions.filter { FleetInterviewDeck(session: $0) != nil }.count
+    }
+
     private func selectFirstVisibleSession() {
         selectFirstVisibleSession(in: visibleSessions)
     }
@@ -193,6 +202,273 @@ struct FleetWindowView: View {
         guard !matching.isEmpty,
               !matching.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
         store.selectedSessionKey = matching.first?.sessionKey
+    }
+}
+
+private struct FleetAnswerQueue: View {
+    @ObservedObject var store: FleetStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedSessionKey: String?
+    @State private var selectedQuestionIndex = 0
+    @State private var selections: [String: Set<String>] = [:]
+    @State private var textAnswers: [String: String] = [:]
+    @State private var rejectConfirmation = false
+
+    private var decks: [FleetInterviewDeck] {
+        store.sessions.compactMap(FleetInterviewDeck.init(session:)).sorted {
+            FleetInterviewDeck.priority($0.session) < FleetInterviewDeck.priority($1.session)
+        }
+    }
+
+    private var deck: FleetInterviewDeck? {
+        decks.first(where: { $0.session.sessionKey == selectedSessionKey }) ?? decks.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Answer Queue")
+                        .font(.title2.weight(.bold))
+                    Text("Priority ordered. Delivery stays visible until Fleet confirms state.")
+                        .font(.subheadline)
+                        .foregroundStyle(FleetPalette.muted)
+                }
+                Spacer()
+                Button("Done", action: dismiss.callAsFunction)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(decks, id: \.session.sessionKey) { item in
+                        Button {
+                            choose(item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.session.displayName ?? item.session.sessionKey)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                Text("\(item.questions.count) questions · \(item.session.provider.rawValue.uppercased())")
+                                    .font(.caption)
+                                    .foregroundStyle(FleetPalette.muted)
+                            }
+                            .padding(12)
+                            .frame(width: 210, alignment: .leading)
+                            .background(
+                                item.session.sessionKey == deck?.session.sessionKey ? FleetPalette.selected : FleetPalette.control,
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if let deck, let question = deck.questions[safe: selectedQuestionIndex] {
+                questionPanel(deck: deck, question: question)
+            } else {
+                ContentUnavailableView("No structured interviews", systemImage: "checkmark.circle")
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 760, minHeight: 560)
+        .background(FleetPalette.canvas)
+        .onAppear { choose(decks.first) }
+        .onChange(of: decks.map(\.session.sessionKey)) { _, _ in choose(deck) }
+    }
+
+    @ViewBuilder private func questionPanel(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(deck.questions.enumerated()), id: \.element.id) { index, item in
+                        Button {
+                            selectedQuestionIndex = index
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(index + 1). \(item.header)")
+                                    .font(.caption.weight(.bold))
+                                Text(answered(deck: deck, question: item) ? "Answered" : "Needs answer")
+                                    .font(.caption2)
+                                    .foregroundStyle(answered(deck: deck, question: item) ? FleetPalette.mint : FleetPalette.amber)
+                            }
+                            .padding(10)
+                            .frame(width: 150, alignment: .leading)
+                            .background(index == selectedQuestionIndex ? FleetPalette.selected : FleetPalette.control, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Text(question.header).font(.title3.weight(.semibold))
+            Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
+
+            if question.options.isEmpty {
+                TextField("Type answer", text: textBinding(deck: deck, question: question), axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(3...8)
+            } else {
+                ForEach(question.options, id: \.self) { option in
+                    Button {
+                        toggle(option, deck: deck, question: question)
+                    } label: {
+                        HStack {
+                            Image(systemName: isSelected(option, deck: deck, question: question)
+                                  ? (question.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
+                                  : (question.multiSelect ? "square" : "circle"))
+                            Text(option)
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(FleetPalette.control, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                if isSelected("Other", deck: deck, question: question) {
+                    TextField("Describe Other", text: textBinding(deck: deck, question: question))
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            HStack {
+                Button("← Previous") { moveQuestion(-1, deck: deck) }
+                    .disabled(selectedQuestionIndex == 0)
+                Button("Next →") { moveQuestion(1, deck: deck) }
+                    .disabled(selectedQuestionIndex + 1 == deck.questions.count)
+                Spacer()
+                if deck.session.provider == .claude && deck.session.capabilities.structuredDismiss {
+                    Button("Reject interview", role: .destructive) { rejectConfirmation = true }
+                }
+                Button("Submit all answers") { submit(deck) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!complete(deck) || store.pendingIntentID != nil)
+            }
+
+            if let notice = store.controlNotice {
+                Text(notice).font(.caption).foregroundStyle(FleetPalette.amber)
+            }
+        }
+        .padding(18)
+        .background(FleetPalette.sidebar, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onMoveCommand { direction in
+            if direction == .left { moveQuestion(-1, deck: deck) }
+            if direction == .right { moveQuestion(1, deck: deck) }
+        }
+        .confirmationDialog("Reject this structured interview?", isPresented: $rejectConfirmation) {
+            Button("Reject interview", role: .destructive) {
+                store.selectedSessionKey = deck.session.sessionKey
+                store.dismissStructuredInterview(on: deck.session)
+            }
+        } message: {
+            Text("Claude receives an explicit rejection. Draft answers remain until Fleet state changes.")
+        }
+    }
+
+    private func choose(_ item: FleetInterviewDeck?) {
+        guard let item else { return }
+        selectedSessionKey = item.session.sessionKey
+        store.selectedSessionKey = item.session.sessionKey
+        selectedQuestionIndex = min(selectedQuestionIndex, max(item.questions.count - 1, 0))
+    }
+
+    private func key(_ deck: FleetInterviewDeck, _ question: FleetInterviewQuestion) -> String {
+        "\(deck.session.sessionKey):\(deck.session.currentRequestFingerprint ?? ""): \(question.id)"
+    }
+
+    private func isSelected(_ option: String, deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Bool {
+        selections[key(deck, question), default: []].contains(option)
+    }
+
+    private func toggle(_ option: String, deck: FleetInterviewDeck, question: FleetInterviewQuestion) {
+        let answerKey = key(deck, question)
+        if question.multiSelect {
+            if selections[answerKey, default: []].contains(option) {
+                selections[answerKey, default: []].remove(option)
+            } else {
+                selections[answerKey, default: []].insert(option)
+            }
+        } else {
+            selections[answerKey] = [option]
+        }
+    }
+
+    private func textBinding(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Binding<String> {
+        let answerKey = key(deck, question)
+        return Binding(get: { textAnswers[answerKey, default: ""] }, set: { textAnswers[answerKey] = $0 })
+    }
+
+    private func answered(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Bool {
+        let answerKey = key(deck, question)
+        if question.options.isEmpty { return !textAnswers[answerKey, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let selected = selections[answerKey, default: []]
+        return !selected.isEmpty && (!selected.contains("Other") || !textAnswers[answerKey, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    private func complete(_ deck: FleetInterviewDeck) -> Bool {
+        deck.questions.allSatisfy { answered(deck: deck, question: $0) }
+    }
+
+    private func moveQuestion(_ delta: Int, deck: FleetInterviewDeck) {
+        selectedQuestionIndex = min(max(selectedQuestionIndex + delta, 0), deck.questions.count - 1)
+    }
+
+    private func submit(_ deck: FleetInterviewDeck) {
+        store.selectedSessionKey = deck.session.sessionKey
+        let answers = deck.questions.map { question in
+            let answerKey = key(deck, question)
+            let selections = Array(selections[answerKey, default: []]).sorted()
+            let text = textAnswers[answerKey]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return FleetQuestionAnswer(questionID: question.id, selectedOptions: selections, text: text?.isEmpty == false ? text : nil)
+        }
+        store.submitStructuredAnswers(answers, on: deck.session)
+    }
+}
+
+private struct FleetInterviewDeck {
+    let session: FleetSession
+    let questions: [FleetInterviewQuestion]
+
+    init?(session: FleetSession) {
+        guard session.attention == .ask,
+              session.capabilities.structuredAnswer,
+              session.currentRequestFingerprint != nil,
+              let request = session.currentRequest else { return nil }
+        let payload = request.value("payload") ?? request
+        let input = payload.value("tool_input", "input") ?? payload
+        let questions: [FleetInterviewQuestion] = input.value("questions")?.arrayValue?.enumerated().compactMap { index, value in
+            guard let text = value.value("question", "text")?.stringValue else { return nil }
+            let options = value.value("options")?.arrayValue?.compactMap { $0.stringValue ?? $0.value("label")?.stringValue } ?? []
+            return FleetInterviewQuestion(
+                id: value.value("id")?.stringValue ?? String(index),
+                header: value.value("header")?.stringValue ?? "Question \(index + 1)",
+                text: text,
+                options: options,
+                multiSelect: value.value("multiSelect", "multi_select")?.boolValue ?? false
+            )
+        } ?? []
+        guard !questions.isEmpty else { return nil }
+        self.session = session
+        self.questions = questions
+    }
+
+    static func priority(_ session: FleetSession) -> (Int, Int64) {
+        let attention = session.attention == .ask ? 0 : 1
+        return (attention, -session.attentionUpdatedAt)
+    }
+}
+
+private struct FleetInterviewQuestion: Identifiable {
+    let id: String
+    let header: String
+    let text: String
+    let options: [String]
+    let multiSelect: Bool
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

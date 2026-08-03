@@ -3279,6 +3279,7 @@ impl EventHandler {
                 }
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
+                    FleetAction::DismissStructured { .. } => "rejected interview",
                     FleetAction::Approve { .. } => "approved request",
                     FleetAction::Deny { .. } => "denied request",
                     FleetAction::SendText { .. } => "sent prompt",
