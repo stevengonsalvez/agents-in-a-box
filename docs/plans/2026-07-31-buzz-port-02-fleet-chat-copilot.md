@@ -1,8 +1,9 @@
 # Plan: Fleet Chat + Fleet Copilot, both surfaces (buzz-port part 2)
 
-**From spec:** plans/2026-07-31-buzz-port-02-fleet-chat-copilot-spec.md
-**Research:** research/2026-07-31_14-56-19_buzz-acp-port.md · research/2026-07-31_acp-resume-steering-spike.md
-**Depends on:** plans/2026-07-31-buzz-port-01-chat-bus-acp.md (part 1: chat bus + ainb-acp AgentPool; generating at plan time, see Phase 0 gate)
+**From spec:** docs/plans/2026-07-31-buzz-port-02-fleet-chat-copilot-spec.md
+**Research:** [research, discussion #570](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) · [spike report, discussion #570 comment](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570#discussioncomment-17880848)
+**Explainer:** https://explainers.stevengonsalvez.com/buzz-acp-port/ (committed copy: explainers/buzz-acp-port-research.html)
+**Depends on:** docs/plans/2026-07-31-buzz-port-01-chat-bus-acp.md (part 1: chat bus + ainb-acp AgentPool; generating at plan time, see Phase 0 gate)
 **Date:** 2026-07-31
 **Code roots:** `ainb-tui/crates/` (daemon, proto, fleet-core, plugins) · `apps/ainb-fleet-macos/`
 

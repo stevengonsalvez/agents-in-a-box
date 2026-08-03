@@ -1,8 +1,9 @@
 # Plan: Daemon Chat Bus + ACP Provider Adapter (buzz-port part 1)
 
-**Research:** research/2026-07-31_14-56-19_buzz-acp-port.md (verdicts, §6 migration sketch, §7 chat ranking)
-**Spike:** research/2026-07-31_acp-resume-steering-spike.md (resume + steering matrix; RE-CHECK before Phases 5 and 6, adapter versions drift on npm)
-**Companion:** plans/2026-07-31-buzz-port-02-fleet-chat-copilot.md (part 2 reconciles its draft contract against THIS file at its Phase 0 gate)
+**Research:** [research, discussion #570](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) (verdicts, §6 migration sketch, §7 chat ranking)
+**Explainer:** https://explainers.stevengonsalvez.com/buzz-acp-port/ (committed copy: explainers/buzz-acp-port-research.html)
+**Spike:** [spike report, discussion #570 comment](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570#discussioncomment-17880848) (resume + steering matrix; RE-CHECK before Phases 5 and 6, adapter versions drift on npm)
+**Companion:** docs/plans/2026-07-31-buzz-port-02-fleet-chat-copilot.md (part 2 reconciles its draft contract against THIS file at its Phase 0 gate)
 **Design provenance:** Design B (winner of A/B/C bake-off) with 8 grafts applied and B's 6 named defects amputated; see "Design decisions" below.
 **Date:** 2026-07-31
 **Code roots:** `ainb-tui/crates/` (hangar-proto, hangar-store, hangar-daemon, fleet-core, core) · `apps/ainb-fleet-macos/` · buzz reference at session scratchpad `scratchpad/buzz/crates/buzz-acp/src/{pool,queue,acp}.rs` (patterns only, adapt not copy)
@@ -420,7 +421,7 @@ Manual:
 
 <!-- wave: 5 | depends_on: [5] | files: [ainb-tui/crates/ainb-hangar-daemon/src/acp_pool.rs, ainb-tui/crates/ainb-hangar-daemon/src/lib.rs, ainb-tui/crates/ainb-acp/src/client.rs] -->
 
-GATE before starting: re-read research/2026-07-31_acp-resume-steering-spike.md and re-run its probe scripts against the adapter versions actually pinned at implementation time (npm drift). The resume routine below must hold for the re-checked matrix.
+GATE before starting: re-read [spike report, discussion #570 comment](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570#discussioncomment-17880848) and re-run its probe scripts against the adapter versions actually pinned at implementation time (npm drift). The resume routine below must hold for the re-checked matrix.
 
 ### Changes
 

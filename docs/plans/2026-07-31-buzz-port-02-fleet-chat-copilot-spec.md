@@ -1,6 +1,6 @@
 # Specification: Fleet Chat + Fleet Copilot (buzz-port part 2)
 
-**Generated from:** /interview (3 rounds, 11 questions) + research/2026-07-31_14-56-19_buzz-acp-port.md + research/2026-07-31_acp-resume-steering-spike.md
+**Generated from:** /interview (3 rounds, 11 questions) + [research, discussion #570](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) + [spike report, discussion #570 comment](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570#discussioncomment-17880848)
 **Interview date:** 2026-07-31
 **Version:** 1.0
 
@@ -89,7 +89,7 @@ Contract-first against part 1's draft `fleet/message_*` family; reconciliation g
 - Adapter version floors asserted from agentInfo at spawn
 
 ### External Dependencies
-- Part 1 plan (plans/2026-07-31-buzz-port-01-chat-bus-acp.md, generating at interview time): message model, AgentPool, ainb-acp crate
+- Part 1 plan (docs/plans/2026-07-31-buzz-port-01-chat-bus-acp.md, generating at interview time): message model, AgentPool, ainb-acp crate
 
 ## Risks & Mitigations
 

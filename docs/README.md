@@ -17,6 +17,7 @@ If you're looking for a specific topic, start here:
 | [Knowledge](#knowledge) | `reflect` / `recall` GraphRAG + QMD |
 | [Contributing](#contributing) | Build, test, ship |
 | [Reference](#reference) | Architecture, glossary, deep dives |
+| [Plans](#plans) | Active implementation plans + their research |
 
 ---
 
@@ -87,6 +88,16 @@ The two-tier learning capture and retrieval system.
 
 - [Architecture deep-dive](reference/architecture.md)
 - [Glossary](reference/glossary.md)
+
+## Plans
+
+Committed implementation plans for in-flight work. Research lives in GitHub
+Discussions; visual explainers on the explainer site.
+
+- [Buzz port part 1 — daemon chat bus + ACP adapter](plans/2026-07-31-buzz-port-01-chat-bus-acp.md)
+- [Buzz port part 2 — fleet chat + copilot (macOS + TUI)](plans/2026-07-31-buzz-port-02-fleet-chat-copilot.md) · [spec](plans/2026-07-31-buzz-port-02-fleet-chat-copilot-spec.md)
+- Research: [porting block/buzz into ainb (discussion #570)](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) — includes the ACP resume/steering spike as a comment
+- Explainer: [buzz → ainb port research](https://explainers.stevengonsalvez.com/buzz-acp-port/) (committed copy under `explainers/`)
 
 ---
 
