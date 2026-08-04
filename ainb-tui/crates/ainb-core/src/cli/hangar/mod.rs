@@ -8436,7 +8436,7 @@ pub fn ensure_hangar_daemon() {
 /// Spawn the daemon as a detached background child unless it is already running,
 /// recording its EXACT pid. When `announce` is true the outcome is printed
 /// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
-fn start_daemon_if_stopped(announce: bool) -> Result<()> {
+pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     let pid_path = daemon_pid_path()?;
 
     // Already running? Bail out cleanly rather than spawning a duplicate.

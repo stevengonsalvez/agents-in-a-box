@@ -5109,8 +5109,9 @@ impl AppState {
         o.hangar_start_status = Some("starting Hangar daemon…".to_string());
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::ensure_hangar_daemon();
-                "Hangar start requested".to_string()
+                crate::cli::hangar::start_daemon_if_stopped(false)
+                    .map(|_| "Hangar started".to_string())
+                    .unwrap_or_else(|e| format!("Hangar start failed: {e:#}"))
             }).await.unwrap_or_else(|e| format!("Hangar start failed: {e}"));
             let _ = tx.send(line);
         });
