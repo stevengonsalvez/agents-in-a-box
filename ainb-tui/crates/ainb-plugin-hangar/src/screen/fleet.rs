@@ -18,11 +18,11 @@ const GOLD: Color = Color::rgb(251, 191, 36);
 const BLUE: Color = Color::rgb(96, 165, 250);
 const VIOLET: Color = Color::rgb(185, 140, 235);
 const GREEN: Color = Color::rgb(110, 200, 130);
+const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 const ALERT: Color = Color::rgb(220, 90, 90);
 const SURFACE: Color = Color::rgb(15, 23, 42);
 const ACTIVE_CHIP: Color = Color::rgb(30, 64, 175);
 const CARD_BORDER: Color = Color::rgb(70, 80, 110);
-const SELECTED_OUTLINE: Color = Color::rgb(210, 130, 90);
 const BOLD: u16 = 1;
 
 /// Capability wire shape accepted from current and planned daemon snapshots.
@@ -2083,7 +2083,7 @@ fn render_session_card(
         return;
     }
     let border = if selected {
-        SELECTED_OUTLINE
+        SELECTION_GREEN
     } else {
         CARD_BORDER
     };
@@ -2093,7 +2093,7 @@ fn render_session_card(
     let content_width = usize::from(right.saturating_sub(5)).max(8);
     let identity = truncate_ellipsis(&session.repository_label(), content_width);
     let age = format_age(now_ms, session.last_observed_at);
-    let marker = if selected { "▸ " } else { "  " };
+    let marker = if selected { "▶ " } else { "  " };
     let branch = truncate_ellipsis(&session.branch_label(), content_width.saturating_sub(18));
 
     put_char(buffer, 0, row_y, '╭', border);
@@ -2138,11 +2138,7 @@ fn render_session_card(
         2,
         row_y.saturating_add(1),
         &format!("{marker}{identity}"),
-        if selected {
-            FG
-        } else {
-            operator_state_color(session)
-        },
+        if selected { SELECTION_GREEN } else { operator_state_color(session) },
         None,
         selected.then_some(BOLD).unwrap_or(0),
         inner_right,
@@ -4117,7 +4113,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_cards_keep_semantic_colours_and_selected_outline_without_fill() {
+    fn operator_cards_keep_semantic_colours_and_selection_without_fill() {
         let mut error = session("error", "claude", "IDLE", "ERROR", "managed");
         error.current_request = Some(serde_json::json!({"message": "review failure"}));
         let mut state = FleetPaneState::default();
@@ -4125,7 +4121,7 @@ mod tests {
             session("input", "claude", "IDLE", "ASK", "managed"),
             session("running", "codex", "RUNNING", "NONE", "managed"),
             session("idle", "codex", "IDLE", "NONE", "managed"),
-            session("done", "claude", "COMPLETED", "NONE", "managed"),
+            session("done", "claude", "TURN_COMPLETE", "NONE", "managed"),
             error,
         ]);
         state = apply(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
@@ -4134,13 +4130,14 @@ mod tests {
 
         assert_eq!(
             final_cell(&buffer, 0, 3).and_then(|cell| cell.fg),
-            Some(SELECTED_OUTLINE)
+            Some(SELECTION_GREEN)
         );
         assert_eq!(final_cell(&buffer, 2, 4).and_then(|cell| cell.bg), None);
-        for color in [GOLD, BLUE, VIOLET, GREEN, ALERT] {
-            assert!(
-                buffer.cells.iter().any(|(_, cell)| cell.fg == Some(color)),
-                "semantic colour {color:?} missing from Fleet cards"
+        for (row, color) in [(3, GOLD), (7, BLUE), (11, VIOLET), (15, GREEN), (19, ALERT)] {
+            assert_eq!(
+                final_cell(&buffer, 2, row).and_then(|cell| cell.fg),
+                Some(color),
+                "semantic color at card row {row}"
             );
         }
     }
@@ -4168,7 +4165,7 @@ mod tests {
         render_fleet(&mut buffer, 100, 0, 9, &state);
         let rendered = (0..9).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("session-17"));
-        assert!(rendered.contains("▸"));
+        assert!(rendered.contains("▶"));
         assert!(!rendered.contains("session-00"));
     }
 
@@ -4418,10 +4415,13 @@ mod tests {
         let mut state = FleetPaneState::default();
         state.set_sessions(vec![row]);
         state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
-        assert!(
-            state.is_capturing_text(),
-            "free-text answer must retain H and ? for its field"
-        );
+        state = apply(&state, FleetEvent::Key(FleetKey::Char('H'))).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Char('?'))).state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("free-text interview expected");
+        };
+        let answer = queue.current().expect("active interview");
+        assert_eq!(answer.texts[answer.question_index], "H?");
     }
 
     #[test]
