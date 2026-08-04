@@ -1,0 +1,850 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buzz → ainb port research: ACP, chat, federation</title>
+<style>
+  :root {
+    --ivory:   #FAF9F5;
+    --slate:   #141413;
+    --clay:    #D97757;
+    --oat:     #E3DACC;
+    --olive:   #788C5D;
+    --gray-150:#F0EEE6;
+    --gray-300:#D1CFC5;
+    --gray-500:#87867F;
+    --gray-700:#3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--ivory);
+    color: var(--gray-700);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    padding: 56px 24px 120px;
+  }
+  .page {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr);
+    gap: 48px;
+  }
+  @media (max-width: 920px) { .page { grid-template-columns: 1fr; } nav { display: none; } }
+
+  /* ── nav ──────────────────────────────── */
+  nav {
+    position: sticky;
+    top: 32px;
+    align-self: start;
+    font-size: 13px;
+  }
+  nav .label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--gray-500);
+    margin-bottom: 12px;
+  }
+  nav a {
+    display: block;
+    padding: 5px 0 5px 12px;
+    border-left: 2px solid var(--gray-300);
+    color: var(--gray-700);
+    text-decoration: none;
+  }
+  nav a:hover { color: var(--slate); border-color: var(--slate); }
+  nav a.l2 { padding-left: 24px; font-size: 12.5px; color: var(--gray-500); }
+  nav .files {
+    margin-top: 28px;
+    border-top: 1px solid var(--gray-300);
+    padding-top: 16px;
+  }
+  nav .files code {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--gray-500);
+    padding: 3px 0;
+  }
+
+  /* ── header ───────────────────────────── */
+  header { margin-bottom: 12px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gray-500);
+    margin-bottom: 10px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 32px;
+    color: var(--slate);
+    letter-spacing: -0.01em;
+    margin-bottom: 14px;
+  }
+  .tldr {
+    border: 1.5px solid var(--gray-300);
+    border-left: 3px solid var(--clay);
+    border-radius: 10px;
+    background: #fff;
+    padding: 16px 18px;
+    margin-bottom: 8px;
+  }
+  .tldr b { color: var(--slate); }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 22px;
+    color: var(--slate);
+    margin: 40px 0 14px;
+    scroll-margin-top: 24px;
+  }
+  h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 17px;
+    color: var(--slate);
+    margin: 22px 0 8px;
+  }
+  p { margin-bottom: 12px; max-width: 680px; }
+  code { font-family: var(--mono); font-size: 13px; }
+
+  /* ── collapsible ─────────────────────── */
+  details {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 10px;
+    background: #fff;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 14px 16px;
+    font-family: var(--serif);
+    font-size: 16px;
+    color: var(--slate);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "▸";
+    color: var(--clay);
+    font-family: var(--sans);
+    font-size: 12px;
+    transition: transform 120ms;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  summary .where {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--gray-500);
+    margin-left: auto;
+  }
+  details .body { padding: 0 16px 16px; }
+  details .body p { font-size: 14px; }
+  details .body ul { padding-left: 20px; font-size: 14px; margin-bottom: 10px; }
+  details .body li { margin-bottom: 6px; }
+
+  /* ── tabs ─────────────────────────────── */
+  .tabs {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 10px;
+    background: #fff;
+    margin: 16px 0 8px;
+    overflow: hidden;
+  }
+  .tabbar {
+    display: flex;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--gray-300);
+    background: var(--gray-150);
+  }
+  .tabbar button {
+    appearance: none;
+    border: none;
+    background: none;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gray-500);
+    padding: 10px 16px;
+    cursor: pointer;
+    border-right: 1px solid var(--gray-300);
+  }
+  .tabbar button.on {
+    background: #fff;
+    color: var(--slate);
+    border-bottom: 2px solid var(--clay);
+    margin-bottom: -1px;
+  }
+  .tabs pre {
+    display: none;
+    margin: 0;
+    padding: 16px 18px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--slate);
+    overflow-x: auto;
+  }
+  .tabs pre.on { display: block; }
+  .hl { color: var(--clay); }
+  .cm { color: var(--gray-500); }
+  .ol { color: var(--olive); }
+
+  /* ── callout ──────────────────────────── */
+  .callout {
+    display: flex;
+    gap: 12px;
+    border: 1.5px solid var(--oat);
+    background: rgba(227,218,204,0.35);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 18px 0;
+    font-size: 14px;
+  }
+  .callout .ico { color: var(--clay); font-weight: 600; }
+
+  /* ── verdict ─────────────────────────── */
+  .verdict {
+    border: 1.5px solid var(--olive);
+    border-left: 3px solid var(--olive);
+    background: #fff;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 18px 0;
+    font-size: 14.5px;
+  }
+  .verdict b { color: var(--slate); }
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    border-radius: 99px;
+    padding: 2px 10px;
+    margin-right: 6px;
+  }
+  .pill.adopt { background: rgba(120,140,93,0.15); color: var(--olive); border: 1px solid var(--olive); }
+  .pill.hold  { background: rgba(227,218,204,0.5); color: var(--gray-700); border: 1px solid var(--gray-300); }
+  .pill.skip  { background: rgba(217,119,87,0.12); color: var(--clay); border: 1px solid var(--clay); }
+
+  /* ── tables ───────────────────────────── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    background: #fff;
+    border: 1.5px solid var(--gray-300);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 14px 0;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--gray-500);
+    background: var(--gray-150);
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--gray-300);
+  }
+  td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--gray-150);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12px; }
+
+  /* ── faq ──────────────────────────────── */
+  dl.faq { margin-top: 8px; }
+  dl.faq dt {
+    font-family: var(--serif);
+    font-size: 16px;
+    color: var(--slate);
+    margin-top: 18px;
+  }
+  dl.faq dd { font-size: 14px; margin: 4px 0 0; max-width: 640px; }
+</style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ── side nav ── -->
+  <nav>
+    <div class="label">On this page</div>
+    <a href="#tldr">TL;DR</a>
+    <a href="#buzz">1 · What is Buzz</a>
+    <a href="#buzz" class="l2">Architecture</a>
+    <a href="#buzz" class="l2">Feature inventory</a>
+    <a href="#acp">2 · ACP deep dive</a>
+    <a href="#acp" class="l2">Protocol + ecosystem</a>
+    <a href="#acp" class="l2">How buzz uses it</a>
+    <a href="#verdict">3 · ACP verdict for ainb</a>
+    <a href="#chat">4 · Chat surfaces</a>
+    <a href="#federation">5 · Federation</a>
+    <a href="#roadmap">6 · Port roadmap</a>
+    <a href="#faq">Open questions</a>
+    <div class="files">
+      <div class="label">Key files read</div>
+      <code>buzz-acp/src/acp.rs</code>
+      <code>buzz-acp/src/pool.rs</code>
+      <code>buzz-acp/src/queue.rs</code>
+      <code>buzz-dev-mcp/src/lib.rs</code>
+      <code>buzz-relay-mesh/src/*.rs</code>
+      <code>ainb: fleet/provider.rs</code>
+      <code>ainb: fleet/send/tmux.rs</code>
+      <code>ainb: hangar-proto/fleet.rs</code>
+    </div>
+  </nav>
+
+  <!-- ── main ── -->
+  <main>
+    <header>
+      <div class="eyebrow">Research · block/buzz @ 39ce3df · ainb branch f/buzz @ 10165efc · 2026-07-31</div>
+      <h1>What ainb should port from <code>block/buzz</code></h1>
+      <div class="tldr" id="tldr">
+        <b>TL;DR</b>: Buzz is not a small ACP chat app; it is a self-hosted Nostr-relay workspace where
+        humans and AI agents are equal members. Three verdicts: <b>(1) ACP: hybrid-adopt</b>: add ACP as a
+        new provider transport at ainb's existing <code>ProviderAdapter</code> seam for chat-grade sessions,
+        keep tmux for interactive terminals; <b>(2) Chat: build the daemon-level chat bus first</b>: the
+        fleet daemon already ships composer → send → broadcast → receipts, only a persisted message model is
+        missing; <b>(3) Federation: Tailscale/SSH over the existing daemon now</b>: buzz itself has zero
+        relay-to-relay federation in code; what it federates is <em>identity</em>, and that is the part worth
+        copying later. Full citations: <code>research/2026-07-31_14-56-19_buzz-acp-port.md</code>.
+      </div>
+    </header>
+
+    <h2 id="buzz">1 · What is Buzz</h2>
+    <p>A self-hostable team workspace built on the Nostr protocol. Every action, message, reaction,
+      workflow step, git push notification, huddle join, is a cryptographically signed event with a
+      <code>kind</code> integer. The relay is the single source of truth; agents hold their own keypairs,
+      channel memberships and audit trails, exactly like human members.</p>
+
+    <div class="tabs" data-tabs>
+      <div class="tabbar">
+        <button class="on" data-t="0">system architecture</button>
+        <button data-t="1">event model</button>
+        <button data-t="2">deploy footprint</button>
+      </div>
+<pre class="on">┌──────────────┐  ┌──────────────────┐  ┌────────────┐
+│ Desktop      │  │ <span class="hl">buzz-acp harness</span> │  │ buzz-cli   │
+│ (Tauri+React)│  │ ACP stdio ndjson │  │ agent-first│
+│ mobile (Flu.)│  │ goose/codex/     │  │ JSON CLI   │
+└──────┬───────┘  │ claude pool 1-32 │  └─────┬──────┘
+       │ WS+REST  └────────┬─────────┘        │
+       ▼                   ▼ WS+REST          ▼
+┌─────────────────────────────────────────────────────┐
+│ <span class="hl">buzz-relay</span> (Axum): NIP-01 signed events, kinds     │
+│ channels·threads·DMs·canvas·media·search·audit·git· │
+│ workflows·huddles(voice)·presence                   │
+└──────┬──────────────┬──────────────┬────────────────┘
+   Postgres         Redis         S3/MinIO
+   (events+FTS)     (pubsub)      (Blossom media)</pre>
+<pre><span class="cm">// every event, human or agent:</span>
+{
+  "id":      "&lt;sha256 of canonical serialization&gt;",
+  "pubkey":  "&lt;secp256k1 public key&gt;",
+  "kind":    <span class="hl">40002</span>,          <span class="cm">// the only dispatch switch</span>
+  "tags":    [["e","…"],["p","…"]],
+  "content": "…",
+  "sig":     "&lt;Schnorr signature&gt;"
+}
+
+<span class="cm">// new feature = new kind number = zero breaking changes.</span>
+<span class="cm">// 81 kinds defined; custom range 40000-49999.</span></pre>
+<pre><span class="cm"># minimum self-host = 5 containers (deploy/compose/compose.yml)</span>
+relay + postgres:17 + redis:7 + minio + minio-init
+
+<span class="hl">no feature flags to drop any of them.</span>
+buzz-db: no [features]; hard-errors at boot without Postgres
+buzz-pubsub: Redis pool built unconditionally
+buzz-media: single concrete S3 Bucket, no trait
+<span class="cm"># → the chat substrate is NOT liftable; the patterns are.</span></pre>
+    </div>
+
+    <h3>Feature inventory (port-relevant subset)</h3>
+
+    <details>
+      <summary>Channels · threads · reactions · DMs · search · audit <span class="where">relay + Postgres, pattern only</span></summary>
+      <div class="body">
+        <p>Channel types Stream/Forum/Dm/Workflow; threads are a relay-computed read model
+          (<code>thread_metadata</code> at ingest, synthetic summary kinds 39005/39006); reactions are NIP-25
+          overlays; DMs support NIP-17 gift wrap (sender/content/timestamp hidden); search is a Postgres
+          generated <code>tsvector</code> column; audit is a per-community SHA-256 hash chain under a
+          Postgres advisory lock. All hard-wired to the relay substrate, <b>skip the code, keep the
+          shapes</b>: the content/aux/non-conversational kind partition is the design to copy.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>buzz-dev-mcp, standalone agent tool server <span class="where">crates/buzz-dev-mcp/src/lib.rs</span></summary>
+      <div class="body">
+        <p>Pure local MCP server, zero relay/Postgres/Redis coupling: <code>shell</code>,
+          <code>read_file</code>, <code>str_replace</code>, <code>todo</code>, <code>view_image</code>, plus
+          two lifecycle hooks, <code>_Stop</code> (objection gate before the agent ends its turn) and
+          <code>_PostCompact</code> (re-inject state after context compaction). Installs a 0700 tempdir PATH
+          shim exposing <code>rg</code>/<code>tree</code>/<code>buzz</code>; moves the private key from env
+          into a 0600 keyfile so child processes never see it (<code>shim.rs:33-58</code>).
+          <b>Best standalone lift in the repo.</b></p>
+      </div>
+    </details>
+
+    <details>
+      <summary>buzz-workflow, YAML automation DSL <span class="where">crates/buzz-workflow/src/schema.rs</span></summary>
+      <div class="body">
+        <p>Triggers: <code>message_posted</code>, <code>reaction_added</code>, <code>diff_posted</code>,
+          <code>schedule</code> (cron), <code>webhook</code>. Actions: send_message, send_dm, add_reaction,
+          call_webhook (SSRF-guarded), request_approval, delay. Conditions via <code>evalexpr</code> with a
+          100&nbsp;ms timeout. The schema/executor have zero Nostr/Postgres coupling, only the concrete
+          <code>action_sink</code> is relay-bound. Swap in an ainb sink ("send prompt to session",
+          "broadcast", "notify") and this becomes ainb's automation engine.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>buzz-persona, <code>.persona.md</code> agent packs <span class="where">crates/buzz-persona/src/persona.rs:101-169</span></summary>
+      <div class="body">
+        <p>YAML frontmatter + markdown-body-as-system-prompt: name, avatar, skills, MCP servers, triggers
+          (mentions/keywords/all), model, runtime, temperature, hooks. Parser/merge/validate are pure
+          filesystem logic. Direct fit for per-agent chat configuration in ainb.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Identity primitives, NIP-42 challenge, NIP-OA/AA attestation <span class="where">buzz-auth/src/nip42.rs:37-86 · docs/nips/</span></summary>
+      <div class="body">
+        <p><b>NIP-42</b>: relay sends 32 random bytes; client signs {challenge, relay-URL}; relay verifies
+          Schnorr + URL binding + ±60&nbsp;s window. ~50 transport-agnostic lines.
+          <b>NIP-OA</b>: an owner key authorizes an agent key with bounded conditions
+          (<code>kind=…&amp;created_at&lt;…</code>) without transferring identity, the event stays authored
+          by the agent. <b>NIP-AA</b>: an agent whose owner is a member inherits access; revoking the human
+          revokes their agents. This trio is the identity model for "my agents on my machines".</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Also inventoried <span class="where">full table in the research doc</span></summary>
+      <div class="body">
+        <ul>
+          <li><b>Git hosting on object storage</b>: Smart HTTP over ephemeral worktrees hydrated from S3,
+            TLA+-checked CAS-manifest publish; plus standalone <code>git-credential-nostr</code> /
+            <code>git-sign-nostr</code> binaries.</li>
+          <li><b>Huddles</b>: dumb Opus-frame fan-out over WS inside the relay, no SFU. <b>buzz-voice</b> -
+            separate, fully offline local TTS crate (zero infra; optional lift).</li>
+          <li><b>Device pairing (NIP-AB)</b>: QR + ECDH + human-compared 6-digit SAS + stateless throwaway
+            relay; complete device-enrollment protocol in ~small code.</li>
+          <li><b>Agent job kinds 43001-43006</b>: wire convention only; no dedicated relay dispatcher found.</li>
+          <li><b>sprig</b>: multicall binary (argv[0] dispatch) packaging pattern.</li>
+        </ul>
+      </div>
+    </details>
+
+    <h2 id="acp">2 · ACP deep dive</h2>
+
+    <h3>The protocol and its ecosystem (fetched 2026-07-31)</h3>
+    <p>ACP (Agent Client Protocol, agentclientprotocol.com) is JSON-RPC 2.0 over stdio: the client spawns
+      the agent as a subprocess. <code>initialize</code> negotiates an integer <code>protocolVersion</code>
+      (stable = 1; v2 schema in alpha). Sessions: <code>session/new</code> (carries MCP server configs +
+      cwd), <code>session/prompt</code>, streamed <code>session/update</code> notifications,
+      <code>session/request_permission</code>, <code>session/cancel</code>. Co-governed by Zed + JetBrains,
+      Apache 2.0; first-party Rust crate <code>agent-client-protocol</code> v1.6.0. Remote transport is
+      explicitly work-in-progress in the spec, stdio is the baseline.</p>
+
+    <table>
+      <thead><tr><th>Agent</th><th>ACP support</th><th>Via</th></tr></thead>
+      <tbody>
+        <tr><td>Claude Code</td><td>Yes</td><td>official <code>claude-agent-acp</code> (agentclientprotocol org)</td></tr>
+        <tr><td>Codex</td><td>Yes</td><td>official <code>codex-acp</code></td></tr>
+        <tr><td>Gemini CLI</td><td>Yes, native</td><td><code>--acp</code> flag, launch partner</td></tr>
+        <tr><td>Copilot CLI</td><td>Yes, native</td><td><code>--acp --port</code>: stdio <b>and TCP</b> (only real remote transport shipping)</td></tr>
+        <tr><td>Goose (Block) · OpenCode · OpenHands · Junie</td><td>Yes, native</td><td>-</td></tr>
+        <tr><td>Aider · Crush</td><td>No</td><td>gap / open feature request</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:13px; color:var(--gray-500);">Clients: Zed (reference), JetBrains IDEs, Neovim
+      (CodeCompanion), Emacs, Toad, marimo, community VS Code extensions. Known weaknesses: stdio-only breaks
+      SSH/remote setups (open Zed issues #47910, #52254); session persistence optional per spec; auth
+      late-bound.</p>
+
+    <h3>How buzz actually uses ACP</h3>
+
+    <details open>
+      <summary>The harness loop <span class="where">buzz-acp/src/{acp,pool,queue}.rs</span></summary>
+      <div class="body">
+        <p>Hand-rolled client (no upstream crate existed then): NDJSON JSON-RPC over child stdio, 10&nbsp;MB
+          line cap. Pool of 1–32 agent subprocesses with claim/return and <em>channel affinity</em>; one ACP
+          session per (process × channel), reused across prompts so the adapter's own history carries
+          context. Per-channel FIFO queue: at most one prompt in flight per channel, up to 50 events batched
+          into one prompt, cross-channel fairness by oldest head. Two clocks per turn: idle 620&nbsp;s
+          (reset on any output and on <code>tool_call</code>) and hard 7200&nbsp;s. Per-slot crash circuit
+          breaker with jittered exponential backoff.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>The surprising part: replies don't return via ACP <span class="where">buzz-acp/src/base_prompt.md:5-24</span></summary>
+      <div class="body">
+        <p><code>session/update</code> chunks (message, thought, tool_call, plan) are only logged and
+          mirrored to an <b>encrypted owner-only observer feed</b> (kind 24200). The agent posts to chat by
+          running the <code>buzz</code> CLI from an MCP shell tool, it is a first-class chat client, not a
+          pipe. The chat timeline therefore only ever receives the agent's <em>final</em> message; thinking,
+          tool calls, plans, permission requests and token cost render in a side transcript reduced from the
+          observer frames. The chat renderer never handles partial markdown.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Steering, permissions, MCP wiring <span class="where">buzz-acp/src/acp.rs:1865-1940, lib.rs:4179-4232</span></summary>
+      <div class="body">
+        <p>Mid-turn arrivals: Queue / <b>Steer</b> (default, non-cancelling injection via
+          <code>_session/steering</code>, capability-gated because codex-acp answers unknown methods with
+          <code>{}</code> success and would silently eat messages) / Interrupt / OwnerInterrupt. Tool
+          permissions are auto-approved (<code>allow_once</code> selected by kind); a session-level
+          permission mode is pushed via <code>session/set_config_option</code>. MCP servers are passed to the
+          agent through ACP's <code>session/new</code> params, buzz passes exactly one
+          (<code>buzz-dev-mcp</code>).</p>
+      </div>
+    </details>
+
+    <h2 id="verdict">3 · ACP verdict for ainb</h2>
+
+    <div class="verdict">
+      <span class="pill adopt">verdict · hybrid-adopt</span>
+      <b>Adopt ACP as a new agent transport for chat/broadcast sessions at the existing
+      <code>ProviderAdapter</code> seam, inside the hangar daemon. Keep tmux for interactive terminal
+      sessions. Do not touch the hangar plugin protocol or the fleet daemon protocol, ACP is not for those
+      layers.</b>
+    </div>
+
+    <p>ainb's transport today is terminal scraping: <code>tmux send-keys</code> with a 1000&nbsp;ms paste
+      settle and 3× Enter retry (<code>fleet/send/tmux.rs:84-104</code>, born from the "8 unsubmitted
+      pastes" incident), observation via <code>capture-pane</code> box-drawing heuristics and tailing Claude
+      Code's own JSONL transcripts. ACP replaces every one of those with a structured call:</p>
+
+    <div class="tabs" data-tabs>
+      <div class="tabbar">
+        <button class="on" data-t="0">before (today)</button>
+        <button data-t="1">after (hybrid)</button>
+        <button data-t="2">migration sketch</button>
+      </div>
+<pre>┌─────────┐ send-keys -l --   ┌───────────────┐
+│ fleet-  │──── + settle ────▶│ tmux pane     │
+│ core    │      + retry ×3   │ claude / codex│
+│         │◀──────────────────│               │
+└─────────┘  capture-pane +   └───────────────┘
+             jsonl tail
+<span class="cm"># inject: paste heuristics, no ack
+# observe: scrollback scraping, re-implemented
+#          Claude path-slugging rules
+# permissions: detected via '?' + │┌└ chars</span></pre>
+<pre>┌─────────┐ fleet/* ┌──────────────────────────┐
+│ TUI /   │────────▶│ <span class="hl">hangar daemon</span>            │
+│ Fleet / │         │  chat store (hangar-store)│
+│ web     │◀────────│  <span class="hl">AgentPool (ACP)</span>          │
+└─────────┘ events  └───┬──────────────────┬───┘
+                 ACP stdio│                │tmux (kept)
+        ┌────────────────▼───┐   ┌────────▼─────────┐
+        │ claude-agent-acp / │   │ interactive tmux │
+        │ codex-acp / gemini │   │ sessions (watch- │
+        │ (headless, pooled) │   │ able, attachable)│
+        └────────────────────┘   └──────────────────┘
+<span class="cm"># chat sessions: structured prompt/stream/permission/cancel
+# terminal sessions: unchanged, ainb's core value stays</span></pre>
+<pre>1. <span class="hl">ainb-acp crate</span> on agent-client-protocol v1.x:
+   spawn adapter → initialize → session/new
+   (pass ainb MCP servers) → session/prompt →
+   reduce session/update into fleet events
+2. daemon-owned <span class="hl">AgentPool</span> (adapt buzz pool/queue/
+   circuit-breaker; session per chat channel)
+3. <span class="hl">AcpProviderAdapter</span> impl of existing trait
+   (fleet-core/src/fleet/provider.rs:149-166);
+   capability bitset advertises send/observe/
+   cancel/steer
+4. chat store + fleet/message_* methods (§4)
+5. later: structured session/request_permission
+   replaces scrape heuristics for ACP sessions
+<span class="cm">// Provider enum is on the wire → batch the
+// growth with one fleet protocol version bump</span></pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">★</span>
+      <div><b>What ACP does not replace:</b> the visible tmux session. An ACP agent is a headless subprocess
+        of the harness. ainb's watchable/attachable terminals stay on tmux; ACP powers the chat-grade
+        sessions where headless is fine. And unlike buzz, ainb should use the upstream Rust crate, buzz
+        hand-rolled the protocol only because the crate didn't exist yet.</div>
+    </div>
+
+    <h2 id="chat">4 · Chat surfaces, ranked build order</h2>
+
+    <p>Headline from the ainb audit: <b>a chat transport already exists</b>. The macOS Fleet app ships a
+      per-session prompt composer and a multi-recipient broadcast form with delivery receipts, over
+      <code>hangar.sock</code> with token auth, capability gating, and revision-contiguous replay proven
+      against two independent clients. What's missing is a persisted message model, not a wire protocol.</p>
+
+    <table>
+      <thead><tr><th>#</th><th>Surface</th><th>Already exists</th><th>Missing</th><th>Call</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>1</b></td>
+          <td><b>Daemon-level chat bus</b></td>
+          <td>fleet negotiate/subscribe/replay/resync; broadcast + receipts (<code>Pending|Delivered|Failed|Unknown|Rejected</code>); capability gating; <code>hangar/comment_*</code>, inbox, mentions; SQLite store</td>
+          <td><code>fleet/message_send</code>/<code>_list</code>/<code>thread_*</code>; message table; ACP AgentPool for agent participants</td>
+          <td><span class="pill adopt">build first</span> one bus, every frontend attaches</td>
+        </tr>
+        <tr>
+          <td><b>2</b></td>
+          <td><b>Fleet chat + broadcast</b></td>
+          <td>composer (<code>FleetSessionDetailView.swift:87-117</code>); broadcast form with recipient checklist + confirm (<code>FleetWindowView.swift:430-481</code>); receipts UI</td>
+          <td>transcript timeline over the bus; thread panel; agent-transcript inspector (observer pattern)</td>
+          <td><span class="pill adopt">second</span> broadcast = message to N sessions, replies threaded per session</td>
+        </tr>
+        <tr>
+          <td><b>3</b></td>
+          <td><b>TUI chat tab</b></td>
+          <td><code>hangar-tui</code> plugin-as-daemon-client template; <code>captures_text</code> for text entry; dormant <code>ClaudeChatComponent</code> UI shell</td>
+          <td>new plugin + core screen registration (tab set is compile-time); ratatui chat list + composer</td>
+          <td><span class="pill hold">third</span> highest UI effort; benefits from bus + Fleet patterns first</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>UX contract carried over from buzz: clean timeline (final message only) + side transcript from ACP
+      updates; three-way kind partition (content / aux-overlay / non-conversational); optimistic send with a
+      carried local key; message grouping into continuations; one-level threads for v1; agents as members
+      with profiles; sticky "addressed agents" audience per channel. Two deliberate improvements over buzz:
+      <b>slash commands</b> (buzz has none, a TUI has no button bar to fall back on) and <b>actionable
+      permission rows</b> (buzz renders <code>session/request_permission</code> read-only; render
+      <code>[1] allow once · [2] always · [3] reject</code> and answer by JSON-RPC id).</p>
+
+    <h2 id="federation">5 · Federation, three sketches, one pick</h2>
+
+    <p>Evidence first: <b>buzz has no relay-to-relay federation in code.</b> <code>buzz-relay-mesh</code> is
+      pod-to-pod QUIC <em>inside one deployment</em>, peer discovery is a shared Redis registry, and
+      membership fails closed against any relay identity that isn't its own
+      (<code>membership.rs:90-102</code>). What buzz federates is identity: the portable keypair, NIP-42
+      challenge auth, NIP-OA owner→agent attestation. Community state deliberately does not travel.</p>
+
+    <div class="tabs" data-tabs>
+      <div class="tabbar">
+        <button data-t="0">A · signed-event hub</button>
+        <button data-t="1">B · iroh QUIC p2p</button>
+        <button class="on" data-t="2">C · tailscale (pick)</button>
+      </div>
+<pre> machine 1              hub (1 binary)          machine 2
+┌──────────┐   wss    ┌──────────────┐   wss   ┌──────────┐
+│ ainb     │─────────▶│ event store  │◀────────│ ainb     │
+│ + key    │◀─────────│ + sub filter │────────▶│ + key    │
+└──────────┘  signed  │  (sqlite)    │         └──────────┘
+              events  └──────────────┘
+  auth: NIP-42 challenge (50 lines, buzz-auth/nip42.rs)
+  identity: NIP-OA owner→agent tags
+<span class="cm"># the buzz-shaped answer. cost: you now own a hub,
+# a key format, and a migration story.</span></pre>
+<pre>┌──────────┐                            ┌──────────┐
+│ ainb A   │═════ iroh QUIC direct ═════│ ainb B   │
+│ ed25519  │      (ALPN "ainb/1")       │ ed25519  │
+└────┬─────┘                            └────┬─────┘
+     │      ┌────────────────────┐           │
+     └─────▶│ rendezvous blob:   │◀──────────┘
+            │ signed peer records│
+            └────────────────────┘
+  admission: peer ∈ allowlist, else drop (fail closed)
+<span class="cm"># copy endpoint.rs + wire.rs framing (~140 lines) from
+# buzz-relay-mesh. no server, NAT handled by iroh.
+# cost: rendezvous is still a distributed-systems pick.</span></pre>
+<pre>┌──────────┐  tailnet (WireGuard, MagicDNS)  ┌──────────┐
+│ ainb TUI │────────────────────────────────▶│ hangar   │
+│ laptop   │  existing fleet protocol,       │ daemon   │
+└──────────┘  unchanged, over 100.x.y.z      │ devbox   │
+                                             └──────────┘
+  authn: tailnet ACL + device auth (already solved)
+  <span class="ol">already in-tree:</span> ainb-web binds non-loopback behind a
+  bearer token (config.rs:97-136); docs describe tailnet
+  usage; FleetTransport seam fits a remote-peer impl
+<span class="cm"># zero new protocol, zero new crypto, zero new binary</span></pre>
+    </div>
+
+    <div class="verdict">
+      <span class="pill adopt">pick · C now</span>
+      <b>Tailscale/SSH over the existing daemon.</b> Threat-model check: "my laptop ↔ my devbox" has no
+      untrusted party, so buzz's signature layers buy nothing yet. Sequencing: adopt the NIP-42 challenge
+      (~50 transport-agnostic lines) the moment a second person's machine joins; NIP-OA-style agent
+      attestation when agents get their own keys; iroh p2p (B) only if coordinator-less becomes a real
+      requirement. Buzz's own history endorses this order, thorough identity layer, still no federation,
+      and both times they went p2p they kept a central bootstrap anyway.
+    </div>
+
+    <h2 id="roadmap">6 · Port roadmap, ranked lift candidates</h2>
+
+    <table>
+      <thead><tr><th>What</th><th>From</th><th>Call</th><th>Effort</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>ACP provider adapter + AgentPool</b></td><td><code>buzz-acp</code> patterns + upstream crate</td><td><span class="pill adopt">adapt</span></td><td>M</td><td>Raises the scrape ceiling; unlocks chat-grade sessions (§3)</td></tr>
+        <tr><td><b>Daemon chat bus + message model</b></td><td>ainb fleet spine + buzz kind partition</td><td><span class="pill adopt">build</span></td><td>M</td><td>One bus, three thin UIs (§4)</td></tr>
+        <tr><td><b>Observer side-channel + transcript reducer</b></td><td>kind 24200 + <code>agentSessionTranscript.ts</code></td><td><span class="pill adopt">adapt</span></td><td>M</td><td>Clean timeline; thinking/tools/cost in side pane</td></tr>
+        <tr><td><b>buzz-dev-mcp tool server</b></td><td><code>crates/buzz-dev-mcp</code></td><td><span class="pill adopt">port</span></td><td>S-M</td><td>Standalone; <code>_Stop</code>/<code>_PostCompact</code> hooks; keyfile hygiene</td></tr>
+        <tr><td><b><code>.persona.md</code> packs</b></td><td><code>crates/buzz-persona</code></td><td><span class="pill adopt">port</span></td><td>S</td><td>Pure-filesystem agent config; direct fit</td></tr>
+        <tr><td><b>YAML workflow engine</b></td><td><code>crates/buzz-workflow</code></td><td><span class="pill adopt">port</span></td><td>M</td><td>Schema/executor decoupled; write an ainb action sink</td></tr>
+        <tr><td><b>CLI error/exit contract</b></td><td><code>buzz-cli/src/error.rs:87-136</code></td><td><span class="pill adopt">adapt</span></td><td>S</td><td><code>retryable</code> flag, conflict=5, <code>delivery_unknown</code>; add <code>--follow</code>/<code>--wait</code> buzz lacks</td></tr>
+        <tr><td><b>Read-state frontier sync</b></td><td><code>readStateManager.ts</code> / NIP-RS</td><td><span class="pill adopt">adapt</span></td><td>S</td><td><code>effective(ctx)=max(own,parent)</code>, needed once 3 UIs show one chat</td></tr>
+        <tr><td><b>NIP-42 challenge + NIP-OA attestation</b></td><td><code>buzz-auth/nip42.rs</code> + <code>docs/nips/</code></td><td><span class="pill hold">hold</span></td><td>S-M</td><td>Trigger: second human's machine joins</td></tr>
+        <tr><td><b>SAS device pairing</b></td><td><code>buzz-core/src/pairing/</code></td><td><span class="pill hold">hold</span></td><td>M</td><td>Trigger: multi-machine enrollment UX needed</td></tr>
+        <tr><td><b>iroh QUIC endpoint + framing</b></td><td><code>buzz-relay-mesh</code></td><td><span class="pill hold">hold</span></td><td>M</td><td>Trigger: coordinator-less p2p requirement</td></tr>
+        <tr><td><b>buzz-voice local TTS · sprig multicall</b></td><td><code>crates/buzz-voice</code> · <code>crates/sprig</code></td><td><span class="pill hold">optional</span></td><td>S</td><td>Nice-to-haves, zero infra</td></tr>
+        <tr><td><b>Relay substrate (channels/search/audit/git/huddles/media)</b></td><td>relay + Postgres + Redis + S3</td><td><span class="pill skip">skip</span></td><td>-</td><td>Inseparable from buzz's 5-container stack</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <span class="ico">!</span>
+      <div><b>Independent fix worth doing regardless:</b> ainb has a second, unhardened send path
+        (<code>ainb-core/src/cli/run.rs:417-430</code>, bare <code>send-keys</code> + <code>C-m</code>, no
+        <code>-l</code>, no <code>--</code>, no verify) that violates fleet-core's declared "ONE verified
+        send path" invariant.</div>
+    </div>
+
+    <h2 id="faq">Open questions</h2>
+    <dl class="faq">
+      <dt>Can ACP chat sessions survive a daemon restart?</dt>
+      <dd>Session persistence is optional in the spec (<code>session/load</code> support varies by adapter).
+        Needs a per-adapter test matrix before promising resumable chat channels.</dd>
+
+      <dt>Does steering work outside goose?</dt>
+      <dd><code>_session/steering</code> is an extension. Buzz gates it on an <code>initialize</code>
+        capability flag because codex-acp replies <code>{}</code> to unknown methods (a false success that
+        would silently drop the user's message). Verify claude-agent-acp/codex-acp behavior before
+        promising broadcast-steer semantics.</dd>
+
+      <dt>How rich should the v1 message model be?</dt>
+      <dd>Options: adopt buzz's content/aux/non-conversational partition directly, or simplify to
+        messages + receipts and add overlays later. The partition costs little up front and prevents the
+        phantom-unread class of bugs buzz documented.</dd>
+
+      <dt>One protocol bump or two?</dt>
+      <dd>Growing the wire <code>Provider</code> enum (ACP) and adding <code>fleet/message_*</code> are both
+        version events, probably batch them into one fleet protocol bump.</dd>
+    </dl>
+  </main>
+
+</div>
+
+<script>
+document.querySelectorAll("[data-tabs]").forEach(box => {
+  const btns = box.querySelectorAll("button");
+  const panes = box.querySelectorAll("pre");
+  btns.forEach(b => b.addEventListener("click", () => {
+    btns.forEach(x => x.classList.remove("on"));
+    panes.forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    panes[+b.dataset.t].classList.add("on");
+  }));
+});
+</script>
+</body>
+</html>
