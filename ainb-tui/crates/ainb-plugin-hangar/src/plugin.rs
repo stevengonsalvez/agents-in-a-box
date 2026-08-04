@@ -5151,7 +5151,7 @@ impl Plugin for HangarPlugin {
         Ok(())
     }
 
-    async fn handle_event(&mut self, _host: &HostClient, params: HandleEventParams) -> Result<()> {
+    async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         // Only socket:<stream_id> deliveries for our current stream concern us.
         let want = self.conn.stream_id().map(|id| format!("socket:{id}"));
         if want.as_deref() != Some(params.topic.as_str()) {
@@ -5161,9 +5161,10 @@ impl Plugin for HangarPlugin {
             Ok(event) => self.on_socket_event(&event),
             Err(e) => self.conn.on_error(format!("bad socket event: {e}")),
         }
-        // The reader mutex stays free after reduction. Render drains pending
-        // writes through `try_unix_socket_send`, retaining them if the writer is
-        // full instead of awaiting capacity from this inline callback.
+        // Try the first enqueue pass now so socket-driven refreshes do not wait
+        // for another render. This never awaits writer capacity; any unsent tail
+        // remains pending for a later render retry.
+        self.drain_pending_refreshes(host);
         Ok(())
     }
 
