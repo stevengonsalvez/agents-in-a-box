@@ -706,6 +706,41 @@ mod tests {
     }
 
     #[test]
+    fn previous_workspace_selects_its_first_visible_session() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.session_filter = SessionFilter::ActiveOnly;
+
+        let mut first = Workspace::new("first".to_string(), "/tmp/first".into());
+        first.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped,
+        ));
+        first.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+        first.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        let mut second = Workspace::new("second".to_string(), "/tmp/second".into());
+        second.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        state.workspaces = vec![first, second];
+        state.selected_workspace_index = Some(1);
+        state.selected_session_index = Some(0);
+        state.previous_workspace();
+
+        assert_eq!(state.selected_workspace_index, Some(0));
+        assert_eq!(state.selected_session_index, Some(1));
+    }
+
+    #[test]
     fn merge_oldest_call_day_keeps_earliest_across_loads() {
         use chrono::NaiveDate;
         let april = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();

@@ -6347,6 +6347,25 @@ impl AppState {
         }
     }
 
+    fn select_first_visible_workspace_item_before(&mut self, end: usize) -> bool {
+        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+            |(workspace_idx, workspace)| {
+                workspace
+                    .sessions
+                    .iter()
+                    .position(|session| self.session_passes_filter(session))
+                    .map(|session_idx| (workspace_idx, Some(session_idx)))
+                    .or_else(|| workspace.shell_session.as_ref().map(|_| (workspace_idx, None)))
+            },
+        );
+        if let Some((workspace_idx, session_idx)) = target {
+            self.select_workspace_item(workspace_idx, session_idx);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Helper: Move to next workspace's first session/shell, or SSH sessions, or Other tmux
     fn move_to_next_workspace_first_item(&mut self, current_workspace_idx: usize) {
         if self.select_first_visible_workspace_item_from(current_workspace_idx + 1) {
@@ -6470,8 +6489,8 @@ impl AppState {
     pub fn previous_workspace(&mut self) {
         if !self.workspaces.is_empty() {
             let current = self.selected_workspace_index.unwrap_or(0);
-            if !self.select_last_visible_workspace_item_before(current) {
-                self.select_last_visible_workspace_item_before(self.workspaces.len());
+            if !self.select_first_visible_workspace_item_before(current) {
+                self.select_first_visible_workspace_item_before(self.workspaces.len());
             }
         }
     }
