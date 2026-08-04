@@ -2664,7 +2664,7 @@ fn render_interview(
         return;
     };
     let lane_count = queue.answers.len().min(3);
-    if bottom.saturating_sub(top) < (lane_count as u16 * 2 + 11) {
+    if bottom.saturating_sub(top) < (lane_count as u16 * 2 + 15) {
         return;
     }
     put_str(
@@ -4189,6 +4189,45 @@ mod tests {
         assert!(rendered.contains("Checks"));
         assert!(rendered.contains("0  /  2 answered"));
         assert!(rendered.contains("verified Fleet work only"));
+    }
+
+    #[test]
+    fn interview_renderer_keeps_active_card_usable_at_minimum_height() {
+        for session_count in [1_usize, 3] {
+            let mut state = FleetPaneState::default();
+            let mut rows = Vec::with_capacity(session_count);
+            for index in 0..session_count {
+                let mut row = session(
+                    &format!("claude:minimum-{index}"),
+                    "claude",
+                    "IDLE",
+                    "ASK",
+                    "managed",
+                );
+                row.current_request_fingerprint = Some(format!("minimum-{index}"));
+                row.current_request = Some(serde_json::json!({
+                    "questions": [{
+                        "id": "ship",
+                        "header": "Ship",
+                        "question": "Ship this?",
+                        "options": ["Yes"]
+                    }]
+                }));
+                rows.push(row);
+            }
+            state.set_sessions(rows);
+            let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+            let height = session_count as u16 * 2 + 15;
+            let mut buffer = WireBuffer::new(120, height + 1);
+            render_fleet(&mut buffer, 120, 0, height, &state);
+            let rendered = (0..height)
+                .map(|row| row_text(&buffer, row, 120))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("Ship"), "question missing at {height} rows: {rendered}");
+            assert!(rendered.contains("Yes"), "option missing at {height} rows: {rendered}");
+            assert!(rendered.contains("Enter next"), "footer missing at {height} rows: {rendered}");
+        }
     }
 
     #[test]
