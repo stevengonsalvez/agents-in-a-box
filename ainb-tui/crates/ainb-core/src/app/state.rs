@@ -4431,26 +4431,18 @@ impl AppState {
         self.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
-        // Set initial selection
-        if !self.workspaces.is_empty() {
-            self.selected_workspace_index = Some(0);
-            if !self.workspaces[0].sessions.is_empty() {
-                self.selected_session_index = Some(0);
-            } else if self.workspaces[0].shell_session.is_some() {
-                // First workspace has no sessions but has a shell - select it
-                self.shell_selected = true;
+        // Set initial selection from rows visible under the active filter.
+        if !self.select_first_visible_workspace_item_from(0) {
+            if !self.ssh_sessions.is_empty() {
+                // No workspaces but there are SSH sessions - select the first one
+                self.selected_ssh_session_index = Some(0);
+            } else if !self.other_tmux_sessions.is_empty() {
+                // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
+                self.selected_other_tmux_index = Some(0);
+            } else {
+                info!("No active sessions found. Use 'n' to create a new session.");
+                // Selection indices already reset above
             }
-            // If workspace has neither sessions nor shell, selection indices stay None
-            // which is the correct state for an empty workspace
-        } else if !self.ssh_sessions.is_empty() {
-            // No workspaces but there are SSH sessions - select the first one
-            self.selected_ssh_session_index = Some(0);
-        } else if !self.other_tmux_sessions.is_empty() {
-            // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
-            self.selected_other_tmux_index = Some(0);
-        } else {
-            info!("No active sessions found. Use 'n' to create a new session.");
-            // Selection indices already reset above
         }
 
         // Queue logs fetch for the currently selected session if any
@@ -4554,19 +4546,14 @@ impl AppState {
                             self.selected_ssh_session_index = None;
                             self.selected_other_tmux_index = None;
 
-                            if !self.workspaces.is_empty() {
-                                self.selected_workspace_index = Some(0);
-                                if !self.workspaces[0].sessions.is_empty() {
-                                    self.selected_session_index = Some(0);
-                                } else if self.workspaces[0].shell_session.is_some() {
-                                    self.shell_selected = true;
+                            if !self.select_first_visible_workspace_item_from(0) {
+                                if !self.ssh_sessions.is_empty() {
+                                    // No workspaces but there are SSH sessions - select the first one
+                                    self.selected_ssh_session_index = Some(0);
+                                } else if !self.other_tmux_sessions.is_empty() {
+                                    // No workspaces or SSH sessions but there are "Other tmux" sessions
+                                    self.selected_other_tmux_index = Some(0);
                                 }
-                            } else if !self.ssh_sessions.is_empty() {
-                                // No workspaces but there are SSH sessions - select the first one
-                                self.selected_ssh_session_index = Some(0);
-                            } else if !self.other_tmux_sessions.is_empty() {
-                                // No workspaces or SSH sessions but there are "Other tmux" sessions
-                                self.selected_other_tmux_index = Some(0);
                             }
 
                             self.add_success_notification("Workspaces loaded".to_string());
@@ -5862,14 +5849,7 @@ impl AppState {
         self.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
-        if !self.workspaces.is_empty() {
-            self.selected_workspace_index = Some(0);
-            if !self.workspaces[0].sessions.is_empty() {
-                self.selected_session_index = Some(0);
-            } else if self.workspaces[0].shell_session.is_some() {
-                self.shell_selected = true;
-            }
-        }
+        self.select_first_visible_workspace_item_from(0);
     }
 
     /// Load a large dataset to simulate the 353 repository scenario
@@ -6317,27 +6297,60 @@ impl AppState {
         }
     }
 
+    fn select_workspace_item(&mut self, workspace_idx: usize, session_idx: Option<usize>) {
+        self.selected_workspace_index = Some(workspace_idx);
+        self.selected_session_index = session_idx;
+        self.shell_selected = session_idx.is_none();
+        self.selected_ssh_session_index = None;
+        self.selected_other_tmux_index = None;
+        if session_idx.is_some() {
+            self.queue_logs_fetch();
+        }
+    }
+
+    fn select_first_visible_workspace_item_from(&mut self, start: usize) -> bool {
+        let target = self.workspaces.iter().enumerate().skip(start).find_map(
+            |(workspace_idx, workspace)| {
+                workspace
+                    .sessions
+                    .iter()
+                    .position(|session| self.session_passes_filter(session))
+                    .map(|session_idx| (workspace_idx, Some(session_idx)))
+                    .or_else(|| workspace.shell_session.as_ref().map(|_| (workspace_idx, None)))
+            },
+        );
+        if let Some((workspace_idx, session_idx)) = target {
+            self.select_workspace_item(workspace_idx, session_idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn select_last_visible_workspace_item_before(&mut self, end: usize) -> bool {
+        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+            |(workspace_idx, workspace)| {
+                workspace.shell_session.as_ref().map(|_| (workspace_idx, None)).or_else(|| {
+                    workspace
+                        .sessions
+                        .iter()
+                        .rposition(|session| self.session_passes_filter(session))
+                        .map(|session_idx| (workspace_idx, Some(session_idx)))
+                })
+            },
+        );
+        if let Some((workspace_idx, session_idx)) = target {
+            self.select_workspace_item(workspace_idx, session_idx);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Helper: Move to next workspace's first session/shell, or SSH sessions, or Other tmux
     fn move_to_next_workspace_first_item(&mut self, current_workspace_idx: usize) {
-        // Try to find next workspace with content
-        for next_idx in (current_workspace_idx + 1)..self.workspaces.len() {
-            if let Some(next_ws) = self.workspaces.get(next_idx) {
-                if !next_ws.sessions.is_empty() {
-                    // Next workspace has sessions
-                    self.selected_workspace_index = Some(next_idx);
-                    self.selected_session_index = Some(0);
-                    self.shell_selected = false;
-                    self.queue_logs_fetch();
-                    return;
-                } else if next_ws.shell_session.is_some() {
-                    // Next workspace only has shell
-                    self.selected_workspace_index = Some(next_idx);
-                    self.selected_session_index = None;
-                    self.shell_selected = true;
-                    return;
-                }
-                // Empty workspace - skip it
-            }
+        if self.select_first_visible_workspace_item_from(current_workspace_idx + 1) {
+            return;
         }
 
         // No more workspaces - move to SSH sessions if available
@@ -6370,21 +6383,8 @@ impl AppState {
                 self.selected_other_tmux_index = None;
                 if !self.ssh_sessions.is_empty() {
                     self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
-                } else if !self.workspaces.is_empty() {
-                    // No SSH sessions - move back to workspaces
-                    let last_workspace_idx = self.workspaces.len() - 1;
-                    let workspace = &self.workspaces[last_workspace_idx];
-                    self.selected_workspace_index = Some(last_workspace_idx);
-
-                    // Go to shell session if exists, else last regular session
-                    if workspace.shell_session.is_some() {
-                        self.selected_session_index = None;
-                        self.shell_selected = true;
-                    } else if !workspace.sessions.is_empty() {
-                        self.selected_session_index = Some(workspace.sessions.len() - 1);
-                        self.shell_selected = false;
-                        self.queue_logs_fetch();
-                    }
+                } else {
+                    self.select_last_visible_workspace_item_before(self.workspaces.len());
                 }
             }
             return;
@@ -6398,21 +6398,7 @@ impl AppState {
             } else {
                 // At first SSH session - move back to workspaces
                 self.selected_ssh_session_index = None;
-                if !self.workspaces.is_empty() {
-                    let last_workspace_idx = self.workspaces.len() - 1;
-                    let workspace = &self.workspaces[last_workspace_idx];
-                    self.selected_workspace_index = Some(last_workspace_idx);
-
-                    // Go to shell session if exists, else last regular session
-                    if workspace.shell_session.is_some() {
-                        self.selected_session_index = None;
-                        self.shell_selected = true;
-                    } else if !workspace.sessions.is_empty() {
-                        self.selected_session_index = Some(workspace.sessions.len() - 1);
-                        self.shell_selected = false;
-                        self.queue_logs_fetch();
-                    }
-                }
+                self.select_last_visible_workspace_item_before(self.workspaces.len());
             }
             return;
         }
@@ -6432,10 +6418,14 @@ impl AppState {
             if let Some(workspace) = self.workspaces.get(workspace_idx) {
                 // Currently on shell session?
                 if self.shell_selected {
-                    if !workspace.sessions.is_empty() {
+                    if let Some(session_idx) = workspace
+                        .sessions
+                        .iter()
+                        .rposition(|session| self.session_passes_filter(session))
+                    {
                         // Go back to last regular session
                         self.shell_selected = false;
-                        self.selected_session_index = Some(workspace.sessions.len() - 1);
+                        self.selected_session_index = Some(session_idx);
                         self.queue_logs_fetch();
                     }
                     // Else: stay at shell session (it's the only item)
@@ -6459,25 +6449,7 @@ impl AppState {
                         self.queue_logs_fetch();
                     } else {
                         // At first session - try to move to previous workspace's last item
-                        if workspace_idx > 0 {
-                            let prev_idx = workspace_idx - 1;
-                            self.selected_workspace_index = Some(prev_idx);
-                            // Select last item in previous workspace (shell or last session)
-                            if let Some(prev_ws) = self.workspaces.get(prev_idx) {
-                                if prev_ws.shell_session.is_some() {
-                                    self.shell_selected = true;
-                                    self.selected_session_index = None;
-                                } else if !prev_ws.sessions.is_empty() {
-                                    self.selected_session_index = Some(prev_ws.sessions.len() - 1);
-                                    self.shell_selected = false;
-                                    self.queue_logs_fetch();
-                                } else {
-                                    // Empty workspace - select workspace header
-                                    self.selected_session_index = None;
-                                    self.shell_selected = false;
-                                }
-                            }
-                        }
+                        self.select_last_visible_workspace_item_before(workspace_idx);
                         // else: at first workspace, first session - stay (no wrap)
                     }
                 }
@@ -6488,33 +6460,50 @@ impl AppState {
     pub fn next_workspace(&mut self) {
         if !self.workspaces.is_empty() {
             let current = self.selected_workspace_index.unwrap_or(0);
-            self.selected_workspace_index = Some((current + 1) % self.workspaces.len());
-            self.selected_session_index =
-                if !self.workspaces[self.selected_workspace_index.unwrap()].sessions.is_empty() {
-                    Some(0)
-                } else {
-                    None
-                };
-            // Queue container logs fetch for the newly selected session
-            self.queue_logs_fetch();
+            let start = (current + 1) % self.workspaces.len();
+            if !self.select_first_visible_workspace_item_from(start) && start > 0 {
+                self.select_first_visible_workspace_item_from(0);
+            }
         }
     }
 
     pub fn previous_workspace(&mut self) {
         if !self.workspaces.is_empty() {
             let current = self.selected_workspace_index.unwrap_or(0);
-            self.selected_workspace_index = Some(if current == 0 {
-                self.workspaces.len() - 1
-            } else {
-                current - 1
-            });
-            self.selected_session_index =
-                if !self.workspaces[self.selected_workspace_index.unwrap()].sessions.is_empty() {
-                    Some(0)
-                } else {
-                    None
-                };
-            // Queue container logs fetch for the newly selected session
+            if !self.select_last_visible_workspace_item_before(current) {
+                self.select_last_visible_workspace_item_before(self.workspaces.len());
+            }
+        }
+    }
+
+    pub fn select_first_visible_session_in_current_workspace(&mut self) {
+        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
+            self.workspaces.get(workspace_idx).and_then(|workspace| {
+                workspace
+                    .sessions
+                    .iter()
+                    .position(|session| self.session_passes_filter(session))
+            })
+        });
+        if let Some(session_idx) = session_idx {
+            self.selected_session_index = Some(session_idx);
+            self.shell_selected = false;
+            self.queue_logs_fetch();
+        }
+    }
+
+    pub fn select_last_visible_session_in_current_workspace(&mut self) {
+        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
+            self.workspaces.get(workspace_idx).and_then(|workspace| {
+                workspace
+                    .sessions
+                    .iter()
+                    .rposition(|session| self.session_passes_filter(session))
+            })
+        });
+        if let Some(session_idx) = session_idx {
+            self.selected_session_index = Some(session_idx);
+            self.shell_selected = false;
             self.queue_logs_fetch();
         }
     }

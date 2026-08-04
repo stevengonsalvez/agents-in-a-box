@@ -525,7 +525,7 @@ mod tests {
     // -- SessionFilter tests ------------------------------------------------
 
     use crate::app::state::SessionFilter;
-    use crate::models::{Session, SessionStatus as Status};
+    use crate::models::{Session, SessionStatus as Status, Workspace};
 
     fn make_filter_session(mode: SessionMode, status: Status) -> Session {
         let mut s = Session::new("test".to_string(), "/tmp/x".to_string());
@@ -619,6 +619,90 @@ mod tests {
         assert_eq!(state.session_filter, SessionFilter::StoppedOnly);
         state.cycle_session_filter();
         assert_eq!(state.session_filter, SessionFilter::All);
+    }
+
+    #[test]
+    fn filtered_navigation_skips_hidden_sessions_across_workspaces() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.session_filter = SessionFilter::ActiveOnly;
+
+        let mut first = Workspace::new("first".to_string(), "/tmp/first".into());
+        first.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        let mut second = Workspace::new("second".to_string(), "/tmp/second".into());
+        second.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped,
+        ));
+        second.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+        second.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped,
+        ));
+        second.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        state.workspaces = vec![first, second];
+        state.selected_workspace_index = Some(0);
+        state.selected_session_index = Some(0);
+
+        state.next_session();
+        assert_eq!(state.selected_workspace_index, Some(1));
+        assert_eq!(state.selected_session_index, Some(1));
+
+        state.previous_session();
+        assert_eq!(state.selected_workspace_index, Some(0));
+        assert_eq!(state.selected_session_index, Some(0));
+
+        state.next_workspace();
+        assert_eq!(state.selected_workspace_index, Some(1));
+        assert_eq!(state.selected_session_index, Some(1));
+
+        EventHandler::process_event(AppEvent::GoToBottom, &mut state);
+        assert_eq!(state.selected_session_index, Some(3));
+        EventHandler::process_event(AppEvent::GoToTop, &mut state);
+        assert_eq!(state.selected_session_index, Some(1));
+
+        state.previous_workspace();
+        assert_eq!(state.selected_workspace_index, Some(0));
+        assert_eq!(state.selected_session_index, Some(0));
+    }
+
+    #[test]
+    fn initial_filtered_selection_skips_hidden_workspaces() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.session_filter = SessionFilter::ActiveOnly;
+
+        let mut hidden = Workspace::new("hidden".to_string(), "/tmp/hidden".into());
+        hidden.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped,
+        ));
+
+        let mut visible = Workspace::new("visible".to_string(), "/tmp/visible".into());
+        visible.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped,
+        ));
+        visible.add_session(make_filter_session(
+            SessionMode::Interactive,
+            Status::Running,
+        ));
+
+        state.workspaces = vec![hidden, visible];
+        assert!(state.select_first_visible_workspace_item_from(0));
+        assert_eq!(state.selected_workspace_index, Some(1));
+        assert_eq!(state.selected_session_index, Some(1));
     }
 
     #[test]
