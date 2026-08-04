@@ -877,10 +877,17 @@ pub enum FleetEvent {
         area_height: u16,
     },
     RequestAction(FleetAction),
-    ActionSucceeded { session_key: String },
-    ActionFailed { session_key: String, detail: String },
+    ActionSucceeded {
+        session_key: String,
+    },
+    ActionFailed {
+        session_key: String,
+        detail: String,
+    },
     BroadcastReceipts(Vec<BroadcastReceipt>),
-    BroadcastFailed { detail: String },
+    BroadcastFailed {
+        detail: String,
+    },
     Feedback(String),
     Tick(i64),
 }
@@ -1125,10 +1132,7 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         state.feedback = Some("no actionable structured interviews".into());
         return;
     }
-    let Some(active) = answers
-        .iter()
-        .position(|answer| answer.session_key == selected_key)
-    else {
+    let Some(active) = answers.iter().position(|answer| answer.session_key == selected_key) else {
         state.feedback = Some("selected session has no structured interview".into());
         return;
     };
@@ -2223,7 +2227,11 @@ fn render_session_card(
         2,
         row_y.saturating_add(1),
         &format!("{marker}{identity}"),
-        if selected { SELECTION_GREEN } else { operator_state_color(session) },
+        if selected {
+            SELECTION_GREEN
+        } else {
+            operator_state_color(session)
+        },
         None,
         selected.then_some(BOLD).unwrap_or(0),
         inner_right,
@@ -2875,10 +2883,7 @@ fn answer_card_hit(
 ) -> Option<AnswerCardHit> {
     let left = 2_u16;
     let right = area_width.saturating_sub(2);
-    if right <= left.saturating_add(4)
-        || area_height < 14
-        || !(left..right).contains(&column)
-    {
+    if right <= left.saturating_add(4) || area_height < 14 || !(left..right).contains(&column) {
         return None;
     }
     let content_bottom = area_height.saturating_sub(4);
@@ -2911,7 +2916,9 @@ fn answer_card_hit(
                             .saturating_add(2)
                             .saturating_add(6)
                             .saturating_add(option.label.chars().count() as u16);
-                        if (option_left..option_right.min(right.saturating_sub(1))).contains(&column) {
+                        if (option_left..option_right.min(right.saturating_sub(1)))
+                            .contains(&column)
+                        {
                             return Some(AnswerCardHit::Option {
                                 question_index,
                                 option_index,
@@ -4849,7 +4856,8 @@ mod tests {
         state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 1, 23, &state);
-        let rendered = (0..23).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        let rendered =
+            (0..23).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("Q2 · Second ✓"));
         assert!(rendered.contains("Q3 · Third"));
         let clicked = apply(
