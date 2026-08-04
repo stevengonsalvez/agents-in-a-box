@@ -302,7 +302,16 @@ impl PullService {
 ///
 /// `?1` = `issue_id`. The new `ord` appends the card to the end of its target
 /// column, consistent with a manual `card_move` and with the auto-move hook.
-const ADVANCE_SQL: &str = "\
+///
+/// # Why this is `pub`
+///
+/// For the same reason [`PULL_SQL`] is: so the MUTATION PROOFS in
+/// `tests/pipeline_advance.rs` can delete exactly one guard and assert the
+/// corresponding refusal goes away. Every guard here is a REFUSAL, and a test
+/// that only ever runs the real statement proves the card stayed put; it cannot
+/// prove that the clause under test is what kept it there, and would keep
+/// passing if the clause were deleted and some other accident covered for it.
+pub const ADVANCE_SQL: &str = "\
 UPDATE board_card \
    SET column_id = ( \
         SELECT n.id FROM board_column AS n \
