@@ -137,13 +137,15 @@ impl SessionListComponent {
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        if let Some(label) = state.session_filter.title_label() {
-            title_spans.push(Span::raw(" "));
-            title_spans.push(Span::styled(
-                format!("[{}]", label),
-                Style::default().fg(GOLD),
-            ));
-        }
+        let filter_label = format!("F [{}]", state.session_filter.label());
+        let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}) ");
+        state.sessions_pane_state.set_filter_toggle_area(Rect::new(
+            area.x.saturating_add(1 + title_prefix.chars().count() as u16),
+            area.y,
+            filter_label.chars().count() as u16,
+            1,
+        ));
+        title_spans.push(Span::styled(filter_label, Style::default().fg(GOLD)));
         title_spans.push(Span::raw(" "));
         // 'B' is the keyboard twin of clicking the [-] glyph (hint lives next
         // to the control it drives, not in the bottom menu bar).

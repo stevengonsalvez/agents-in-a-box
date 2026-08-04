@@ -961,6 +961,10 @@ impl EventHandler {
                         }
                     }
 
+                    if state.sessions_pane_state.is_on_filter_toggle(x, y) {
+                        return Some(AppEvent::CycleSessionFilter);
+                    }
+
                     if state.sessions_pane_state.is_on_toggle(x, y) {
                         state.sessions_pane_state.toggle_collapsed();
                         Self::persist_sessions_pane_preferences(state);

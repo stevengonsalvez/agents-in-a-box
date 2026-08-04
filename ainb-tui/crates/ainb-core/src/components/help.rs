@@ -43,7 +43,7 @@ impl HelpComponent {
             ),
             row(
                 "→",
-                "Attach in a split pane (keeps the session list visible)",
+                "Pane attach (keeps the session list visible)",
             ),
             row("1-9", "Quick-attach to numbered session"),
             row("Enter", "Resume (stopped) / attach (running)"),

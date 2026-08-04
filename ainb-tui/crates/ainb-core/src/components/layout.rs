@@ -366,7 +366,7 @@ impl LayoutComponent {
             key("a", SELECTION_GREEN),
             desc("ttach "),
             key("→", SELECTION_GREEN),
-            desc(" pane "),
+            desc(" Pane attach "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
             key("Space", SELECTION_GREEN),
@@ -489,7 +489,7 @@ impl LayoutComponent {
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
                 key("→", SELECTION_GREEN),
-                desc(" pane  "),
+                desc(" Pane attach  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
                 key("Space", SELECTION_GREEN),
@@ -1519,7 +1519,7 @@ mod menu_bar_tests {
             "xpand",   // expand
             "focus",   // Tab focus
             "ttach",   // attach
-            "pane",    // A — in-pane interactive embed
+            "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select
             "tar",     // star
@@ -1608,7 +1608,7 @@ mod menu_bar_tests {
         for token in [
             "ew",      // new
             "ttach",   // attach
-            "pane",    // A — in-pane interactive embed
+            "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select
             "tar",     // star
