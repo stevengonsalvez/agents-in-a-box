@@ -2524,9 +2524,18 @@ async fn build_prompt(
 /// `None` when the issue is on no board, sits in a column that adds nothing, or
 /// the read faults.
 ///
-/// An issue can be carded on several boards; the pipeline board is the one that
-/// gates dispatch, so a stage that actually carries an addendum wins over one
-/// that does not, and ties break on `board_id` to keep the brief deterministic.
+/// An issue can be carded on several boards, and only one of them gates
+/// dispatch: a PIPELINE board, i.e. one carrying at least one role-gated column
+/// (0074). The lookup is constrained to those, so a personal kanban board that
+/// happens to card the same issue can never inject its own column text into a
+/// pipeline run. Without that constraint the winner was whichever `board_id`
+/// sorted lower, i.e. a ULID, i.e. board creation order, which has nothing to do
+/// with which board dispatched the work.
+///
+/// Within a pipeline board the stage that actually GATES (`services_role IS NOT
+/// NULL`) wins over an ungated column, and `board_id` breaks the remaining tie so
+/// the brief stays deterministic.
+///
 /// Best-effort by design: a store fault must degrade to "no stage layer", never
 /// strand a dispatch.
 async fn stage_prompt_for_issue(pool: &SqlitePool, issue_id: &str) -> Option<String> {
@@ -2534,7 +2543,10 @@ async fn stage_prompt_for_issue(pool: &SqlitePool, issue_id: &str) -> Option<Str
         "SELECT col.stage_prompt FROM board_card AS bc \
            JOIN board_column AS col ON col.id = bc.column_id \
           WHERE bc.issue_id = ? AND TRIM(COALESCE(col.stage_prompt, '')) <> '' \
-          ORDER BY bc.board_id LIMIT 1",
+            AND EXISTS (SELECT 1 FROM board_column AS gate \
+                         WHERE gate.board_id = bc.board_id \
+                           AND gate.services_role IS NOT NULL) \
+          ORDER BY (col.services_role IS NULL), bc.board_id LIMIT 1",
     )
     .bind(issue_id)
     .fetch_optional(pool)
@@ -4152,6 +4164,131 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(disp.invocation.prompt, INSTRUCTIONS);
+    }
+
+    /// The stage addendum comes from the PIPELINE board, never from some other
+    /// board that happens to card the same issue.
+    ///
+    /// An issue can be carded anywhere. Before the board constraint the lookup
+    /// selected from every board and broke ties on `board_id`, so a personal
+    /// kanban board created earlier (a lower ULID) silently won and its `Doing`
+    /// column's text was injected into a pipeline run's brief.
+    #[tokio::test]
+    async fn stage_prompt_comes_from_the_pipeline_board_not_a_personal_one() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        const PIPELINE_STAGE: &str = "Review gate: check migrations are additive.";
+        const PERSONAL_STAGE: &str = "My kanban note: remember to water the plants.";
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "checker", "claude", None).await.unwrap();
+
+        let issue_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: issue_id.clone(),
+                workspace_id: ws.clone(),
+                title: "Fix the login bug".into(),
+                description: None,
+                state: "open".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Two boards carding the SAME issue. `b-personal` sorts BELOW `b-pipeline`,
+        // so under a plain `ORDER BY board_id` the personal board wins.
+        for (board, name) in [("b-personal", "My kanban"), ("b-pipeline", "Pipeline")] {
+            sqlx::query("INSERT INTO board (id, workspace_id, name, created_at) VALUES (?,?,?,0)")
+                .bind(board)
+                .bind(ws.as_str())
+                .bind(name)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        // The personal board's Doing column: no role gate, but it carries text.
+        sqlx::query(
+            "INSERT INTO board_column \
+             (id, board_id, ord, name, fsm_state, auto_move, services_role, stage_prompt) \
+             VALUES ('c-doing','b-personal',0,'Doing',NULL,0,NULL,?)",
+        )
+        .bind(PERSONAL_STAGE)
+        .execute(pool)
+        .await
+        .unwrap();
+        // The pipeline board's role-gated Review stage.
+        sqlx::query(
+            "INSERT INTO board_column \
+             (id, board_id, ord, name, fsm_state, auto_move, services_role, stage_prompt) \
+             VALUES ('c-review','b-pipeline',0,'Review',NULL,1,'reviewer',?)",
+        )
+        .bind(PIPELINE_STAGE)
+        .execute(pool)
+        .await
+        .unwrap();
+        for (board, column) in [("b-personal", "c-doing"), ("b-pipeline", "c-review")] {
+            sqlx::query(
+                "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+                 VALUES (?,?,?,0,0)",
+            )
+            .bind(board)
+            .bind(&issue_id)
+            .bind(column)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
+        let brief = disp.invocation.prompt;
+        assert!(
+            brief.contains(PIPELINE_STAGE),
+            "the gating pipeline stage supplies the addendum, got:\n{brief}"
+        );
+        assert!(
+            !brief.contains(PERSONAL_STAGE),
+            "a non-pipeline board must never inject into a pipeline brief, got:\n{brief}"
+        );
+
+        // And when the pipeline stage adds nothing, the answer is NO stage layer,
+        // not a fallback onto whatever other board carries text.
+        sqlx::query("UPDATE board_column SET stage_prompt = NULL WHERE id = 'c-review'")
+            .execute(pool)
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Fix the login bug",
+            "no gating addendum means the brief is the issue body alone"
+        );
     }
 
     /// A linked upstream issue (0043) appends a `Linked issue:` line to the brief so

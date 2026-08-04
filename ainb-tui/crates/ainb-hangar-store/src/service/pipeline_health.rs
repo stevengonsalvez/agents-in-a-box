@@ -126,6 +126,43 @@ impl PipelineHealth {
     }
 }
 
+/// Read one board's pipeline health, but ONLY when the board is a pipeline at
+/// all: `Ok(None)` for a board with no role-gated column.
+///
+/// The full fold is not free. `role_agents_free` counts each candidate agent's
+/// active tasks with a correlated subquery over `agent_task_queue`, once per
+/// (column x agent), and the caller that matters here is
+/// `boards_list`, which the Boards screen re-arms on every pushed daemon event
+/// for EVERY board in the workspace. A plain kanban board can never produce a
+/// non-empty light, so paying for that on one is pure waste.
+///
+/// The probe itself is served by `idx_board_column_pull` (0074), which is
+/// partial on exactly this predicate.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if a query fails.
+pub async fn snapshot_if_pipeline(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    board_id: &str,
+    now_ms: i64,
+) -> Result<Option<PipelineHealth>, sqlx::Error> {
+    let gated: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM board_column col JOIN board bd ON bd.id = col.board_id \
+          WHERE col.board_id = ?1 AND bd.workspace_id = ?2 \
+            AND col.services_role IS NOT NULL LIMIT 1",
+    )
+    .bind(board_id)
+    .bind(workspace.as_str())
+    .fetch_optional(pool)
+    .await?;
+    if gated.is_none() {
+        return Ok(None);
+    }
+    snapshot(pool, workspace, board_id, now_ms).await.map(Some)
+}
+
 /// Read one board's pipeline health.
 ///
 /// `now_ms` is passed rather than read so the stuck light is deterministic under

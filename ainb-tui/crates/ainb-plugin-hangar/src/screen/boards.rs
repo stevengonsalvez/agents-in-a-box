@@ -2875,13 +2875,24 @@ fn stage_name<'a>(board: &'a BoardView, health: &ColumnHealthWireRow) -> &'a str
 ///
 /// Keyed off the geometry `render_card_board` just returned, so the dot lands on
 /// the exact cell the widget painted its glyph in, at any width and any scroll.
+///
+/// The walk is over the LAYOUT, indexing back into `board.columns` through
+/// [`ColumnLayout::index`](card_board::ColumnLayout::index). The layout holds
+/// only the PAINTED WINDOW, which starts at the widget's `first_col` once the
+/// board scrolls horizontally, so zipping the canonical column list against it
+/// would shift every dot left by `first_col`, painting a stage's failure glyph
+/// on its right-hand neighbour, which is legitimate-looking output and therefore
+/// silent.
 fn paint_role_dots(
     buf: &mut WireBuffer,
     board: &BoardView,
     layout: &card_board::BoardLayout,
     area_w: u16,
 ) {
-    for (col, lay) in board.columns.iter().zip(layout.columns.iter()) {
+    for lay in &layout.columns {
+        let Some(col) = board.columns.get(lay.index) else {
+            continue;
+        };
         let Some(health) = col.health.as_ref() else {
             continue;
         };
@@ -4343,6 +4354,117 @@ mod tests {
         assert!(
             out.state.overlay().is_none(),
             "no overlay — a direct toggle"
+        );
+    }
+
+    /// A pipeline column carrying a role gate and a role-coverage count.
+    fn gated_col(
+        id: &str,
+        name: &str,
+        role: Option<&str>,
+        role_agents: i64,
+        role_agents_free: i64,
+    ) -> BoardColumnWireRow {
+        BoardColumnWireRow {
+            health: Some(ColumnHealthWireRow {
+                services_role: role.map(str::to_string),
+                wip_limit: None,
+                wip_active: 0,
+                role_agents,
+                role_agents_free,
+                stuck: 0,
+            }),
+            ..col(id, name, None, false, Vec::new())
+        }
+    }
+
+    /// The default six-stage pipeline: Backlog and Done ungated, QA's `tester`
+    /// role held by nobody (its dot is the RED `✗`), every other stage green.
+    fn six_stage_pipeline() -> BoardsListResult {
+        BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Pipeline".into(),
+                auto_move: false,
+                columns: vec![
+                    gated_col("c0", "Backlog", None, 0, 0),
+                    gated_col("c1", "Triage", Some("triager"), 1, 1),
+                    gated_col("c2", "Implement", Some("implementer"), 1, 1),
+                    gated_col("c3", "Review", Some("reviewer"), 1, 1),
+                    gated_col("c4", "QA", Some("tester"), 0, 0),
+                    gated_col("c5", "Done", None, 0, 0),
+                ],
+                unmapped: Vec::new(),
+            }],
+        }
+    }
+
+    /// The symbol painted at `(x, y)`, last write winning (the buffer is sparse
+    /// and append-only, so the dot overpaint is the LAST cell at its coord).
+    fn cell_at(buf: &WireBuffer, x: u16, y: u16) -> Option<&Cell> {
+        buf.cells
+            .iter()
+            .rev()
+            .find(|(coord, _)| coord.x == x && coord.y == y)
+            .map(|(_, cell)| cell)
+    }
+
+    /// The role dot must land on the stage it describes AFTER the board scrolls
+    /// horizontally.
+    ///
+    /// At 80 cells the six-stage pipeline only fits five columns (`col_w =
+    /// max(80/6, 14) = 14`, `visible_cols = 5`), so focusing `Done` slides the
+    /// painted window to `first_col = 1` and `render_card_board` returns only the
+    /// painted window. Zipping the canonical `board.columns` against that window
+    /// shifts every dot one stage LEFT: QA's red `✗` paints on Done's header and
+    /// Review's green `●` on QA's, i.e. exactly the inversion of the signal this
+    /// strip exists to give, and both glyphs are legitimate output, so nothing
+    /// looks wrong.
+    #[test]
+    fn role_dots_stay_on_their_own_stage_when_the_board_scrolls() {
+        let mut state = BoardsState::from_snapshot(&six_stage_pipeline());
+        // Walk the column cursor to Done (index 5): one arrow key past the
+        // window, which is what slides it.
+        for _ in 0..5 {
+            state = reduce_boards(&state, BoardsEvent::FocusRight).state;
+        }
+        assert_eq!(state.focus().1, 5, "focused on Done");
+
+        let mut buf = WireBuffer::new(80, 16);
+        render_boards(&mut buf, 80, 0, 16, &state);
+
+        // Title row 0, health strip row 1 (this board IS a pipeline), hint band
+        // row 2, so the card board's header row is row 3.
+        let header_y = 3;
+        let map = painted(&buf);
+        assert!(
+            map.contains("QA"),
+            "QA is inside the painted window:\n{map}"
+        );
+
+        // The window starts at canonical column 1 (Triage), 14 cells per column:
+        // Triage@0, Implement@14, Review@28, QA@42, Done@56.
+        let qa_x = 42;
+        let done_x = 56;
+        assert_eq!(
+            cell_at(&buf, qa_x, header_y).map(|c| c.symbol.as_str()),
+            Some("✗"),
+            "QA has no tester, so ITS header carries the red ✗:\n{map}"
+        );
+        assert_eq!(
+            cell_at(&buf, qa_x, header_y).and_then(|c| c.fg),
+            Some(RED),
+            "and it is red, not the header accent"
+        );
+        assert_ne!(
+            cell_at(&buf, done_x, header_y).map(|c| c.symbol.as_str()),
+            Some("✗"),
+            "Done is ungated, so it must never inherit QA's failure glyph:\n{map}"
+        );
+        assert_eq!(
+            cell_at(&buf, 0, header_y).map(|c| c.symbol.as_str()),
+            Some("●"),
+            "the leftmost painted stage is Triage, whose triager is free:\n{map}"
         );
     }
 }

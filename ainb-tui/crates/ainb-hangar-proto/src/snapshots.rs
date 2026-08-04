@@ -4762,9 +4762,12 @@ mod tests {
             serde_json::from_str::<BoardsListResult>(&s).unwrap(),
             result
         );
-        // A column with no pipeline health OMITS the field entirely, so a
-        // non-pipeline board's payload stays byte-identical to a pre-0074
-        // producer's (append-only).
+        // `health: None` OMITS the field entirely rather than writing a null.
+        // This is a SERIALISATION assertion over a hand-built row: it pins
+        // `skip_serializing_if`, and nothing more. Whether the daemon actually
+        // leaves it `None` on a non-pipeline board is a property of the PRODUCER,
+        // which lives a crate away and is pinned by
+        // `rpc::snapshots::tests::boards_list_emits_health_only_on_role_gated_columns`.
         assert!(
             !s.contains("health"),
             "health must be omitted when absent: {s}"

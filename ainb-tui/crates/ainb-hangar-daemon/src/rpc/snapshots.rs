@@ -729,10 +729,13 @@ pub async fn boards_list(
     let boards = BoardRepo::list(pool, &ws).await?;
     let mut out = Vec::with_capacity(boards.len());
     for b in boards {
-        // The pipeline health of every column of this board, folded once per
-        // board (0074/0076). A board with no role-gated column produces stages
-        // that are all `services_role = None`, which render nothing.
-        let health = ainb_hangar_store::service::pipeline_health::snapshot(
+        // The pipeline health of this board's columns, folded once per board
+        // (0074/0076) and ONLY when the board is a pull pipeline. `boards_list`
+        // is re-armed by the Boards screen on every pushed daemon event, and the
+        // fold's `role_agents_free` counts each candidate agent's active tasks
+        // once per (column x agent); a plain kanban board can never produce a
+        // light off that work, so it is skipped before it is paid for.
+        let health = ainb_hangar_store::service::pipeline_health::snapshot_if_pipeline(
             pool,
             &ws,
             &b.id,
@@ -749,16 +752,26 @@ pub async fn boards_list(
                 fsm_state: c.fsm_state.clone(),
                 auto_move: c.auto_move,
                 cards: Vec::new(),
-                health: health.stages.iter().find(|s| s.column_id == c.id).map(|s| {
-                    ainb_hangar_proto::snapshots::ColumnHealthWireRow {
+                // Only a ROLE-GATED column carries health on the wire. The fold
+                // returns a row for EVERY column of the board (Backlog, Done,
+                // and every column of a plain kanban board), so emitting them
+                // unfiltered ships a `health` object on every column of every
+                // board and breaks the append-only promise the field was added
+                // under. `None` is skipped at serialisation, so a non-pipeline
+                // board's payload stays byte-identical to a pre-0074 producer's.
+                health: health
+                    .iter()
+                    .flat_map(|h| h.stages.iter())
+                    .find(|s| s.column_id == c.id)
+                    .filter(|s| s.services_role.is_some())
+                    .map(|s| ainb_hangar_proto::snapshots::ColumnHealthWireRow {
                         services_role: s.services_role.clone(),
                         wip_limit: s.wip_limit,
                         wip_active: s.wip_active,
                         role_agents: s.role_agents,
                         role_agents_free: s.role_agents_free,
                         stuck: s.stuck,
-                    }
-                }),
+                    }),
             })
             .collect();
         let mut unmapped = Vec::new();
@@ -4209,4 +4222,98 @@ pub async fn issue_timeline(
         entries.drain(..entries.len() - cap);
     }
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pipeline board (Backlog, a role-gated Review, Done) plus a plain kanban
+    /// board (Todo, Doing), both in the default workspace. Returns the workspace
+    /// id.
+    async fn seed_two_boards(pool: &sqlx::SqlitePool) -> String {
+        let ws = ainb_hangar_store::bootstrap::ensure_default_workspace(pool).await.unwrap();
+        for (id, name) in [("b-pipeline", "Pipeline"), ("b-kanban", "My kanban")] {
+            sqlx::query("INSERT INTO board (id, workspace_id, name, created_at) VALUES (?,?,?,0)")
+                .bind(id)
+                .bind(&ws)
+                .bind(name)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let cols: [(&str, &str, &str, i64, Option<&str>); 5] = [
+            ("p-backlog", "b-pipeline", "Backlog", 0, None),
+            ("p-review", "b-pipeline", "Review", 1, Some("reviewer")),
+            ("p-done", "b-pipeline", "Done", 2, None),
+            ("k-todo", "b-kanban", "Todo", 0, None),
+            ("k-doing", "b-kanban", "Doing", 1, None),
+        ];
+        for (id, board, name, ord, role) in cols {
+            sqlx::query(
+                "INSERT INTO board_column \
+                 (id, board_id, ord, name, fsm_state, auto_move, services_role) \
+                 VALUES (?,?,?,?,NULL,0,?)",
+            )
+            .bind(id)
+            .bind(board)
+            .bind(ord)
+            .bind(name)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        ws
+    }
+
+    /// `health` rides the wire ONLY on a role-gated column, straight out of the
+    /// real producer.
+    ///
+    /// The fold behind it returns a row for every column of the board, so an
+    /// unfiltered producer ships `"health":{…}` on every plain kanban column too:
+    /// a wire change on a surface that promised to be append-only, and invisible
+    /// to any assertion made against a hand-built `BoardColumnWireRow`. This
+    /// serialises what `boards_list` actually produced.
+    #[tokio::test]
+    async fn boards_list_emits_health_only_on_role_gated_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = seed_two_boards(pool).await;
+
+        let boards = boards_list(pool, &ws).await.unwrap();
+        let kanban = boards.iter().find(|b| b.name == "My kanban").expect("kanban board");
+        let pipeline = boards.iter().find(|b| b.name == "Pipeline").expect("pipeline board");
+
+        // Not one column of a board with no role gate carries health.
+        assert!(
+            kanban.columns.iter().all(|c| c.health.is_none()),
+            "a plain kanban board ships no health: {:?}",
+            kanban.columns.iter().map(|c| (&c.name, &c.health)).collect::<Vec<_>>()
+        );
+        let json = serde_json::to_string(kanban).unwrap();
+        assert!(
+            !json.contains("health"),
+            "a non-pipeline board's payload stays byte-identical to a pre-0074 producer's: {json}"
+        );
+
+        // On the pipeline board only the GATED stage carries it.
+        let gated: Vec<&str> = pipeline
+            .columns
+            .iter()
+            .filter(|c| c.health.is_some())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            gated,
+            vec!["Review"],
+            "Backlog and Done are not pull queues, so they carry no health"
+        );
+        assert_eq!(
+            pipeline.columns[1].health.as_ref().and_then(|h| h.services_role.as_deref()),
+            Some("reviewer"),
+            "and the gated stage carries its role verbatim"
+        );
+    }
 }
