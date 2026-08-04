@@ -7082,6 +7082,7 @@ mod tests {
                     fsm_state: None,
                     auto_move: false,
                     cards: Vec::new(),
+                    health: None,
                 }],
                 unmapped: Vec::new(),
             }],
@@ -7200,6 +7201,7 @@ mod tests {
                                 related: Vec::new(),
                             },
                         ],
+                        health: None,
                     },
                     BoardColumnWireRow {
                         id: "c-done".into(),
@@ -7208,6 +7210,7 @@ mod tests {
                         fsm_state: None,
                         auto_move: false,
                         cards: Vec::new(),
+                        health: None,
                     },
                 ],
                 unmapped: Vec::new(),

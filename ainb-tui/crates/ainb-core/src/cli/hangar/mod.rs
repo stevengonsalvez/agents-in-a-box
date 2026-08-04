@@ -38,7 +38,7 @@ use clap::{Args, Subcommand};
 
 use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
-use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_store::Store;
@@ -51,6 +51,10 @@ use ainb_hangar_store::service::cancel::CancelTaskService;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 
 use crate::cli::OutputFormat;
+
+/// The `pipeline show` health-strip renderer (pure formatting, unit-tested
+/// without a database).
+mod pipeline_view;
 
 /// The default workspace slug + owner details now live in
 /// [`ainb_hangar_store::bootstrap`] — the single shared, idempotent lay-down the
@@ -137,6 +141,27 @@ pub enum PipelineCommand {
     Init(PipelineInitArgs),
     /// Show each stage with its role gate, WIP limit and current card count.
     Show(PipelineInitArgs),
+    /// Set (or clear) a stage's prompt addendum: the instruction every card
+    /// entering that stage carries, whichever agent pulls it.
+    StagePrompt(PipelineStagePromptArgs),
+}
+
+/// Arguments for `hangar pipeline stage-prompt`.
+#[derive(Args, Debug)]
+pub struct PipelineStagePromptArgs {
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// The stage (board column) name, e.g. `Review`. Case-insensitive.
+    #[arg(long)]
+    pub stage: String,
+    /// The instruction to prepend to every brief pulled from this stage. Omit
+    /// (or pass `--clear`) to remove it.
+    #[arg(long)]
+    pub text: Option<String>,
+    /// Clear the stage's prompt addendum.
+    #[arg(long, conflicts_with = "text")]
+    pub clear: bool,
 }
 
 /// Arguments for `hangar pipeline init` / `hangar pipeline show`.
@@ -2533,11 +2558,11 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
 async fn dispatch_pipeline(cmd: PipelineCommand) -> Result<()> {
     use ainb_hangar_core::ids::WorkspaceId;
     use ainb_hangar_store::service::pipeline::PipelineService;
-    use sqlx::Row;
 
     let (args, init) = match cmd {
         PipelineCommand::Init(a) => (a, true),
         PipelineCommand::Show(a) => (a, false),
+        PipelineCommand::StagePrompt(a) => return run_pipeline_stage_prompt(a).await,
     };
     let store = Store::open_default().await.context("open hangar database")?;
     let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
@@ -2551,41 +2576,95 @@ async fn dispatch_pipeline(cmd: PipelineCommand) -> Result<()> {
         println!("pipeline board {board_id}");
     }
 
-    let rows = sqlx::query(
-        "SELECT col.name AS name, col.services_role AS role, col.wip_limit AS wip, \
-                col.excludes_prior_agent AS excl, \
-                (SELECT COUNT(*) FROM board_card bc WHERE bc.column_id = col.id) AS cards \
-           FROM board_column col JOIN board bd ON bd.id = col.board_id \
-          WHERE bd.workspace_id = ?1 AND bd.name = ?2 ORDER BY col.ord",
-    )
-    .bind(ws.as_str())
-    .bind(ainb_hangar_store::service::pipeline::DEFAULT_PIPELINE_BOARD)
-    .fetch_all(store.pool())
-    .await
-    .context("read the pipeline stages")?;
-
-    if rows.is_empty() {
+    let Some(board_id) = pipeline_board_id(&store, &ws).await? else {
         println!("no pipeline provisioned (run `ainb hangar pipeline init`)");
         return Ok(());
+    };
+    let health = ainb_hangar_store::service::pipeline_health::snapshot(
+        store.pool(),
+        &ws,
+        &board_id,
+        SystemClock.now_ms(),
+    )
+    .await
+    .context("read the pipeline health")?;
+
+    // The daemon light reuses the SAME pid-file probe `hangar daemon status`
+    // prints, so the strip and that command can never disagree about liveness.
+    let daemon_alive = daemon_pid_path()
+        .ok()
+        .and_then(|p| read_daemon_pid(&p))
+        .is_some_and(pid_is_running);
+    let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    for line in pipeline_view::render(&health, daemon_alive, color) {
+        println!("{line}");
     }
-    println!(
-        "{:<12} {:<14} {:>5} {:>6} {:>6}",
-        "STAGE", "ROLE", "WIP", "EXCL", "CARDS"
-    );
-    for r in &rows {
-        let name: String = r.try_get("name").unwrap_or_default();
-        let role: Option<String> = r.try_get("role").unwrap_or_default();
-        let wip: Option<i64> = r.try_get("wip").unwrap_or_default();
-        let excl: i64 = r.try_get("excl").unwrap_or_default();
-        let cards: i64 = r.try_get("cards").unwrap_or_default();
-        println!(
-            "{:<12} {:<14} {:>5} {:>6} {:>6}",
-            name,
-            role.as_deref().unwrap_or("-"),
-            wip.map_or_else(|| "-".to_string(), |w| w.to_string()),
-            if excl == 1 { "yes" } else { "-" },
-            cards
-        );
+    Ok(())
+}
+
+/// The workspace's pipeline board id, or `None` when it has never been
+/// provisioned.
+async fn pipeline_board_id(
+    store: &Store,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+) -> Result<Option<String>> {
+    sqlx::query_scalar::<_, String>("SELECT id FROM board WHERE workspace_id = ?1 AND name = ?2")
+        .bind(ws.as_str())
+        .bind(ainb_hangar_store::service::pipeline::DEFAULT_PIPELINE_BOARD)
+        .fetch_optional(store.pool())
+        .await
+        .context("look up the pipeline board")
+}
+
+/// `hangar pipeline stage-prompt`: set or clear one stage's prompt addendum
+/// (migration 0076).
+///
+/// Store-direct like the rest of `pipeline`, so it works against a bare database
+/// with no daemon running. The write goes through
+/// [`BoardRepo::column_update`](ainb_hangar_store::repo::board::BoardRepo::column_update)
+/// rather than a bespoke UPDATE, so it inherits that path's workspace/board
+/// ownership check.
+async fn run_pipeline_stage_prompt(args: PipelineStagePromptArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let Some(board_id) = pipeline_board_id(&store, &ws).await? else {
+        anyhow::bail!("no pipeline provisioned (run `ainb hangar pipeline init`)");
+    };
+
+    let column_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM board_column WHERE board_id = ?1 AND LOWER(name) = LOWER(?2)",
+    )
+    .bind(&board_id)
+    .bind(&args.stage)
+    .fetch_optional(store.pool())
+    .await
+    .context("look up the stage")?;
+    let column_id = column_id
+        .ok_or_else(|| anyhow::anyhow!("no stage named `{}` on the pipeline board", args.stage))?;
+
+    // `--clear`, or `--text` omitted entirely, clears; anything else sets.
+    let text = args.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let stage_prompt = if args.clear { None } else { text };
+    BoardRepo::column_update(
+        store.pool(),
+        &ws,
+        &board_id,
+        &column_id,
+        None,
+        None,
+        None,
+        Some(stage_prompt),
+    )
+    .await
+    .context("write the stage prompt")?;
+
+    match stage_prompt {
+        Some(t) => println!("stage `{}` prompt set ({} chars)", args.stage, t.len()),
+        None => println!("stage `{}` prompt cleared", args.stage),
     }
     Ok(())
 }

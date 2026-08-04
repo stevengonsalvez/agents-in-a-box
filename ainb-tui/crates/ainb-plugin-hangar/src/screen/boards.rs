@@ -29,7 +29,9 @@
 //! auto-move, create/delete a board). Pure: no IO, no input mutation.
 
 use ainb_hangar_proto::events::MessageKind;
-use ainb_hangar_proto::snapshots::{BoardCardWireRow, BoardsListResult, CardMemberChip};
+use ainb_hangar_proto::snapshots::{
+    BoardCardWireRow, BoardsListResult, CardMemberChip, ColumnHealthWireRow,
+};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::screen::task_detail::ViewEntry;
@@ -141,6 +143,13 @@ const MUTED: Color = Color::rgb(120, 120, 140);
 const GREEN: Color = Color::rgb(100, 200, 120);
 /// Amber-red for the "couldn't load boards" error state.
 const ERROR_RED: Color = Color::rgb(235, 90, 90);
+/// Amber for a stage that is AT a limit but still working (WIP saturated, or a
+/// role whose every holder is busy). Deliberately NOT red: busy is not broken,
+/// and painting the two the same colour is what makes an operator stop reading
+/// the strip.
+const AMBER: Color = Color::rgb(255, 165, 0);
+/// Red for a pipeline that CANNOT move: a role nobody holds, or a stuck card.
+const RED: Color = Color::rgb(230, 100, 100);
 
 /// The load state of the Boards screen.
 ///
@@ -276,6 +285,9 @@ pub struct ColumnView {
     pub auto_move: bool,
     /// The cards in this column, in board order.
     pub cards: Vec<CardView>,
+    /// The column's pull-pipeline health (role gate, WIP pressure, role
+    /// coverage, stuck count), or `None` on a board that is not a pipeline.
+    pub health: Option<ColumnHealthWireRow>,
 }
 
 /// One board with its columns + its unmapped-card pool.
@@ -720,6 +732,7 @@ impl BoardsState {
                         fsm_state: c.fsm_state.clone(),
                         auto_move: c.auto_move,
                         cards: c.cards.iter().map(CardView::from_wire).collect(),
+                        health: c.health.clone(),
                     })
                     .collect(),
                 unmapped: b.unmapped.iter().map(CardView::from_wire).collect(),
@@ -2261,12 +2274,21 @@ pub fn render_boards(
         put_str(buf, x, top, note, GOLD, area_w);
     }
 
+    // The pipeline health strip, ONE row, directly under the title, but only on
+    // a board that actually is a pull pipeline. A plain kanban board keeps its
+    // existing layout to the cell, so nothing that reads this screen shifts.
+    let mut next_row = top.saturating_add(1);
+    if is_pipeline(board) {
+        render_health_strip(buf, area_w, next_row, board, state.status());
+        next_row = next_row.saturating_add(1);
+    }
+
     // Hint band NEXT to the widget (letters next to the controls they affect).
-    let hint_row = top.saturating_add(1);
+    let hint_row = next_row;
     render_hint_band(buf, area_w, hint_row);
 
     // Card-board body below the hint band.
-    let body_top = top.saturating_add(2);
+    let body_top = hint_row.saturating_add(1);
     if body_top >= bottom {
         return;
     }
@@ -2278,7 +2300,13 @@ pub fn render_boards(
     } else {
         None
     };
-    let _ = card_board::render_card_board(buf, area_w, body_top, bottom, &columns, selected);
+    let layout = card_board::render_card_board(buf, area_w, body_top, bottom, &columns, selected);
+    // Repaint each pipeline stage's leading glyph as a COLOUR-CODED role dot.
+    // Done as an overpaint keyed off the layout the board just returned rather
+    // than by widening `card_board::BoardColumn`: the widget paints a header in
+    // one accent colour, and a dot that cannot go red is exactly the signal this
+    // strip exists to give.
+    paint_role_dots(buf, board, &layout, area_w);
 
     // An open interactive overlay paints a banner over the top body rows so the
     // typed title / picked profile / run mode is visible (and greppable by the
@@ -2700,9 +2728,187 @@ fn board_columns(board: &BoardView) -> Vec<card_board::BoardColumn> {
     columns
 }
 
+/// Whether this board is a role-gated PULL PIPELINE, i.e. at least one column
+/// gates on a `services_role` (0074). A plain kanban board has none, gets no
+/// health strip, and keeps its existing layout untouched.
+fn is_pipeline(board: &BoardView) -> bool {
+    board
+        .columns
+        .iter()
+        .any(|c| c.health.as_ref().is_some_and(|h| h.services_role.is_some()))
+}
+
+/// The four health lights: daemon, role coverage, WIP headroom, stuck cards.
+///
+/// Answers "why is nothing moving?" in one row. Every light is derived from the
+/// snapshot the daemon already sent, so the strip cannot disagree with the board
+/// beneath it, and the colours are the whole point: a stalled pipeline reports no
+/// error anywhere, so RED here is the only signal an operator gets.
+fn render_health_strip(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    board: &BoardView,
+    status: &BoardsStatus,
+) {
+    let stages: Vec<&ColumnHealthWireRow> =
+        board.columns.iter().filter_map(|c| c.health.as_ref()).collect();
+
+    // Liveness is the SAME socket link the rest of this screen reads: a board
+    // that rendered from a snapshot came off a live daemon, and a failed fetch is
+    // exactly how this screen already learns the daemon is gone. No second notion.
+    let alive = !matches!(status, BoardsStatus::Error(_));
+    let mut x = put_str(buf, 0, row, "●", if alive { GREEN } else { RED }, area_w);
+    x = put_str(
+        buf,
+        x,
+        row,
+        if alive {
+            " daemon ok   "
+        } else {
+            " daemon down   "
+        },
+        MUTED,
+        area_w,
+    );
+
+    // The light that matters: a stage whose role NO agent holds parks its cards
+    // forever, silently. Name the role rather than just going red.
+    let uncovered: Vec<&str> = stages
+        .iter()
+        .filter(|h| h.services_role.is_some() && h.role_agents == 0)
+        .filter_map(|h| h.services_role.as_deref())
+        .collect();
+    x = put_str(
+        buf,
+        x,
+        row,
+        "●",
+        if uncovered.is_empty() { GREEN } else { RED },
+        area_w,
+    );
+    x = if uncovered.is_empty() {
+        put_str(buf, x, row, " roles covered   ", MUTED, area_w)
+    } else {
+        put_str(
+            buf,
+            x,
+            row,
+            &format!(" no agent: {}   ", uncovered.join(", ")),
+            RED,
+            area_w,
+        )
+    };
+
+    // WIP: the stage at its cap if there is one, else the tightest capped stage.
+    let saturated = stages.iter().find(|h| h.wip_limit.is_some_and(|l| h.wip_active >= l));
+    let tightest = saturated.or_else(|| {
+        stages
+            .iter()
+            .filter(|h| h.wip_limit.is_some())
+            .max_by_key(|h| h.wip_active - h.wip_limit.unwrap_or_default())
+    });
+    match tightest {
+        Some(h) => {
+            let at_cap = saturated.is_some();
+            x = put_str(
+                buf,
+                x,
+                row,
+                if at_cap { "○" } else { "●" },
+                if at_cap { AMBER } else { GREEN },
+                area_w,
+            );
+            let name = stage_name(board, h);
+            x = put_str(
+                buf,
+                x,
+                row,
+                &format!(
+                    " wip {}/{} {name}   ",
+                    h.wip_active,
+                    h.wip_limit.unwrap_or_default()
+                ),
+                MUTED,
+                area_w,
+            );
+        }
+        None => {
+            x = put_str(buf, x, row, "●", GREEN, area_w);
+            x = put_str(buf, x, row, " wip unlimited   ", MUTED, area_w);
+        }
+    }
+
+    let stuck: i64 = stages.iter().map(|h| h.stuck).sum();
+    x = put_str(
+        buf,
+        x,
+        row,
+        "●",
+        if stuck > 0 { RED } else { GREEN },
+        area_w,
+    );
+    put_str(
+        buf,
+        x,
+        row,
+        &format!(" {stuck} stuck"),
+        if stuck > 0 { RED } else { MUTED },
+        area_w,
+    );
+}
+
+/// The display name of the column carrying `health` (the strip names the stage
+/// its WIP light is about).
+fn stage_name<'a>(board: &'a BoardView, health: &ColumnHealthWireRow) -> &'a str {
+    board
+        .columns
+        .iter()
+        .find(|c| c.health.as_ref().is_some_and(|h| std::ptr::eq(h, health)))
+        .map_or("", |c| c.name.as_str())
+}
+
+/// Overpaint each role-gated column's leading header glyph with a COLOUR-CODED
+/// role dot: `✗` red when no agent holds the stage's role (cards can never be
+/// pulled), `○` amber when every holder is at its own `max_concurrent_tasks`
+/// (busy, not broken), `●` green when someone can pull right now.
+///
+/// Keyed off the geometry `render_card_board` just returned, so the dot lands on
+/// the exact cell the widget painted its glyph in, at any width and any scroll.
+fn paint_role_dots(
+    buf: &mut WireBuffer,
+    board: &BoardView,
+    layout: &card_board::BoardLayout,
+    area_w: u16,
+) {
+    for (col, lay) in board.columns.iter().zip(layout.columns.iter()) {
+        let Some(health) = col.health.as_ref() else {
+            continue;
+        };
+        if health.services_role.is_none() {
+            continue;
+        }
+        let (glyph, colour) = if health.role_agents == 0 {
+            ("✗", RED)
+        } else if health.role_agents_free == 0 {
+            ("○", AMBER)
+        } else {
+            ("●", GREEN)
+        };
+        put_str(buf, lay.rect.x, lay.header_y, glyph, colour, area_w);
+    }
+}
+
 /// A column header carrying its FSM mapping (`Done→done` / `Done↦done` for an
 /// auto-move column) so the mapping reads on the board.
 fn column_header(c: &ColumnView) -> String {
+    // A pipeline stage names its ROLE GATE instead of an FSM mapping: every
+    // pipeline column deliberately carries `fsm_state = NULL` (see
+    // `service::pipeline`), so the gate is the only thing there is to show, and
+    // it is what the coloured dot beside it refers to.
+    if let Some(role) = c.health.as_ref().and_then(|h| h.services_role.as_deref()) {
+        return format!("{} ·{role}", c.name);
+    }
     match (&c.fsm_state, c.auto_move) {
         (Some(fs), true) => format!("{} ↦{}", c.name, fs),
         (Some(fs), false) => format!("{} ·{}", c.name, fs),
@@ -2832,6 +3038,7 @@ mod tests {
             fsm_state: fsm.map(str::to_string),
             auto_move: auto,
             cards,
+            health: None,
         }
     }
 
