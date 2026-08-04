@@ -45,6 +45,9 @@ pub mod mention;
 /// The DEFAULT six-stage pull pipeline (Backlog / Triage / Implement / Review /
 /// QA / Done) and the enqueue that places a card in its first role-gated stage.
 pub mod pipeline;
+/// The pipeline's four health lights (roles covered / WIP headroom / stuck
+/// cards, plus the per-stage role dot), all derived at query time.
+pub mod pipeline_health;
 /// Role-gated PULL of board work: a card in a role-gated column is the queue,
 /// and exactly one eligible agent takes it. The seam that replaces squad
 /// BROADCAST (one run per member) with one owner per card.

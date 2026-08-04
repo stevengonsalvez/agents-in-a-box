@@ -2337,6 +2337,41 @@ pub struct BoardColumnWireRow {
     pub auto_move: bool,
     /// The cards currently in this column (in board order).
     pub cards: Vec<BoardCardWireRow>,
+    /// The column's pull-pipeline health (0074/0076): its role gate, WIP
+    /// pressure, role coverage and stuck count, all derived at query time.
+    /// APPEND-ONLY, and `None` on a board that is not a pull pipeline, so a
+    /// pre-pipeline producer's payload stays byte-identical.
+    ///
+    /// Sent rather than derived client-side because NONE of it is otherwise on
+    /// the wire: the plugin sees neither `services_role`, nor the squad roster
+    /// that covers it, nor per-agent concurrency. Shipping the folded facts
+    /// keeps the board and `ainb hangar pipeline show` reading one computation
+    /// instead of two that can drift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<ColumnHealthWireRow>,
+}
+
+/// One column's pipeline health, as folded by
+/// `ainb_hangar_store::service::pipeline_health` (the same snapshot the CLI
+/// strip renders).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ColumnHealthWireRow {
+    /// The role that gates pulling from this stage; `None` ⇒ not a pull queue
+    /// (Backlog / Done).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services_role: Option<String>,
+    /// The stage's WIP cap, or `None` for unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_limit: Option<i64>,
+    /// Cards here holding an active task right now.
+    pub wip_active: i64,
+    /// Non-archived agents that HOLD this stage's role. Zero is the silent-stall
+    /// condition the board paints `✗` for.
+    pub role_agents: i64,
+    /// Of those, how many are under their own `max_concurrent_tasks`.
+    pub role_agents_free: i64,
+    /// Cards that have sat here with no active task past the stall threshold.
+    pub stuck: i64,
 }
 
 /// One board with its ordered columns and its cards
@@ -4717,6 +4752,7 @@ mod tests {
                         blocks: Vec::new(),
                         related: Vec::new(),
                     }],
+                    health: None,
                 }],
                 unmapped: Vec::new(),
             }],
@@ -4726,6 +4762,26 @@ mod tests {
             serde_json::from_str::<BoardsListResult>(&s).unwrap(),
             result
         );
+        // A column with no pipeline health OMITS the field entirely, so a
+        // non-pipeline board's payload stays byte-identical to a pre-0074
+        // producer's (append-only).
+        assert!(
+            !s.contains("health"),
+            "health must be omitted when absent: {s}"
+        );
+
+        // …and a role-gated stage round-trips its health verbatim.
+        let mut gated = result.clone();
+        gated.boards[0].columns[0].health = Some(ColumnHealthWireRow {
+            services_role: Some("reviewer".into()),
+            wip_limit: Some(3),
+            wip_active: 1,
+            role_agents: 2,
+            role_agents_free: 1,
+            stuck: 4,
+        });
+        let s = serde_json::to_string(&gated).unwrap();
+        assert_eq!(serde_json::from_str::<BoardsListResult>(&s).unwrap(), gated);
 
         // Omitted fsm_state => None (leave the mapping unchanged).
         let omitted: BoardColumnUpdateParams = serde_json::from_str(

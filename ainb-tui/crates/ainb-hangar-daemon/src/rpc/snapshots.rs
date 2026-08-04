@@ -729,6 +729,16 @@ pub async fn boards_list(
     let boards = BoardRepo::list(pool, &ws).await?;
     let mut out = Vec::with_capacity(boards.len());
     for b in boards {
+        // The pipeline health of every column of this board, folded once per
+        // board (0074/0076). A board with no role-gated column produces stages
+        // that are all `services_role = None`, which render nothing.
+        let health = ainb_hangar_store::service::pipeline_health::snapshot(
+            pool,
+            &ws,
+            &b.id,
+            SystemClock.now_ms(),
+        )
+        .await?;
         let mut columns: Vec<BoardColumnWireRow> = b
             .columns
             .iter()
@@ -739,6 +749,16 @@ pub async fn boards_list(
                 fsm_state: c.fsm_state.clone(),
                 auto_move: c.auto_move,
                 cards: Vec::new(),
+                health: health.stages.iter().find(|s| s.column_id == c.id).map(|s| {
+                    ainb_hangar_proto::snapshots::ColumnHealthWireRow {
+                        services_role: s.services_role.clone(),
+                        wip_limit: s.wip_limit,
+                        wip_active: s.wip_active,
+                        role_agents: s.role_agents,
+                        role_agents_free: s.role_agents_free,
+                        stuck: s.stuck,
+                    }
+                }),
             })
             .collect();
         let mut unmapped = Vec::new();
