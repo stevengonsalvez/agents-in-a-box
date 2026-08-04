@@ -602,8 +602,8 @@ impl Default for BroadcastState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FleetMode {
     Browse,
-    Answer(AnswerState),
-    AnswerDismissConfirm(AnswerState),
+    Answer(AnswerQueue),
+    AnswerDismissConfirm(AnswerQueue),
     Start(StartState),
     Prompt {
         text: String,
@@ -649,6 +649,57 @@ struct AnswerState {
     texts: Vec<String>,
     editing_text: bool,
     delivery: AnswerDelivery,
+}
+
+/// Drafts for every actionable structured interview. `active` is a flattened
+/// card cursor: left/right crosses question and session boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerQueue {
+    answers: Vec<AnswerState>,
+    active: usize,
+}
+
+impl AnswerQueue {
+    fn current(&self) -> Option<&AnswerState> {
+        self.answers.get(self.active)
+    }
+
+    fn current_mut(&mut self) -> Option<&mut AnswerState> {
+        self.answers.get_mut(self.active)
+    }
+
+    fn move_card(&mut self, delta: isize) {
+        let Some(answer) = self.current() else { return };
+        let question_count = answer.questions.len();
+        if question_count == 0 {
+            return;
+        }
+        let question = answer.question_index as isize + delta;
+        if (0..question_count as isize).contains(&question) {
+            let answer = &mut self.answers[self.active];
+            answer.question_index = question as usize;
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            return;
+        }
+        let answer_count = self.answers.len();
+        if answer_count <= 1 {
+            return;
+        }
+        self.active = if delta.is_negative() {
+            self.active.checked_sub(1).unwrap_or(answer_count - 1)
+        } else {
+            (self.active + 1) % answer_count
+        };
+        let answer = &mut self.answers[self.active];
+        answer.question_index = if delta.is_negative() {
+            answer.questions.len().saturating_sub(1)
+        } else {
+            0
+        };
+        answer.option_cursor = 0;
+        answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,16 +770,17 @@ impl FleetPaneState {
     }
 
     pub fn is_capturing_text(&self) -> bool {
-        matches!(
-            self.mode,
+        match &self.mode {
             FleetMode::TypedConfirm { .. }
-                | FleetMode::Start(_)
-                | FleetMode::Prompt { .. }
-                | FleetMode::Broadcast(BroadcastState {
-                    stage: BroadcastStage::Compose,
-                    ..
-                })
-        )
+            | FleetMode::Start(_)
+            | FleetMode::Prompt { .. }
+            | FleetMode::Broadcast(BroadcastState {
+                stage: BroadcastStage::Compose,
+                ..
+            }) => true,
+            FleetMode::Answer(queue) => queue.current().is_some_and(|answer| answer.editing_text),
+            _ => false,
+        }
     }
 
     pub fn set_sessions(&mut self, roster: Vec<FleetSessionRow>) {
@@ -784,22 +836,29 @@ impl FleetPaneState {
     }
 
     fn discard_stale_answer(&mut self) {
-        let answer = match &self.mode {
-            FleetMode::Answer(answer) | FleetMode::AnswerDismissConfirm(answer) => answer,
+        let queue = match &mut self.mode {
+            FleetMode::Answer(queue) | FleetMode::AnswerDismissConfirm(queue) => queue,
             _ => return,
         };
-        let fresh = self
-            .roster
-            .iter()
-            .find(|row| row.session_key == answer.session_key)
-            .is_some_and(|row| {
-                row.version == answer.expected_version
-                    && row.current_request_fingerprint.as_deref()
-                        == Some(answer.request_fingerprint.as_str())
-            });
-        if !fresh {
+        let before = queue.answers.len();
+        queue.answers.retain(|answer| {
+            self.roster
+                .iter()
+                .find(|row| row.session_key == answer.session_key)
+                .is_some_and(|row| {
+                    row.version == answer.expected_version
+                        && row.current_request_fingerprint.as_deref()
+                            == Some(answer.request_fingerprint.as_str())
+                })
+        });
+        if queue.answers.is_empty() {
             self.mode = FleetMode::Browse;
             self.feedback = Some("interview closed: authoritative request changed".into());
+        } else {
+            queue.active = queue.active.min(queue.answers.len() - 1);
+            if queue.answers.len() != before {
+                self.feedback = Some("delivered interview removed from answer queue".into());
+            }
         }
     }
 }
@@ -873,10 +932,11 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         FleetEvent::Key(key) => reduce_key(&mut next, key),
         FleetEvent::RequestAction(action) => request_action(&mut next, action),
         FleetEvent::ActionSucceeded { session_key } => {
-            if let FleetMode::Answer(answer) = &next.mode {
-                if answer.session_key == session_key
-                    && answer.delivery == AnswerDelivery::Confirming
-                {
+            if let FleetMode::Answer(queue) = &next.mode {
+                if queue.answers.iter().any(|answer| {
+                    answer.session_key == session_key
+                        && answer.delivery == AnswerDelivery::Confirming
+                }) {
                     next.feedback = Some("delivered, confirming authoritative Fleet state".into());
                     return FleetReduction {
                         state: next,
@@ -892,8 +952,10 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
             session_key,
             detail,
         } => {
-            if let FleetMode::Answer(answer) = &mut next.mode {
-                if answer.session_key == session_key {
+            if let FleetMode::Answer(queue) = &mut next.mode {
+                if let Some(answer) =
+                    queue.answers.iter_mut().find(|answer| answer.session_key == session_key)
+                {
                     answer.delivery = AnswerDelivery::Ready;
                 }
             }
@@ -926,8 +988,8 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
 fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
     match state.mode.clone() {
         FleetMode::Browse => reduce_browse_key(state, key),
-        FleetMode::Answer(answer) => reduce_answer_key(state, answer, key),
-        FleetMode::AnswerDismissConfirm(answer) => reduce_answer_dismiss_key(state, answer, key),
+        FleetMode::Answer(queue) => reduce_answer_key(state, queue, key),
+        FleetMode::AnswerDismissConfirm(queue) => reduce_answer_dismiss_key(state, queue, key),
         FleetMode::Start(start) => reduce_start_key(state, start, key),
         FleetMode::Prompt { text } => reduce_prompt_key(state, text, key),
         FleetMode::Broadcast(broadcast) => reduce_broadcast_key(state, broadcast, key),
@@ -980,47 +1042,45 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
 }
 
 fn begin_structured_answer(state: &mut FleetPaneState) {
-    let Some(row) = state.selected_session().cloned() else {
+    let Some(selected_key) = state.selected_key.clone() else {
         state.feedback = Some("no Fleet session selected".into());
         return;
     };
-    if !row.attention_state.eq_ignore_ascii_case("ASK") {
-        state.feedback = Some("selected session has no structured question".into());
+    let answers: Vec<_> = state.roster.iter().filter_map(answer_state_from_row).collect();
+    if answers.is_empty() {
+        state.feedback = Some("no actionable structured interviews".into());
         return;
     }
-    if !row.is_managed() || !row.capabilities.contains("structured_answer") {
-        state.feedback = Some("structured answer unavailable for selected session".into());
-        return;
+    let active = answers
+        .iter()
+        .position(|answer| answer.session_key == selected_key)
+        .unwrap_or(0);
+    state.mode = FleetMode::Answer(AnswerQueue { answers, active });
+}
+
+fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
+    if !row.attention_state.eq_ignore_ascii_case("ASK")
+        || !row.is_managed()
+        || !row.capabilities.contains("structured_answer")
+    {
+        return None;
     }
-    let Some(request_fingerprint) = row.current_request_fingerprint.clone() else {
-        state.feedback = Some("structured request fingerprint unavailable".into());
-        return;
-    };
-    let Some(request) = row.current_request.as_ref() else {
-        state.feedback = Some("structured request payload unavailable".into());
-        return;
-    };
+    let request_fingerprint = row.current_request_fingerprint.clone()?;
+    let request = row.current_request.as_ref()?;
     let questions = answer_questions(request);
-    if questions.is_empty() {
-        state.feedback = Some("structured request has no questions".into());
-        return;
-    }
-    let selections = vec![BTreeSet::new(); questions.len()];
-    let texts = vec![String::new(); questions.len()];
-    let editing_text = questions[0].options.is_empty();
-    state.mode = FleetMode::Answer(AnswerState {
-        session_key: row.session_key,
+    (!questions.is_empty()).then(|| AnswerState {
+        session_key: row.session_key.clone(),
         expected_version: row.version,
         request_fingerprint,
         request_identity: request_identity(request),
+        editing_text: questions[0].options.is_empty(),
+        selections: vec![BTreeSet::new(); questions.len()],
+        texts: vec![String::new(); questions.len()],
         questions,
         question_index: 0,
         option_cursor: 0,
-        selections,
-        texts,
-        editing_text,
         delivery: AnswerDelivery::Ready,
-    });
+    })
 }
 
 fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
@@ -1113,16 +1173,33 @@ fn request_identity(
 
 fn reduce_answer_key(
     state: &mut FleetPaneState,
-    mut answer: AnswerState,
+    mut queue: AnswerQueue,
     key: FleetKey,
 ) -> Option<FleetIntent> {
     if key == FleetKey::Esc {
         state.mode = FleetMode::Browse;
         return None;
     }
+    let Some(mut answer) = queue.current().cloned() else {
+        state.mode = FleetMode::Browse;
+        return None;
+    };
     if answer.delivery == AnswerDelivery::Confirming {
+        match key {
+            FleetKey::Tab | FleetKey::Right => {
+                queue.move_card(1);
+                state.mode = FleetMode::Answer(queue);
+                return None;
+            }
+            FleetKey::BackTab | FleetKey::Left => {
+                queue.move_card(-1);
+                state.mode = FleetMode::Answer(queue);
+                return None;
+            }
+            _ => {}
+        }
         state.feedback = Some("waiting for authoritative Fleet state".into());
-        state.mode = FleetMode::Answer(answer);
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     if key == FleetKey::Char('x') {
@@ -1132,10 +1209,10 @@ fn reduce_answer_key(
             .find(|row| row.session_key == answer.session_key)
             .is_some_and(|row| row.capabilities.contains("structured_dismiss"));
         if can_dismiss {
-            state.mode = FleetMode::AnswerDismissConfirm(answer);
+            state.mode = FleetMode::AnswerDismissConfirm(queue);
         } else {
             state.feedback = Some("provider does not expose safe interview dismissal".into());
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
         }
         return None;
     }
@@ -1146,20 +1223,13 @@ fn reduce_answer_key(
     };
     match key {
         FleetKey::Tab | FleetKey::Right => {
-            answer.question_index = (answer.question_index + 1) % answer.questions.len();
-            answer.option_cursor = 0;
-            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-            state.mode = FleetMode::Answer(answer);
+            queue.move_card(1);
+            state.mode = FleetMode::Answer(queue);
             return None;
         }
         FleetKey::BackTab | FleetKey::Left => {
-            answer.question_index = answer
-                .question_index
-                .checked_sub(1)
-                .unwrap_or(answer.questions.len().saturating_sub(1));
-            answer.option_cursor = 0;
-            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-            state.mode = FleetMode::Answer(answer);
+            queue.move_card(-1);
+            state.mode = FleetMode::Answer(queue);
             return None;
         }
         _ => {}
@@ -1172,14 +1242,15 @@ fn reduce_answer_key(
             FleetKey::Enter if answer.texts[answer.question_index].trim().is_empty() => {
                 state.feedback = Some("answer text required".into());
             }
-            FleetKey::Enter => return advance_or_submit_answer(state, answer),
+            FleetKey::Enter => return advance_or_submit_answer(state, queue, answer),
             FleetKey::Char(character) => {
                 answer.texts[answer.question_index].push(character);
             }
             FleetKey::Space => answer.texts[answer.question_index].push(' '),
             _ => {}
         }
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     match key {
@@ -1210,26 +1281,31 @@ fn reduce_answer_key(
             if selected_other && answer.texts[answer.question_index].trim().is_empty() {
                 answer.editing_text = true;
             } else {
-                return advance_or_submit_answer(state, answer);
+                return advance_or_submit_answer(state, queue, answer);
             }
         }
         _ => {}
     }
-    state.mode = FleetMode::Answer(answer);
+    queue.answers[queue.active] = answer;
+    state.mode = FleetMode::Answer(queue);
     None
 }
 
 fn reduce_answer_dismiss_key(
     state: &mut FleetPaneState,
-    mut answer: AnswerState,
+    mut queue: AnswerQueue,
     key: FleetKey,
 ) -> Option<FleetIntent> {
     match key {
         FleetKey::Esc => {
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
             None
         }
         FleetKey::Enter => {
+            let Some(answer) = queue.current_mut() else {
+                state.mode = FleetMode::Browse;
+                return None;
+            };
             answer.delivery = AnswerDelivery::Confirming;
             let intent = FleetIntent::Execute {
                 session_key: answer.session_key.clone(),
@@ -1239,11 +1315,11 @@ fn reduce_answer_dismiss_key(
                     request_identity: answer.request_identity.clone(),
                 },
             };
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
             Some(intent)
         }
         _ => {
-            state.mode = FleetMode::AnswerDismissConfirm(answer);
+            state.mode = FleetMode::AnswerDismissConfirm(queue);
             None
         }
     }
@@ -1251,13 +1327,15 @@ fn reduce_answer_dismiss_key(
 
 fn advance_or_submit_answer(
     state: &mut FleetPaneState,
+    mut queue: AnswerQueue,
     mut answer: AnswerState,
 ) -> Option<FleetIntent> {
     if answer.question_index + 1 < answer.questions.len() {
         answer.question_index += 1;
         answer.option_cursor = 0;
         answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     if let Some(index) = answer.questions.iter().enumerate().find_map(|(index, question)| {
@@ -1267,7 +1345,8 @@ fn advance_or_submit_answer(
         answer.option_cursor = 0;
         answer.editing_text = answer.questions[index].options.is_empty();
         state.feedback = Some("complete every interview question before submit".into());
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     let answers = answer
@@ -1298,7 +1377,8 @@ fn advance_or_submit_answer(
         })
         .collect();
     answer.delivery = AnswerDelivery::Confirming;
-    state.mode = FleetMode::Answer(answer.clone());
+    queue.answers[queue.active] = answer.clone();
+    state.mode = FleetMode::Answer(queue);
     Some(FleetIntent::Execute {
         session_key: answer.session_key,
         expected_version: answer.expected_version,
@@ -2479,15 +2559,18 @@ fn render_mode(
 ) {
     match &state.mode {
         FleetMode::Browse => {}
-        FleetMode::Answer(answer) => render_interview(buffer, area_width, top, bottom, answer),
-        FleetMode::AnswerDismissConfirm(answer) => render_modal(
+        FleetMode::Answer(queue) => render_interview(buffer, area_width, top, bottom, queue),
+        FleetMode::AnswerDismissConfirm(queue) => render_modal(
             buffer,
             area_width,
             top,
             bottom,
             "Reject structured interview",
             &[
-                format!("session: {}", answer.session_key),
+                format!(
+                    "session: {}",
+                    queue.current().map_or("unknown", |answer| answer.session_key.as_str())
+                ),
                 "This returns a rejected result to Claude.".into(),
                 "Enter rejects, Esc returns to draft".into(),
             ],
@@ -2568,72 +2651,108 @@ fn render_interview(
     area_width: u16,
     top: u16,
     bottom: u16,
-    answer: &AnswerState,
+    queue: &AnswerQueue,
 ) {
-    if area_width < 28 || bottom.saturating_sub(top) < 8 {
+    if area_width < 28 {
         return;
     }
     fill_background(buffer, 0, top, area_width, bottom, SURFACE);
     let left = 2;
     let right = area_width.saturating_sub(2);
     let title_y = top.saturating_add(1);
+    let Some(answer) = queue.current() else {
+        return;
+    };
+    let lane_count = queue.answers.len().min(3);
+    if bottom.saturating_sub(top) < (lane_count as u16 * 2 + 11) {
+        return;
+    }
     put_str(
         buffer,
         left,
         title_y,
-        "ANSWER QUEUE  ·  STRUCTURED INTERVIEW",
+        &format!(
+            "ANSWER QUEUE  ·  STRUCTURED INTERVIEW  ·  {} SESSIONS",
+            queue.answers.len()
+        ),
         GOLD,
         right,
     );
-    let answered = answer
-        .questions
-        .iter()
-        .enumerate()
-        .filter(|(index, question)| answer_question_complete(answer, *index, question))
-        .count();
+    let answered = queue.answers.iter().map(answered_questions).sum::<usize>();
+    let question_total = queue.answers.iter().map(|answer| answer.questions.len()).sum::<usize>();
     put_str(
         buffer,
         left,
         title_y.saturating_add(1),
         &format!(
-            "{}  /  {} answered     session: {}",
+            "{}  /  {} answered   active: {}",
             answered,
-            answer.questions.len(),
+            question_total,
             truncate(&answer.session_key, 28)
         ),
         MUTED,
         right,
     );
-    let mut tab_x = left;
     let tab_y = title_y.saturating_add(3);
-    for (index, question) in answer.questions.iter().enumerate() {
-        let active = index == answer.question_index;
-        let done = answer_question_complete(answer, index, question);
-        let marker = if done { "●" } else { "○" };
-        let tab = format!(
-            " {} {} {} ",
-            index + 1,
-            marker,
-            truncate(&question.header, 14)
+    for offset in 0..lane_count {
+        let index = (queue.active + offset) % queue.answers.len();
+        let lane = &queue.answers[index];
+        let active_lane = index == queue.active;
+        let mut tab_x = left;
+        let lane_label = format!(
+            "{} {}  ",
+            if active_lane { "▶" } else { " " },
+            truncate(&lane.session_key, 20)
         );
-        if tab_x.saturating_add(tab.len() as u16) >= right {
-            break;
-        }
         put_str(
             buffer,
             tab_x,
-            tab_y,
-            &tab,
-            if active { GREEN } else { MUTED },
+            tab_y.saturating_add((offset * 2) as u16),
+            &lane_label,
+            if active_lane { GOLD } else { MUTED },
             right,
         );
-        tab_x = tab_x.saturating_add(tab.len() as u16 + 1);
+        tab_x = tab_x.saturating_add(lane_label.len() as u16);
+        for (question_index, question) in lane.questions.iter().enumerate() {
+            let done = answer_question_complete(lane, question_index, question);
+            let active_card = active_lane && question_index == lane.question_index;
+            let card = format!(
+                "[{} {} {}]",
+                if done { "●" } else { "○" },
+                question_index + 1,
+                truncate(&question.header, 11)
+            );
+            if tab_x.saturating_add(card.len() as u16) >= right {
+                break;
+            }
+            put_str(
+                buffer,
+                tab_x,
+                tab_y.saturating_add((offset * 2) as u16),
+                &card,
+                if active_card {
+                    GREEN
+                } else if done {
+                    BLUE
+                } else {
+                    MUTED
+                },
+                right,
+            );
+            tab_x = tab_x.saturating_add(card.len() as u16 + 1);
+        }
     }
     for x in left..right {
-        put_char(buffer, x, tab_y.saturating_add(1), '─', BLUE);
+        put_char(
+            buffer,
+            x,
+            tab_y.saturating_add((lane_count * 2) as u16),
+            '─',
+            BLUE,
+        );
     }
     let question = &answer.questions[answer.question_index];
-    let content_top = tab_y.saturating_add(3);
+    let content_top = tab_y.saturating_add((lane_count * 2 + 2) as u16);
     put_str(
         buffer,
         left,
@@ -2719,10 +2838,13 @@ fn render_interview(
     for x in left..right {
         put_char(buffer, x, bottom.saturating_sub(2), '─', BLUE);
     }
+    let complete = answered_questions(answer) == answer.questions.len();
     let help = if answer.delivery == AnswerDelivery::Confirming {
         "Refreshing authoritative state, Esc leaves queue"
+    } else if complete {
+        "READY  ·  Enter submit this interview  ←→ card  x reject  Esc leave"
     } else if answer.editing_text {
-        "Type answer  Enter next  ←→ card  x reject  Esc leave"
+        "Type answer  Enter next  ←→ card across sessions  x reject  Esc leave"
     } else if question.multi_select {
         "↑↓ move  Space toggle  Enter next  ←→ card  x reject  Esc leave"
     } else {
@@ -2741,6 +2863,15 @@ fn answer_question_complete(answer: &AnswerState, index: usize, question: &Answe
         .any(|option| option.label.eq_ignore_ascii_case("other"));
     !answer.selections[index].is_empty()
         && (!selected_other || !answer.texts[index].trim().is_empty())
+}
+
+fn answered_questions(answer: &AnswerState) -> usize {
+    answer
+        .questions
+        .iter()
+        .enumerate()
+        .filter(|(index, question)| answer_question_complete(answer, *index, question))
+        .count()
 }
 
 fn render_broadcast_modal(
@@ -3329,9 +3460,10 @@ mod tests {
         state = apply(&state, FleetEvent::Key(FleetKey::Left)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
-        let FleetMode::Answer(answer) = &state.mode else {
+        let FleetMode::Answer(queue) = &state.mode else {
             panic!("arrow navigation must keep interview open");
         };
+        let answer = queue.current().expect("active interview");
         assert_eq!(answer.question_index, 1);
         assert_eq!(answer.selections[0], BTreeSet::from([0]));
         assert_eq!(answer.selections[1], BTreeSet::from([0]));
@@ -3360,9 +3492,10 @@ mod tests {
         state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
         let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
-        let FleetMode::Answer(answer) = &submitted.state.mode else {
+        let FleetMode::Answer(queue) = &submitted.state.mode else {
             panic!("delivered interview must remain visible");
         };
+        let answer = queue.current().expect("active interview");
         assert_eq!(answer.delivery, AnswerDelivery::Confirming);
 
         let delivered = apply(
@@ -4056,6 +4189,115 @@ mod tests {
         assert!(rendered.contains("Checks"));
         assert!(rendered.contains("0  /  2 answered"));
         assert!(rendered.contains("verified Fleet work only"));
+    }
+
+    #[test]
+    fn interview_queue_crosses_sessions_and_prunes_confirmed_delivery() {
+        let mut first = session("claude:first", "claude", "IDLE", "ASK", "managed");
+        first.current_request_fingerprint = Some("first-request".into());
+        first.current_request = Some(serde_json::json!({
+            "questions": [{"id": "first", "question": "First?", "options": ["Yes"]}]
+        }));
+        let mut second = session("codex:second", "codex", "IDLE", "ASK", "managed");
+        second.current_request_fingerprint = Some("second-request".into());
+        second.current_request = Some(serde_json::json!({
+            "payload": {"identity": {"requestId": "codex-2"}, "questions": [
+                {"id": "second", "question": "Second?", "options": ["Ship"]}
+            ]}
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![first.clone(), second]);
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("answer queue expected")
+        };
+        assert_eq!(queue.answers.len(), 2);
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+        let mut buffer = WireBuffer::new(140, 28);
+        render_fleet(&mut buffer, 140, 0, 26, &state);
+        let rendered: String =
+            (0..26).map(|row| row_text(&buffer, row, 140)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("claude:first"));
+        assert!(rendered.contains("codex:second"));
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+        assert!(matches!(
+            submitted.intent,
+            Some(FleetIntent::Execute { session_key, action: FleetAction::StructuredAnswer { .. }, .. })
+                if session_key == "codex:second"
+        ));
+
+        let working = apply(&submitted.state, FleetEvent::Key(FleetKey::Left)).state;
+        let FleetMode::Answer(queue) = &working.mode else {
+            panic!("queue must remain usable")
+        };
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+
+        let delivered = apply(
+            &working,
+            FleetEvent::ActionSucceeded {
+                session_key: "codex:second".into(),
+            },
+        )
+        .state;
+        let reconciled = apply(&delivered, FleetEvent::Snapshot(vec![first])).state;
+        let FleetMode::Answer(queue) = &reconciled.mode else {
+            panic!("remaining interview must stay open")
+        };
+        assert_eq!(queue.answers.len(), 1);
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+        assert_eq!(
+            reconciled.feedback(),
+            Some("delivered interview removed from answer queue")
+        );
+    }
+
+    #[test]
+    fn interview_renderer_exposes_explicit_submit_for_complete_session() {
+        let mut row = session("claude:submit", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("submit-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{
+                "id": "submit", "question": "Submit?", "multiSelect": true, "options": ["Yes"]
+            }]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+        let mut buffer = WireBuffer::new(120, 24);
+        render_fleet(&mut buffer, 120, 0, 22, &state);
+        let rendered: String =
+            (0..22).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("READY"));
+        assert!(rendered.contains("Enter submit this interview"));
+    }
+
+    #[test]
+    fn interview_free_text_captures_host_reserved_characters() {
+        let mut row = session("codex:text", "codex", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("text-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "why", "question": "Why?", "options": []}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(
+            state.is_capturing_text(),
+            "free-text answer must retain H and ? for its field"
+        );
     }
 
     #[test]
