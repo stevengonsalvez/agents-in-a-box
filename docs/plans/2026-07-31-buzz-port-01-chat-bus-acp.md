@@ -1,3 +1,7 @@
+---
+title: "Buzz port part 1 — daemon chat bus + ACP adapter"
+---
+
 # Plan: Daemon Chat Bus + ACP Provider Adapter (buzz-port part 1)
 
 **Research:** [research, discussion #570](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) (verdicts, §6 migration sketch, §7 chat ranking)

@@ -1,3 +1,7 @@
+---
+title: "Buzz port part 2 — spec"
+---
+
 # Specification: Fleet Chat + Fleet Copilot (buzz-port part 2)
 
 **Generated from:** /interview (3 rounds, 11 questions) + [research, discussion #570](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570) + [spike report, discussion #570 comment](https://github.com/stevengonsalvez/agents-in-a-box/discussions/570#discussioncomment-17880848)

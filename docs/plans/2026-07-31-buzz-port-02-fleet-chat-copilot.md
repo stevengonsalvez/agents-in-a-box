@@ -1,3 +1,7 @@
+---
+title: "Buzz port part 2 — fleet chat + copilot"
+---
+
 # Plan: Fleet Chat + Fleet Copilot, both surfaces (buzz-port part 2)
 
 **From spec:** docs/plans/2026-07-31-buzz-port-02-fleet-chat-copilot-spec.md
