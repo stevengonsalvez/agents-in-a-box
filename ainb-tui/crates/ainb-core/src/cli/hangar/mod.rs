@@ -5289,10 +5289,14 @@ fn squad_assign_cli_err(
         SquadAssignError::MemberAgentMissing(id) => {
             anyhow::anyhow!("squad member agent `{id}` not found")
         }
-        // Two pre-flight refusals that write NO task row: the gap-#8 invocation
-        // gate, and the parity-#26 archived-squad guard. Both are surfaced
-        // verbatim so the CLI exits non-zero with the store's own reason.
-        e @ (SquadAssignError::NotInvocable { .. } | SquadAssignError::Archived(_)) => {
+        // Pre-flight refusals that write NO task row: the gap-#8 invocation gate,
+        // the parity-#26 archived-squad guard, and the two stage guards a
+        // `--redundant` cluster is subject to on a role-gated card. All are
+        // surfaced verbatim so the CLI exits non-zero with the store's own reason.
+        e @ (SquadAssignError::NotInvocable { .. }
+        | SquadAssignError::Archived(_)
+        | SquadAssignError::ActiveRun(_)
+        | SquadAssignError::StageRoleUnheld { .. }) => {
             anyhow::anyhow!("{e}")
         }
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),

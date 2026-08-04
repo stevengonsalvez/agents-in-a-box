@@ -5661,6 +5661,15 @@ fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignErr
         SquadAssignError::Archived(id) => invalid_params(&format!(
             "squad `{id}` is archived — restore it before assigning work"
         )),
+        // The two stage guards a `--redundant` cluster is subject to on a
+        // role-gated card. Client errors: the operator waits for the live run, or
+        // grants an agent the stage's role, and re-issues.
+        SquadAssignError::ActiveRun(id) => invalid_params(&format!(
+            "card `{id}` already has a run in flight; let it finish before asking for redundancy"
+        )),
+        SquadAssignError::StageRoleUnheld { role, squad_id } => invalid_params(&format!(
+            "no agent in squad `{squad_id}` holds the role `{role}` this card's stage services"
+        )),
         SquadAssignError::Db(db) => store_err(db),
     }
 }

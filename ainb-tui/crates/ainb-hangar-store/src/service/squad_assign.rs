@@ -128,6 +128,24 @@ pub enum SquadAssignError {
     /// phase, so NO task row is written — restore the squad to assign to it again.
     #[error("squad `{0}` is archived — restore it before assigning work")]
     Archived(String),
+    /// A `--redundant` cluster was asked for on a ROLE-GATED card that already
+    /// holds an active (`queued` / `dispatched` / `running`) task. Redundancy
+    /// REPLACES the single owner of a stage; it does not stack on top of one, so
+    /// this refuses rather than putting N more concurrent runs on a live stage.
+    /// Pre-flight, so NO row is written.
+    #[error("card `{0}` already has a run in flight; let it finish before asking for redundancy")]
+    ActiveRun(String),
+    /// A `--redundant` cluster was asked for on a ROLE-GATED card whose stage no
+    /// dispatch target services. Redundancy is redundancy WITHIN a stage, so
+    /// dispatching to whoever happened to be in the squad would be exactly the
+    /// role-blind dispatch migration 0074 ended. Pre-flight, so NO row is written.
+    #[error("no agent in squad `{squad_id}` holds the role `{role}` this card's stage services")]
+    StageRoleUnheld {
+        /// The stage's `board_column.services_role`.
+        role: String,
+        /// The squad that was asked to service it.
+        squad_id: String,
+    },
     /// An underlying store failure (resolve, lookup, or enqueue).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -458,11 +476,10 @@ impl SquadAssignService {
     ///
     /// This is the explicit opt-in that keeps intentional parallelism alive now
     /// that [`Self::assign_fanout`] no longer broadcasts: N independent attempts
-    /// at one problem, or several reviewers over one artifact. The difference
-    /// from the removed defect is entirely in the intent and the evidence. A
-    /// broadcast was the DEFAULT, was unbounded (one run per member, however many
-    /// that happened to be), and left no trace saying the parallelism was wanted.
-    /// This is opt-in, explicitly capped at `copies`, and every row carries the
+    /// at one problem, or several reviewers over one artifact. A broadcast was
+    /// the DEFAULT, was unbounded (one run per member, however many that happened
+    /// to be), and left no trace saying the parallelism was wanted. This is
+    /// opt-in, explicitly capped at `copies`, and every row carries the
     /// `run_group` that identifies the cluster, so "why are there three runs on
     /// this card" is answerable from the row itself.
     ///
@@ -475,12 +492,37 @@ impl SquadAssignService {
     /// dependent stays blocked until the WHOLE cluster drains rather than
     /// unblocking on the first copy home.
     ///
+    /// # Redundancy is redundancy WITHIN A STAGE
+    ///
+    /// This writes rows directly rather than going through
+    /// [`PullService`](crate::service::pull::PullService), so it has to reproduce
+    /// the parts of the pull contract that still apply. On a card sitting in a
+    /// ROLE-GATED column it therefore:
+    ///
+    ///   * dispatches ONLY to agents that hold that column's `services_role`, and
+    ///     refuses outright when nobody does. Dispatching to whoever happened to
+    ///     be in the squad is the role-blind dispatch migration 0074 ended, and it
+    ///     would hand an Implement-stage card to a tester;
+    ///   * refuses a card that already holds an ACTIVE task. Redundancy REPLACES
+    ///     the single owner of a stage, it does not stack on top of one;
+    ///   * stamps each row's `board_column_id`, so the cluster is a stage like any
+    ///     other and the pull's finished-stage guard sees it.
+    ///
+    /// The WIP limit is DELIBERATELY not applied: exceeding the per-column cap is
+    /// the entire point of asking for redundancy, and unlike the other predicates
+    /// it protects throughput rather than correctness.
+    ///
+    /// A card that is NOT in a role-gated column (no pipeline provisioned, parked
+    /// in Backlog or Done, or an issueless ad-hoc dispatch) has no stage to gate
+    /// against, so it keeps the plain leader-plus-members behaviour.
+    ///
     /// # Errors
     ///
     /// The same rejections as [`Self::assign_fanout`]: an archived squad, a
     /// human / unknown / dangling leader, a dangling member ref, or a target the
-    /// effective invoker may not invoke. All are pre-flight, so a rejection
-    /// writes zero rows.
+    /// effective invoker may not invoke. Plus, on a role-gated card,
+    /// [`SquadAssignError::ActiveRun`] and [`SquadAssignError::StageRoleUnheld`].
+    /// All are pre-flight, so a rejection writes zero rows.
     pub async fn assign_redundant(
         pool: &SqlitePool,
         workspace: &WorkspaceId,
@@ -505,6 +547,22 @@ impl SquadAssignService {
         let invoker = Self::effective_invoker(pool, workspace, request).await?;
         Self::gate(pool, &leader, &invoker).await?;
 
+        // The STAGE this cluster serves, if the card is in a role-gated column.
+        // Resolved before any candidate work so a refusal costs one query.
+        let stage = match request.issue_id {
+            Some(issue_id) => Self::gated_stage_of(pool, workspace, issue_id).await?,
+            None => None,
+        };
+        if let (Some(issue_id), Some(_)) = (request.issue_id, stage.as_ref()) {
+            // Redundancy REPLACES the single owner of a stage rather than stacking
+            // on it: three more concurrent runs alongside a live one is the
+            // several-runs-on-one-card shape the pull pipeline exists to remove,
+            // and they would not even share the live run's generation.
+            if Self::has_active_task(pool, issue_id).await? {
+                return Err(SquadAssignError::ActiveRun(issue_id.to_string()));
+            }
+        }
+
         // Resolve + gate EVERY candidate before writing, so a bad member ref
         // rejects the whole cluster rather than leaving a partial fan-out. The
         // leader leads the candidate list, then distinct agent members in id
@@ -521,6 +579,26 @@ impl SquadAssignService {
                 .ok_or_else(|| SquadAssignError::MemberAgentMissing(agent_id.clone()))?;
             Self::gate(pool, &member, &invoker).await?;
             targets.push((agent_id, member.runtime_id));
+        }
+
+        // THE ROLE GATE. On a role-gated card only agents servicing THAT stage may
+        // take a copy. Filtered after the invocation gate so a foreign / private
+        // member still rejects the whole dispatch rather than being quietly
+        // dropped by the role filter first.
+        if let Some((_, role)) = stage.as_ref() {
+            let mut eligible = Vec::new();
+            for (agent_id, runtime_id) in targets {
+                if Self::holds_role(pool, workspace, &agent_id, role).await? {
+                    eligible.push((agent_id, runtime_id));
+                }
+            }
+            if eligible.is_empty() {
+                return Err(SquadAssignError::StageRoleUnheld {
+                    role: role.clone(),
+                    squad_id: squad_id.to_string(),
+                });
+            }
+            targets = eligible;
         }
         targets.truncate(copies);
 
@@ -547,6 +625,17 @@ impl SquadAssignService {
             .await?;
             Self::stamp_dispatch_fields(&mut tx, &task_id, request).await?;
             TaskRepo::set_squad_id_in_tx(&mut tx, &task_id, squad_id).await?;
+            // Record the STAGE each copy serves, exactly as the pull does for a
+            // single owner, so the cluster is a stage like any other: the pull's
+            // finished-stage guard sees it, and the card is not re-pulled in the
+            // window between the last copy finishing and the advance moving it.
+            if let Some((column_id, _)) = stage.as_ref() {
+                sqlx::query("UPDATE agent_task_queue SET board_column_id = ?1 WHERE id = ?2")
+                    .bind(column_id)
+                    .bind(&task_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             sqlx::query("UPDATE agent_task_queue SET run_group = ?1 WHERE id = ?2")
                 .bind(&run_group)
                 .bind(&task_id)
@@ -623,6 +712,86 @@ impl SquadAssignService {
             }
         }
         Ok(None)
+    }
+
+    /// The ROLE-GATED stage `issue_id`'s card currently sits in, as
+    /// `(column_id, services_role)`, or `None` when it is not in one.
+    ///
+    /// `None` covers a workspace with no pipeline, a card parked in an ungated
+    /// column (Backlog / Done, or any column predating migration 0074), and an
+    /// issue that is on no board at all. Scoped to `workspace` so a card carried
+    /// by another tenant's board can never decide this dispatch's stage; the
+    /// earliest stage wins when a card sits on several boards, which is
+    /// deterministic rather than whichever row the planner returned first.
+    async fn gated_stage_of(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        issue_id: &str,
+    ) -> Result<Option<(String, String)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT bc.column_id, col.services_role \
+               FROM board_card AS bc \
+               JOIN board_column AS col ON col.id = bc.column_id \
+               JOIN board AS bd ON bd.id = bc.board_id \
+              WHERE bc.issue_id = ?1 \
+                AND bd.workspace_id = ?2 \
+                AND col.services_role IS NOT NULL \
+              ORDER BY col.ord, col.id \
+              LIMIT 1",
+        )
+        .bind(issue_id)
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Whether `issue_id` currently holds any ACTIVE task. The same active set
+    /// the pull's one-owner-per-card predicate reads.
+    async fn has_active_task(pool: &SqlitePool, issue_id: &str) -> Result<bool, sqlx::Error> {
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM agent_task_queue \
+              WHERE issue_id = ?1 AND status IN ('queued','dispatched','running') LIMIT 1",
+        )
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(found.is_some())
+    }
+
+    /// Whether `agent_id` HOLDS `role` through any squad membership in
+    /// `workspace`.
+    ///
+    /// Matched exactly as
+    /// [`PULL_SQL`](crate::service::pull::PULL_SQL) matches it: a
+    /// COMMA-SEPARATED TOKEN set, case-insensitively and ignoring spaces, via
+    /// `INSTR` over comma-delimited needles rather than `LIKE`, so a role
+    /// containing `%` or `_` cannot act as a wildcard and silently over-match.
+    /// Keeping the two identical is what stops a `--redundant` cluster admitting
+    /// an agent the ordinary pull would refuse.
+    async fn holds_role(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent_id: &str,
+        role: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM squad_member AS sm \
+               JOIN squad AS sq ON sq.id = sm.squad_id \
+              WHERE sm.member_type = 'agent' \
+                AND sm.member_id = ?1 \
+                AND sq.workspace_id = ?2 \
+                AND INSTR( \
+                      ',' || REPLACE(LOWER(sm.role), ' ', '') || ',', \
+                      ',' || LOWER(TRIM(?3)) || ',' \
+                    ) > 0 \
+              LIMIT 1",
+        )
+        .bind(agent_id)
+        .bind(workspace.as_str())
+        .bind(role)
+        .fetch_optional(pool)
+        .await?;
+        Ok(found.is_some())
     }
 
     /// Stamp the card's `repo_ref` + resolved `agent_kind` onto a fanned-out task

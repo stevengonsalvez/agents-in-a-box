@@ -26,7 +26,9 @@ use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::service::pipeline::PipelineService;
-use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+use ainb_hangar_store::service::squad_assign::{
+    SquadAssignError, SquadAssignRequest, SquadAssignService,
+};
 use sqlx::SqlitePool;
 
 const NOW_MS: i64 = 1_700_000_500_000;
@@ -106,6 +108,30 @@ async fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     (dir, store)
+}
+
+/// Park `issue_id`'s card in the pipeline column named `column`, returning that
+/// column's id. Requires the default pipeline to be provisioned.
+async fn park_card_in(pool: &SqlitePool, issue_id: &str, column: &str) -> String {
+    let (board_id, column_id): (String, String) = sqlx::query_as(
+        "SELECT b.id, c.id FROM board AS b JOIN board_column AS c ON c.board_id = b.id \
+          WHERE b.workspace_id = 'ws-1' AND c.name = ?1",
+    )
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .expect("the pipeline column exists");
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES (?1, ?2, ?3, 0, 0)",
+    )
+    .bind(&board_id)
+    .bind(issue_id)
+    .bind(&column_id)
+    .execute(pool)
+    .await
+    .expect("park the card");
+    column_id
 }
 
 /// Add `i-dep`, blocked by `blocker`.
@@ -526,6 +552,180 @@ async fn redundant_more_than_the_roster_dispatches_to_everyone() {
         4,
         "leader plus three members, capped by the roster"
     );
+}
+
+/// Redundancy is redundancy WITHIN A STAGE: on a card sitting in a role-gated
+/// column, only agents that HOLD that column's `services_role` may be handed a
+/// copy.
+///
+/// `assign_redundant` writes rows straight through `TaskRepo::insert_in_tx` with
+/// no board awareness at all, so it dispatched to the leader plus every member in
+/// id order regardless of role. On an Implement-stage card that hands the work to
+/// a tester, which is precisely the role-blind dispatch migration 0074 exists to
+/// end.
+#[tokio::test]
+async fn redundant_on_a_gated_card_only_dispatches_to_that_stages_role() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    park_card_in(pool, "i-1", "Implement").await;
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let mut owners: Vec<String> =
+        sqlx::query_scalar("SELECT agent_id FROM agent_task_queue WHERE issue_id='i-1'")
+            .fetch_all(pool)
+            .await
+            .expect("read owners");
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec!["ag-a".to_string(), "ag-lead".to_string()],
+        "only the two implementers may take an Implement-stage card; the \
+         reviewer and the tester must not be handed a copy"
+    );
+}
+
+/// Every copy of a stage cluster records the STAGE it serves, so the pull's
+/// finished-stage guard treats the cluster exactly like a single-owner run.
+#[tokio::test]
+async fn redundant_copies_record_the_stage_they_serve() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    let column = park_card_in(pool, "i-1", "Implement").await;
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        2,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let stamped: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT board_column_id FROM agent_task_queue WHERE issue_id='i-1'")
+            .fetch_all(pool)
+            .await
+            .expect("read the stage stamp");
+    assert!(
+        !stamped.is_empty() && stamped.iter().all(|c| c.as_deref() == Some(column.as_str())),
+        "every copy must name the stage it serves: {stamped:?}"
+    );
+}
+
+/// Redundancy REPLACES the single owner of a stage; it does not stack on top of
+/// one. A card that already has a pulled run in flight refuses, rather than
+/// acquiring three more concurrent runs of the same stage.
+#[tokio::test]
+async fn redundant_refuses_a_gated_card_that_already_has_an_active_run() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    park_card_in(pool, "i-1", "Implement").await;
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+         VALUES ('t-live','ws-1','rt-1','ag-a','i-1','running',0,1)",
+    )
+    .execute(pool)
+    .await
+    .expect("a run already in flight");
+
+    let err = SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 2,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect_err("stacking onto a live stage must be refused");
+    assert!(
+        matches!(err, SquadAssignError::ActiveRun(ref id) if id == "i-1"),
+        "expected an active-run refusal, got {err:?}"
+    );
+    assert_eq!(
+        task_count(pool).await,
+        1,
+        "a refusal writes zero rows: only the run already in flight remains"
+    );
+}
+
+/// A stage nobody holds the role for refuses outright rather than silently
+/// dispatching to whoever happened to be in the squad.
+#[tokio::test]
+async fn redundant_refuses_when_no_member_holds_the_stages_role() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    // Nobody in this squad services Triage except the leader; strip that role.
+    sqlx::query("UPDATE squad_member SET role='implementer' WHERE member_id='ag-lead'")
+        .execute(pool)
+        .await
+        .expect("strip the triager role");
+    park_card_in(pool, "i-1", "Triage").await;
+
+    let err = SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect_err("no eligible agent must refuse");
+    assert!(
+        matches!(err, SquadAssignError::StageRoleUnheld { ref role, .. } if role == "triager"),
+        "expected a role refusal, got {err:?}"
+    );
+    assert_eq!(task_count(pool).await, 0, "a refusal writes zero rows");
 }
 
 /// FANOUT-SEMANTICS, preserved for the surviving multi-task shape: a dependent
