@@ -586,6 +586,174 @@ async fn sequential_pulls_never_double_assign_one_card() {
     assert_eq!(n, 1, "exactly one task exists for the card");
 }
 
+// ---------------------------------------------------------------------------
+// The FINALIZE WINDOW: a stage that has committed `done` but not yet advanced
+// ---------------------------------------------------------------------------
+
+/// Mark `task_id` `done` WITHOUT running the stage advance.
+///
+/// This is the finalize window reproduced exactly. In the daemon the task row
+/// commits `done` first, then four awaited best-effort steps run (usage, run
+/// branch, run history, the `TaskFinished` event), and only THEN does
+/// `auto_move_after_terminal` reach `PullService::advance_after_stage`. The pull
+/// tick runs concurrently on a 1000ms timer, so it observes precisely this
+/// state: terminal task, card still in the column it ran in.
+///
+/// A SEQUENTIAL double-pull test (`sequential_pulls_never_double_assign_one_card`)
+/// cannot see this: its first task is still `queued`, so the one-owner guard
+/// covers for the missing predicate. Only a terminal-but-unadvanced card exposes
+/// it.
+async fn finish_without_advancing(pool: &SqlitePool, task_id: &str) {
+    sqlx::query("UPDATE agent_task_queue SET status='done', finished_at=?2 WHERE id=?1")
+        .bind(task_id)
+        .bind(NOW_MS)
+        .execute(pool)
+        .await
+        .expect("terminalise the task");
+}
+
+/// A card whose CURRENT stage has already finished is not pullable again while
+/// it waits to be advanced.
+///
+/// Without this the SAME implementer re-pulls the card it just finished and a
+/// second full Implement run starts, which is the two-runs-on-one-card defect
+/// the whole pull pipeline exists to remove.
+#[tokio::test]
+async fn a_finished_stage_is_not_re_pulled_before_the_card_advances() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-impl", "implementer", 5).await;
+    add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+    add_card(pool, "i-1", "col-impl", 0).await;
+
+    let first = pull(pool, "t-1").await.expect("the implementer takes the card");
+    assert_eq!(first.agent_id, "ag-impl");
+    finish_without_advancing(pool, "t-1").await;
+
+    assert!(
+        pull(pool, "t-2").await.is_none(),
+        "the stage is done and the card has not moved: re-pulling it starts a \
+         SECOND Implement run on the same card"
+    );
+
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id='i-1'")
+        .fetch_one(pool)
+        .await
+        .expect("count");
+    assert_eq!(n, 1, "exactly one Implement run exists for the card");
+}
+
+/// The same window on a stage with `excludes_prior_agent = 1`: that flag only
+/// blocks the agent that already holds a `done` task, so a DIFFERENT reviewer
+/// is free to take the card and double-review it.
+#[tokio::test]
+async fn a_finished_review_is_not_re_pulled_by_a_second_reviewer() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-rev-a", "reviewer", 5).await;
+    add_agent(pool, "ag-rev-b", "reviewer", 5).await;
+    add_column(pool, "col-rev", 1, Some("reviewer"), None, true).await;
+    add_card(pool, "i-1", "col-rev", 0).await;
+
+    let first = pull(pool, "t-1").await.expect("a reviewer takes the card");
+    finish_without_advancing(pool, "t-1").await;
+
+    let second = pull(pool, "t-2").await;
+    assert!(
+        second.is_none(),
+        "the review is done and the card has not moved; the prior-agent flag \
+         only excludes {}, so the OTHER reviewer double-reviews",
+        first.agent_id
+    );
+}
+
+/// The positive control: once the card DOES advance, the next stage is pullable
+/// again. The finished-stage guard must close the window, not the pipeline.
+#[tokio::test]
+async fn the_next_stage_is_pullable_once_the_card_advances() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-impl", "implementer", 5).await;
+    add_agent(pool, "ag-rev", "reviewer", 5).await;
+    add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+    add_column(pool, "col-rev", 2, Some("reviewer"), None, true).await;
+    add_card(pool, "i-1", "col-impl", 0).await;
+
+    pull(pool, "t-1").await.expect("the implementer takes the card");
+    finish_without_advancing(pool, "t-1").await;
+    let moved = PullService::advance_after_stage(pool, "i-1").await.expect("advance runs");
+    assert_eq!(moved, vec![("b-1".to_string(), "col-rev".to_string())]);
+
+    let review = pull(pool, "t-2").await.expect("the reviewer takes the advanced card");
+    assert_eq!(review.agent_id, "ag-rev");
+    assert_eq!(review.column_id, "col-rev");
+    assert_eq!(review.generation, 2, "each stage is its own generation");
+}
+
+/// With the finished-stage predicate DELETED, the finalize window hands the card
+/// straight back out, the pre-change behaviour, and the exact double-execution
+/// the criticals reported.
+#[tokio::test]
+async fn mutation_proof_without_the_finished_stage_predicate_the_card_runs_twice() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-impl", "implementer", 5).await;
+    add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+    add_card(pool, "i-1", "col-impl", 0).await;
+
+    pull(pool, "t-1").await.expect("the implementer takes the card");
+    finish_without_advancing(pool, "t-1").await;
+
+    let winner = pull_mutant(pool, "t-2", FINISHED_STAGE_CLAUSE).await;
+    assert_eq!(
+        winner.as_deref(),
+        Some("ag-impl"),
+        "without the guard the implementer re-pulls the card it just finished"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id='i-1'")
+        .fetch_one(pool)
+        .await
+        .expect("count");
+    assert_eq!(n, 2, "the mutant started a second run of the same stage");
+}
+
+/// A card RE-ENQUEUED to an earlier stage after a full walk is pullable again:
+/// the guard is scoped to the CURRENT generation, so an old `done` in that
+/// column does not freeze the card forever.
+#[tokio::test]
+async fn a_re_enqueued_card_is_pullable_again_at_an_earlier_stage() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-impl", "implementer", 5).await;
+    add_agent(pool, "ag-rev", "reviewer", 5).await;
+    add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+    add_column(pool, "col-rev", 2, Some("reviewer"), None, true).await;
+    add_card(pool, "i-1", "col-impl", 0).await;
+
+    // Walk Implement then Review, so `col-impl` carries an old `done`.
+    pull(pool, "t-1").await.expect("implement");
+    finish_without_advancing(pool, "t-1").await;
+    PullService::advance_after_stage(pool, "i-1").await.expect("advance to review");
+    pull(pool, "t-2").await.expect("review");
+    finish_without_advancing(pool, "t-2").await;
+
+    // Re-enqueue: move the card back to the first stage, exactly as
+    // `PipelineService::enqueue` does for a "run this again from the top".
+    sqlx::query("UPDATE board_card SET column_id='col-impl' WHERE issue_id='i-1'")
+        .execute(pool)
+        .await
+        .expect("re-enqueue");
+
+    let again = pull(pool, "t-3").await.expect("the re-enqueued card runs again");
+    assert_eq!(again.column_id, "col-impl");
+    assert_eq!(again.generation, 3);
+}
+
 /// A card with an UNFINISHED blocker is not pullable at any stage (the F7
 /// refuse-run guard, reused verbatim), and becomes pullable once the blocker's
 /// latest generation drains with a `done`.
@@ -794,6 +962,18 @@ const PRIOR_AGENT_CLAUSE: &str = "\
            AND p.agent_id = a.id \
            AND p.status = 'done' \
        ) ) ";
+
+/// The FINALIZE WINDOW guard: the card's current column must not already hold a
+/// `done` task at the card's current generation.
+const FINISHED_STAGE_CLAUSE: &str = "\
+   AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS f \
+         WHERE f.issue_id = bc.issue_id \
+           AND f.status = 'done' \
+           AND f.board_column_id = bc.column_id \
+           AND f.generation = (SELECT MAX(g4.generation) FROM agent_task_queue AS g4 \
+                                WHERE g4.issue_id = bc.issue_id) \
+       ) ";
 
 /// The supporting one-owner-per-card guard.
 const ONE_OWNER_CLAUSE: &str = "\

@@ -41,7 +41,7 @@
 //! agents can therefore never take the same card, and the guarantee holds across
 //! processes, not just across tasks in one daemon.
 //!
-//! # The five predicates
+//! # The six predicates
 //!
 //! A `(card, agent)` pair is *pullable* when ALL of these hold:
 //!
@@ -55,12 +55,24 @@
 //!    (`queued`/`dispatched`/`running`) task at all. This is strictly stronger
 //!    than the pre-existing per-(issue, agent) guard, and it is what makes
 //!    "exactly one task running per card" true rather than merely likely.
-//! 4. **Prior-agent exclusion.** On a column with `excludes_prior_agent = 1`, an
+//! 4. **The stage is not already finished.** The card's CURRENT column holds no
+//!    `done` task at the card's CURRENT generation. This is the FINALIZE WINDOW
+//!    guard: `done` commits in the claim loop's finalize, four awaited
+//!    best-effort steps run, and only then does the advance move the card, so a
+//!    concurrent pull tick sees a terminal stage on an unmoved card and every
+//!    other predicate passes (predicate 3 reads the ACTIVE set, and a `done`
+//!    task is not in it). Without this the same implementer re-pulls the card it
+//!    just finished, and a different reviewer double-reviews. `board_column_id`
+//!    (migration 0077) is what makes the question answerable; see that file for
+//!    why the generation alone is not enough. Scoping to the current generation
+//!    is what keeps a RE-ENQUEUED card, moved back to an earlier stage for
+//!    another pass, pullable rather than frozen by its own history.
+//! 5. **Prior-agent exclusion.** On a column with `excludes_prior_agent = 1`, an
 //!    agent that already holds a `done` task on this card may not take it. This
 //!    is the reviewer-is-never-the-implementer rule. Note the direction of
 //!    failure: if the only eligible agent implemented the card, the card WAITS
 //!    rather than being self-reviewed.
-//! 5. **Not blocked, and the agent has capacity.** Unfinished `card_dependency`
+//! 6. **Not blocked, and the agent has capacity.** Unfinished `card_dependency`
 //!    blockers make a card unpullable at every stage (the F7 refuse-run guard,
 //!    reused verbatim from
 //!    [`CardDependencyRepo::unfinished_blockers_of`](crate::repo::card_dependency::CardDependencyRepo::unfinished_blockers_of)),
@@ -315,6 +327,13 @@ RETURNING board_id, column_id";
 /// read across stages, so nothing new is introduced. The first stage of a card
 /// has no `done` predecessor and correctly chains to NULL.
 ///
+/// `board_column_id` (migration 0077) records WHICH STAGE the run serves. Only
+/// the pull writes it; every push-path task leaves it NULL. It exists so the
+/// finished-stage predicate can distinguish "this stage is done and the card has
+/// not advanced yet" (the finalize window, must not re-pull) from "the card DID
+/// advance and the next stage is waiting" (must pull). Read from
+/// `agent_task_queue` alone those two states are identical.
+///
 /// # Why this is `pub`
 ///
 /// So the MUTATION PROOFS in `tests/pull_role_gate.rs` can delete exactly one
@@ -327,7 +346,8 @@ RETURNING board_id, column_id";
 pub const PULL_SQL: &str = "\
 INSERT INTO agent_task_queue \
     (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
-     priority, generation, agent_kind, repo_ref, squad_id, parent_task_id) \
+     priority, generation, agent_kind, repo_ref, squad_id, parent_task_id, \
+     board_column_id) \
 SELECT ?1, \
        bd.workspace_id, \
        a.runtime_id, \
@@ -349,7 +369,8 @@ SELECT ?1, \
        i.squad_id, \
        (SELECT p.id FROM agent_task_queue AS p \
          WHERE p.issue_id = bc.issue_id AND p.status = 'done' \
-         ORDER BY p.generation DESC, p.finished_at DESC, p.id DESC LIMIT 1) \
+         ORDER BY p.generation DESC, p.finished_at DESC, p.id DESC LIMIT 1), \
+       bc.column_id \
   FROM board_card AS bc \
   JOIN board_column AS col ON col.id = bc.column_id \
   JOIN board AS bd ON bd.id = bc.board_id \
@@ -380,6 +401,14 @@ SELECT ?1, \
         SELECT 1 FROM agent_task_queue AS o \
          WHERE o.issue_id = bc.issue_id \
            AND o.status IN ('queued','dispatched','running') \
+       ) \
+   AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS f \
+         WHERE f.issue_id = bc.issue_id \
+           AND f.status = 'done' \
+           AND f.board_column_id = bc.column_id \
+           AND f.generation = (SELECT MAX(g4.generation) FROM agent_task_queue AS g4 \
+                                WHERE g4.issue_id = bc.issue_id) \
        ) \
    AND ( col.excludes_prior_agent = 0 OR NOT EXISTS ( \
         SELECT 1 FROM agent_task_queue AS p \
