@@ -5855,6 +5855,9 @@ async fn handle_board_column_update(
         params.name.as_deref(),
         fsm_state,
         params.auto_move,
+        // The stage addendum is set through `ainb hangar pipeline stage-prompt`
+        // (0076); this RPC leaves it untouched.
+        None,
     )
     .await
     .map_err(|e| board_repo_err(&e))?;

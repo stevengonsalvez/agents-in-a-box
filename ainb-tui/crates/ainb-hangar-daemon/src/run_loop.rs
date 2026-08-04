@@ -2466,6 +2466,12 @@ async fn resolve_dispatch(
 /// 2. the agent's own `instructions` — a chat / autopilot task with no issue,
 /// 3. [`FALLBACK_PROMPT`] — so a provider is never spawned promptless (which is
 ///    an immediate non-zero exit, not a no-op).
+///
+/// On top of that, migration 0076's `board_column.stage_prompt` is a LAYER
+/// rather than a source: the stage the card currently sits in contributes its
+/// own instruction ("everything entering Review gets this") regardless of which
+/// agent pulled the card. It leads the issue body so specificity increases
+/// downward: agent instructions, then stage, then the issue itself.
 async fn build_prompt(
     pool: &SqlitePool,
     issue_id: Option<&str>,
@@ -2473,9 +2479,18 @@ async fn build_prompt(
 ) -> String {
     use ainb_hangar_store::repo::issue::IssueRepo;
 
+    let stage = match issue_id {
+        Some(id) => stage_prompt_for_issue(pool, id).await,
+        None => None,
+    };
     if let Some(issue_id) = issue_id {
         if let Ok(Some(issue)) = IssueRepo::get_by_id(pool, issue_id).await {
-            let mut brief = issue.title;
+            let mut brief = String::new();
+            if let Some(stage) = stage.as_deref() {
+                brief.push_str(stage);
+                brief.push_str("\n\n");
+            }
+            brief.push_str(&issue.title);
             if let Some(desc) = issue.description.filter(|d| !d.trim().is_empty()) {
                 brief.push_str("\n\n");
                 brief.push_str(&desc);
@@ -2493,10 +2508,39 @@ async fn build_prompt(
             }
         }
     }
-    agent_instructions
-        .map(str::trim)
-        .filter(|i| !i.is_empty())
-        .map_or_else(|| FALLBACK_PROMPT.to_string(), ToString::to_string)
+    // No usable issue body. The agent's own instructions become the brief, and the
+    // stage layer (reachable here when the card's issue row vanished mid-flight)
+    // still stacks BELOW them, the same ordering the issue path renders.
+    let instructions = agent_instructions.map(str::trim).filter(|i| !i.is_empty());
+    match (instructions, stage.as_deref()) {
+        (Some(i), Some(s)) => format!("{i}\n\n{s}"),
+        (Some(i), None) => i.to_string(),
+        (None, Some(s)) => s.to_string(),
+        (None, None) => FALLBACK_PROMPT.to_string(),
+    }
+}
+
+/// The `stage_prompt` (migration 0076) of the column the issue's card sits in, or
+/// `None` when the issue is on no board, sits in a column that adds nothing, or
+/// the read faults.
+///
+/// An issue can be carded on several boards; the pipeline board is the one that
+/// gates dispatch, so a stage that actually carries an addendum wins over one
+/// that does not, and ties break on `board_id` to keep the brief deterministic.
+/// Best-effort by design: a store fault must degrade to "no stage layer", never
+/// strand a dispatch.
+async fn stage_prompt_for_issue(pool: &SqlitePool, issue_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT col.stage_prompt FROM board_card AS bc \
+           JOIN board_column AS col ON col.id = bc.column_id \
+          WHERE bc.issue_id = ? AND TRIM(COALESCE(col.stage_prompt, '')) <> '' \
+          ORDER BY bc.board_id LIMIT 1",
+    )
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_default()
+    .map(|s| s.trim().to_string())
 }
 
 /// Resolve the provider wire name and owning workspace for a task's agent
@@ -3976,6 +4020,138 @@ mod tests {
             "a prompt is never empty"
         );
         assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+    }
+
+    /// The stage a card sits in contributes its OWN instruction to the brief
+    /// (migration 0076), and its POSITION is the contract: below the agent
+    /// instructions, above the issue body, so specificity increases downward.
+    ///
+    /// Asserts ordering rather than mere presence: a stage prompt appended after
+    /// the issue description would still "contain" the text while inverting the
+    /// layering it exists to express.
+    #[tokio::test]
+    async fn stage_prompt_layers_between_agent_instructions_and_the_issue_body() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        const STAGE: &str = "Use /my-review-skill. Check migrations are additive.";
+        const INSTRUCTIONS: &str = "You are the reviewer on call.";
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent =
+            bootstrap::create_agent(pool, &ws, "checker", "claude", Some(INSTRUCTIONS.into()))
+                .await
+                .unwrap();
+
+        let issue_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: issue_id.clone(),
+                workspace_id: ws.clone(),
+                title: "Fix the login bug".into(),
+                description: Some("It 500s on empty password.".into()),
+                state: "open".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // A pipeline board whose Review stage carries the addendum, with the
+        // issue's card parked in it.
+        sqlx::query("INSERT INTO board (id, workspace_id, name, created_at) VALUES (?,?,?,0)")
+            .bind("b-1")
+            .bind(ws.as_str())
+            .bind("Pipeline")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO board_column \
+             (id, board_id, ord, name, fsm_state, auto_move, services_role, stage_prompt) \
+             VALUES ('c-1','b-1',0,'Review',NULL,1,'reviewer',?)",
+        )
+        .bind(STAGE)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+             VALUES ('b-1',?,'c-1',0,0)",
+        )
+        .bind(&issue_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
+        let brief = disp.invocation.prompt;
+        assert_eq!(
+            brief,
+            format!("{STAGE}\n\nFix the login bug\n\nIt 500s on empty password."),
+            "the stage prompt leads the issue body"
+        );
+        let stage_at = brief.find(STAGE).expect("stage prompt in the brief");
+        let title_at = brief.find("Fix the login bug").expect("title in the brief");
+        let desc_at = brief.find("It 500s on empty").expect("description in the brief");
+        assert!(
+            stage_at < title_at && title_at < desc_at,
+            "ordering must be stage -> title -> description, got {stage_at}/{title_at}/{desc_at} \
+             in:\n{brief}"
+        );
+
+        // The other half of the layering: when the issue body is gone and the
+        // agent's own instructions become the brief, the stage still stacks BELOW
+        // them. Ordering, not presence, is what is asserted.
+        sqlx::query("DELETE FROM issue WHERE id = ?")
+            .bind(&issue_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
+        let brief = disp.invocation.prompt;
+        let instr_at = brief.find(INSTRUCTIONS).expect("agent instructions in the brief");
+        let stage_at = brief.find(STAGE).expect("stage prompt in the brief");
+        assert!(
+            instr_at < stage_at,
+            "the stage layer sits BELOW the agent instructions, got:\n{brief}"
+        );
+
+        // A stage with no addendum changes nothing: the brief is byte-identical to
+        // the pre-0076 one.
+        sqlx::query("UPDATE board_column SET stage_prompt = NULL WHERE id = 'c-1'")
+            .execute(pool)
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(disp.invocation.prompt, INSTRUCTIONS);
     }
 
     /// A linked upstream issue (0043) appends a `Linked issue:` line to the brief so

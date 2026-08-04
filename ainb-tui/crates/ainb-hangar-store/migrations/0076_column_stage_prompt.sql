@@ -1,0 +1,23 @@
+-- Hangar v1 schema, migration 0076: per-stage prompt addendum.
+--
+-- 0074 turned board columns into role-gated pull queues, so a card now crosses
+-- several stages, each pulled by a DIFFERENT agent. What was missing is the
+-- instruction that belongs to the STAGE rather than to any one agent: "everything
+-- that enters Review gets this", independent of which reviewer happens to pull it.
+--
+-- Today's brief (`build_prompt`, `run_loop.rs`) layers agent instructions and the
+-- issue title + description; the workspace context prompt and the squad-leader
+-- briefing arrive separately as a materialised `CLAUDE.md` in the run workdir.
+-- `stage_prompt` slots in directly above the issue body, so specificity increases
+-- downward: workspace, then squad, then agent, then STAGE, then the issue itself.
+-- The stage text is the more general of the two, which is why it leads the issue
+-- rather than trailing it.
+--
+-- Additive `ALTER TABLE ... ADD COLUMN` with no default, the same O(1) catalog
+-- change 0074 used and safe on a populated home. NULL is the meaningful default
+-- and means exactly "this stage adds nothing", so every pre-existing column
+-- migrates to NULL and no existing brief changes by a single byte.
+--
+-- No index: the column is read once per dispatch by primary key (the card's
+-- `column_id`), never scanned or filtered on.
+ALTER TABLE board_column ADD COLUMN stage_prompt TEXT;
