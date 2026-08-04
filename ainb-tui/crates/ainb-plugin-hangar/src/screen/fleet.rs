@@ -1051,10 +1051,7 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         state.feedback = Some("no actionable structured interviews".into());
         return;
     }
-    let Some(active) = answers
-        .iter()
-        .position(|answer| answer.session_key == selected_key)
-    else {
+    let Some(active) = answers.iter().position(|answer| answer.session_key == selected_key) else {
         state.feedback = Some("selected session has no structured interview".into());
         return;
     };
@@ -2138,7 +2135,11 @@ fn render_session_card(
         2,
         row_y.saturating_add(1),
         &format!("{marker}{identity}"),
-        if selected { SELECTION_GREEN } else { operator_state_color(session) },
+        if selected {
+            SELECTION_GREEN
+        } else {
+            operator_state_color(session)
+        },
         None,
         selected.then_some(BOLD).unwrap_or(0),
         inner_right,
