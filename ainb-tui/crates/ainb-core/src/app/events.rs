@@ -3640,18 +3640,10 @@ impl EventHandler {
                 state.last_preview_update = None;
             }
             AppEvent::GoToTop => {
-                if state.selected_workspace_index.is_some() {
-                    state.selected_session_index = Some(0);
-                }
+                state.select_first_visible_session_in_current_workspace();
             }
             AppEvent::GoToBottom => {
-                if let Some(workspace_idx) = state.selected_workspace_index {
-                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        if !workspace.sessions.is_empty() {
-                            state.selected_session_index = Some(workspace.sessions.len() - 1);
-                        }
-                    }
-                }
+                state.select_last_visible_session_in_current_workspace();
             }
             AppEvent::NewSession => {
                 // Phase 4 (new-session redesign): open the screen-1 unified

@@ -1,11 +1,13 @@
 // ABOUTME: Unit tests for AppState to ensure navigation and state management work correctly
 
 use ainb::app::AppState;
+use ainb::app::state::SessionFilter;
 use ainb::models::{Session, SessionStatus, Workspace};
 use std::path::PathBuf;
 
 fn create_test_state() -> AppState {
     let mut state = AppState::default();
+    state.session_filter = SessionFilter::All;
 
     let mut workspace1 = Workspace::new("project1".to_string(), PathBuf::from("/project1"));
     let mut session1 = Session::new(
