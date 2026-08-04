@@ -4224,9 +4224,18 @@ mod tests {
                 .map(|row| row_text(&buffer, row, 120))
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(rendered.contains("Ship"), "question missing at {height} rows: {rendered}");
-            assert!(rendered.contains("Yes"), "option missing at {height} rows: {rendered}");
-            assert!(rendered.contains("Enter next"), "footer missing at {height} rows: {rendered}");
+            assert!(
+                rendered.contains("Ship"),
+                "question missing at {height} rows: {rendered}"
+            );
+            assert!(
+                rendered.contains("Yes"),
+                "option missing at {height} rows: {rendered}"
+            );
+            assert!(
+                rendered.contains("Enter next"),
+                "footer missing at {height} rows: {rendered}"
+            );
         }
     }
 
