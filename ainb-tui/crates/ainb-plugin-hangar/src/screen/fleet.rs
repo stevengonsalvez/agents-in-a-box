@@ -1818,10 +1818,12 @@ pub fn render_fleet(
         area_width
     };
     render_lenses(buffer, 1, top, list_width, state);
+    render_focus_summary(buffer, 1, top.saturating_add(1), list_width, state);
     let visible = state.visible_sessions();
     let header_y = top.saturating_add(2);
     let rows_top = header_y.saturating_add(1);
-    let capacity = usize::from(bottom.saturating_sub(rows_top));
+    const CARD_HEIGHT: u16 = 2;
+    let capacity = usize::from(bottom.saturating_sub(rows_top) / CARD_HEIGHT);
     let selected_index = state
         .selected_key
         .as_ref()
@@ -1832,11 +1834,7 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let identity_width = table_identity_width(list_width);
-        let header = format!(
-            "  {:<identity_width$} {:<8} {:<13} {:<7} AGE",
-            "REPOSITORY / BRANCH", "PROVIDER", "STATE", "CONNECT"
-        );
+        let header = format!("  PRIORITY QUEUE  ·  {} sessions", visible.len());
         put_str(buffer, 0, header_y, &header, MUTED, list_width);
         let position_width = position.chars().count() as u16;
         put_str(
@@ -1851,8 +1849,8 @@ pub fn render_fleet(
     let mut row_y = rows_top;
     for session in visible.iter().skip(window_start).take(capacity) {
         let selected = state.selected_key.as_deref() == Some(session.session_key.as_str());
-        render_table_row(buffer, row_y, list_width, session, selected, state.now_ms);
-        row_y = row_y.saturating_add(1);
+        render_session_card(buffer, row_y, list_width, session, selected, state.now_ms);
+        row_y = row_y.saturating_add(CARD_HEIGHT);
     }
     if visible.is_empty() && rows_top < bottom {
         render_empty_lens(buffer, 2, rows_top.saturating_add(1), list_width, state);
@@ -1870,6 +1868,25 @@ pub fn render_fleet(
         );
     }
     render_mode(buffer, area_width, top, bottom, state);
+}
+
+fn render_focus_summary(
+    buffer: &mut WireBuffer,
+    left: u16,
+    row: u16,
+    right: u16,
+    state: &FleetPaneState,
+) {
+    let count =
+        |filter: FleetFilter| state.roster.iter().filter(|session| filter.matches(session)).count();
+    let summary = format!(
+        "{} need you   {} running   {} idle   {} done",
+        count(FleetFilter::NeedsInput),
+        count(FleetFilter::Running),
+        count(FleetFilter::Idle),
+        count(FleetFilter::Completed),
+    );
+    put_str(buffer, left, row, &summary, MUTED, right);
 }
 
 fn render_lenses(buffer: &mut WireBuffer, left: u16, row: u16, right: u16, state: &FleetPaneState) {
@@ -1962,7 +1979,7 @@ pub fn render_degraded_banner(buffer: &mut WireBuffer, area_width: u16, top: u16
     );
 }
 
-fn render_table_row(
+fn render_session_card(
     buffer: &mut WireBuffer,
     row_y: u16,
     right: u16,
@@ -1971,43 +1988,53 @@ fn render_table_row(
     now_ms: i64,
 ) {
     let marker = if selected { "▸" } else { " " };
-    let identity_width = table_identity_width(right);
-    let identity = format!(
-        "{} / {}",
-        session.repository_label(),
-        session.branch_label()
-    );
-    let identity = truncate_ellipsis(&identity, identity_width);
-    let provider = provider_label(&session.provider);
-    let operator_state = session.operator_state();
-    let attachment = session.attachment_label();
+    let card_width = usize::from(right).saturating_sub(10).max(12);
+    let identity = truncate_ellipsis(&session.repository_label(), card_width);
+    let operator_state = home_state_label(session);
     let age = format_age(now_ms, session.last_observed_at);
-    let workload = if session.active_work_count > 0 {
-        format!(" +{}", session.active_work_count)
-    } else {
-        String::new()
-    };
-    let text = format!(
-        "{marker} {identity:<identity_width$} {provider:<8} {operator_state:<13}{workload:<4} {attachment:<7} {age:>4}"
+    let title = format!("{marker} {identity}  {operator_state}  {age}");
+    let metadata = format!(
+        "  {}  ·  {}  ·  {}",
+        truncate_ellipsis(
+            &session.branch_label(),
+            usize::from(right).saturating_sub(24).max(8),
+        ),
+        provider_label(&session.provider),
+        session.attachment_label()
     );
+    let color = if selected {
+        FG
+    } else {
+        operator_state_color(session)
+    };
     put_str_styled(
         buffer,
         0,
         row_y,
-        &text,
-        if selected {
-            FG
-        } else {
-            operator_state_color(session)
-        },
+        &title,
+        color,
         selected.then_some(SELECTED_ROW),
         if selected { BOLD } else { 0 },
         right,
     );
+    put_str_styled(
+        buffer,
+        0,
+        row_y.saturating_add(1),
+        &metadata,
+        if selected { MUTED } else { MUTED },
+        selected.then_some(SELECTED_ROW),
+        0,
+        right,
+    );
 }
 
-fn table_identity_width(right: u16) -> usize {
-    usize::from(right).saturating_sub(46).max(12)
+fn home_state_label(session: &FleetSessionRow) -> &'static str {
+    match session.operator_state() {
+        "NEEDS INPUT" => "INPUT",
+        "COMPLETED" => "DONE",
+        state => state,
+    }
 }
 
 fn provider_label(provider: &str) -> &'static str {
@@ -2079,7 +2106,7 @@ fn render_detail(
         BLUE,
         right,
     );
-    y = y.saturating_add(2);
+    y = y.saturating_add(1);
 
     let age = format_age(state.now_ms, session.last_observed_at);
     put_str(
@@ -2087,9 +2114,10 @@ fn render_detail(
         left,
         y,
         &format!(
-            "{}  ·  {}  ·  {age}",
-            session.operator_state(),
-            provider_label(&session.provider)
+            "{}  ·  {}  ·  {}  ·  {age}",
+            home_state_label(session),
+            provider_label(&session.provider),
+            session.attachment_label()
         ),
         operator_state_color(session),
         right,
@@ -2097,14 +2125,14 @@ fn render_detail(
     y = y.saturating_add(2);
 
     if session.is_actionable() {
-        put_str(buffer, left, y, "NEEDS YOUR INPUT", GOLD, right);
+        put_str(buffer, left, y, "WHAT NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
         if let Some(question) = session
             .current_request
             .as_ref()
             .and_then(|request| answer_questions(request).into_iter().next())
         {
-            y = render_wrapped_value(buffer, left, y, right, &question.text, FG);
+            y = render_clamped_value(buffer, left, y, right, &question.text, FG, 3);
         } else {
             let summary = session
                 .current_request
@@ -2117,21 +2145,8 @@ fn render_detail(
         y = y.saturating_add(1);
     }
 
-    put_str(buffer, left, y, "CONNECTION", MUTED, right);
-    y = y.saturating_add(1);
-    let connection = connection_summary(session);
-    y = render_wrapped_value(buffer, left, y, right, &connection, FG);
-    y = y.saturating_add(1);
-
-    put_str(buffer, left, y, "NEXT", MUTED, right);
-    y = y.saturating_add(1);
-    y = render_wrapped_value(buffer, left, y, right, &next_action(session), FG);
-    y = y.saturating_add(1);
-
     let actions = available_action_labels(session);
     if !actions.is_empty() && y < bottom {
-        put_str(buffer, left, y, "ACTIONS", MUTED, right);
-        y = y.saturating_add(1);
         let action_line = actions.join("   ");
         let _ = render_wrapped_value(buffer, left, y, right, &action_line, GREEN);
     }
@@ -2148,6 +2163,30 @@ fn render_detail(
             );
         }
     }
+}
+
+fn render_clamped_value(
+    buffer: &mut WireBuffer,
+    left: u16,
+    mut row: u16,
+    right: u16,
+    value: &str,
+    color: Color,
+    max_lines: usize,
+) -> u16 {
+    let width = usize::from(right.saturating_sub(left).saturating_sub(1)).max(1);
+    let lines = wrap_text(value, width);
+    let truncated = lines.len() > max_lines;
+    for (index, part) in lines.into_iter().take(max_lines).enumerate() {
+        let text = if truncated && index + 1 == max_lines && width > 1 {
+            format!("{}…", truncate_ellipsis(&part, width - 1))
+        } else {
+            part
+        };
+        put_str(buffer, left, row, &text, color, right);
+        row = row.saturating_add(1);
+    }
+    row
 }
 
 fn render_wrapped_value(
@@ -2206,34 +2245,6 @@ fn attention_request_summary(request: &serde_json::Value, attention: &str) -> Op
         });
     }
     None
-}
-
-fn connection_summary(session: &FleetSessionRow) -> String {
-    match session.attachment_label() {
-        "TMUX" => "TMUX · ready to open or attach full screen".into(),
-        "REMOTE" => "REMOTE · controllable without a terminal attachment".into(),
-        _ if session.tmux_target.is_none() => "NONE · no tmux target is available".into(),
-        _ => "NONE · this session does not allow tmux attachment".into(),
-    }
-}
-
-fn next_action(session: &FleetSessionRow) -> String {
-    if session.attention_state.eq_ignore_ascii_case("ASK") {
-        "Answer the structured question.".into()
-    } else if session.attention_state.eq_ignore_ascii_case("APPROVAL") {
-        "Approve or deny the request.".into()
-    } else if session.attention_state.eq_ignore_ascii_case("ERROR") {
-        "Review the error, then open the session if attachment is available.".into()
-    } else if session.attention_state.eq_ignore_ascii_case("WAITING") {
-        "Review why the session is waiting.".into()
-    } else {
-        match session.operator_state() {
-            "RUNNING" => "Monitor progress; interrupt only if necessary.".into(),
-            "COMPLETED" => "Review the result or archive the session.".into(),
-            "IDLE" => "Send a prompt or open the session.".into(),
-            _ => "Inspect the session before taking action.".into(),
-        }
-    }
 }
 
 fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
@@ -3784,7 +3795,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_first_render_contains_lenses_identity_connection_and_actions() {
+    fn attention_first_render_uses_priority_cards_and_compact_action_detail() {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
@@ -3792,21 +3803,19 @@ mod tests {
         assert!(row_text(&buffer, 0, 120).contains("5 All 3"));
         let header = row_text(&buffer, 2, 90);
         let first_row = row_text(&buffer, 3, 90);
-        assert!(header.contains("REPOSITORY / BRANCH"));
-        assert!(first_row.contains("agents-in-a-box / claude/ask"));
-        assert!(first_row.contains("TMUX"));
-        assert_eq!(
-            header.find("PROVIDER").map(|index| header[..index].chars().count()),
-            first_row.find("CLAUDE").map(|index| first_row[..index].chars().count()),
-            "table header and row columns must stay aligned"
-        );
+        assert!(row_text(&buffer, 1, 90).contains("2 need you"));
+        assert!(header.contains("PRIORITY QUEUE"));
+        assert!(first_row.contains("agents-in-a-box"));
+        assert!(first_row.contains("INPUT"));
+        assert!(row_text(&buffer, 4, 90).contains("claude/ask"));
+        assert!(row_text(&buffer, 4, 90).contains("CLAUDE"));
+        assert!(row_text(&buffer, 4, 90).contains("TMUX"));
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("NEEDS YOUR INPUT"));
-        assert!(rendered.contains("CONNECTION"));
+        assert!(rendered.contains("WHAT NEEDS YOU"));
         assert!(rendered.contains("Enter Answer"));
-        assert!(!rendered.contains("Identity:"));
-        assert!(!rendered.contains("Capabilities:"));
+        assert!(!rendered.contains("CONNECTION"));
+        assert!(!rendered.contains("REPOSITORY / BRANCH"));
     }
 
     #[test]
@@ -3869,8 +3878,7 @@ mod tests {
         assert!(rendered.contains("REMOTE"));
         assert!(rendered.contains("NONE"));
         assert!(rendered.contains("branch unknown"));
-        assert!(rendered.contains("REMOTE · controllable"));
-        assert!(rendered.contains("terminal attachment"));
+        assert!(rendered.contains("PRIORITY QUEUE"));
         assert_eq!(
             wrap_text("Controls should never split ordinary words", 18),
             vec!["Controls should", "never split", "ordinary words"]

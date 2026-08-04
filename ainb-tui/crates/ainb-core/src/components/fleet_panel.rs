@@ -1573,7 +1573,11 @@ mod tests {
         assert!(out.contains("4 Running 1"), "running lens missing: {out}");
         assert!(out.contains("5 All 4"), "all lens missing: {out}");
         // Default lens shows only actionable rows.
-        assert!(out.contains("NEEDS INPUT"), "operator state missing: {out}");
+        assert!(
+            out.contains("PRIORITY QUEUE"),
+            "priority queue missing: {out}"
+        );
+        assert!(out.contains("INPUT"), "operator state missing: {out}");
         assert!(out.contains("deploy"), "ASK session label missing");
         assert!(out.contains("api"), "ERR session label missing");
         assert!(

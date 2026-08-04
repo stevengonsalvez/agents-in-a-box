@@ -402,9 +402,11 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && c.contains("3 Completed 1")
             && c.contains("4 Running 1")
             && c.contains("5 All 4")
-            && c.contains("NEEDS INPUT")
+            && c.contains("2 need you   1 running   0 idle   1 done")
+            && c.contains("PRIORITY QUEUE")
+            && c.contains("INPUT")
             && c.contains("What release scope should Fleet use?")
-            && c.contains("CONNECTION")
+            && c.contains("WHAT NEEDS YOU")
             && c.contains("REMOTE")
     });
     let Some(open_cap) = opened else {
@@ -421,6 +423,10 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         !open_cap.contains("current_state"),
         "Fleet must not expose or read legacy notifyd current_state:\n{open_cap}"
     );
+    assert!(
+        !open_cap.contains("REPOSITORY / BRANCH") && !open_cap.contains("CONNECTION"),
+        "Fleet home must use compact priority cards, not dense table detail:\n{open_cap}"
+    );
     demo_pause();
 
     send_key(&session, "4");
@@ -436,7 +442,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
 
     send_key(&session, "3");
     let completed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains("completed-project") && c.contains("COMPLETED") && c.contains("1/1")
+        c.contains("completed-project") && c.contains("DONE") && c.contains("1/1")
     });
     assert!(
         completed.is_some(),
@@ -463,7 +469,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     send_key(&session, "1");
     let needs_input = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
         c.contains("What release scope should Fleet use?")
-            && c.contains("NEEDS INPUT")
+            && c.contains("INPUT")
             && c.contains("1/2")
     });
     assert!(
@@ -482,8 +488,8 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         panic!("Fleet did not open tabbed interview; last capture:\n---\n{last}\n---");
     };
     assert!(
-        interview_cap.contains("ship only verified Fleet work"),
-        "first option description missing from interview:\n{interview_cap}"
+        interview_cap.contains("What release scope should Fleet use?"),
+        "first structured question missing from interview:\n{interview_cap}"
     );
     demo_pause();
 
@@ -515,9 +521,19 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         "structured answer must use Hangar RPC, never legacy tmux discovery:\n{answer_cap}"
     );
     demo_final_pause();
-    let receipt = hangar
-        .latest_receipt("claude:fleet-panel-ask-1")
-        .expect("structured answer persisted a Fleet receipt");
+    let receipt_deadline = Instant::now() + Duration::from_secs(10);
+    let receipt = loop {
+        if let Some(receipt) = hangar.latest_receipt("claude:fleet-panel-ask-1") {
+            if receipt.status == "DELIVERED" {
+                break receipt;
+            }
+        }
+        assert!(
+            Instant::now() < receipt_deadline,
+            "structured answer receipt never reached DELIVERED"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
     assert_eq!(receipt.action_kind, "structured_answer");
     assert_eq!(receipt.status, "DELIVERED");
     assert_eq!(
@@ -536,6 +552,17 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     assert_eq!(answers[2].question, "When should the release launch?");
     assert_eq!(answers[2].selected_options, ["Now"]);
 
+    // First Esc closes the delivery-confirmation interview draft. Second Esc
+    // exercises Fleet's panel return path after that modal has closed.
+    send_key(&session, "Escape");
+    let draft_closed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("PRIORITY QUEUE") && !c.contains("STRUCTURED INTERVIEW")
+    });
+    assert!(
+        draft_closed.is_some(),
+        "Esc did not close delivered interview draft:\n{}",
+        capture_pane(&session)
+    );
     send_key(&session, "Escape");
     let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats")
