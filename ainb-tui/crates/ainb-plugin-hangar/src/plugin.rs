@@ -28,6 +28,7 @@ use ainb_plugin_sdk::{
     UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 use crate::chrome::{Presence, render_footer, render_top_bar};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
@@ -196,6 +197,9 @@ const BOARD_CARD_RUN_REQ_ID: i64 = 43;
 /// card-create `@` autocomplete roster (spec F3). Host-scoped (a repo picker is
 /// not workspace-partitioned), fetched once alongside the other snapshots.
 const REPO_LIST_REQ_ID: i64 = 44;
+/// Snapshot request IDs are generation-tagged so replies from a workspace that
+/// was just left cannot be mistaken for the current workspace's fixed request.
+const SNAPSHOT_REQUEST_GENERATION_STRIDE: i64 = 1_000;
 /// JSON-RPC id for a `hangar/board_card_cancel` mutation (tcp T3 / F6). The reply
 /// is a `BoardCardCancelResult` surfaced as a transient board note; the card
 /// leaves the running state via the daemon's pushed `TaskFinished(Cancelled)`.
@@ -354,6 +358,10 @@ pub struct HangarPlugin {
     /// queue. Preserves one bundle under writer backpressure rather than
     /// restarting all snapshot requests on every redraw.
     snapshot_fetch_cursor: usize,
+    /// Current snapshot generation and its wire-id to handler-id correlation.
+    /// Switching workspace clears this map, making late replies harmless.
+    snapshot_generation: i64,
+    snapshot_response_ids: BTreeMap<i64, i64>,
     /// A Fleet event or lag notification requested a focused snapshot refresh.
     fleet_fetch_pending: bool,
     /// The workspace handshake or a lag notification requested a new gapless
@@ -607,6 +615,8 @@ impl Default for HangarPlugin {
             screens: ScreenStates::default(),
             fetch_pending: false,
             snapshot_fetch_cursor: 0,
+            snapshot_generation: 1,
+            snapshot_response_ids: BTreeMap::new(),
             fleet_fetch_pending: false,
             fleet_subscribe_pending: false,
             first_run: FirstRunModal::default(),
@@ -821,7 +831,7 @@ impl HangarPlugin {
     async fn connect(&mut self, host: &HostClient) {
         self.decoder = FrameDecoder::new();
         self.fetch_pending = false;
-        self.snapshot_fetch_cursor = 0;
+        self.reset_snapshot_generation();
         self.fleet_subscribe_pending = false;
         self.fleet_fetch_pending = false;
         self.conn.dialing();
@@ -1018,6 +1028,14 @@ impl HangarPlugin {
 
     /// React to one fully-decoded daemon response.
     fn on_daemon_response(&mut self, resp: &RpcResponse) {
+        if let RpcId::Number(wire_id) = resp.id {
+            if let Some(handler_id) = self.snapshot_response_ids.remove(&wire_id) {
+                let mut normalized = resp.clone();
+                normalized.id = RpcId::Number(handler_id);
+                self.on_daemon_response(&normalized);
+                return;
+            }
+        }
         match resp.id {
             // The auth ack precedes the subscribe ack (e38.1). Success is
             // silent (the subscribe ack drives the state machine forward); a
@@ -2333,12 +2351,14 @@ impl HangarPlugin {
         for (index, (id, method, params)) in
             requests.into_iter().enumerate().skip(self.snapshot_fetch_cursor)
         {
-            let Ok(body) = encode_request(id, method, params) else {
+            let wire_id = self.snapshot_wire_id(id);
+            let Ok(body) = encode_request(wire_id, method, params) else {
                 self.snapshot_fetch_cursor = index + 1;
                 continue;
             };
             match send(stream_id.clone(), body) {
                 Ok(NotificationEnqueueOutcome::Queued) => {
+                    self.snapshot_response_ids.insert(wire_id, id);
                     self.snapshot_fetch_cursor = index + 1;
                 }
                 Ok(NotificationEnqueueOutcome::Full) => return,
@@ -2358,6 +2378,18 @@ impl HangarPlugin {
         }
         self.fetch_pending = false;
         self.snapshot_fetch_cursor = 0;
+    }
+
+    fn snapshot_wire_id(&self, handler_id: i64) -> i64 {
+        self.snapshot_generation
+            .saturating_mul(SNAPSHOT_REQUEST_GENERATION_STRIDE)
+            .saturating_add(handler_id)
+    }
+
+    fn reset_snapshot_generation(&mut self) {
+        self.snapshot_generation = self.snapshot_generation.saturating_add(1);
+        self.snapshot_fetch_cursor = 0;
+        self.snapshot_response_ids.clear();
     }
 
     fn try_fetch_fleet_snapshot(
@@ -3832,7 +3864,7 @@ impl HangarPlugin {
         // the effective-active target.
         if rescope {
             self.fetch_pending = true;
-            self.snapshot_fetch_cursor = 0;
+            self.reset_snapshot_generation();
         }
     }
 
@@ -8145,6 +8177,39 @@ mod tests {
         assert_eq!(retry_attempts, 16, "retry skips the one queued request");
         assert!(!plugin.fetch_pending);
         assert_eq!(plugin.snapshot_fetch_cursor, 0);
+    }
+
+    #[test]
+    fn stale_snapshot_reply_after_rescope_cannot_overwrite_current_workspace() {
+        let mut plugin = connected_plugin_with_issue();
+        let stale_id = plugin.snapshot_wire_id(ISSUES_REQ_ID);
+        plugin.snapshot_response_ids.insert(stale_id, ISSUES_REQ_ID);
+
+        plugin.reset_snapshot_generation();
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(stale_id),
+            result: Some(serde_json::json!({ "issues": [] })),
+            error: None,
+        });
+        assert_eq!(
+            plugin.screens.issue_list.all_rows().len(),
+            1,
+            "old workspace reply must be ignored"
+        );
+
+        let current_id = plugin.snapshot_wire_id(ISSUES_REQ_ID);
+        plugin.snapshot_response_ids.insert(current_id, ISSUES_REQ_ID);
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(current_id),
+            result: Some(serde_json::json!({ "issues": [] })),
+            error: None,
+        });
+        assert!(
+            plugin.screens.issue_list.all_rows().is_empty(),
+            "current workspace reply must still apply"
+        );
     }
 
     #[test]
