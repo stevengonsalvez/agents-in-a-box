@@ -729,10 +729,13 @@ pub async fn boards_list(
     let boards = BoardRepo::list(pool, &ws).await?;
     let mut out = Vec::with_capacity(boards.len());
     for b in boards {
-        // The pipeline health of every column of this board, folded once per
-        // board (0074/0076). A board with no role-gated column produces stages
-        // that are all `services_role = None`, which render nothing.
-        let health = ainb_hangar_store::service::pipeline_health::snapshot(
+        // The pipeline health of this board's columns, folded once per board
+        // (0074/0076) and ONLY when the board is a pull pipeline. `boards_list`
+        // is re-armed by the Boards screen on every pushed daemon event, and the
+        // fold's `role_agents_free` counts each candidate agent's active tasks
+        // once per (column x agent); a plain kanban board can never produce a
+        // light off that work, so it is skipped before it is paid for.
+        let health = ainb_hangar_store::service::pipeline_health::snapshot_if_pipeline(
             pool,
             &ws,
             &b.id,
@@ -757,8 +760,8 @@ pub async fn boards_list(
                 // under. `None` is skipped at serialisation, so a non-pipeline
                 // board's payload stays byte-identical to a pre-0074 producer's.
                 health: health
-                    .stages
                     .iter()
+                    .flat_map(|h| h.stages.iter())
                     .find(|s| s.column_id == c.id)
                     .filter(|s| s.services_role.is_some())
                     .map(|s| ainb_hangar_proto::snapshots::ColumnHealthWireRow {

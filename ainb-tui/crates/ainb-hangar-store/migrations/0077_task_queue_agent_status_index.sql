@@ -1,0 +1,32 @@
+-- Hangar v1 schema, migration 0077: index the per-agent active-task count.
+--
+-- WHAT IS SLOW. "how many active tasks does this agent hold?" is the per-agent
+-- concurrency cap, and it is asked as a correlated subquery:
+--
+--     SELECT COUNT(*) FROM agent_task_queue r
+--      WHERE r.agent_id = a.id AND r.status IN ('queued','dispatched','running')
+--
+-- The pull statement (`service::pull`) carries it, and so does the
+-- `role_agents_free` column of the health fold (`service::pipeline_health`).
+-- Nothing indexes `agent_task_queue.agent_id`: `idx_one_pending_task_per_issue_agent`
+-- (0012) is PARTIAL on `status IN ('queued','dispatched')` so it cannot serve a
+-- predicate that also admits `'running'`, and `idx_task_issue_status` (0074)
+-- leads on `issue_id`. Every evaluation is therefore a full scan of a table that
+-- grows without bound with task history.
+--
+-- WHY IT MATTERS NOW. The pull runs the subquery once per daemon tick, which was
+-- affordable. The health fold runs it once per (column x candidate agent) and is
+-- now read on EVERY `boards_list`, which the Boards screen re-arms on every
+-- pushed daemon event: six columns x five agents is thirty full scans per board
+-- refresh.
+--
+-- The index is NOT partial: `status` is the second column, so one index serves
+-- any status set the two callers ask for (they already differ), and a partial
+-- index pinned to today's `ACTIVE_STATUSES` would silently stop being usable the
+-- day that list changes. `(agent_id, status)` also covers both predicates
+-- entirely, so the count is answered from the index without touching the table.
+--
+-- Pure `CREATE INDEX`: no data is read or rewritten, and it is a no-op to roll
+-- forward onto a populated home.
+CREATE INDEX IF NOT EXISTS idx_task_agent_status
+    ON agent_task_queue (agent_id, status);

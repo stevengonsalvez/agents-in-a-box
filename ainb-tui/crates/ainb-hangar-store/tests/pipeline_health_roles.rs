@@ -13,7 +13,7 @@
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::service::pipeline_health;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 /// Frozen "now" so the stuck light is deterministic.
 const NOW_MS: i64 = 1_700_000_500_000;
@@ -163,5 +163,73 @@ async fn uncovered_role_reports_red_until_an_agent_holds_it() {
         uncovered,
         vec!["tester"],
         "an archived holder does not cover a role"
+    );
+}
+
+/// The fold is SKIPPED on a board that gates nothing, and the per-agent
+/// active-task count it charges for is index-served.
+///
+/// `boards_list` re-reads this on every pushed daemon event, for every board in
+/// the workspace, and `role_agents_free` runs a correlated count over
+/// `agent_task_queue` once per (column x candidate agent). A plain kanban board
+/// can never produce a light off that work, so it must not pay for it; and the
+/// count that remains must not be a full table scan.
+#[tokio::test]
+async fn a_board_with_no_role_gate_skips_the_fold_and_the_agent_count_is_indexed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let pool = store.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-1", "reviewer", 2).await;
+
+    // A plain kanban board: two columns, neither one a pull queue.
+    add_column(pool, "Todo", 0, None, None).await;
+    add_column(pool, "Doing", 1, None, None).await;
+    assert_eq!(
+        pipeline_health::snapshot_if_pipeline(pool, &ws(), "b-1", NOW_MS)
+            .await
+            .expect("probe"),
+        None,
+        "a board with no role-gated column is not a pipeline and folds nothing"
+    );
+
+    // Gate ONE column and the same board becomes a pipeline, folded in full.
+    sqlx::query("UPDATE board_column SET services_role = 'reviewer' WHERE id = 'Doing'")
+        .execute(pool)
+        .await
+        .expect("gate a column");
+    let health = pipeline_health::snapshot_if_pipeline(pool, &ws(), "b-1", NOW_MS)
+        .await
+        .expect("probe")
+        .expect("a gated column makes this a pipeline");
+    assert_eq!(
+        health.stages.len(),
+        2,
+        "the fold still covers EVERY column, gated or not"
+    );
+    let doing = health.stages.iter().find(|s| s.name == "Doing").expect("Doing stage");
+    assert_eq!(doing.role_agents, 1, "the reviewer covers it");
+
+    // Migration 0077: the per-agent active-task count is answered from an index
+    // rather than by scanning `agent_task_queue`, which grows with task history.
+    let rows = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM agent_task_queue r \
+          WHERE r.agent_id = 'ag-1' AND r.status IN ('queued','dispatched','running')",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("query plan");
+    let plan = rows
+        .iter()
+        .map(|r| r.try_get::<String, _>("detail").unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        plan.contains("idx_task_agent_status"),
+        "the per-agent active-task count must use idx_task_agent_status, got: {plan}"
+    );
+    assert!(
+        !plan.contains("SCAN agent_task_queue"),
+        "and must not scan the table: {plan}"
     );
 }
