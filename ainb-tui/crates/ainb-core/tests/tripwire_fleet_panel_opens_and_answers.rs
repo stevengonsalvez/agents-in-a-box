@@ -402,11 +402,11 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && c.contains("3 Completed 1")
             && c.contains("4 Running 1")
             && c.contains("5 All 4")
-            && c.contains("2 need you   1 running   0 idle   1 done")
-            && c.contains("PRIORITY QUEUE")
-            && c.contains("INPUT")
+            && c.contains("2 INPUT")
+            && c.contains("1 RUN")
+            && c.contains("ACTION QUEUE")
             && c.contains("What release scope should Fleet use?")
-            && c.contains("WHAT NEEDS YOU")
+            && c.contains("NEEDS YOU")
             && c.contains("REMOTE")
     });
     let Some(open_cap) = opened else {
@@ -556,7 +556,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     // exercises Fleet's panel return path after that modal has closed.
     send_key(&session, "Escape");
     let draft_closed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains("PRIORITY QUEUE") && !c.contains("STRUCTURED INTERVIEW")
+        c.contains("ACTION QUEUE") && !c.contains("STRUCTURED INTERVIEW")
     });
     assert!(
         draft_closed.is_some(),

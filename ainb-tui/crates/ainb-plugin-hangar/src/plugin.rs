@@ -23,10 +23,12 @@
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::{RpcId, RpcResponse, methods as daemon_methods};
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode, Plugin,
-    RenderParams, Result, RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode,
+    NotificationEnqueueOutcome, Plugin, RenderParams, Result, RpcError, UnixSocketEvent,
+    UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 use crate::chrome::{Presence, render_footer, render_top_bar};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
@@ -195,6 +197,9 @@ const BOARD_CARD_RUN_REQ_ID: i64 = 43;
 /// card-create `@` autocomplete roster (spec F3). Host-scoped (a repo picker is
 /// not workspace-partitioned), fetched once alongside the other snapshots.
 const REPO_LIST_REQ_ID: i64 = 44;
+/// Snapshot request IDs are generation-tagged so replies from a workspace that
+/// was just left cannot be mistaken for the current workspace's fixed request.
+const SNAPSHOT_REQUEST_GENERATION_STRIDE: i64 = 1_000;
 /// JSON-RPC id for a `hangar/board_card_cancel` mutation (tcp T3 / F6). The reply
 /// is a `BoardCardCancelResult` surfaced as a transient board note; the card
 /// leaves the running state via the daemon's pushed `TaskFinished(Cancelled)`.
@@ -347,8 +352,16 @@ pub struct HangarPlugin {
     /// Per-screen render-state caches filled from the daemon snapshot RPCs.
     screens: ScreenStates,
     /// Set when a subscribe ack just arrived, so `handle_event` knows to fire
-    /// the snapshot fetches (it has the `host` the sync decode path lacks).
+    /// the snapshot fetches during a later render.
     fetch_pending: bool,
+    /// Next request in the snapshot bundle that has not entered the host writer
+    /// queue. Preserves one bundle under writer backpressure rather than
+    /// restarting all snapshot requests on every redraw.
+    snapshot_fetch_cursor: usize,
+    /// Current snapshot generation and its wire-id to handler-id correlation.
+    /// Switching workspace clears this map, making late replies harmless.
+    snapshot_generation: i64,
+    snapshot_response_ids: BTreeMap<i64, i64>,
     /// A Fleet event or lag notification requested a focused snapshot refresh.
     fleet_fetch_pending: bool,
     /// The workspace handshake or a lag notification requested a new gapless
@@ -601,6 +614,9 @@ impl Default for HangarPlugin {
             app: None,
             screens: ScreenStates::default(),
             fetch_pending: false,
+            snapshot_fetch_cursor: 0,
+            snapshot_generation: 1,
+            snapshot_response_ids: BTreeMap::new(),
             fleet_fetch_pending: false,
             fleet_subscribe_pending: false,
             first_run: FirstRunModal::default(),
@@ -814,6 +830,8 @@ impl HangarPlugin {
     /// crashing the plugin.
     async fn connect(&mut self, host: &HostClient) {
         self.decoder = FrameDecoder::new();
+        self.fetch_pending = false;
+        self.reset_snapshot_generation();
         self.fleet_subscribe_pending = false;
         self.fleet_fetch_pending = false;
         self.conn.dialing();
@@ -1010,6 +1028,14 @@ impl HangarPlugin {
 
     /// React to one fully-decoded daemon response.
     fn on_daemon_response(&mut self, resp: &RpcResponse) {
+        if let RpcId::Number(wire_id) = resp.id {
+            if let Some(handler_id) = self.snapshot_response_ids.remove(&wire_id) {
+                let mut normalized = resp.clone();
+                normalized.id = RpcId::Number(handler_id);
+                self.on_daemon_response(&normalized);
+                return;
+            }
+        }
         match resp.id {
             // The auth ack precedes the subscribe ack (e38.1). Success is
             // silent (the subscribe ack drives the state machine forward); a
@@ -1020,8 +1046,8 @@ impl HangarPlugin {
                     self.conn.on_error(format!("daemon auth rejected: {}", err.message));
                 }
             }
-            // The subscribe ack completes the handshake and arms the snapshot
-            // fetch (issued by `handle_event`, which holds the `host`).
+            // The subscribe ack completes the handshake and arms snapshot
+            // delivery for the next render.
             RpcId::Number(SUBSCRIBE_REQ_ID) => {
                 if resp.error.is_some() {
                     self.conn.on_error("daemon rejected workspace/subscribe".to_string());
@@ -2204,11 +2230,13 @@ impl HangarPlugin {
         self.conn.on_event();
     }
 
-    /// Fire every `hangar/*` snapshot request over the daemon stream, framed for
-    /// the cap (one per landing screen — issues, agents, skills, autopilots,
-    /// tasks, daemon-health, usage, members, health). A send failure is logged but
-    /// non-fatal — the screens simply stay empty until the next subscribe.
-    async fn fetch_snapshots(&mut self, host: &HostClient) {
+    /// Try every pending `hangar/*` snapshot request without waiting for host
+    /// writer capacity. A full writer retains this cursor, so redraw retries the
+    /// unsent tail once instead of replaying the whole bundle.
+    fn try_fetch_snapshots(
+        &mut self,
+        send: &mut impl FnMut(String, Vec<u8>) -> Result<NotificationEnqueueOutcome>,
+    ) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
@@ -2320,17 +2348,54 @@ impl HangarPlugin {
                 serde_json::json!({}),
             ),
         ];
-        for (id, method, params) in requests {
-            let Ok(body) = encode_request(id, method, params) else {
+        for (index, (id, method, params)) in
+            requests.into_iter().enumerate().skip(self.snapshot_fetch_cursor)
+        {
+            let wire_id = self.snapshot_wire_id(id);
+            let Ok(body) = encode_request(wire_id, method, params) else {
+                self.snapshot_fetch_cursor = index + 1;
                 continue;
             };
-            if let Err(e) = host.unix_socket_send(stream_id.clone(), body).await {
-                let _ = host.log_info(format!("hangar: snapshot send failed: {e}")).await;
+            match send(stream_id.clone(), body) {
+                Ok(NotificationEnqueueOutcome::Queued) => {
+                    self.snapshot_response_ids.insert(wire_id, id);
+                    self.snapshot_fetch_cursor = index + 1;
+                }
+                Ok(NotificationEnqueueOutcome::Full) => return,
+                Ok(NotificationEnqueueOutcome::Closed) => {
+                    self.conn.on_error("host writer closed while refreshing snapshots");
+                    self.fetch_pending = false;
+                    self.snapshot_fetch_cursor = 0;
+                    return;
+                }
+                Err(error) => {
+                    self.conn.on_error(format!("snapshot refresh enqueue failed: {error}"));
+                    self.fetch_pending = false;
+                    self.snapshot_fetch_cursor = 0;
+                    return;
+                }
             }
         }
+        self.fetch_pending = false;
+        self.snapshot_fetch_cursor = 0;
     }
 
-    async fn fetch_fleet_snapshot(&mut self, host: &HostClient) {
+    fn snapshot_wire_id(&self, handler_id: i64) -> i64 {
+        self.snapshot_generation
+            .saturating_mul(SNAPSHOT_REQUEST_GENERATION_STRIDE)
+            .saturating_add(handler_id)
+    }
+
+    fn reset_snapshot_generation(&mut self) {
+        self.snapshot_generation = self.snapshot_generation.saturating_add(1);
+        self.snapshot_fetch_cursor = 0;
+        self.snapshot_response_ids.clear();
+    }
+
+    fn try_fetch_fleet_snapshot(
+        &mut self,
+        send: &mut impl FnMut(String, Vec<u8>) -> Result<NotificationEnqueueOutcome>,
+    ) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
@@ -2339,14 +2404,27 @@ impl HangarPlugin {
             daemon_methods::FLEET_SNAPSHOT,
             serde_json::json!({}),
         ) else {
+            self.fleet_fetch_pending = false;
             return;
         };
-        if let Err(error) = host.unix_socket_send(stream_id, body).await {
-            let _ = host.log_info(format!("hangar: fleet snapshot send failed: {error}")).await;
+        match send(stream_id, body) {
+            Ok(NotificationEnqueueOutcome::Queued) => self.fleet_fetch_pending = false,
+            Ok(NotificationEnqueueOutcome::Full) => {}
+            Ok(NotificationEnqueueOutcome::Closed) => {
+                self.conn.on_error("host writer closed while refreshing Fleet snapshot");
+                self.fleet_fetch_pending = false;
+            }
+            Err(error) => {
+                self.conn.on_error(format!("Fleet snapshot refresh enqueue failed: {error}"));
+                self.fleet_fetch_pending = false;
+            }
         }
     }
 
-    async fn subscribe_fleet(&mut self, host: &HostClient) {
+    fn try_subscribe_fleet(
+        &mut self,
+        send: &mut impl FnMut(String, Vec<u8>) -> Result<NotificationEnqueueOutcome>,
+    ) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
@@ -2355,10 +2433,43 @@ impl HangarPlugin {
             daemon_methods::FLEET_SUBSCRIBE,
             serde_json::json!({ "after_revision": self.screens.fleet.head_revision() }),
         ) else {
+            self.fleet_subscribe_pending = false;
             return;
         };
-        if let Err(error) = host.unix_socket_send(stream_id, body).await {
-            let _ = host.log_info(format!("hangar: fleet subscribe send failed: {error}")).await;
+        match send(stream_id, body) {
+            Ok(NotificationEnqueueOutcome::Queued) => self.fleet_subscribe_pending = false,
+            Ok(NotificationEnqueueOutcome::Full) => {}
+            Ok(NotificationEnqueueOutcome::Closed) => {
+                self.conn.on_error("host writer closed while subscribing Fleet");
+                self.fleet_subscribe_pending = false;
+            }
+            Err(error) => {
+                self.conn.on_error(format!("Fleet subscribe enqueue failed: {error}"));
+                self.fleet_subscribe_pending = false;
+            }
+        }
+    }
+
+    /// Drain deferred snapshot writes from `render`, never from the SDK's
+    /// inline inbound-event reader.
+    fn drain_pending_refreshes(&mut self, host: &HostClient) {
+        self.drain_pending_refreshes_with(|stream_id, body| {
+            host.try_unix_socket_send(stream_id, body)
+        });
+    }
+
+    fn drain_pending_refreshes_with(
+        &mut self,
+        mut send: impl FnMut(String, Vec<u8>) -> Result<NotificationEnqueueOutcome>,
+    ) {
+        if self.fetch_pending {
+            self.try_fetch_snapshots(&mut send);
+        }
+        if self.fleet_fetch_pending {
+            self.try_fetch_fleet_snapshot(&mut send);
+        }
+        if self.fleet_subscribe_pending {
+            self.try_subscribe_fleet(&mut send);
         }
     }
 
@@ -3749,10 +3860,11 @@ impl HangarPlugin {
         // After an active-workspace switch/create/delete, re-pull every
         // workspace-scoped snapshot so the screens reflect the NEW tenant's data
         // (not the prior one's stale cache). `refresh_workspaces` already moved
-        // `ws_id`, and `fetch_snapshots` reads it, so the re-fetch is scoped to
+        // `ws_id`, and the deferred snapshot bundle reads it, so the re-fetch is scoped to
         // the effective-active target.
         if rescope {
-            self.fetch_snapshots(host).await;
+            self.fetch_pending = true;
+            self.reset_snapshot_generation();
         }
     }
 
@@ -5081,17 +5193,10 @@ impl Plugin for HangarPlugin {
             Ok(event) => self.on_socket_event(&event),
             Err(e) => self.conn.on_error(format!("bad socket event: {e}")),
         }
-        // The subscribe ack (decoded above) arms the snapshot fetch; fire it now
-        // that we hold the host. One fetch per subscribe.
-        if std::mem::take(&mut self.fetch_pending) {
-            self.fetch_snapshots(host).await;
-        }
-        if std::mem::take(&mut self.fleet_fetch_pending) {
-            self.fetch_fleet_snapshot(host).await;
-        }
-        if std::mem::take(&mut self.fleet_subscribe_pending) {
-            self.subscribe_fleet(host).await;
-        }
+        // Try the first enqueue pass now so socket-driven refreshes do not wait
+        // for another render. This never awaits writer capacity; any unsent tail
+        // remains pending for a later render retry.
+        self.drain_pending_refreshes(host);
         Ok(())
     }
 
@@ -5162,6 +5267,10 @@ impl Plugin for HangarPlugin {
             // safe there). Consumed (taken) by that render, so not level-held.
             || self.pending_issue_dispatch.is_some()
             || self.screens.pending_fleet_intent.is_some()
+            || (self.conn.is_connected()
+                && (self.fetch_pending
+                    || self.fleet_fetch_pending
+                    || self.fleet_subscribe_pending))
     }
 
     fn captures_text(&self) -> bool {
@@ -5210,6 +5319,7 @@ impl Plugin for HangarPlugin {
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        self.drain_pending_refreshes(host);
         if let Some(intent) = self.screens.take_pending_fleet_intent() {
             self.apply_fleet_intent(host, intent).await;
         }
@@ -7968,6 +8078,141 @@ mod tests {
         }));
         assert_eq!(plugin.screens.fleet.head_revision(), 12);
         assert!(plugin.fleet_fetch_pending);
+    }
+
+    #[test]
+    fn full_writer_defers_fleet_refresh_without_blocking_fleet_key_reduction() {
+        use crate::screen::fleet::{FleetCapabilities, FleetSessionRow};
+
+        let mut plugin = connected_plugin_with_issue();
+        plugin.on_daemon_event(&serde_json::json!({
+            "method": "fleet/event",
+            "params": {
+                "revision": 12,
+                "event_id": "evt-12",
+                "session_key": "codex:thread-1",
+                "observed_at": 100,
+                "provenance": "authoritative",
+                "event_type": "turn_started",
+                "payload": {},
+                "session_version": 3,
+                "applied": true
+            }
+        }));
+
+        let mut attempts = 0;
+        plugin.drain_pending_refreshes_with(|_, _| {
+            attempts += 1;
+            Ok(NotificationEnqueueOutcome::Full)
+        });
+        assert_eq!(attempts, 1, "one focused refresh enqueue is attempted");
+        assert!(
+            plugin.fleet_fetch_pending,
+            "full writer retains Fleet refresh"
+        );
+        assert!(
+            plugin.wants_redraw(),
+            "retained refresh schedules another render"
+        );
+
+        let row = |key: &str| FleetSessionRow {
+            session_key: key.into(),
+            provider: "claude".into(),
+            provider_session_id: None,
+            current_request_fingerprint: None,
+            current_request: None,
+            lifecycle_state: "IDLE".into(),
+            attention_state: "ASK".into(),
+            management_state: "managed".into(),
+            provenance: "hangar-authoritative".into(),
+            confidence: "authoritative".into(),
+            transport_health: "healthy".into(),
+            capabilities: FleetCapabilities::default(),
+            version: 1,
+            active_work_count: 0,
+            cwd: "/work".into(),
+            tmux_target: None,
+            display_name: Some(key.into()),
+            repository_name: Some("repo".into()),
+            branch_name: Some("main".into()),
+            discovered_at: 1,
+            last_observed_at: 1,
+            metadata_updated_at: 1,
+            lifecycle_updated_at: 1,
+            attention_updated_at: 1,
+            transport_updated_at: 1,
+        };
+        plugin.screens.fleet.set_sessions(vec![row("claude:one"), row("claude:two")]);
+
+        plugin.on_key(&char_press('F'));
+        plugin.on_key(&key_press(KeyCode::Down));
+        assert!(matches!(plugin.app_state().screen, Screen::Fleet));
+        assert_eq!(plugin.screens.fleet.selected_key(), Some("claude:two"));
+        assert!(
+            plugin.fleet_fetch_pending,
+            "key reduction never consumes refresh work"
+        );
+    }
+
+    #[test]
+    fn snapshot_bundle_retries_only_its_unsent_tail() {
+        let mut plugin = connected_plugin_with_issue();
+        plugin.fetch_pending = true;
+
+        let mut first_attempts = 0;
+        plugin.drain_pending_refreshes_with(|_, _| {
+            first_attempts += 1;
+            Ok(if first_attempts == 1 {
+                NotificationEnqueueOutcome::Queued
+            } else {
+                NotificationEnqueueOutcome::Full
+            })
+        });
+        assert_eq!(first_attempts, 2);
+        assert_eq!(plugin.snapshot_fetch_cursor, 1);
+        assert!(plugin.fetch_pending);
+
+        let mut retry_attempts = 0;
+        plugin.drain_pending_refreshes_with(|_, _| {
+            retry_attempts += 1;
+            Ok(NotificationEnqueueOutcome::Queued)
+        });
+        assert_eq!(retry_attempts, 16, "retry skips the one queued request");
+        assert!(!plugin.fetch_pending);
+        assert_eq!(plugin.snapshot_fetch_cursor, 0);
+    }
+
+    #[test]
+    fn stale_snapshot_reply_after_rescope_cannot_overwrite_current_workspace() {
+        let mut plugin = connected_plugin_with_issue();
+        let stale_id = plugin.snapshot_wire_id(ISSUES_REQ_ID);
+        plugin.snapshot_response_ids.insert(stale_id, ISSUES_REQ_ID);
+
+        plugin.reset_snapshot_generation();
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(stale_id),
+            result: Some(serde_json::json!({ "issues": [] })),
+            error: None,
+        });
+        assert_eq!(
+            plugin.screens.issue_list.all_rows().len(),
+            1,
+            "old workspace reply must be ignored"
+        );
+
+        let current_id = plugin.snapshot_wire_id(ISSUES_REQ_ID);
+        plugin.snapshot_response_ids.insert(current_id, ISSUES_REQ_ID);
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(current_id),
+            result: Some(serde_json::json!({ "issues": [] })),
+            error: None,
+        });
+        assert!(
+            plugin.screens.issue_list.all_rows().is_empty(),
+            "current workspace reply must still apply"
+        );
     }
 
     #[test]

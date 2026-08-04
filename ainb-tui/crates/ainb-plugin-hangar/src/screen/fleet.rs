@@ -16,11 +16,13 @@ const FG: Color = Color::rgb(226, 232, 240);
 const MUTED: Color = Color::rgb(148, 163, 184);
 const GOLD: Color = Color::rgb(251, 191, 36);
 const BLUE: Color = Color::rgb(96, 165, 250);
-const GREEN: Color = Color::rgb(94, 234, 212);
-const ALERT: Color = Color::rgb(251, 113, 133);
+const VIOLET: Color = Color::rgb(185, 140, 235);
+const GREEN: Color = Color::rgb(110, 200, 130);
+const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+const ALERT: Color = Color::rgb(220, 90, 90);
 const SURFACE: Color = Color::rgb(15, 23, 42);
 const ACTIVE_CHIP: Color = Color::rgb(30, 64, 175);
-const SELECTED_ROW: Color = Color::rgb(30, 41, 59);
+const CARD_BORDER: Color = Color::rgb(70, 80, 110);
 const BOLD: u16 = 1;
 
 /// Capability wire shape accepted from current and planned daemon snapshots.
@@ -600,8 +602,8 @@ impl Default for BroadcastState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FleetMode {
     Browse,
-    Answer(AnswerState),
-    AnswerDismissConfirm(AnswerState),
+    Answer(AnswerQueue),
+    AnswerDismissConfirm(AnswerQueue),
     Start(StartState),
     Prompt {
         text: String,
@@ -647,6 +649,57 @@ struct AnswerState {
     texts: Vec<String>,
     editing_text: bool,
     delivery: AnswerDelivery,
+}
+
+/// Drafts for every actionable structured interview. `active` is a flattened
+/// card cursor: left/right crosses question and session boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerQueue {
+    answers: Vec<AnswerState>,
+    active: usize,
+}
+
+impl AnswerQueue {
+    fn current(&self) -> Option<&AnswerState> {
+        self.answers.get(self.active)
+    }
+
+    fn current_mut(&mut self) -> Option<&mut AnswerState> {
+        self.answers.get_mut(self.active)
+    }
+
+    fn move_card(&mut self, delta: isize) {
+        let Some(answer) = self.current() else { return };
+        let question_count = answer.questions.len();
+        if question_count == 0 {
+            return;
+        }
+        let question = answer.question_index as isize + delta;
+        if (0..question_count as isize).contains(&question) {
+            let answer = &mut self.answers[self.active];
+            answer.question_index = question as usize;
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            return;
+        }
+        let answer_count = self.answers.len();
+        if answer_count <= 1 {
+            return;
+        }
+        self.active = if delta.is_negative() {
+            self.active.checked_sub(1).unwrap_or(answer_count - 1)
+        } else {
+            (self.active + 1) % answer_count
+        };
+        let answer = &mut self.answers[self.active];
+        answer.question_index = if delta.is_negative() {
+            answer.questions.len().saturating_sub(1)
+        } else {
+            0
+        };
+        answer.option_cursor = 0;
+        answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,16 +770,17 @@ impl FleetPaneState {
     }
 
     pub fn is_capturing_text(&self) -> bool {
-        matches!(
-            self.mode,
+        match &self.mode {
             FleetMode::TypedConfirm { .. }
-                | FleetMode::Start(_)
-                | FleetMode::Prompt { .. }
-                | FleetMode::Broadcast(BroadcastState {
-                    stage: BroadcastStage::Compose,
-                    ..
-                })
-        )
+            | FleetMode::Start(_)
+            | FleetMode::Prompt { .. }
+            | FleetMode::Broadcast(BroadcastState {
+                stage: BroadcastStage::Compose,
+                ..
+            }) => true,
+            FleetMode::Answer(queue) => queue.current().is_some_and(|answer| answer.editing_text),
+            _ => false,
+        }
     }
 
     pub fn set_sessions(&mut self, roster: Vec<FleetSessionRow>) {
@@ -782,22 +836,29 @@ impl FleetPaneState {
     }
 
     fn discard_stale_answer(&mut self) {
-        let answer = match &self.mode {
-            FleetMode::Answer(answer) | FleetMode::AnswerDismissConfirm(answer) => answer,
+        let queue = match &mut self.mode {
+            FleetMode::Answer(queue) | FleetMode::AnswerDismissConfirm(queue) => queue,
             _ => return,
         };
-        let fresh = self
-            .roster
-            .iter()
-            .find(|row| row.session_key == answer.session_key)
-            .is_some_and(|row| {
-                row.version == answer.expected_version
-                    && row.current_request_fingerprint.as_deref()
-                        == Some(answer.request_fingerprint.as_str())
-            });
-        if !fresh {
+        let before = queue.answers.len();
+        queue.answers.retain(|answer| {
+            self.roster
+                .iter()
+                .find(|row| row.session_key == answer.session_key)
+                .is_some_and(|row| {
+                    row.version == answer.expected_version
+                        && row.current_request_fingerprint.as_deref()
+                            == Some(answer.request_fingerprint.as_str())
+                })
+        });
+        if queue.answers.is_empty() {
             self.mode = FleetMode::Browse;
             self.feedback = Some("interview closed: authoritative request changed".into());
+        } else {
+            queue.active = queue.active.min(queue.answers.len() - 1);
+            if queue.answers.len() != before {
+                self.feedback = Some("delivered interview removed from answer queue".into());
+            }
         }
     }
 }
@@ -871,10 +932,11 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         FleetEvent::Key(key) => reduce_key(&mut next, key),
         FleetEvent::RequestAction(action) => request_action(&mut next, action),
         FleetEvent::ActionSucceeded { session_key } => {
-            if let FleetMode::Answer(answer) = &next.mode {
-                if answer.session_key == session_key
-                    && answer.delivery == AnswerDelivery::Confirming
-                {
+            if let FleetMode::Answer(queue) = &next.mode {
+                if queue.answers.iter().any(|answer| {
+                    answer.session_key == session_key
+                        && answer.delivery == AnswerDelivery::Confirming
+                }) {
                     next.feedback = Some("delivered, confirming authoritative Fleet state".into());
                     return FleetReduction {
                         state: next,
@@ -890,8 +952,10 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
             session_key,
             detail,
         } => {
-            if let FleetMode::Answer(answer) = &mut next.mode {
-                if answer.session_key == session_key {
+            if let FleetMode::Answer(queue) = &mut next.mode {
+                if let Some(answer) =
+                    queue.answers.iter_mut().find(|answer| answer.session_key == session_key)
+                {
                     answer.delivery = AnswerDelivery::Ready;
                 }
             }
@@ -924,8 +988,8 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
 fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
     match state.mode.clone() {
         FleetMode::Browse => reduce_browse_key(state, key),
-        FleetMode::Answer(answer) => reduce_answer_key(state, answer, key),
-        FleetMode::AnswerDismissConfirm(answer) => reduce_answer_dismiss_key(state, answer, key),
+        FleetMode::Answer(queue) => reduce_answer_key(state, queue, key),
+        FleetMode::AnswerDismissConfirm(queue) => reduce_answer_dismiss_key(state, queue, key),
         FleetMode::Start(start) => reduce_start_key(state, start, key),
         FleetMode::Prompt { text } => reduce_prompt_key(state, text, key),
         FleetMode::Broadcast(broadcast) => reduce_broadcast_key(state, broadcast, key),
@@ -978,47 +1042,48 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
 }
 
 fn begin_structured_answer(state: &mut FleetPaneState) {
-    let Some(row) = state.selected_session().cloned() else {
+    let Some(selected_key) = state.selected_key.clone() else {
         state.feedback = Some("no Fleet session selected".into());
         return;
     };
-    if !row.attention_state.eq_ignore_ascii_case("ASK") {
-        state.feedback = Some("selected session has no structured question".into());
+    let answers: Vec<_> = state.roster.iter().filter_map(answer_state_from_row).collect();
+    if answers.is_empty() {
+        state.feedback = Some("no actionable structured interviews".into());
         return;
     }
-    if !row.is_managed() || !row.capabilities.contains("structured_answer") {
-        state.feedback = Some("structured answer unavailable for selected session".into());
+    let Some(active) = answers
+        .iter()
+        .position(|answer| answer.session_key == selected_key)
+    else {
+        state.feedback = Some("selected session has no structured interview".into());
         return;
+    };
+    state.mode = FleetMode::Answer(AnswerQueue { answers, active });
+}
+
+fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
+    if !row.attention_state.eq_ignore_ascii_case("ASK")
+        || !row.is_managed()
+        || !row.capabilities.contains("structured_answer")
+    {
+        return None;
     }
-    let Some(request_fingerprint) = row.current_request_fingerprint.clone() else {
-        state.feedback = Some("structured request fingerprint unavailable".into());
-        return;
-    };
-    let Some(request) = row.current_request.as_ref() else {
-        state.feedback = Some("structured request payload unavailable".into());
-        return;
-    };
+    let request_fingerprint = row.current_request_fingerprint.clone()?;
+    let request = row.current_request.as_ref()?;
     let questions = answer_questions(request);
-    if questions.is_empty() {
-        state.feedback = Some("structured request has no questions".into());
-        return;
-    }
-    let selections = vec![BTreeSet::new(); questions.len()];
-    let texts = vec![String::new(); questions.len()];
-    let editing_text = questions[0].options.is_empty();
-    state.mode = FleetMode::Answer(AnswerState {
-        session_key: row.session_key,
+    (!questions.is_empty()).then(|| AnswerState {
+        session_key: row.session_key.clone(),
         expected_version: row.version,
         request_fingerprint,
         request_identity: request_identity(request),
+        editing_text: questions[0].options.is_empty(),
+        selections: vec![BTreeSet::new(); questions.len()],
+        texts: vec![String::new(); questions.len()],
         questions,
         question_index: 0,
         option_cursor: 0,
-        selections,
-        texts,
-        editing_text,
         delivery: AnswerDelivery::Ready,
-    });
+    })
 }
 
 fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
@@ -1111,16 +1176,33 @@ fn request_identity(
 
 fn reduce_answer_key(
     state: &mut FleetPaneState,
-    mut answer: AnswerState,
+    mut queue: AnswerQueue,
     key: FleetKey,
 ) -> Option<FleetIntent> {
     if key == FleetKey::Esc {
         state.mode = FleetMode::Browse;
         return None;
     }
+    let Some(mut answer) = queue.current().cloned() else {
+        state.mode = FleetMode::Browse;
+        return None;
+    };
     if answer.delivery == AnswerDelivery::Confirming {
+        match key {
+            FleetKey::Tab | FleetKey::Right => {
+                queue.move_card(1);
+                state.mode = FleetMode::Answer(queue);
+                return None;
+            }
+            FleetKey::BackTab | FleetKey::Left => {
+                queue.move_card(-1);
+                state.mode = FleetMode::Answer(queue);
+                return None;
+            }
+            _ => {}
+        }
         state.feedback = Some("waiting for authoritative Fleet state".into());
-        state.mode = FleetMode::Answer(answer);
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     if key == FleetKey::Char('x') {
@@ -1130,10 +1212,10 @@ fn reduce_answer_key(
             .find(|row| row.session_key == answer.session_key)
             .is_some_and(|row| row.capabilities.contains("structured_dismiss"));
         if can_dismiss {
-            state.mode = FleetMode::AnswerDismissConfirm(answer);
+            state.mode = FleetMode::AnswerDismissConfirm(queue);
         } else {
             state.feedback = Some("provider does not expose safe interview dismissal".into());
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
         }
         return None;
     }
@@ -1144,20 +1226,13 @@ fn reduce_answer_key(
     };
     match key {
         FleetKey::Tab | FleetKey::Right => {
-            answer.question_index = (answer.question_index + 1) % answer.questions.len();
-            answer.option_cursor = 0;
-            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-            state.mode = FleetMode::Answer(answer);
+            queue.move_card(1);
+            state.mode = FleetMode::Answer(queue);
             return None;
         }
         FleetKey::BackTab | FleetKey::Left => {
-            answer.question_index = answer
-                .question_index
-                .checked_sub(1)
-                .unwrap_or(answer.questions.len().saturating_sub(1));
-            answer.option_cursor = 0;
-            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-            state.mode = FleetMode::Answer(answer);
+            queue.move_card(-1);
+            state.mode = FleetMode::Answer(queue);
             return None;
         }
         _ => {}
@@ -1170,14 +1245,15 @@ fn reduce_answer_key(
             FleetKey::Enter if answer.texts[answer.question_index].trim().is_empty() => {
                 state.feedback = Some("answer text required".into());
             }
-            FleetKey::Enter => return advance_or_submit_answer(state, answer),
+            FleetKey::Enter => return advance_or_submit_answer(state, queue, answer),
             FleetKey::Char(character) => {
                 answer.texts[answer.question_index].push(character);
             }
             FleetKey::Space => answer.texts[answer.question_index].push(' '),
             _ => {}
         }
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     match key {
@@ -1208,26 +1284,31 @@ fn reduce_answer_key(
             if selected_other && answer.texts[answer.question_index].trim().is_empty() {
                 answer.editing_text = true;
             } else {
-                return advance_or_submit_answer(state, answer);
+                return advance_or_submit_answer(state, queue, answer);
             }
         }
         _ => {}
     }
-    state.mode = FleetMode::Answer(answer);
+    queue.answers[queue.active] = answer;
+    state.mode = FleetMode::Answer(queue);
     None
 }
 
 fn reduce_answer_dismiss_key(
     state: &mut FleetPaneState,
-    mut answer: AnswerState,
+    mut queue: AnswerQueue,
     key: FleetKey,
 ) -> Option<FleetIntent> {
     match key {
         FleetKey::Esc => {
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
             None
         }
         FleetKey::Enter => {
+            let Some(answer) = queue.current_mut() else {
+                state.mode = FleetMode::Browse;
+                return None;
+            };
             answer.delivery = AnswerDelivery::Confirming;
             let intent = FleetIntent::Execute {
                 session_key: answer.session_key.clone(),
@@ -1237,11 +1318,11 @@ fn reduce_answer_dismiss_key(
                     request_identity: answer.request_identity.clone(),
                 },
             };
-            state.mode = FleetMode::Answer(answer);
+            state.mode = FleetMode::Answer(queue);
             Some(intent)
         }
         _ => {
-            state.mode = FleetMode::AnswerDismissConfirm(answer);
+            state.mode = FleetMode::AnswerDismissConfirm(queue);
             None
         }
     }
@@ -1249,13 +1330,15 @@ fn reduce_answer_dismiss_key(
 
 fn advance_or_submit_answer(
     state: &mut FleetPaneState,
+    mut queue: AnswerQueue,
     mut answer: AnswerState,
 ) -> Option<FleetIntent> {
     if answer.question_index + 1 < answer.questions.len() {
         answer.question_index += 1;
         answer.option_cursor = 0;
         answer.editing_text = answer.questions[answer.question_index].options.is_empty();
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     if let Some(index) = answer.questions.iter().enumerate().find_map(|(index, question)| {
@@ -1265,7 +1348,8 @@ fn advance_or_submit_answer(
         answer.option_cursor = 0;
         answer.editing_text = answer.questions[index].options.is_empty();
         state.feedback = Some("complete every interview question before submit".into());
-        state.mode = FleetMode::Answer(answer);
+        queue.answers[queue.active] = answer;
+        state.mode = FleetMode::Answer(queue);
         return None;
     }
     let answers = answer
@@ -1296,7 +1380,8 @@ fn advance_or_submit_answer(
         })
         .collect();
     answer.delivery = AnswerDelivery::Confirming;
-    state.mode = FleetMode::Answer(answer.clone());
+    queue.answers[queue.active] = answer.clone();
+    state.mode = FleetMode::Answer(queue);
     Some(FleetIntent::Execute {
         session_key: answer.session_key,
         expected_version: answer.expected_version,
@@ -1822,7 +1907,7 @@ pub fn render_fleet(
     let visible = state.visible_sessions();
     let header_y = top.saturating_add(2);
     let rows_top = header_y.saturating_add(1);
-    const CARD_HEIGHT: u16 = 2;
+    const CARD_HEIGHT: u16 = 4;
     let capacity = usize::from(bottom.saturating_sub(rows_top) / CARD_HEIGHT);
     let selected_index = state
         .selected_key
@@ -1834,8 +1919,8 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = format!("  PRIORITY QUEUE  ·  {} sessions", visible.len());
-        put_str(buffer, 0, header_y, &header, MUTED, list_width);
+        let header = format!("  ACTION QUEUE  ·  {} sessions", visible.len());
+        put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
         put_str(
             buffer,
@@ -1879,14 +1964,21 @@ fn render_focus_summary(
 ) {
     let count =
         |filter: FleetFilter| state.roster.iter().filter(|session| filter.matches(session)).count();
-    let summary = format!(
-        "{} need you   {} running   {} idle   {} done",
-        count(FleetFilter::NeedsInput),
-        count(FleetFilter::Running),
-        count(FleetFilter::Idle),
-        count(FleetFilter::Completed),
-    );
-    put_str(buffer, left, row, &summary, MUTED, right);
+    let chips = [
+        (count(FleetFilter::NeedsInput), "INPUT", GOLD),
+        (count(FleetFilter::Running), "RUN", BLUE),
+        (count(FleetFilter::Idle), "IDLE", VIOLET),
+        (count(FleetFilter::Completed), "DONE", GREEN),
+    ];
+    let mut x = left;
+    for (count, label, color) in chips {
+        let chip = format!(" {count} {label} ");
+        if x.saturating_add(chip.chars().count() as u16) >= right {
+            break;
+        }
+        put_str_styled(buffer, x, row, &chip, color, Some(SURFACE), BOLD, right);
+        x = x.saturating_add(chip.chars().count() as u16 + 1);
+    }
 }
 
 fn render_lenses(buffer: &mut WireBuffer, left: u16, row: u16, right: u16, state: &FleetPaneState) {
@@ -1987,49 +2079,91 @@ fn render_session_card(
     selected: bool,
     now_ms: i64,
 ) {
-    let marker = if selected { "▸" } else { " " };
-    let card_width = usize::from(right).saturating_sub(10).max(12);
-    let identity = truncate_ellipsis(&session.repository_label(), card_width);
-    let operator_state = home_state_label(session);
-    let age = format_age(now_ms, session.last_observed_at);
-    let title = format!("{marker} {identity}  {operator_state}  {age}");
-    let metadata = format!(
-        "  {}  ·  {}  ·  {}",
-        truncate_ellipsis(
-            &session.branch_label(),
-            usize::from(right).saturating_sub(24).max(8),
-        ),
-        provider_label(&session.provider),
-        session.attachment_label()
-    );
-    let color = if selected {
-        FG
+    if right < 8 {
+        return;
+    }
+    let border = if selected {
+        SELECTION_GREEN
     } else {
-        operator_state_color(session)
+        CARD_BORDER
     };
-    put_str_styled(
+    let status = home_state_label(session);
+    let status_color = operator_state_color(session);
+    let inner_right = right.saturating_sub(1);
+    let content_width = usize::from(right.saturating_sub(5)).max(8);
+    let identity = truncate_ellipsis(&session.repository_label(), content_width);
+    let age = format_age(now_ms, session.last_observed_at);
+    let marker = if selected { "▶ " } else { "  " };
+    let branch = truncate_ellipsis(&session.branch_label(), content_width.saturating_sub(18));
+
+    put_char(buffer, 0, row_y, '╭', border);
+    put_char(buffer, inner_right, row_y, '╮', border);
+    put_char(buffer, 0, row_y.saturating_add(1), '│', border);
+    put_char(buffer, inner_right, row_y.saturating_add(1), '│', border);
+    put_char(buffer, 0, row_y.saturating_add(2), '│', border);
+    put_char(buffer, inner_right, row_y.saturating_add(2), '│', border);
+    put_char(buffer, 0, row_y.saturating_add(3), '╰', border);
+    put_char(buffer, inner_right, row_y.saturating_add(3), '╯', border);
+    for x in 1..inner_right {
+        put_char(buffer, x, row_y, '─', border);
+    }
+
+    let age_width = age.chars().count() as u16;
+    let status_label = if selected {
+        let action = available_action_labels(session).into_iter().next().unwrap_or_default();
+        format!(" {status}  ·  {action} ")
+    } else {
+        format!(" {status} ")
+    };
+    let status_width =
+        usize::from(inner_right.saturating_sub(age_width.saturating_add(4)).saturating_sub(2));
+    put_str(
         buffer,
-        0,
+        2,
         row_y,
-        &title,
-        color,
-        selected.then_some(SELECTED_ROW),
-        if selected { BOLD } else { 0 },
-        right,
+        &truncate_ellipsis(&status_label, status_width),
+        status_color,
+        inner_right,
+    );
+    put_str(
+        buffer,
+        inner_right.saturating_sub(age_width.saturating_add(1)),
+        row_y,
+        &age,
+        MUTED,
+        inner_right,
     );
     put_str_styled(
         buffer,
-        0,
+        2,
         row_y.saturating_add(1),
-        &metadata,
-        if selected { MUTED } else { MUTED },
-        selected.then_some(SELECTED_ROW),
-        0,
-        right,
+        &format!("{marker}{identity}"),
+        if selected { SELECTION_GREEN } else { operator_state_color(session) },
+        None,
+        selected.then_some(BOLD).unwrap_or(0),
+        inner_right,
     );
+    put_str(
+        buffer,
+        2,
+        row_y.saturating_add(2),
+        &format!(
+            "{branch}  ·  {}  ·  {}",
+            provider_label(&session.provider),
+            session.attachment_label()
+        ),
+        MUTED,
+        inner_right,
+    );
+    for x in 1..inner_right {
+        put_char(buffer, x, row_y.saturating_add(3), '─', border);
+    }
 }
 
 fn home_state_label(session: &FleetSessionRow) -> &'static str {
+    if session.attention_state.eq_ignore_ascii_case("ERROR") {
+        return "ERROR";
+    }
     match session.operator_state() {
         "NEEDS INPUT" => "INPUT",
         "COMPLETED" => "DONE",
@@ -2048,10 +2182,14 @@ fn provider_label(provider: &str) -> &'static str {
 }
 
 fn operator_state_color(session: &FleetSessionRow) -> Color {
+    if session.attention_state.eq_ignore_ascii_case("ERROR") {
+        return ALERT;
+    }
     match session.operator_state() {
         "NEEDS INPUT" => attention_color(&session.attention_state),
-        "RUNNING" => GREEN,
-        "COMPLETED" => MUTED,
+        "RUNNING" => BLUE,
+        "IDLE" => VIOLET,
+        "COMPLETED" => GREEN,
         "UNKNOWN" => MUTED,
         _ => FG,
     }
@@ -2086,46 +2224,85 @@ fn render_detail(
         return;
     };
     let mut y = top;
-    let detail_width = usize::from(right.saturating_sub(left).saturating_sub(1)).max(1);
+    put_str(buffer, left, y, "NOW", GOLD, right);
+    y = y.saturating_add(1);
+    let card_left = left;
+    let card_right = right.saturating_sub(1);
+    let border = if session.is_actionable() {
+        GOLD
+    } else {
+        CARD_BORDER
+    };
+    if card_right <= card_left.saturating_add(3) || y.saturating_add(4) >= bottom {
+        return;
+    }
+    for x in card_left.saturating_add(1)..card_right {
+        put_char(buffer, x, y, '─', border);
+        put_char(buffer, x, y.saturating_add(4), '─', border);
+    }
+    put_char(buffer, card_left, y, '╭', border);
+    put_char(buffer, card_right, y, '╮', border);
+    put_char(buffer, card_left, y.saturating_add(4), '╰', border);
+    put_char(buffer, card_right, y.saturating_add(4), '╯', border);
+    for card_y in y.saturating_add(1)..y.saturating_add(4) {
+        put_char(buffer, card_left, card_y, '│', border);
+        put_char(buffer, card_right, card_y, '│', border);
+    }
+    let card_content_left = left.saturating_add(2);
+    let card_content_right = card_right;
+    let card_width = usize::from(card_content_right.saturating_sub(card_content_left)).max(1);
+    put_str(
+        buffer,
+        card_content_left,
+        y,
+        home_state_label(session),
+        operator_state_color(session),
+        card_content_right,
+    );
+    y = y.saturating_add(1);
     put_str_styled(
         buffer,
-        left,
+        card_content_left,
         y,
-        &truncate_ellipsis(&session.repository_label(), detail_width),
+        &truncate_ellipsis(&session.repository_label(), card_width),
         FG,
         None,
         BOLD,
-        right,
+        card_content_right,
     );
     y = y.saturating_add(1);
     put_str(
         buffer,
-        left,
+        card_content_left,
         y,
-        &truncate_ellipsis(&session.branch_label(), detail_width),
+        &truncate_ellipsis(&session.branch_label(), card_width),
         BLUE,
-        right,
+        card_content_right,
     );
     y = y.saturating_add(1);
 
     let age = format_age(state.now_ms, session.last_observed_at);
     put_str(
         buffer,
-        left,
+        card_content_left,
         y,
         &format!(
-            "{}  ·  {}  ·  {}  ·  {age}",
-            home_state_label(session),
+            "{}  ·  {}  ·  {age}",
             provider_label(&session.provider),
             session.attachment_label()
         ),
-        operator_state_color(session),
-        right,
+        MUTED,
+        card_content_right,
     );
     y = y.saturating_add(2);
 
+    put_str(buffer, left, y, "QUEUE PULSE", MUTED, right);
+    y = y.saturating_add(1);
+    render_focus_summary(buffer, left, y, right, state);
+    y = y.saturating_add(2);
+
     if session.is_actionable() {
-        put_str(buffer, left, y, "WHAT NEEDS YOU", GOLD, right);
+        put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
         if let Some(question) = session
             .current_request
@@ -2382,15 +2559,18 @@ fn render_mode(
 ) {
     match &state.mode {
         FleetMode::Browse => {}
-        FleetMode::Answer(answer) => render_interview(buffer, area_width, top, bottom, answer),
-        FleetMode::AnswerDismissConfirm(answer) => render_modal(
+        FleetMode::Answer(queue) => render_interview(buffer, area_width, top, bottom, queue),
+        FleetMode::AnswerDismissConfirm(queue) => render_modal(
             buffer,
             area_width,
             top,
             bottom,
             "Reject structured interview",
             &[
-                format!("session: {}", answer.session_key),
+                format!(
+                    "session: {}",
+                    queue.current().map_or("unknown", |answer| answer.session_key.as_str())
+                ),
                 "This returns a rejected result to Claude.".into(),
                 "Enter rejects, Esc returns to draft".into(),
             ],
@@ -2471,72 +2651,129 @@ fn render_interview(
     area_width: u16,
     top: u16,
     bottom: u16,
-    answer: &AnswerState,
+    queue: &AnswerQueue,
 ) {
-    if area_width < 28 || bottom.saturating_sub(top) < 8 {
+    if area_width == 0 || top >= bottom {
+        return;
+    }
+    if area_width < 28 {
+        fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+        put_str(
+            buffer,
+            0,
+            top,
+            "Enlarge pane to answer interview",
+            GOLD,
+            area_width,
+        );
         return;
     }
     fill_background(buffer, 0, top, area_width, bottom, SURFACE);
     let left = 2;
     let right = area_width.saturating_sub(2);
     let title_y = top.saturating_add(1);
+    let Some(answer) = queue.current() else {
+        return;
+    };
+    let lane_count = queue.answers.len().min(3);
+    if bottom.saturating_sub(top) < (lane_count as u16 * 2 + 15) {
+        put_str(
+            buffer,
+            left,
+            top,
+            "Enlarge pane to answer interview",
+            GOLD,
+            right,
+        );
+        return;
+    }
     put_str(
         buffer,
         left,
         title_y,
-        "ANSWER QUEUE  ·  STRUCTURED INTERVIEW",
+        &format!(
+            "ANSWER QUEUE  ·  STRUCTURED INTERVIEW  ·  {} SESSIONS",
+            queue.answers.len()
+        ),
         GOLD,
         right,
     );
-    let answered = answer
-        .questions
-        .iter()
-        .enumerate()
-        .filter(|(index, question)| answer_question_complete(answer, *index, question))
-        .count();
+    let answered = queue.answers.iter().map(answered_questions).sum::<usize>();
+    let question_total = queue.answers.iter().map(|answer| answer.questions.len()).sum::<usize>();
     put_str(
         buffer,
         left,
         title_y.saturating_add(1),
         &format!(
-            "{}  /  {} answered     session: {}",
+            "{}  /  {} answered   active: {}",
             answered,
-            answer.questions.len(),
+            question_total,
             truncate(&answer.session_key, 28)
         ),
         MUTED,
         right,
     );
-    let mut tab_x = left;
     let tab_y = title_y.saturating_add(3);
-    for (index, question) in answer.questions.iter().enumerate() {
-        let active = index == answer.question_index;
-        let done = answer_question_complete(answer, index, question);
-        let marker = if done { "●" } else { "○" };
-        let tab = format!(
-            " {} {} {} ",
-            index + 1,
-            marker,
-            truncate(&question.header, 14)
+    for offset in 0..lane_count {
+        let index = (queue.active + offset) % queue.answers.len();
+        let lane = &queue.answers[index];
+        let active_lane = index == queue.active;
+        let mut tab_x = left;
+        let lane_label = format!(
+            "{} {}  ",
+            if active_lane { "▶" } else { " " },
+            truncate(&lane.session_key, 20)
         );
-        if tab_x.saturating_add(tab.len() as u16) >= right {
-            break;
-        }
         put_str(
             buffer,
             tab_x,
-            tab_y,
-            &tab,
-            if active { GREEN } else { MUTED },
+            tab_y.saturating_add((offset * 2) as u16),
+            &lane_label,
+            if active_lane { GOLD } else { MUTED },
             right,
         );
-        tab_x = tab_x.saturating_add(tab.len() as u16 + 1);
+        tab_x = tab_x.saturating_add(lane_label.chars().count() as u16);
+        for (question_index, question) in lane.questions.iter().enumerate() {
+            let done = answer_question_complete(lane, question_index, question);
+            let active_card = active_lane && question_index == lane.question_index;
+            let card = format!(
+                "[{} {} {}]",
+                if done { "●" } else { "○" },
+                question_index + 1,
+                truncate(&question.header, 11)
+            );
+            let card_width = card.chars().count() as u16;
+            if tab_x.saturating_add(card_width) >= right {
+                break;
+            }
+            put_str(
+                buffer,
+                tab_x,
+                tab_y.saturating_add((offset * 2) as u16),
+                &card,
+                if active_card {
+                    GREEN
+                } else if done {
+                    BLUE
+                } else {
+                    MUTED
+                },
+                right,
+            );
+            tab_x = tab_x.saturating_add(card_width + 1);
+        }
     }
     for x in left..right {
-        put_char(buffer, x, tab_y.saturating_add(1), '─', BLUE);
+        put_char(
+            buffer,
+            x,
+            tab_y.saturating_add((lane_count * 2) as u16),
+            '─',
+            BLUE,
+        );
     }
     let question = &answer.questions[answer.question_index];
-    let content_top = tab_y.saturating_add(3);
+    let content_top = tab_y.saturating_add((lane_count * 2 + 2) as u16);
     put_str(
         buffer,
         left,
@@ -2622,10 +2859,13 @@ fn render_interview(
     for x in left..right {
         put_char(buffer, x, bottom.saturating_sub(2), '─', BLUE);
     }
+    let complete = answered_questions(answer) == answer.questions.len();
     let help = if answer.delivery == AnswerDelivery::Confirming {
         "Refreshing authoritative state, Esc leaves queue"
+    } else if complete {
+        "READY  ·  Enter submit this interview  ←→ card  x reject  Esc leave"
     } else if answer.editing_text {
-        "Type answer  Enter next  ←→ card  x reject  Esc leave"
+        "Type answer  Enter next  ←→ card across sessions  x reject  Esc leave"
     } else if question.multi_select {
         "↑↓ move  Space toggle  Enter next  ←→ card  x reject  Esc leave"
     } else {
@@ -2644,6 +2884,15 @@ fn answer_question_complete(answer: &AnswerState, index: usize, question: &Answe
         .any(|option| option.label.eq_ignore_ascii_case("other"));
     !answer.selections[index].is_empty()
         && (!selected_other || !answer.texts[index].trim().is_empty())
+}
+
+fn answered_questions(answer: &AnswerState) -> usize {
+    answer
+        .questions
+        .iter()
+        .enumerate()
+        .filter(|(index, question)| answer_question_complete(answer, *index, question))
+        .count()
 }
 
 fn render_broadcast_modal(
@@ -2928,6 +3177,15 @@ mod tests {
         output.trim_end().to_string()
     }
 
+    fn final_cell(buffer: &WireBuffer, x: u16, y: u16) -> Option<&Cell> {
+        buffer
+            .cells
+            .iter()
+            .rev()
+            .find(|(coord, _)| coord.x == x && coord.y == y)
+            .map(|(_, cell)| cell)
+    }
+
     #[test]
     fn needs_input_is_default_and_excludes_non_actionable_rows() {
         let state = state_with_roster();
@@ -3194,6 +3452,26 @@ mod tests {
     }
 
     #[test]
+    fn enter_refuses_to_open_another_sessions_interview() {
+        let mut interview = session("claude:interview", "claude", "IDLE", "ASK", "managed");
+        interview.current_request_fingerprint = Some("interview-request".into());
+        interview.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let other = session("claude:other", "claude", "IDLE", "ASK", "managed");
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![interview, other]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Down)).state;
+
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Browse));
+        assert_eq!(
+            state.feedback(),
+            Some("selected session has no structured interview")
+        );
+    }
+
+    #[test]
     fn interview_tabs_preserve_answers_and_refuse_incomplete_batch() {
         let mut row = session("claude:interview", "claude", "IDLE", "ASK", "managed");
         row.current_request_fingerprint = Some("interview-fingerprint".into());
@@ -3223,9 +3501,10 @@ mod tests {
         state = apply(&state, FleetEvent::Key(FleetKey::Left)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
-        let FleetMode::Answer(answer) = &state.mode else {
+        let FleetMode::Answer(queue) = &state.mode else {
             panic!("arrow navigation must keep interview open");
         };
+        let answer = queue.current().expect("active interview");
         assert_eq!(answer.question_index, 1);
         assert_eq!(answer.selections[0], BTreeSet::from([0]));
         assert_eq!(answer.selections[1], BTreeSet::from([0]));
@@ -3254,9 +3533,10 @@ mod tests {
         state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
         state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
         let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
-        let FleetMode::Answer(answer) = &submitted.state.mode else {
+        let FleetMode::Answer(queue) = &submitted.state.mode else {
             panic!("delivered interview must remain visible");
         };
+        let answer = queue.current().expect("active interview");
         assert_eq!(answer.delivery, AnswerDelivery::Confirming);
 
         let delivered = apply(
@@ -3795,27 +4075,71 @@ mod tests {
     }
 
     #[test]
-    fn attention_first_render_uses_priority_cards_and_compact_action_detail() {
+    fn attention_first_render_uses_operator_cards_and_compact_action_detail() {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
         assert!(row_text(&buffer, 0, 120).contains("1 Needs input 2"));
         assert!(row_text(&buffer, 0, 120).contains("5 All 3"));
         let header = row_text(&buffer, 2, 90);
-        let first_row = row_text(&buffer, 3, 90);
-        assert!(row_text(&buffer, 1, 90).contains("2 need you"));
-        assert!(header.contains("PRIORITY QUEUE"));
-        assert!(first_row.contains("agents-in-a-box"));
-        assert!(first_row.contains("INPUT"));
-        assert!(row_text(&buffer, 4, 90).contains("claude/ask"));
-        assert!(row_text(&buffer, 4, 90).contains("CLAUDE"));
-        assert!(row_text(&buffer, 4, 90).contains("TMUX"));
+        let card_status = row_text(&buffer, 3, 90);
+        assert!(row_text(&buffer, 1, 90).contains("2 INPUT"));
+        assert!(header.contains("ACTION QUEUE"));
+        assert!(card_status.contains("INPUT"));
+        assert!(card_status.contains("Enter Answer"));
+        assert!(row_text(&buffer, 4, 90).contains("agents-in-a-box"));
+        assert!(row_text(&buffer, 5, 90).contains("claude/ask"));
+        assert!(row_text(&buffer, 5, 90).contains("CLAUDE"));
+        assert!(row_text(&buffer, 5, 90).contains("TMUX"));
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("WHAT NEEDS YOU"));
+        assert!(rendered.contains("NOW"));
+        assert!(rendered.contains("QUEUE PULSE"));
+        assert!(rendered.contains("NEEDS YOU"));
         assert!(rendered.contains("Enter Answer"));
         assert!(!rendered.contains("CONNECTION"));
         assert!(!rendered.contains("REPOSITORY / BRANCH"));
+    }
+
+    #[test]
+    fn detail_does_not_write_below_its_pane() {
+        let state = state_with_roster();
+        let mut buffer = WireBuffer::new(120, 4);
+        render_detail(&mut buffer, 80, 120, 0, 3, &state);
+        assert!(
+            !buffer.cells.iter().any(|(coord, _)| coord.x >= 80 && coord.y >= 3),
+            "detail must stay inside the supplied pane"
+        );
+    }
+
+    #[test]
+    fn operator_cards_keep_semantic_colours_and_selection_without_fill() {
+        let mut error = session("error", "claude", "IDLE", "ERROR", "managed");
+        error.current_request = Some(serde_json::json!({"message": "review failure"}));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![
+            session("input", "claude", "IDLE", "ASK", "managed"),
+            session("running", "codex", "RUNNING", "NONE", "managed"),
+            session("idle", "codex", "IDLE", "NONE", "managed"),
+            session("done", "claude", "TURN_COMPLETE", "NONE", "managed"),
+            error,
+        ]);
+        state = apply(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 29, &state);
+
+        assert_eq!(
+            final_cell(&buffer, 0, 3).and_then(|cell| cell.fg),
+            Some(SELECTION_GREEN)
+        );
+        assert_eq!(final_cell(&buffer, 2, 4).and_then(|cell| cell.bg), None);
+        for (row, color) in [(3, GOLD), (7, BLUE), (11, VIOLET), (15, GREEN), (19, ALERT)] {
+            assert_eq!(
+                final_cell(&buffer, 2, row).and_then(|cell| cell.fg),
+                Some(color),
+                "semantic color at card row {row}"
+            );
+        }
     }
 
     #[test]
@@ -3841,7 +4165,7 @@ mod tests {
         render_fleet(&mut buffer, 100, 0, 9, &state);
         let rendered = (0..9).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("session-17"));
-        assert!(rendered.contains("▸"));
+        assert!(rendered.contains("▶"));
         assert!(!rendered.contains("session-00"));
     }
 
@@ -3878,7 +4202,7 @@ mod tests {
         assert!(rendered.contains("REMOTE"));
         assert!(rendered.contains("NONE"));
         assert!(rendered.contains("branch unknown"));
-        assert!(rendered.contains("PRIORITY QUEUE"));
+        assert!(rendered.contains("ACTION QUEUE"));
         assert_eq!(
             wrap_text("Controls should never split ordinary words", 18),
             vec!["Controls should", "never split", "ordinary words"]
@@ -3918,6 +4242,186 @@ mod tests {
         assert!(rendered.contains("Checks"));
         assert!(rendered.contains("0  /  2 answered"));
         assert!(rendered.contains("verified Fleet work only"));
+    }
+
+    #[test]
+    fn interview_renderer_explains_when_pane_is_too_small() {
+        let mut row = session("claude:small", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("small-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+
+        let mut narrow = WireBuffer::new(27, 30);
+        render_fleet(&mut narrow, 27, 0, 29, &state);
+        assert!(row_text(&narrow, 0, 27).contains("Enlarge pane"));
+
+        let mut short = WireBuffer::new(120, 17);
+        render_fleet(&mut short, 120, 0, 16, &state);
+        assert!(row_text(&short, 0, 120).contains("Enlarge pane"));
+    }
+
+    #[test]
+    fn interview_renderer_keeps_active_card_usable_at_minimum_height() {
+        for session_count in [1_usize, 3] {
+            let mut state = FleetPaneState::default();
+            let mut rows = Vec::with_capacity(session_count);
+            for index in 0..session_count {
+                let mut row = session(
+                    &format!("claude:minimum-{index}"),
+                    "claude",
+                    "IDLE",
+                    "ASK",
+                    "managed",
+                );
+                row.current_request_fingerprint = Some(format!("minimum-{index}"));
+                row.current_request = Some(serde_json::json!({
+                    "questions": [{
+                        "id": "ship",
+                        "header": "Ship",
+                        "question": "Ship this?",
+                        "options": ["Yes"]
+                    }]
+                }));
+                rows.push(row);
+            }
+            state.set_sessions(rows);
+            let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+            let height = session_count as u16 * 2 + 15;
+            let mut buffer = WireBuffer::new(120, height + 1);
+            render_fleet(&mut buffer, 120, 0, height, &state);
+            let rendered = (0..height)
+                .map(|row| row_text(&buffer, row, 120))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                rendered.contains("Ship"),
+                "question missing at {height} rows: {rendered}"
+            );
+            assert!(
+                rendered.contains("Yes"),
+                "option missing at {height} rows: {rendered}"
+            );
+            assert!(
+                rendered.contains("Enter next"),
+                "footer missing at {height} rows: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn interview_queue_crosses_sessions_and_prunes_confirmed_delivery() {
+        let mut first = session("claude:first", "claude", "IDLE", "ASK", "managed");
+        first.current_request_fingerprint = Some("first-request".into());
+        first.current_request = Some(serde_json::json!({
+            "questions": [{"id": "first", "question": "First?", "options": ["Yes"]}]
+        }));
+        let mut second = session("codex:second", "codex", "IDLE", "ASK", "managed");
+        second.current_request_fingerprint = Some("second-request".into());
+        second.current_request = Some(serde_json::json!({
+            "payload": {"identity": {"requestId": "codex-2"}, "questions": [
+                {"id": "second", "question": "Second?", "options": ["Ship"]}
+            ]}
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![first.clone(), second]);
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("answer queue expected")
+        };
+        assert_eq!(queue.answers.len(), 2);
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+        let mut buffer = WireBuffer::new(140, 28);
+        render_fleet(&mut buffer, 140, 0, 26, &state);
+        let rendered: String =
+            (0..26).map(|row| row_text(&buffer, row, 140)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("claude:first"));
+        assert!(rendered.contains("codex:second"));
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Right)).state;
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+        assert!(matches!(
+            submitted.intent,
+            Some(FleetIntent::Execute { session_key, action: FleetAction::StructuredAnswer { .. }, .. })
+                if session_key == "codex:second"
+        ));
+
+        let working = apply(&submitted.state, FleetEvent::Key(FleetKey::Left)).state;
+        let FleetMode::Answer(queue) = &working.mode else {
+            panic!("queue must remain usable")
+        };
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+
+        let delivered = apply(
+            &working,
+            FleetEvent::ActionSucceeded {
+                session_key: "codex:second".into(),
+            },
+        )
+        .state;
+        let reconciled = apply(&delivered, FleetEvent::Snapshot(vec![first])).state;
+        let FleetMode::Answer(queue) = &reconciled.mode else {
+            panic!("remaining interview must stay open")
+        };
+        assert_eq!(queue.answers.len(), 1);
+        assert_eq!(
+            queue.current().map(|answer| answer.session_key.as_str()),
+            Some("claude:first")
+        );
+        assert_eq!(
+            reconciled.feedback(),
+            Some("delivered interview removed from answer queue")
+        );
+    }
+
+    #[test]
+    fn interview_renderer_exposes_explicit_submit_for_complete_session() {
+        let mut row = session("claude:submit", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("submit-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{
+                "id": "submit", "question": "Submit?", "multiSelect": true, "options": ["Yes"]
+            }]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+        let mut buffer = WireBuffer::new(120, 24);
+        render_fleet(&mut buffer, 120, 0, 22, &state);
+        let rendered: String =
+            (0..22).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("READY"));
+        assert!(rendered.contains("Enter submit this interview"));
+    }
+
+    #[test]
+    fn interview_free_text_captures_host_reserved_characters() {
+        let mut row = session("codex:text", "codex", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("text-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "why", "question": "Why?", "options": []}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Char('H'))).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Char('?'))).state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("free-text interview expected");
+        };
+        let answer = queue.current().expect("active interview");
+        assert_eq!(answer.texts[answer.question_index], "H?");
     }
 
     #[test]

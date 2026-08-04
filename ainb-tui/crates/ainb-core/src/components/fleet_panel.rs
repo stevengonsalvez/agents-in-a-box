@@ -23,7 +23,6 @@
 // cornflower-blue panels, selection-green indicator), matching Inbox/Daemons.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -41,7 +40,9 @@ use ratatui::{
 };
 
 pub use crate::fleet::control::ActionFeedback;
-use crate::fleet::control::{FleetDaemonHealth, FleetHostUpdate, FleetHostUpdateSink};
+use crate::fleet::control::{
+    FleetDaemonHealth, FleetHostUpdate, FleetHostUpdateSink, FleetSnapshotUpdate,
+};
 use crate::fleet::read::jsonl_tail::AskUserQuestionData;
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -57,49 +58,6 @@ const WAIT_AMBER: Color = Color::Rgb(220, 180, 90);
 
 /// Window in which an identical dispatch is treated as an accidental double tap.
 const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct FleetGitContext {
-    repository_name: Option<String>,
-    branch_name: Option<String>,
-}
-
-fn resolve_fleet_git_context(cwd: &str) -> FleetGitContext {
-    let Ok(repository) = git2::Repository::discover(Path::new(cwd)) else {
-        return FleetGitContext::default();
-    };
-    let repository_name = repository.workdir().and_then(|worktree_root| {
-        let source_repository =
-            crate::interactive::InteractiveSessionManager::get_source_repository(worktree_root)
-                .unwrap_or_else(|| worktree_root.to_path_buf());
-        source_repository.file_name().and_then(|name| name.to_str()).map(str::to_string)
-    });
-    let branch_name = repository.head().ok().and_then(|head| {
-        if head.is_branch() {
-            head.shorthand().map(str::to_string)
-        } else {
-            head.target().map(|oid| oid.to_string().chars().take(8).collect())
-        }
-    });
-    FleetGitContext {
-        repository_name,
-        branch_name,
-    }
-}
-
-fn fleet_git_contexts<'a>(
-    cwds: impl IntoIterator<Item = &'a str>,
-) -> HashMap<String, FleetGitContext> {
-    let mut contexts = HashMap::new();
-    for cwd in cwds {
-        if !cwd.is_empty() {
-            contexts
-                .entry(cwd.to_string())
-                .or_insert_with(|| resolve_fleet_git_context(cwd));
-        }
-    }
-    contexts
-}
 
 /// Last dispatch memo used for short-window duplicate suppression.
 #[derive(Debug, Clone)]
@@ -230,10 +188,13 @@ impl FleetPanelState {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: ainb_hangar_proto::fleet::FleetSnapshot) {
+    fn apply_snapshot(&mut self, update: FleetSnapshotUpdate) {
+        let FleetSnapshotUpdate {
+            snapshot,
+            git_contexts,
+        } = update;
         let sessions = snapshot.sessions;
         let selected_key = self.selected_row().map(|row| row.session_id.clone());
-        let git_contexts = fleet_git_contexts(sessions.iter().map(|session| session.cwd.as_str()));
         self.session_meta = sessions
             .iter()
             .cloned()
@@ -268,17 +229,16 @@ impl FleetPanelState {
             .ok()
             .map(|mut updates| std::mem::take(&mut *updates))
             .unwrap_or_default();
-        for update in updates {
-            match update {
-                FleetHostUpdate::Snapshot(snapshot) => self.apply_snapshot(snapshot),
-                FleetHostUpdate::Health(health) => {
-                    self.store = health.is_online().then_some(());
-                    if let FleetDaemonHealth::Offline(detail) = &health {
-                        self.set_feedback(format!("Fleet daemon unavailable: {detail}"));
-                    }
-                    self.daemon_health = health;
-                }
+        let (health_updates, newest_snapshot) = coalesce_host_updates(updates);
+        for health in health_updates {
+            self.store = health.is_online().then_some(());
+            if let FleetDaemonHealth::Offline(detail) = &health {
+                self.set_feedback(format!("Fleet daemon unavailable: {detail}"));
             }
+            self.daemon_health = health;
+        }
+        if let Some(snapshot) = newest_snapshot {
+            self.apply_snapshot(snapshot);
         }
     }
 
@@ -659,6 +619,22 @@ impl FleetPanelState {
             at,
         });
     }
+}
+
+/// Full snapshots supersede earlier snapshots, while connection-state changes
+/// remain ordered so the final terminal health is never lost.
+fn coalesce_host_updates(
+    updates: Vec<FleetHostUpdate>,
+) -> (Vec<FleetDaemonHealth>, Option<FleetSnapshotUpdate>) {
+    let mut health_updates = Vec::new();
+    let mut newest_snapshot = None;
+    for update in updates {
+        match update {
+            FleetHostUpdate::Snapshot(snapshot) => newest_snapshot = Some(snapshot),
+            FleetHostUpdate::Health(health) => health_updates.push(health),
+        }
+    }
+    (health_updates, newest_snapshot)
 }
 
 fn fleet_request_identity(
@@ -1458,80 +1434,6 @@ mod tests {
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
-    fn seed_git_repository(path: &Path) -> (git2::Repository, git2::Oid) {
-        std::fs::create_dir_all(path).expect("create repository directory");
-        let repository = git2::Repository::init(path).expect("initialize repository");
-        std::fs::write(path.join("README.md"), "seed\n").expect("write seed file");
-        let mut index = repository.index().expect("open index");
-        index.add_path(Path::new("README.md")).expect("stage seed file");
-        index.write().expect("write index");
-        let tree_id = index.write_tree().expect("write tree");
-        let tree = repository.find_tree(tree_id).expect("find tree");
-        let signature =
-            git2::Signature::now("Fleet Test", "fleet@example.invalid").expect("create signature");
-        let commit = repository
-            .commit(Some("HEAD"), &signature, &signature, "seed", &tree, &[])
-            .expect("create seed commit");
-        drop(tree);
-        (repository, commit)
-    }
-
-    #[test]
-    fn git_context_discovers_linked_worktree_from_nested_cwd() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        let source_path = temp.path().join("source-repo");
-        let (_source, _commit) = seed_git_repository(&source_path);
-        let worktree_path = temp.path().join("linked-worktree");
-        let output = std::process::Command::new("git")
-            .args(["worktree", "add", "-b", "feature/fleet-labels"])
-            .arg(&worktree_path)
-            .arg("HEAD")
-            .current_dir(&source_path)
-            .output()
-            .expect("run git worktree add");
-        assert!(
-            output.status.success(),
-            "git worktree add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let nested = worktree_path.join("nested/path");
-        std::fs::create_dir_all(&nested).expect("create nested cwd");
-
-        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
-
-        assert_eq!(context.repository_name.as_deref(), Some("source-repo"));
-        assert_eq!(context.branch_name.as_deref(), Some("feature/fleet-labels"));
-    }
-
-    #[test]
-    fn git_context_uses_short_commit_for_detached_head() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        let repository_path = temp.path().join("detached-repo");
-        let (repository, commit) = seed_git_repository(&repository_path);
-        repository.set_head_detached(commit).expect("detach HEAD");
-        let nested = repository_path.join("nested");
-        std::fs::create_dir_all(&nested).expect("create nested cwd");
-
-        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
-
-        assert_eq!(context.repository_name.as_deref(), Some("detached-repo"));
-        let expected_commit = commit.to_string();
-        assert_eq!(context.branch_name.as_deref(), Some(&expected_commit[..8]));
-    }
-
-    #[test]
-    fn git_contexts_deduplicate_cwds_and_skip_missing_metadata() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        let non_git = temp.path().join("plain");
-        std::fs::create_dir_all(&non_git).expect("create non-git directory");
-        let cwd = non_git.to_str().expect("utf8 cwd");
-
-        let contexts = fleet_git_contexts(["", cwd, cwd]);
-
-        assert_eq!(contexts.len(), 1);
-        assert_eq!(contexts[cwd], FleetGitContext::default());
-    }
-
     #[test]
     fn renders_attention_first_operator_view() {
         let mut state = state_with(vec![
@@ -1573,10 +1475,7 @@ mod tests {
         assert!(out.contains("4 Running 1"), "running lens missing: {out}");
         assert!(out.contains("5 All 4"), "all lens missing: {out}");
         // Default lens shows only actionable rows.
-        assert!(
-            out.contains("PRIORITY QUEUE"),
-            "priority queue missing: {out}"
-        );
+        assert!(out.contains("ACTION QUEUE"), "action queue missing: {out}");
         assert!(out.contains("INPUT"), "operator state missing: {out}");
         assert!(out.contains("deploy"), "ASK session label missing");
         assert!(out.contains("api"), "ERR session label missing");
@@ -1851,14 +1750,20 @@ mod tests {
 
         let mut state = FleetPanelState::default();
         state.stream_updates.lock().expect("stream update queue").extend([
-            FleetHostUpdate::Snapshot(FleetSnapshot {
-                head_revision: 7,
-                sessions: Vec::new(),
+            FleetHostUpdate::Snapshot(FleetSnapshotUpdate {
+                snapshot: FleetSnapshot {
+                    head_revision: 7,
+                    sessions: Vec::new(),
+                },
+                git_contexts: HashMap::new(),
             }),
             FleetHostUpdate::Health(FleetDaemonHealth::Online),
-            FleetHostUpdate::Snapshot(FleetSnapshot {
-                head_revision: 9,
-                sessions: Vec::new(),
+            FleetHostUpdate::Snapshot(FleetSnapshotUpdate {
+                snapshot: FleetSnapshot {
+                    head_revision: 9,
+                    sessions: Vec::new(),
+                },
+                git_contexts: HashMap::new(),
             }),
             FleetHostUpdate::Health(FleetDaemonHealth::Offline("socket closed".into())),
         ]);
@@ -1872,6 +1777,46 @@ mod tests {
         );
         assert!(!state.daemon_online());
         assert!(state.feedback_line().contains("socket closed"));
+    }
+
+    #[test]
+    fn stream_update_coalescing_keeps_terminal_health_and_newest_snapshot() {
+        use ainb_hangar_proto::fleet::FleetSnapshot;
+
+        let (health, snapshot) = coalesce_host_updates(vec![
+            FleetHostUpdate::Health(FleetDaemonHealth::Connecting),
+            FleetHostUpdate::Snapshot(FleetSnapshotUpdate {
+                snapshot: FleetSnapshot {
+                    head_revision: 7,
+                    sessions: Vec::new(),
+                },
+                git_contexts: HashMap::new(),
+            }),
+            FleetHostUpdate::Health(FleetDaemonHealth::Online),
+            FleetHostUpdate::Snapshot(FleetSnapshotUpdate {
+                snapshot: FleetSnapshot {
+                    head_revision: 9,
+                    sessions: Vec::new(),
+                },
+                git_contexts: HashMap::new(),
+            }),
+            FleetHostUpdate::Health(FleetDaemonHealth::Offline("socket closed".into())),
+        ]);
+
+        assert_eq!(
+            health,
+            vec![
+                FleetDaemonHealth::Connecting,
+                FleetDaemonHealth::Online,
+                FleetDaemonHealth::Offline("socket closed".into()),
+            ],
+            "connection state order must survive snapshot coalescing"
+        );
+        assert_eq!(
+            snapshot.expect("newest snapshot retained").snapshot.head_revision,
+            9,
+            "replayed complete snapshots must collapse to the newest revision"
+        );
     }
 
     #[test]
