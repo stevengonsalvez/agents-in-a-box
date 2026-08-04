@@ -41,7 +41,7 @@
 //! agents can therefore never take the same card, and the guarantee holds across
 //! processes, not just across tasks in one daemon.
 //!
-//! # The five predicates
+//! # The six predicates
 //!
 //! A `(card, agent)` pair is *pullable* when ALL of these hold:
 //!
@@ -55,12 +55,24 @@
 //!    (`queued`/`dispatched`/`running`) task at all. This is strictly stronger
 //!    than the pre-existing per-(issue, agent) guard, and it is what makes
 //!    "exactly one task running per card" true rather than merely likely.
-//! 4. **Prior-agent exclusion.** On a column with `excludes_prior_agent = 1`, an
+//! 4. **The stage is not already finished.** The card's CURRENT column holds no
+//!    `done` task at the card's CURRENT generation. This is the FINALIZE WINDOW
+//!    guard: `done` commits in the claim loop's finalize, four awaited
+//!    best-effort steps run, and only then does the advance move the card, so a
+//!    concurrent pull tick sees a terminal stage on an unmoved card and every
+//!    other predicate passes (predicate 3 reads the ACTIVE set, and a `done`
+//!    task is not in it). Without this the same implementer re-pulls the card it
+//!    just finished, and a different reviewer double-reviews. `board_column_id`
+//!    (migration 0078) is what makes the question answerable; see that file for
+//!    why the generation alone is not enough. Scoping to the current generation
+//!    is what keeps a RE-ENQUEUED card, moved back to an earlier stage for
+//!    another pass, pullable rather than frozen by its own history.
+//! 5. **Prior-agent exclusion.** On a column with `excludes_prior_agent = 1`, an
 //!    agent that already holds a `done` task on this card may not take it. This
 //!    is the reviewer-is-never-the-implementer rule. Note the direction of
 //!    failure: if the only eligible agent implemented the card, the card WAITS
 //!    rather than being self-reviewed.
-//! 5. **Not blocked, and the agent has capacity.** Unfinished `card_dependency`
+//! 6. **Not blocked, and the agent has capacity.** Unfinished `card_dependency`
 //!    blockers make a card unpullable at every stage (the F7 refuse-run guard,
 //!    reused verbatim from
 //!    [`CardDependencyRepo::unfinished_blockers_of`](crate::repo::card_dependency::CardDependencyRepo::unfinished_blockers_of)),
@@ -143,6 +155,50 @@ impl PullService {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<Option<PulledCard>, sqlx::Error> {
+        Self::pull(pool, runtime_id, None, idgen, clock).await
+    }
+
+    /// Pull ONE eligible card for `runtime_id`, constrained to `issue_id`.
+    ///
+    /// Identical to [`Self::pull_for_runtime`] in every predicate; it merely
+    /// refuses to answer with a different card. The daemon's idle tick wants the
+    /// unconstrained form (take the most urgent work anywhere), but a caller that
+    /// just enqueued ONE card and needs to report the task that owns THAT card
+    /// must not be handed whatever the board ranked first: the pull orders by
+    /// `col.ord DESC` ("pull from the right"), so a card already sitting in a
+    /// LATER stage outranks the one just placed in the first, and its task id
+    /// would flow out as the dispatch's answer.
+    ///
+    /// Returns `Ok(None)` when this card specifically is not pullable right now,
+    /// which is the ordinary "enqueued, waiting for an eligible agent" case.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the statement or a row decode fails.
+    #[tracing::instrument(
+        name = "card.pull_issue",
+        skip(pool, idgen, clock),
+        fields(runtime_id = %runtime_id, issue_id = %issue_id, task_id = tracing::field::Empty, services_role = tracing::field::Empty)
+    )]
+    pub async fn pull_issue_for_runtime(
+        pool: &SqlitePool,
+        runtime_id: &str,
+        issue_id: &str,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<Option<PulledCard>, sqlx::Error> {
+        Self::pull(pool, runtime_id, Some(issue_id), idgen, clock).await
+    }
+
+    /// The shared body of both pull entry points. `only_issue = None` is the
+    /// unconstrained board-wide pull; `Some(id)` narrows it to one card.
+    async fn pull(
+        pool: &SqlitePool,
+        runtime_id: &str,
+        only_issue: Option<&str>,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<Option<PulledCard>, sqlx::Error> {
         let task_id = idgen.new_ulid();
         let now = clock.now_ms();
 
@@ -150,6 +206,7 @@ impl PullService {
             .bind(&task_id)
             .bind(now)
             .bind(runtime_id)
+            .bind(only_issue)
             .fetch_optional(pool)
             .await?;
 
@@ -245,7 +302,16 @@ impl PullService {
 ///
 /// `?1` = `issue_id`. The new `ord` appends the card to the end of its target
 /// column, consistent with a manual `card_move` and with the auto-move hook.
-const ADVANCE_SQL: &str = "\
+///
+/// # Why this is `pub`
+///
+/// For the same reason [`PULL_SQL`] is: so the MUTATION PROOFS in
+/// `tests/pipeline_advance.rs` can delete exactly one guard and assert the
+/// corresponding refusal goes away. Every guard here is a REFUSAL, and a test
+/// that only ever runs the real statement proves the card stayed put; it cannot
+/// prove that the clause under test is what kept it there, and would keep
+/// passing if the clause were deleted and some other accident covered for it.
+pub const ADVANCE_SQL: &str = "\
 UPDATE board_card \
    SET column_id = ( \
         SELECT n.id FROM board_column AS n \
@@ -286,7 +352,12 @@ RETURNING board_id, column_id";
 /// The atomic pull statement: select the most urgent pullable `(card, agent)`
 /// pair for the runtime and INSERT its `queued` task row in one statement.
 ///
-/// `?1` = new task id, `?2` = `created_at` (now), `?3` = `runtime_id`.
+/// `?1` = new task id, `?2` = `created_at` (now), `?3` = `runtime_id`, `?4` =
+/// an OPTIONAL issue to narrow to (NULL = the whole board).
+///
+/// `?4` keeps the constrained and unconstrained pulls ONE statement rather than
+/// two that can drift: a caller that just enqueued one card and must report the
+/// task owning THAT card gets exactly the same six predicates, only narrower.
 ///
 /// `agent_kind` is derived from the PULLING AGENT, not from the card. Under pull
 /// the agent is chosen per stage, so the provider CLI that runs the stage must be
@@ -315,6 +386,25 @@ RETURNING board_id, column_id";
 /// read across stages, so nothing new is introduced. The first stage of a card
 /// has no `done` predecessor and correctly chains to NULL.
 ///
+/// The closed-issue guard names `done` FIRST because that is the token the
+/// codebase actually writes: `IssueLifecycle::as_str` produces `done`, and
+/// migration 0023 rewrote the stored legacy values forward. `closed` is kept
+/// only for the beads-sync reconciler, which still writes it. Listing `closed`
+/// alone made the guard inert for every hangar-native issue.
+///
+/// This guard is only safe because the lifecycle no longer promotes an issue to
+/// `done` when its FIRST stage lands: `advance_issue_lifecycle_after_terminal`
+/// holds the issue at `in_progress` until the card reaches the terminal column of
+/// its pipeline. Without that half, adding `done` here would freeze every
+/// pipeline after its first stage.
+///
+/// `board_column_id` (migration 0078) records WHICH STAGE the run serves. Only
+/// the pull writes it; every push-path task leaves it NULL. It exists so the
+/// finished-stage predicate can distinguish "this stage is done and the card has
+/// not advanced yet" (the finalize window, must not re-pull) from "the card DID
+/// advance and the next stage is waiting" (must pull). Read from
+/// `agent_task_queue` alone those two states are identical.
+///
 /// # Why this is `pub`
 ///
 /// So the MUTATION PROOFS in `tests/pull_role_gate.rs` can delete exactly one
@@ -327,7 +417,8 @@ RETURNING board_id, column_id";
 pub const PULL_SQL: &str = "\
 INSERT INTO agent_task_queue \
     (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
-     priority, generation, agent_kind, repo_ref, squad_id, parent_task_id) \
+     priority, generation, agent_kind, repo_ref, squad_id, parent_task_id, \
+     board_column_id) \
 SELECT ?1, \
        bd.workspace_id, \
        a.runtime_id, \
@@ -349,16 +440,18 @@ SELECT ?1, \
        i.squad_id, \
        (SELECT p.id FROM agent_task_queue AS p \
          WHERE p.issue_id = bc.issue_id AND p.status = 'done' \
-         ORDER BY p.generation DESC, p.finished_at DESC, p.id DESC LIMIT 1) \
+         ORDER BY p.generation DESC, p.finished_at DESC, p.id DESC LIMIT 1), \
+       bc.column_id \
   FROM board_card AS bc \
   JOIN board_column AS col ON col.id = bc.column_id \
   JOIN board AS bd ON bd.id = bc.board_id \
   JOIN issue AS i ON i.id = bc.issue_id \
   JOIN agent AS a ON a.workspace_id = bd.workspace_id \
  WHERE col.services_role IS NOT NULL \
+   AND (?4 IS NULL OR bc.issue_id = ?4) \
    AND a.runtime_id = ?3 \
    AND a.archived = 0 \
-   AND i.state NOT IN ('closed','cancelled') \
+   AND i.state NOT IN ('done','cancelled','closed') \
    AND EXISTS ( \
         SELECT 1 FROM squad_member AS sm \
           JOIN squad AS sq ON sq.id = sm.squad_id \
@@ -380,6 +473,14 @@ SELECT ?1, \
         SELECT 1 FROM agent_task_queue AS o \
          WHERE o.issue_id = bc.issue_id \
            AND o.status IN ('queued','dispatched','running') \
+       ) \
+   AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS f \
+         WHERE f.issue_id = bc.issue_id \
+           AND f.status = 'done' \
+           AND f.board_column_id = bc.column_id \
+           AND f.generation = (SELECT MAX(g4.generation) FROM agent_task_queue AS g4 \
+                                WHERE g4.issue_id = bc.issue_id) \
        ) \
    AND ( col.excludes_prior_agent = 0 OR NOT EXISTS ( \
         SELECT 1 FROM agent_task_queue AS p \

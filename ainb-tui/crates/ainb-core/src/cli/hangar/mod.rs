@@ -5180,6 +5180,10 @@ async fn run_squad_instructions(store: &Store, args: SquadInstructionsArgs) -> R
 /// `agent` member) — the daemon-free proof of the same service the RPC drives.
 /// `--invoker` names the user the gap #8 invocation gate judges every dispatch
 /// target by; omitted, the service resolves the workspace owner.
+///
+/// The run GENERATION is resolved here, exactly as the RPC handler does, so a
+/// dispatch of a card that has run before sits at the issue's new max rather
+/// than under its history.
 async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
     use ainb_hangar_core::ids::WorkspaceId;
     use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
@@ -5190,11 +5194,28 @@ async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
         Some(token) => Some(resolve_user_id(store, token).await?),
         None => None,
     };
+    // Mint the run generation the same way the RPC path does
+    // (`squad_assign_generation`). Leaving it at the `0` default silently stamps
+    // the whole dispatch BELOW the issue's existing `MAX(generation)` whenever
+    // the card has run before, and every generation-scoped fold (the aggregate
+    // terminal state, the blocker-finished predicate, the auto-move) reads that
+    // max and looks at that generation alone. A `--redundant 3` cluster at 0
+    // behind a stage that finished at 1 is therefore invisible: the blocker reads
+    // as finished and a dependent card auto-runs while three implementations are
+    // still live.
+    let generation = match args.issue.as_deref() {
+        Some(issue_id) => TaskRepo::next_generation_for_issue(store.pool(), issue_id)
+            .await
+            .context("resolve the run generation")?,
+        // An issueless ad-hoc dispatch has no history to sit behind.
+        None => 0,
+    };
     let request = SquadAssignRequest {
         issue_id: args.issue.as_deref(),
         work_dir: args.work_dir.as_deref(),
         priority: args.priority,
         invoker: invoker.as_deref(),
+        generation,
         // The CLI assign carries no card repo/agent (tcp T4): the task runs in-tree,
         // exactly the pre-T4 behaviour.
         ..SquadAssignRequest::default()
@@ -5268,10 +5289,14 @@ fn squad_assign_cli_err(
         SquadAssignError::MemberAgentMissing(id) => {
             anyhow::anyhow!("squad member agent `{id}` not found")
         }
-        // Two pre-flight refusals that write NO task row: the gap-#8 invocation
-        // gate, and the parity-#26 archived-squad guard. Both are surfaced
-        // verbatim so the CLI exits non-zero with the store's own reason.
-        e @ (SquadAssignError::NotInvocable { .. } | SquadAssignError::Archived(_)) => {
+        // Pre-flight refusals that write NO task row: the gap-#8 invocation gate,
+        // the parity-#26 archived-squad guard, and the two stage guards a
+        // `--redundant` cluster is subject to on a role-gated card. All are
+        // surfaced verbatim so the CLI exits non-zero with the store's own reason.
+        e @ (SquadAssignError::NotInvocable { .. }
+        | SquadAssignError::Archived(_)
+        | SquadAssignError::ActiveRun(_)
+        | SquadAssignError::StageRoleUnheld { .. }) => {
             anyhow::anyhow!("{e}")
         }
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),

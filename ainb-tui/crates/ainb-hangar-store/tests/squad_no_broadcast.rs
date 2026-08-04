@@ -26,7 +26,9 @@ use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::service::pipeline::PipelineService;
-use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+use ainb_hangar_store::service::squad_assign::{
+    SquadAssignError, SquadAssignRequest, SquadAssignService,
+};
 use sqlx::SqlitePool;
 
 const NOW_MS: i64 = 1_700_000_500_000;
@@ -106,6 +108,66 @@ async fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     (dir, store)
+}
+
+/// Park `issue_id`'s card in the pipeline column named `column`, returning that
+/// column's id. Requires the default pipeline to be provisioned.
+async fn park_card_in(pool: &SqlitePool, issue_id: &str, column: &str) -> String {
+    let (board_id, column_id): (String, String) = sqlx::query_as(
+        "SELECT b.id, c.id FROM board AS b JOIN board_column AS c ON c.board_id = b.id \
+          WHERE b.workspace_id = 'ws-1' AND c.name = ?1",
+    )
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .expect("the pipeline column exists");
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES (?1, ?2, ?3, 0, 0)",
+    )
+    .bind(&board_id)
+    .bind(issue_id)
+    .bind(&column_id)
+    .execute(pool)
+    .await
+    .expect("park the card");
+    column_id
+}
+
+/// Add `i-dep`, blocked by `blocker`.
+async fn seed_dependent_on(pool: &SqlitePool, blocker: &str) {
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("dependent issue");
+    sqlx::query(
+        "INSERT INTO card_dependency \
+         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+         VALUES ('ws-1','i-dep',?1,0,'blocked_by')",
+    )
+    .bind(blocker)
+    .execute(pool)
+    .await
+    .expect("dependency");
+}
+
+/// Give `issue_id` a PRIOR stage that already ran and finished at `generation`,
+/// so the issue's `MAX(generation)` is non-zero before the next dispatch.
+async fn seed_finished_prior_run(pool: &SqlitePool, issue_id: &str, generation: i64) {
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+         VALUES ('t-prior','ws-1','rt-1','ag-lead',?1,'done',0,?2)",
+    )
+    .bind(issue_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .expect("prior run");
 }
 
 /// Count every task row on the issue, in ANY status. Deliberately unfiltered:
@@ -212,6 +274,84 @@ async fn dispatch_places_the_card_in_the_first_role_gated_stage() {
         .await
         .expect("count cards");
     assert_eq!(cards, 1, "one card, one place on the board");
+}
+
+/// A dispatch must be answered with a task belonging to the issue it DISPATCHED,
+/// never with whatever the board happened to rank first.
+///
+/// `assign_fanout` enqueues the issue and then pulls. The pull ordering is
+/// `priority DESC, col.ord DESC, ...`, "pull from the right", which actively
+/// PREFERS a later-stage card. So a card already sitting in Review outranks the
+/// one just placed in Triage, and its task id is what flows out through
+/// `SquadFanout.leader.task_id`, into `BoardCardRunResult.task_id` and the
+/// dispatch log. An operator who cancels or attaches by that id reaches a
+/// DIFFERENT card's agent.
+#[tokio::test]
+async fn a_dispatch_is_answered_with_its_own_cards_task() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+
+    // A SECOND card already sits in Review (ord 3) with an eligible reviewer.
+    // Same priority as the one about to be dispatched, so only the column
+    // ordering separates them.
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-2','ws-1','Already in review','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("second issue");
+    let (board_id, review_col): (String, String) = sqlx::query_as(
+        "SELECT b.id, c.id FROM board AS b JOIN board_column AS c ON c.board_id = b.id \
+          WHERE b.workspace_id='ws-1' AND c.name='Review'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("review column");
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES (?1,'i-2',?2,0,0)",
+    )
+    .bind(&board_id)
+    .bind(&review_col)
+    .execute(pool)
+    .await
+    .expect("park the second card in review");
+
+    let out = SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("fanout");
+
+    assert!(
+        !out.leader.task_id.is_empty(),
+        "the dispatched card has an eligible triager, so a task must exist"
+    );
+    let answered: String =
+        sqlx::query_scalar("SELECT issue_id FROM agent_task_queue WHERE id = ?1")
+            .bind(&out.leader.task_id)
+            .fetch_one(pool)
+            .await
+            .expect("the answered task exists");
+    assert_eq!(
+        answered, "i-1",
+        "the dispatch answered with a task belonging to a DIFFERENT card, so \
+         cancelling or attaching by this id reaches the wrong agent"
+    );
 }
 
 /// Even with NO pipeline provisioned, a squad dispatch is ONE task. The
@@ -414,6 +554,180 @@ async fn redundant_more_than_the_roster_dispatches_to_everyone() {
     );
 }
 
+/// Redundancy is redundancy WITHIN A STAGE: on a card sitting in a role-gated
+/// column, only agents that HOLD that column's `services_role` may be handed a
+/// copy.
+///
+/// `assign_redundant` writes rows straight through `TaskRepo::insert_in_tx` with
+/// no board awareness at all, so it dispatched to the leader plus every member in
+/// id order regardless of role. On an Implement-stage card that hands the work to
+/// a tester, which is precisely the role-blind dispatch migration 0074 exists to
+/// end.
+#[tokio::test]
+async fn redundant_on_a_gated_card_only_dispatches_to_that_stages_role() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    park_card_in(pool, "i-1", "Implement").await;
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let mut owners: Vec<String> =
+        sqlx::query_scalar("SELECT agent_id FROM agent_task_queue WHERE issue_id='i-1'")
+            .fetch_all(pool)
+            .await
+            .expect("read owners");
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec!["ag-a".to_string(), "ag-lead".to_string()],
+        "only the two implementers may take an Implement-stage card; the \
+         reviewer and the tester must not be handed a copy"
+    );
+}
+
+/// Every copy of a stage cluster records the STAGE it serves, so the pull's
+/// finished-stage guard treats the cluster exactly like a single-owner run.
+#[tokio::test]
+async fn redundant_copies_record_the_stage_they_serve() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    let column = park_card_in(pool, "i-1", "Implement").await;
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        2,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let stamped: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT board_column_id FROM agent_task_queue WHERE issue_id='i-1'")
+            .fetch_all(pool)
+            .await
+            .expect("read the stage stamp");
+    assert!(
+        !stamped.is_empty() && stamped.iter().all(|c| c.as_deref() == Some(column.as_str())),
+        "every copy must name the stage it serves: {stamped:?}"
+    );
+}
+
+/// Redundancy REPLACES the single owner of a stage; it does not stack on top of
+/// one. A card that already has a pulled run in flight refuses, rather than
+/// acquiring three more concurrent runs of the same stage.
+#[tokio::test]
+async fn redundant_refuses_a_gated_card_that_already_has_an_active_run() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    park_card_in(pool, "i-1", "Implement").await;
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+         VALUES ('t-live','ws-1','rt-1','ag-a','i-1','running',0,1)",
+    )
+    .execute(pool)
+    .await
+    .expect("a run already in flight");
+
+    let err = SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 2,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect_err("stacking onto a live stage must be refused");
+    assert!(
+        matches!(err, SquadAssignError::ActiveRun(ref id) if id == "i-1"),
+        "expected an active-run refusal, got {err:?}"
+    );
+    assert_eq!(
+        task_count(pool).await,
+        1,
+        "a refusal writes zero rows: only the run already in flight remains"
+    );
+}
+
+/// A stage nobody holds the role for refuses outright rather than silently
+/// dispatching to whoever happened to be in the squad.
+#[tokio::test]
+async fn redundant_refuses_when_no_member_holds_the_stages_role() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    // Nobody in this squad services Triage except the leader; strip that role.
+    sqlx::query("UPDATE squad_member SET role='implementer' WHERE member_id='ag-lead'")
+        .execute(pool)
+        .await
+        .expect("strip the triager role");
+    park_card_in(pool, "i-1", "Triage").await;
+
+    let err = SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            generation: 1,
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect_err("no eligible agent must refuse");
+    assert!(
+        matches!(err, SquadAssignError::StageRoleUnheld { ref role, .. } if role == "triager"),
+        "expected a role refusal, got {err:?}"
+    );
+    assert_eq!(task_count(pool).await, 0, "a refusal writes zero rows");
+}
+
 /// FANOUT-SEMANTICS, preserved for the surviving multi-task shape: a dependent
 /// stays blocked until the blocker's WHOLE cluster has drained with a success.
 ///
@@ -427,37 +741,39 @@ async fn redundant_more_than_the_roster_dispatches_to_everyone() {
 /// The three states that must each keep the dependent blocked: any sibling still
 /// active, all siblings terminal but NONE succeeded, and a success that arrived
 /// in an older generation.
+///
+/// # The fixture deliberately carries PRIOR history
+///
+/// The blocker already ran a stage that finished at generation 1. Without it the
+/// cluster's generation is trivially the max whatever it is stamped with, and
+/// this test would pass even against a caller that left the generation at the
+/// `0` default, which is exactly the defect
+/// [`a_generation_zero_cluster_is_invisible_to_blocked_detection`] pins. The
+/// generation is resolved the way both real callers resolve it.
 #[tokio::test]
 async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+    use ainb_hangar_store::repo::task::TaskRepo;
 
     let (_d, s) = store().await;
     let pool = s.pool();
     seed_squad_of_three(pool).await;
-    sqlx::query(
-        "INSERT INTO issue \
-         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
-         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
-    )
-    .execute(pool)
-    .await
-    .expect("dependent issue");
-    sqlx::query(
-        "INSERT INTO card_dependency \
-         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
-         VALUES ('ws-1','i-dep','i-1',0,'blocked_by')",
-    )
-    .execute(pool)
-    .await
-    .expect("dependency");
+    seed_dependent_on(pool, "i-1").await;
+    seed_finished_prior_run(pool, "i-1", 1).await;
 
-    // A deliberate cluster of three concurrent runs on the blocker.
+    // A deliberate cluster of three concurrent runs on the blocker, at a freshly
+    // minted generation (2) rather than the `0` default.
+    let generation = TaskRepo::next_generation_for_issue(pool, "i-1")
+        .await
+        .expect("resolve the generation");
+    assert_eq!(generation, 2, "the prior run put the issue at generation 1");
     SquadAssignService::assign_redundant(
         pool,
         &ws(),
         "sq-1",
         &SquadAssignRequest {
             issue_id: Some("i-1"),
+            generation,
             ..SquadAssignRequest::default()
         },
         3,
@@ -467,11 +783,13 @@ async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     .await
     .expect("redundant dispatch");
 
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM agent_task_queue WHERE issue_id='i-1' ORDER BY id")
-            .fetch_all(pool)
-            .await
-            .expect("cluster ids");
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM agent_task_queue \
+          WHERE issue_id='i-1' AND run_group IS NOT NULL ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("cluster ids");
     assert_eq!(ids.len(), 3);
 
     let blocked = |pool: &sqlx::SqlitePool| {
@@ -516,6 +834,78 @@ async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     assert!(
         !blocked(pool).await,
         "the cluster has drained with a success, so the dependent unblocks"
+    );
+}
+
+/// WHY the generation must be resolved rather than left at the `0` default:
+/// a cluster stamped `0` behind a prior run is INVISIBLE to blocked-detection.
+///
+/// Every generation-scoped fold reads the issue's `MAX(generation)` and then
+/// looks at that generation ALONE. A cluster at `0` sitting behind a stage that
+/// finished at 1 is below the max, so `unfinished_blockers_of` probes generation
+/// 1, sees a `done` task with nothing active, and declares the blocker finished.
+/// The dependent then unblocks (and auto-runs, if it opted in) while three
+/// implementations of the blocker are still live.
+///
+/// This is the harm the CLI's `..SquadAssignRequest::default()` caused, kept as a
+/// standing description of the failure mode rather than as a claim about any one
+/// caller.
+#[tokio::test]
+async fn a_generation_zero_cluster_is_invisible_to_blocked_detection() {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    seed_dependent_on(pool, "i-1").await;
+    seed_finished_prior_run(pool, "i-1", 1).await;
+
+    // The defect: stamp the cluster with the `0` default instead of resolving it.
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_task_queue \
+          WHERE issue_id='i-1' AND status IN ('queued','dispatched','running')",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count live runs");
+    assert_eq!(live, 3, "three implementations are live on the blocker");
+
+    let remaining = CardDependencyRepo::unfinished_blockers_of(pool, "i-dep")
+        .await
+        .expect("blockers");
+    assert!(
+        remaining.is_empty(),
+        "the fold reads MAX(generation)=1 and never sees the generation-0 cluster, \
+         so the blocker reads as FINISHED while three runs are live"
+    );
+
+    // Resolved to the real next generation, the very same cluster IS seen.
+    sqlx::query("UPDATE agent_task_queue SET generation = 2 WHERE run_group IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("restamp the cluster");
+    let remaining = CardDependencyRepo::unfinished_blockers_of(pool, "i-dep")
+        .await
+        .expect("blockers");
+    assert_eq!(
+        remaining,
+        vec!["i-1".to_string()],
+        "at the issue's real max generation the live cluster blocks the dependent"
     );
 }
 

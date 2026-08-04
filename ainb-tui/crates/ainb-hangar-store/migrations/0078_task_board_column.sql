@@ -1,0 +1,52 @@
+-- Hangar v1 schema, migration 0078: record WHICH pipeline stage a task served.
+--
+-- Closes the FINALIZE WINDOW that let one pipeline stage execute TWICE.
+--
+-- 0074 made a role-gated board column a pull queue and
+-- `PullService::advance_after_stage` the handoff to the next one. But the two
+-- writes are not one transaction and cannot be: the task row commits `done` in
+-- the claim loop's finalize, then four awaited best-effort steps run (usage
+-- persist, run branch, run history, the `TaskFinished` event), and only then
+-- does `auto_move_after_terminal` reach the advance. Execution is spawned off
+-- the main loop, so the pull tick runs concurrently on its 1000ms timer and
+-- observes the card in between: terminal task, card still parked in the column
+-- it just ran in.
+--
+-- In that window every one of 0074's predicates passes. The one-owner guard
+-- reads the ACTIVE set (`queued`/`dispatched`/`running`) and a `done` task is
+-- not in it. `excludes_prior_agent` is 0 on Implement, so the SAME implementer
+-- re-pulls the card it just finished and a second full Implement run starts; on
+-- Review and QA the flag only excludes the agent that already holds a `done`
+-- row, so a DIFFERENT reviewer double-reviews. `advance_after_stage` then sees
+-- an active task and refuses, so the card sits until the duplicate drains.
+--
+-- The missing fact is WHICH COLUMN a task served. Without it "this issue has a
+-- `done` task at the current generation" cannot be told apart from "the advance
+-- already happened and the next stage is legitimately waiting to be pulled":
+-- both look identical from `agent_task_queue` alone, and a guard written on the
+-- generation alone would freeze every pipeline at its first stage.
+--
+-- With the stage recorded, the pull statement asks the precise question: does
+-- the card's CURRENT column already hold a `done` task at the card's CURRENT
+-- generation? In the finalize window the answer is yes and the card is skipped;
+-- once advanced, the card sits in a DIFFERENT column and the answer is no.
+-- Scoping to the current generation is what keeps a re-enqueued card (moved back
+-- to an earlier stage for another pass) pullable rather than frozen by its own
+-- history.
+--
+-- Additive `ALTER TABLE ... ADD COLUMN` with no default, the O(1) catalog change
+-- 0074 and 0076 used, safe on a populated home. NULL is meaningful and means
+-- "this task did not come from a board column": every pre-existing row, and
+-- every task written by the push paths (`run_card`, the squad leader brief, an
+-- infra retry) that never consulted a board. Only the pull statement writes it,
+-- so only a pull is subject to the finished-stage guard.
+ALTER TABLE agent_task_queue ADD COLUMN board_column_id TEXT;
+
+-- The guard's probe: given a candidate card, "does this issue have a `done` task
+-- in THIS column?". `(issue_id, board_column_id)` is the selective prefix and
+-- `status` completes the probe inside the index rather than fetching each row.
+-- Partial, so the NULL `board_column_id` of every push-path task, which is the
+-- overwhelming majority of the table, stays out of the index entirely.
+CREATE INDEX idx_task_issue_board_column
+    ON agent_task_queue (issue_id, board_column_id, status)
+    WHERE board_column_id IS NOT NULL;
