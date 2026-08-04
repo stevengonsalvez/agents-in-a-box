@@ -179,15 +179,27 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 
     // ── notifyd processes ───────────────────────────────────────────────────────
     let mut hangar = vec![
-        Span::styled("  Hangar daemon ", Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  Hangar daemon ",
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        ),
         status_dot(state.hangar_running),
-        Span::styled(format!("    {}", state.hangar_reason), Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            format!("    {}", state.hangar_reason),
+            Style::default().fg(MUTED_GRAY),
+        ),
     ];
     if !state.hangar_running {
-        hangar.push(Span::styled("   S start", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+        hangar.push(Span::styled(
+            "   S start",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
     }
     if let Some(status) = &state.hangar_start_status {
-        hangar.push(Span::styled(format!("   {status}"), Style::default().fg(MUTED_GRAY)));
+        hangar.push(Span::styled(
+            format!("   {status}"),
+            Style::default().fg(MUTED_GRAY),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(hangar)), rows[6]);
 

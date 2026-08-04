@@ -1084,7 +1084,9 @@ pub(crate) fn daemons_sync_probe() -> (
     };
     let hangar = crate::fleet::bridge::daemon::socket_path()
         .and_then(|socket| std::os::unix::net::UnixStream::connect(socket).ok())
-        .map_or((false, "not running".to_string()), |_| (true, "serving".to_string()));
+        .map_or((false, "not running".to_string()), |_| {
+            (true, "serving".to_string())
+        });
     (mcp_alive, headroom_consumers, notifyd, approve, hangar)
 }
 
@@ -5102,8 +5104,12 @@ impl AppState {
     }
 
     pub fn spawn_hangar_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else { return; };
-        if o.hangar_start_rx.is_some() { return; }
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.hangar_start_rx.is_some() {
+            return;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         o.hangar_start_rx = Some(rx);
         o.hangar_start_status = Some("starting Hangar daemon…".to_string());
@@ -5112,7 +5118,9 @@ impl AppState {
                 crate::cli::hangar::start_daemon_if_stopped(false)
                     .map(|_| "Hangar started".to_string())
                     .unwrap_or_else(|e| format!("Hangar start failed: {e:#}"))
-            }).await.unwrap_or_else(|e| format!("Hangar start failed: {e}"));
+            })
+            .await
+            .unwrap_or_else(|e| format!("Hangar start failed: {e}"));
             let _ = tx.send(line);
         });
     }
