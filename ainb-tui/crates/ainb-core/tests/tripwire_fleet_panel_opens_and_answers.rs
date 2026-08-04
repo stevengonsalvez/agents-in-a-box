@@ -1,5 +1,5 @@
 //! Tripwire: the Fleet panel opens from Home, renders Hangar's authoritative
-//! Fleet snapshot, switches across operator lenses, completes a tabbed
+//! Fleet snapshot, switches across operator lenses, completes a vertical-card
 //! multi-question ASK, submits one versioned structured answer batch, and
 //! returns to Home via `Esc`.
 //!
@@ -481,11 +481,15 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
 
     send_key(&session, "Enter");
     let interview = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains("STRUCTURED INTERVIEW") && c.contains("Scope") && c.contains("Validation")
+        c.contains("STRUCTURED INTERVIEW")
+            && c.contains("Scope")
+            && c.contains("Validation")
+            && c.contains("┌")
+            && c.contains("└")
     });
     let Some(interview_cap) = interview else {
         let last = capture_pane(&session);
-        panic!("Fleet did not open tabbed interview; last capture:\n---\n{last}\n---");
+        panic!("Fleet did not open vertical-card interview; last capture:\n---\n{last}\n---");
     };
     assert!(
         interview_cap.contains("What release scope should Fleet use?"),
@@ -499,12 +503,12 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     send_key(&session, "Space");
     demo_pause();
     send_key(&session, "Right");
-    let tabbed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+    let rollout_card = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
         c.contains("Rollout") && c.contains("When should the release launch?")
     });
     assert!(
-        tabbed.is_some(),
-        "Right arrow did not move to Rollout:\n{}",
+        rollout_card.is_some(),
+        "Right arrow did not focus Rollout card:\n{}",
         capture_pane(&session)
     );
     demo_pause();
