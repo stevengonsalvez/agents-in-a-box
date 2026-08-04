@@ -16,11 +16,13 @@ const FG: Color = Color::rgb(226, 232, 240);
 const MUTED: Color = Color::rgb(148, 163, 184);
 const GOLD: Color = Color::rgb(251, 191, 36);
 const BLUE: Color = Color::rgb(96, 165, 250);
-const GREEN: Color = Color::rgb(94, 234, 212);
-const ALERT: Color = Color::rgb(251, 113, 133);
+const VIOLET: Color = Color::rgb(185, 140, 235);
+const GREEN: Color = Color::rgb(110, 200, 130);
+const ALERT: Color = Color::rgb(220, 90, 90);
 const SURFACE: Color = Color::rgb(15, 23, 42);
 const ACTIVE_CHIP: Color = Color::rgb(30, 64, 175);
-const SELECTED_ROW: Color = Color::rgb(30, 41, 59);
+const CARD_BORDER: Color = Color::rgb(70, 80, 110);
+const SELECTED_OUTLINE: Color = Color::rgb(210, 130, 90);
 const BOLD: u16 = 1;
 
 /// Capability wire shape accepted from current and planned daemon snapshots.
@@ -1822,7 +1824,7 @@ pub fn render_fleet(
     let visible = state.visible_sessions();
     let header_y = top.saturating_add(2);
     let rows_top = header_y.saturating_add(1);
-    const CARD_HEIGHT: u16 = 2;
+    const CARD_HEIGHT: u16 = 4;
     let capacity = usize::from(bottom.saturating_sub(rows_top) / CARD_HEIGHT);
     let selected_index = state
         .selected_key
@@ -1834,8 +1836,8 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = format!("  PRIORITY QUEUE  ·  {} sessions", visible.len());
-        put_str(buffer, 0, header_y, &header, MUTED, list_width);
+        let header = format!("  ACTION QUEUE  ·  {} sessions", visible.len());
+        put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
         put_str(
             buffer,
@@ -1879,14 +1881,21 @@ fn render_focus_summary(
 ) {
     let count =
         |filter: FleetFilter| state.roster.iter().filter(|session| filter.matches(session)).count();
-    let summary = format!(
-        "{} need you   {} running   {} idle   {} done",
-        count(FleetFilter::NeedsInput),
-        count(FleetFilter::Running),
-        count(FleetFilter::Idle),
-        count(FleetFilter::Completed),
-    );
-    put_str(buffer, left, row, &summary, MUTED, right);
+    let chips = [
+        (count(FleetFilter::NeedsInput), "INPUT", GOLD),
+        (count(FleetFilter::Running), "RUN", BLUE),
+        (count(FleetFilter::Idle), "IDLE", VIOLET),
+        (count(FleetFilter::Completed), "DONE", GREEN),
+    ];
+    let mut x = left;
+    for (count, label, color) in chips {
+        let chip = format!(" {count} {label} ");
+        if x.saturating_add(chip.chars().count() as u16) >= right {
+            break;
+        }
+        put_str_styled(buffer, x, row, &chip, color, Some(SURFACE), BOLD, right);
+        x = x.saturating_add(chip.chars().count() as u16 + 1);
+    }
 }
 
 fn render_lenses(buffer: &mut WireBuffer, left: u16, row: u16, right: u16, state: &FleetPaneState) {
@@ -1987,49 +1996,95 @@ fn render_session_card(
     selected: bool,
     now_ms: i64,
 ) {
-    let marker = if selected { "▸" } else { " " };
-    let card_width = usize::from(right).saturating_sub(10).max(12);
-    let identity = truncate_ellipsis(&session.repository_label(), card_width);
-    let operator_state = home_state_label(session);
-    let age = format_age(now_ms, session.last_observed_at);
-    let title = format!("{marker} {identity}  {operator_state}  {age}");
-    let metadata = format!(
-        "  {}  ·  {}  ·  {}",
-        truncate_ellipsis(
-            &session.branch_label(),
-            usize::from(right).saturating_sub(24).max(8),
-        ),
-        provider_label(&session.provider),
-        session.attachment_label()
-    );
-    let color = if selected {
-        FG
+    if right < 8 {
+        return;
+    }
+    let border = if selected {
+        SELECTED_OUTLINE
     } else {
-        operator_state_color(session)
+        CARD_BORDER
     };
-    put_str_styled(
+    let status = home_state_label(session);
+    let status_color = operator_state_color(session);
+    let inner_right = right.saturating_sub(1);
+    let content_width = usize::from(right.saturating_sub(5)).max(8);
+    let identity = truncate_ellipsis(&session.repository_label(), content_width);
+    let age = format_age(now_ms, session.last_observed_at);
+    let marker = if selected { "▸ " } else { "  " };
+    let branch = truncate_ellipsis(&session.branch_label(), content_width.saturating_sub(18));
+
+    put_char(buffer, 0, row_y, '╭', border);
+    put_char(buffer, inner_right, row_y, '╮', border);
+    put_char(buffer, 0, row_y.saturating_add(1), '│', border);
+    put_char(buffer, inner_right, row_y.saturating_add(1), '│', border);
+    put_char(buffer, 0, row_y.saturating_add(2), '│', border);
+    put_char(buffer, inner_right, row_y.saturating_add(2), '│', border);
+    put_char(buffer, 0, row_y.saturating_add(3), '╰', border);
+    put_char(buffer, inner_right, row_y.saturating_add(3), '╯', border);
+    for x in 1..inner_right {
+        put_char(buffer, x, row_y, '─', border);
+    }
+
+    let age_width = age.chars().count() as u16;
+    let status_label = if selected {
+        let action = available_action_labels(session).into_iter().next().unwrap_or_default();
+        format!(" {status}  ·  {action} ")
+    } else {
+        format!(" {status} ")
+    };
+    let status_width =
+        usize::from(inner_right.saturating_sub(age_width.saturating_add(4)).saturating_sub(2));
+    put_str(
         buffer,
-        0,
+        2,
         row_y,
-        &title,
-        color,
-        selected.then_some(SELECTED_ROW),
-        if selected { BOLD } else { 0 },
-        right,
+        &truncate_ellipsis(&status_label, status_width),
+        status_color,
+        inner_right,
+    );
+    put_str(
+        buffer,
+        inner_right.saturating_sub(age_width.saturating_add(1)),
+        row_y,
+        &age,
+        MUTED,
+        inner_right,
     );
     put_str_styled(
         buffer,
-        0,
+        2,
         row_y.saturating_add(1),
-        &metadata,
-        if selected { MUTED } else { MUTED },
-        selected.then_some(SELECTED_ROW),
-        0,
-        right,
+        &format!("{marker}{identity}"),
+        if selected {
+            FG
+        } else {
+            operator_state_color(session)
+        },
+        None,
+        selected.then_some(BOLD).unwrap_or(0),
+        inner_right,
     );
+    put_str(
+        buffer,
+        2,
+        row_y.saturating_add(2),
+        &format!(
+            "{branch}  ·  {}  ·  {}",
+            provider_label(&session.provider),
+            session.attachment_label()
+        ),
+        MUTED,
+        inner_right,
+    );
+    for x in 1..inner_right {
+        put_char(buffer, x, row_y.saturating_add(3), '─', border);
+    }
 }
 
 fn home_state_label(session: &FleetSessionRow) -> &'static str {
+    if session.attention_state.eq_ignore_ascii_case("ERROR") {
+        return "ERROR";
+    }
     match session.operator_state() {
         "NEEDS INPUT" => "INPUT",
         "COMPLETED" => "DONE",
@@ -2048,10 +2103,14 @@ fn provider_label(provider: &str) -> &'static str {
 }
 
 fn operator_state_color(session: &FleetSessionRow) -> Color {
+    if session.attention_state.eq_ignore_ascii_case("ERROR") {
+        return ALERT;
+    }
     match session.operator_state() {
         "NEEDS INPUT" => attention_color(&session.attention_state),
-        "RUNNING" => GREEN,
-        "COMPLETED" => MUTED,
+        "RUNNING" => BLUE,
+        "IDLE" => VIOLET,
+        "COMPLETED" => GREEN,
         "UNKNOWN" => MUTED,
         _ => FG,
     }
@@ -2086,46 +2145,84 @@ fn render_detail(
         return;
     };
     let mut y = top;
-    let detail_width = usize::from(right.saturating_sub(left).saturating_sub(1)).max(1);
+    put_str(buffer, left, y, "NOW", GOLD, right);
+    y = y.saturating_add(1);
+    let card_left = left;
+    let card_right = right.saturating_sub(1);
+    let border = if session.is_actionable() {
+        GOLD
+    } else {
+        CARD_BORDER
+    };
+    if card_right > card_left.saturating_add(3) && y.saturating_add(4) < bottom {
+        for x in card_left.saturating_add(1)..card_right {
+            put_char(buffer, x, y, '─', border);
+            put_char(buffer, x, y.saturating_add(4), '─', border);
+        }
+        put_char(buffer, card_left, y, '╭', border);
+        put_char(buffer, card_right, y, '╮', border);
+        put_char(buffer, card_left, y.saturating_add(4), '╰', border);
+        put_char(buffer, card_right, y.saturating_add(4), '╯', border);
+        for card_y in y.saturating_add(1)..y.saturating_add(4) {
+            put_char(buffer, card_left, card_y, '│', border);
+            put_char(buffer, card_right, card_y, '│', border);
+        }
+    }
+    let card_content_left = left.saturating_add(2);
+    let card_content_right = card_right;
+    let card_width = usize::from(card_content_right.saturating_sub(card_content_left)).max(1);
+    put_str(
+        buffer,
+        card_content_left,
+        y,
+        home_state_label(session),
+        operator_state_color(session),
+        card_content_right,
+    );
+    y = y.saturating_add(1);
     put_str_styled(
         buffer,
-        left,
+        card_content_left,
         y,
-        &truncate_ellipsis(&session.repository_label(), detail_width),
+        &truncate_ellipsis(&session.repository_label(), card_width),
         FG,
         None,
         BOLD,
-        right,
+        card_content_right,
     );
     y = y.saturating_add(1);
     put_str(
         buffer,
-        left,
+        card_content_left,
         y,
-        &truncate_ellipsis(&session.branch_label(), detail_width),
+        &truncate_ellipsis(&session.branch_label(), card_width),
         BLUE,
-        right,
+        card_content_right,
     );
     y = y.saturating_add(1);
 
     let age = format_age(state.now_ms, session.last_observed_at);
     put_str(
         buffer,
-        left,
+        card_content_left,
         y,
         &format!(
-            "{}  ·  {}  ·  {}  ·  {age}",
-            home_state_label(session),
+            "{}  ·  {}  ·  {age}",
             provider_label(&session.provider),
             session.attachment_label()
         ),
-        operator_state_color(session),
-        right,
+        MUTED,
+        card_content_right,
     );
     y = y.saturating_add(2);
 
+    put_str(buffer, left, y, "QUEUE PULSE", MUTED, right);
+    y = y.saturating_add(1);
+    render_focus_summary(buffer, left, y, right, state);
+    y = y.saturating_add(2);
+
     if session.is_actionable() {
-        put_str(buffer, left, y, "WHAT NEEDS YOU", GOLD, right);
+        put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
         if let Some(question) = session
             .current_request
@@ -2926,6 +3023,15 @@ mod tests {
             output.push(character);
         }
         output.trim_end().to_string()
+    }
+
+    fn final_cell(buffer: &WireBuffer, x: u16, y: u16) -> Option<&Cell> {
+        buffer
+            .cells
+            .iter()
+            .rev()
+            .find(|(coord, _)| coord.x == x && coord.y == y)
+            .map(|(_, cell)| cell)
     }
 
     #[test]
@@ -3795,27 +3901,59 @@ mod tests {
     }
 
     #[test]
-    fn attention_first_render_uses_priority_cards_and_compact_action_detail() {
+    fn attention_first_render_uses_operator_cards_and_compact_action_detail() {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
         assert!(row_text(&buffer, 0, 120).contains("1 Needs input 2"));
         assert!(row_text(&buffer, 0, 120).contains("5 All 3"));
         let header = row_text(&buffer, 2, 90);
-        let first_row = row_text(&buffer, 3, 90);
-        assert!(row_text(&buffer, 1, 90).contains("2 need you"));
-        assert!(header.contains("PRIORITY QUEUE"));
-        assert!(first_row.contains("agents-in-a-box"));
-        assert!(first_row.contains("INPUT"));
-        assert!(row_text(&buffer, 4, 90).contains("claude/ask"));
-        assert!(row_text(&buffer, 4, 90).contains("CLAUDE"));
-        assert!(row_text(&buffer, 4, 90).contains("TMUX"));
+        let card_status = row_text(&buffer, 3, 90);
+        assert!(row_text(&buffer, 1, 90).contains("2 INPUT"));
+        assert!(header.contains("ACTION QUEUE"));
+        assert!(card_status.contains("INPUT"));
+        assert!(card_status.contains("Enter Answer"));
+        assert!(row_text(&buffer, 4, 90).contains("agents-in-a-box"));
+        assert!(row_text(&buffer, 5, 90).contains("claude/ask"));
+        assert!(row_text(&buffer, 5, 90).contains("CLAUDE"));
+        assert!(row_text(&buffer, 5, 90).contains("TMUX"));
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("WHAT NEEDS YOU"));
+        assert!(rendered.contains("NOW"));
+        assert!(rendered.contains("QUEUE PULSE"));
+        assert!(rendered.contains("NEEDS YOU"));
         assert!(rendered.contains("Enter Answer"));
         assert!(!rendered.contains("CONNECTION"));
         assert!(!rendered.contains("REPOSITORY / BRANCH"));
+    }
+
+    #[test]
+    fn operator_cards_keep_semantic_colours_and_selected_outline_without_fill() {
+        let mut error = session("error", "claude", "IDLE", "ERROR", "managed");
+        error.current_request = Some(serde_json::json!({"message": "review failure"}));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![
+            session("input", "claude", "IDLE", "ASK", "managed"),
+            session("running", "codex", "RUNNING", "NONE", "managed"),
+            session("idle", "codex", "IDLE", "NONE", "managed"),
+            session("done", "claude", "COMPLETED", "NONE", "managed"),
+            error,
+        ]);
+        state = apply(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 29, &state);
+
+        assert_eq!(
+            final_cell(&buffer, 0, 3).and_then(|cell| cell.fg),
+            Some(SELECTED_OUTLINE)
+        );
+        assert_eq!(final_cell(&buffer, 2, 4).and_then(|cell| cell.bg), None);
+        for color in [GOLD, BLUE, VIOLET, GREEN, ALERT] {
+            assert!(
+                buffer.cells.iter().any(|(_, cell)| cell.fg == Some(color)),
+                "semantic colour {color:?} missing from Fleet cards"
+            );
+        }
     }
 
     #[test]
@@ -3878,7 +4016,7 @@ mod tests {
         assert!(rendered.contains("REMOTE"));
         assert!(rendered.contains("NONE"));
         assert!(rendered.contains("branch unknown"));
-        assert!(rendered.contains("PRIORITY QUEUE"));
+        assert!(rendered.contains("ACTION QUEUE"));
         assert_eq!(
             wrap_text("Controls should never split ordinary words", 18),
             vec!["Controls should", "never split", "ordinary words"]

@@ -27,6 +27,8 @@
 // `AtomicBool` guard) so key-repeat can't spawn unbounded worker threads or
 // double-send an answer to an agent.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +58,27 @@ pub enum FleetDaemonHealth {
     Offline(String),
 }
 
+/// Git labels resolved by the subscription worker, never by the render loop.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetGitContext {
+    pub repository_name: Option<String>,
+    pub branch_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FleetGitCacheEntry {
+    head: Option<String>,
+    context: FleetGitContext,
+}
+
+/// A complete Fleet snapshot plus worker-resolved labels for its session CWDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSnapshotUpdate {
+    pub snapshot: FleetSnapshot,
+    /// Keyed by the exact CWD carried by each session in `snapshot`.
+    pub git_contexts: HashMap<String, FleetGitContext>,
+}
+
 impl FleetDaemonHealth {
     /// Whether authoritative control RPCs may be trusted right now.
     #[must_use]
@@ -68,7 +91,7 @@ impl FleetDaemonHealth {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetHostUpdate {
     /// Complete authoritative state at one durable revision.
-    Snapshot(FleetSnapshot),
+    Snapshot(FleetSnapshotUpdate),
     /// Subscription connection health changed.
     Health(FleetDaemonHealth),
 }
@@ -105,12 +128,13 @@ pub fn spawn_fleet_subscription(
 async fn run_fleet_subscription(updates: FleetHostUpdateSink, initial_cursor: i64) {
     let mut cursor = initial_cursor.max(0);
     let mut attempt = 0_u32;
+    let mut git_context_cache = HashMap::new();
     loop {
         publish_host_update(
             &updates,
             FleetHostUpdate::Health(FleetDaemonHealth::Connecting),
         );
-        let outcome = run_fleet_connection(&updates, &mut cursor).await;
+        let outcome = run_fleet_connection(&updates, &mut cursor, &mut git_context_cache).await;
         let detail = outcome.err().unwrap_or_else(|| "Fleet stream ended".to_string());
         publish_host_update(
             &updates,
@@ -124,6 +148,7 @@ async fn run_fleet_subscription(updates: FleetHostUpdateSink, initial_cursor: i6
 async fn run_fleet_connection(
     updates: &FleetHostUpdateSink,
     cursor: &mut i64,
+    git_context_cache: &mut HashMap<String, FleetGitCacheEntry>,
 ) -> Result<(), String> {
     let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
         .map_err(|error| error.to_string())?;
@@ -133,17 +158,18 @@ async fn run_fleet_connection(
         .map_err(|error| error.to_string())?;
 
     *cursor = subscription.snapshot.head_revision;
-    publish_host_update(updates, FleetHostUpdate::Snapshot(subscription.snapshot));
+    publish_snapshot(updates, subscription.snapshot, git_context_cache);
 
     for event in subscription.replay {
-        reconcile_revision(&client, updates, cursor, event.revision).await?;
+        reconcile_revision(&client, updates, cursor, event.revision, git_context_cache).await?;
     }
     publish_host_update(updates, FleetHostUpdate::Health(FleetDaemonHealth::Online));
 
     loop {
         match stream.next_event().await.map_err(|error| error.to_string())? {
             FleetStreamEvent::Revision(event) => {
-                reconcile_revision(&client, updates, cursor, event.revision).await?;
+                reconcile_revision(&client, updates, cursor, event.revision, git_context_cache)
+                    .await?;
             }
             FleetStreamEvent::ResyncRequired => {
                 return Err(format!("Fleet stream lagged after revision {cursor}"));
@@ -157,6 +183,7 @@ async fn reconcile_revision(
     updates: &FleetHostUpdateSink,
     cursor: &mut i64,
     revision: i64,
+    git_context_cache: &mut HashMap<String, FleetGitCacheEntry>,
 ) -> Result<(), String> {
     if revision <= *cursor {
         return Ok(());
@@ -169,8 +196,107 @@ async fn reconcile_revision(
         ));
     }
     *cursor = snapshot.head_revision;
-    publish_host_update(updates, FleetHostUpdate::Snapshot(snapshot));
+    publish_snapshot(updates, snapshot, git_context_cache);
     Ok(())
+}
+
+fn publish_snapshot(
+    updates: &FleetHostUpdateSink,
+    snapshot: FleetSnapshot,
+    git_context_cache: &mut HashMap<String, FleetGitCacheEntry>,
+) {
+    let git_contexts = cached_fleet_git_contexts(
+        snapshot.sessions.iter().map(|session| session.cwd.clone()),
+        git_context_cache,
+        resolve_fleet_git_context,
+    );
+    publish_host_update(
+        updates,
+        FleetHostUpdate::Snapshot(FleetSnapshotUpdate {
+            snapshot,
+            git_contexts,
+        }),
+    );
+}
+
+fn cached_fleet_git_contexts<I, F>(
+    cwds: I,
+    cache: &mut HashMap<String, FleetGitCacheEntry>,
+    mut resolve: F,
+) -> HashMap<String, FleetGitContext>
+where
+    I: IntoIterator<Item = String>,
+    F: FnMut(&str) -> FleetGitContext,
+{
+    let mut contexts = HashMap::new();
+    for cwd in cwds {
+        if cwd.is_empty() {
+            continue;
+        }
+        let canonical_cwd = canonical_cwd(&cwd);
+        let head = fleet_git_head(&canonical_cwd);
+        let stale = cache
+            .get(&canonical_cwd)
+            .is_none_or(|entry| entry.head != head);
+        if stale {
+            cache.insert(
+                canonical_cwd.clone(),
+                FleetGitCacheEntry {
+                    head,
+                    context: resolve(&canonical_cwd),
+                },
+            );
+        }
+        let context = cache
+            .get(&canonical_cwd)
+            .expect("cache entry inserted for nonempty cwd")
+            .context
+            .clone();
+        contexts.insert(cwd, context);
+    }
+    contexts
+}
+
+fn canonical_cwd(cwd: &str) -> String {
+    std::fs::canonicalize(cwd)
+        .unwrap_or_else(|_| PathBuf::from(cwd))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Detect a branch or detached-HEAD change without resolving full labels on
+/// every replayed snapshot. This runs on the subscription worker, never render.
+fn fleet_git_head(cwd: &str) -> Option<String> {
+    let repository = git2::Repository::discover(Path::new(cwd)).ok()?;
+    let head = repository.head().ok()?;
+    Some(format!(
+        "{}:{}",
+        head.name().unwrap_or("HEAD"),
+        head.target().map_or_else(|| "unborn".into(), |oid| oid.to_string())
+    ))
+}
+
+fn resolve_fleet_git_context(cwd: &str) -> FleetGitContext {
+    let Ok(repository) = git2::Repository::discover(Path::new(cwd)) else {
+        return FleetGitContext::default();
+    };
+    let repository_name = repository.workdir().and_then(|worktree_root| {
+        let source_repository =
+            crate::interactive::InteractiveSessionManager::get_source_repository(worktree_root)
+                .unwrap_or_else(|| worktree_root.to_path_buf());
+        source_repository.file_name().and_then(|name| name.to_str()).map(str::to_string)
+    });
+    let branch_name = repository.head().ok().and_then(|head| {
+        if head.is_branch() {
+            head.shorthand().map(str::to_string)
+        } else {
+            head.target().map(|oid| oid.to_string().chars().take(8).collect())
+        }
+    });
+    FleetGitContext {
+        repository_name,
+        branch_name,
+    }
 }
 
 fn publish_host_update(updates: &FleetHostUpdateSink, update: FleetHostUpdate) {
@@ -528,6 +654,136 @@ fn publish(feedback: &Mutex<ActionFeedback>, message: String) {
 mod tests {
     use super::*;
     use crate::fleet::types::{Session, SessionSource};
+
+    #[test]
+    fn git_context_cache_resolves_once_per_distinct_cwd_across_replayed_snapshots() {
+        let temp = tempfile::tempdir().expect("create cwd fixture");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(&first).expect("create first cwd");
+        std::fs::create_dir_all(&second).expect("create second cwd");
+        let first = first.to_string_lossy().into_owned();
+        let second = second.to_string_lossy().into_owned();
+        let mut cache = HashMap::new();
+        let mut resolve_calls = Vec::new();
+
+        let first_snapshot =
+            cached_fleet_git_contexts(vec![first.clone(), first.clone()], &mut cache, |cwd| {
+                resolve_calls.push(cwd.to_string());
+                FleetGitContext::default()
+            });
+        let second_snapshot =
+            cached_fleet_git_contexts(vec![first.clone(), second.clone()], &mut cache, |cwd| {
+                resolve_calls.push(cwd.to_string());
+                FleetGitContext::default()
+            });
+
+        assert_eq!(
+            resolve_calls.len(),
+            2,
+            "replayed snapshots must resolve once per distinct canonical cwd, got {resolve_calls:?}"
+        );
+        assert!(
+            first_snapshot.contains_key(&first),
+            "first CWD context missing"
+        );
+        assert!(
+            second_snapshot.contains_key(&first),
+            "cached first CWD context missing"
+        );
+        assert!(
+            second_snapshot.contains_key(&second),
+            "changed CWD context missing"
+        );
+    }
+
+    fn seed_git_repository(path: &Path) -> (git2::Repository, git2::Oid) {
+        std::fs::create_dir_all(path).expect("create repository directory");
+        let repository = git2::Repository::init(path).expect("initialize repository");
+        std::fs::write(path.join("README.md"), "seed\n").expect("write seed file");
+        let mut index = repository.index().expect("open index");
+        index.add_path(Path::new("README.md")).expect("stage seed file");
+        index.write().expect("write index");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repository.find_tree(tree_id).expect("find tree");
+        let signature =
+            git2::Signature::now("Fleet Test", "fleet@example.invalid").expect("create signature");
+        let commit = repository
+            .commit(Some("HEAD"), &signature, &signature, "seed", &tree, &[])
+            .expect("create seed commit");
+        drop(tree);
+        (repository, commit)
+    }
+
+    #[test]
+    fn git_context_cache_refreshes_when_branch_changes_at_same_cwd() {
+        let temp = tempfile::tempdir().expect("create repository fixture");
+        let path = temp.path().join("branch-repo");
+        let (repository, commit) = seed_git_repository(&path);
+        repository
+            .branch("next", &repository.find_commit(commit).expect("find commit"), false)
+            .expect("create next branch");
+        let cwd = path.to_string_lossy().into_owned();
+        let mut cache = HashMap::new();
+        let mut resolves = 0;
+
+        let first = cached_fleet_git_contexts(vec![cwd.clone()], &mut cache, |cwd| {
+            resolves += 1;
+            resolve_fleet_git_context(cwd)
+        });
+        repository.set_head("refs/heads/next").expect("switch branch");
+        let second = cached_fleet_git_contexts(vec![cwd.clone()], &mut cache, |cwd| {
+            resolves += 1;
+            resolve_fleet_git_context(cwd)
+        });
+
+        assert_eq!(resolves, 2, "branch change must refresh cached labels");
+        assert_ne!(first[&cwd].branch_name.as_deref(), Some("next"));
+        assert_eq!(second[&cwd].branch_name.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn worker_git_context_discovers_linked_worktree_from_nested_cwd() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let source_path = temp.path().join("source-repo");
+        let (_source, _commit) = seed_git_repository(&source_path);
+        let worktree_path = temp.path().join("linked-worktree");
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "feature/fleet-labels"])
+            .arg(&worktree_path)
+            .arg("HEAD")
+            .current_dir(&source_path)
+            .output()
+            .expect("run git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let nested = worktree_path.join("nested/path");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+
+        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
+
+        assert_eq!(context.repository_name.as_deref(), Some("source-repo"));
+        assert_eq!(context.branch_name.as_deref(), Some("feature/fleet-labels"));
+    }
+
+    #[test]
+    fn worker_git_context_uses_short_commit_for_detached_head() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let repository_path = temp.path().join("detached-repo");
+        let (repository, commit) = seed_git_repository(&repository_path);
+        repository.set_head_detached(commit).expect("detach HEAD");
+        let nested = repository_path.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+
+        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
+
+        assert_eq!(context.repository_name.as_deref(), Some("detached-repo"));
+        let expected_commit = commit.to_string();
+        assert_eq!(context.branch_name.as_deref(), Some(&expected_commit[..8]));
+    }
 
     fn session(id: &str, cwd: &str, src: SessionSource) -> Session {
         Session {

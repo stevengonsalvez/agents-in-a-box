@@ -242,6 +242,9 @@ struct RedrawGovernor {
     /// `true` once the streak first exceeded the cap; suppresses both
     /// further honoring and repeat warnings until the next `reset`.
     tripped: bool,
+    /// One low-frequency probe has been scheduled after the cap tripped.
+    /// Prevents a persistent non-animation retry from spinning at frame rate.
+    probe_pending: bool,
 }
 
 impl RedrawGovernor {
@@ -255,7 +258,9 @@ impl RedrawGovernor {
     const fn observe_redraw(&mut self) -> RedrawDecision {
         if self.tripped {
             // Already over budget — keep dropping hints silently until a
-            // reset re-arms the animation.
+            // reset re-arms the animation. An idle-tick probe consumed this
+            // render, so a later tick may schedule the next bounded retry.
+            self.probe_pending = false;
             return RedrawDecision {
                 honor: false,
                 just_tripped: false,
@@ -282,6 +287,19 @@ impl RedrawGovernor {
     const fn reset(&mut self) {
         self.consecutive = 0;
         self.tripped = false;
+        self.probe_pending = false;
+    }
+
+    /// Permit exactly one render on the runtime's low-frequency idle tick
+    /// after a runaway stream was capped. This lets backpressured plugins
+    /// retry retained work without restoring a frame-rate redraw loop.
+    const fn schedule_probe(&mut self) -> bool {
+        if self.tripped && !self.probe_pending {
+            self.probe_pending = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -488,7 +506,10 @@ impl PluginTask {
                         InboundEvent::Eof | InboundEvent::Error => self.handle_exit().await,
                     }
                 }
-                _ = idle_tick.tick() => self.maybe_idle_reap().await,
+                _ = idle_tick.tick() => {
+                    self.maybe_idle_reap().await;
+                    self.retry_capped_redraw();
+                }
             }
         }
     }
@@ -1462,6 +1483,20 @@ impl PluginTask {
         }
     }
 
+    /// Repaint a capped plugin at most once per idle tick (five seconds).
+    /// The next `redraw = true` remains capped, while plugins using the frame
+    /// to retry retained I/O get another nonblocking enqueue attempt.
+    fn retry_capped_redraw(&mut self) {
+        if !matches!(*self.state.read(), LifecycleState::Running)
+            || !self.redraw_governor.schedule_probe()
+        {
+            return;
+        }
+        if let Some(flag) = self.dirty.read().get(&self.plugin.id) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     async fn shutdown(&mut self) {
         if self.child.is_none() {
             return;
@@ -1951,6 +1986,29 @@ mod tests {
         );
         assert!(!after_input.just_tripped);
         assert_eq!(gov.consecutive, 1, "streak restarts at 1 after reset");
+    }
+
+    #[test]
+    fn governor_allows_one_idle_probe_after_cap() {
+        let mut gov = RedrawGovernor::default();
+        for _ in 0..=MAX_CONSECUTIVE_REDRAWS {
+            gov.observe_redraw();
+        }
+
+        assert!(gov.tripped, "fixture must cross the redraw cap");
+        assert!(gov.schedule_probe(), "idle tick schedules one retry render");
+        assert!(
+            !gov.schedule_probe(),
+            "another idle tick cannot queue a second retry before render"
+        );
+        assert!(
+            !gov.observe_redraw().honor,
+            "probe runs once without restoring frame-rate redraw"
+        );
+        assert!(
+            gov.schedule_probe(),
+            "a later idle tick can retry retained work again"
+        );
     }
 
     /// A `redraw = false` frame mid-stream resets the streak just like an

@@ -30,7 +30,7 @@ pub mod plugin;
 pub mod server;
 
 pub use error::{Result, SdkError};
-pub use host_client::HostClient;
+pub use host_client::{HostClient, NotificationEnqueueOutcome};
 pub use plugin::{CliOutput, InitContext, Plugin};
 pub use server::Server;
 

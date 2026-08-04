@@ -53,6 +53,19 @@ use crate::{Result, SdkError};
 /// or a peer-reported `error` envelope.
 pub type RpcOutcome = std::result::Result<serde_json::Value, RpcError>;
 
+/// Result of attempting to enqueue a notification without waiting for writer
+/// capacity. Callers that run on the inbound event path must retain work on
+/// [`NotificationEnqueueOutcome::Full`] and retry from a later redraw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationEnqueueOutcome {
+    /// Writer accepted the frame.
+    Queued,
+    /// Writer queue is saturated. No frame was sent.
+    Full,
+    /// Writer task has stopped. No later retry can succeed.
+    Closed,
+}
+
 /// Pending-responses table shared between the server reader and the
 /// host client. Reader fills oneshots; client drains them.
 pub(crate) type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<RpcOutcome>>>>;
@@ -117,6 +130,26 @@ impl HostClient {
             .send(frame)
             .await
             .map_err(|_| SdkError::plugin("frames channel closed — server is shutting down"))
+    }
+
+    /// Enqueue a JSON-RPC notification without waiting for writer capacity.
+    fn try_send_notification<P: Serialize + Send + Sync>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<NotificationEnqueueOutcome> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let bytes = serde_json::to_vec(&body)?;
+        let frame = framing::encode(&bytes);
+        Ok(match self.inner.frames_tx.try_send(frame) {
+            Ok(()) => NotificationEnqueueOutcome::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => NotificationEnqueueOutcome::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => NotificationEnqueueOutcome::Closed,
+        })
     }
 
     /// Send a JSON-RPC request and await the response.
@@ -356,6 +389,23 @@ impl HostClient {
         self.send_notification(methods::HOST_UNIX_SOCKET_SEND, &params).await
     }
 
+    /// Attempt a unix-socket write without blocking the inbound event reader.
+    ///
+    /// `Full` means the host writer is backpressured. Keep the logical write
+    /// pending and retry later; awaiting [`Self::unix_socket_send`] from an
+    /// event handler can otherwise prevent that handler from receiving keys.
+    pub fn try_unix_socket_send(
+        &self,
+        stream_id: impl Into<String>,
+        bytes: impl Into<bytes::Bytes>,
+    ) -> Result<NotificationEnqueueOutcome> {
+        let params = UnixSocketSendParams {
+            stream_id: stream_id.into(),
+            bytes: bytes.into(),
+        };
+        self.try_send_notification(methods::HOST_UNIX_SOCKET_SEND, &params)
+    }
+
     /// Close a previously dialled unix socket. Notification —
     /// fire-and-forget. The host stops emitting `socket:<stream_id>`
     /// events; closure is also implicit on plugin shutdown.
@@ -500,6 +550,30 @@ mod tests {
         assert_eq!(v["method"], "host/log");
         assert!(v.get("id").is_none(), "notification must not have id");
         assert_eq!(v["params"]["level"], "info");
+    }
+
+    #[test]
+    fn nonblocking_notification_reports_queue_pressure() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (client, _pending) = HostClient::new(tx);
+
+        assert_eq!(
+            client
+                .try_unix_socket_send("stream-1", bytes::Bytes::from_static(b"one"))
+                .unwrap(),
+            NotificationEnqueueOutcome::Queued
+        );
+        assert_eq!(
+            client
+                .try_unix_socket_send("stream-1", bytes::Bytes::from_static(b"two"))
+                .unwrap(),
+            NotificationEnqueueOutcome::Full
+        );
+
+        let frame = rx.try_recv().expect("first notification queued");
+        let body = decode_body(&frame);
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["method"], "host/unix_socket_send");
     }
 
     #[tokio::test]
