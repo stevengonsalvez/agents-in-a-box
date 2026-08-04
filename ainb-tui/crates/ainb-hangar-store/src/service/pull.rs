@@ -63,7 +63,7 @@
 //!    other predicate passes (predicate 3 reads the ACTIVE set, and a `done`
 //!    task is not in it). Without this the same implementer re-pulls the card it
 //!    just finished, and a different reviewer double-reviews. `board_column_id`
-//!    (migration 0077) is what makes the question answerable; see that file for
+//!    (migration 0078) is what makes the question answerable; see that file for
 //!    why the generation alone is not enough. Scoping to the current generation
 //!    is what keeps a RE-ENQUEUED card, moved back to an earlier stage for
 //!    another pass, pullable rather than frozen by its own history.
@@ -398,7 +398,7 @@ RETURNING board_id, column_id";
 /// its pipeline. Without that half, adding `done` here would freeze every
 /// pipeline after its first stage.
 ///
-/// `board_column_id` (migration 0077) records WHICH STAGE the run serves. Only
+/// `board_column_id` (migration 0078) records WHICH STAGE the run serves. Only
 /// the pull writes it; every push-path task leaves it NULL. It exists so the
 /// finished-stage predicate can distinguish "this stage is done and the card has
 /// not advanced yet" (the finalize window, must not re-pull) from "the card DID

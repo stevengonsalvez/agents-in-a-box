@@ -1,4 +1,4 @@
--- Hangar v1 schema, migration 0077: record WHICH pipeline stage a task served.
+-- Hangar v1 schema, migration 0078: record WHICH pipeline stage a task served.
 --
 -- Closes the FINALIZE WINDOW that let one pipeline stage execute TWICE.
 --
