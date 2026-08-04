@@ -214,6 +214,84 @@ async fn dispatch_places_the_card_in_the_first_role_gated_stage() {
     assert_eq!(cards, 1, "one card, one place on the board");
 }
 
+/// A dispatch must be answered with a task belonging to the issue it DISPATCHED,
+/// never with whatever the board happened to rank first.
+///
+/// `assign_fanout` enqueues the issue and then pulls. The pull ordering is
+/// `priority DESC, col.ord DESC, ...`, "pull from the right", which actively
+/// PREFERS a later-stage card. So a card already sitting in Review outranks the
+/// one just placed in Triage, and its task id is what flows out through
+/// `SquadFanout.leader.task_id`, into `BoardCardRunResult.task_id` and the
+/// dispatch log. An operator who cancels or attaches by that id reaches a
+/// DIFFERENT card's agent.
+#[tokio::test]
+async fn a_dispatch_is_answered_with_its_own_cards_task() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+
+    // A SECOND card already sits in Review (ord 3) with an eligible reviewer.
+    // Same priority as the one about to be dispatched, so only the column
+    // ordering separates them.
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-2','ws-1','Already in review','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("second issue");
+    let (board_id, review_col): (String, String) = sqlx::query_as(
+        "SELECT b.id, c.id FROM board AS b JOIN board_column AS c ON c.board_id = b.id \
+          WHERE b.workspace_id='ws-1' AND c.name='Review'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("review column");
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES (?1,'i-2',?2,0,0)",
+    )
+    .bind(&board_id)
+    .bind(&review_col)
+    .execute(pool)
+    .await
+    .expect("park the second card in review");
+
+    let out = SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("fanout");
+
+    assert!(
+        !out.leader.task_id.is_empty(),
+        "the dispatched card has an eligible triager, so a task must exist"
+    );
+    let answered: String =
+        sqlx::query_scalar("SELECT issue_id FROM agent_task_queue WHERE id = ?1")
+            .bind(&out.leader.task_id)
+            .fetch_one(pool)
+            .await
+            .expect("the answered task exists");
+    assert_eq!(
+        answered, "i-1",
+        "the dispatch answered with a task belonging to a DIFFERENT card, so \
+         cancelling or attaching by this id reaches the wrong agent"
+    );
+}
+
 /// Even with NO pipeline provisioned, a squad dispatch is ONE task. The
 /// no-pipeline fallback briefs the leader alone: the member broadcast is gone
 /// outright, not merely bypassed when a pipeline happens to exist.

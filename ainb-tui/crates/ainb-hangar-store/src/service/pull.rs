@@ -155,6 +155,50 @@ impl PullService {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<Option<PulledCard>, sqlx::Error> {
+        Self::pull(pool, runtime_id, None, idgen, clock).await
+    }
+
+    /// Pull ONE eligible card for `runtime_id`, constrained to `issue_id`.
+    ///
+    /// Identical to [`Self::pull_for_runtime`] in every predicate; it merely
+    /// refuses to answer with a different card. The daemon's idle tick wants the
+    /// unconstrained form (take the most urgent work anywhere), but a caller that
+    /// just enqueued ONE card and needs to report the task that owns THAT card
+    /// must not be handed whatever the board ranked first: the pull orders by
+    /// `col.ord DESC` ("pull from the right"), so a card already sitting in a
+    /// LATER stage outranks the one just placed in the first, and its task id
+    /// would flow out as the dispatch's answer.
+    ///
+    /// Returns `Ok(None)` when this card specifically is not pullable right now,
+    /// which is the ordinary "enqueued, waiting for an eligible agent" case.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the statement or a row decode fails.
+    #[tracing::instrument(
+        name = "card.pull_issue",
+        skip(pool, idgen, clock),
+        fields(runtime_id = %runtime_id, issue_id = %issue_id, task_id = tracing::field::Empty, services_role = tracing::field::Empty)
+    )]
+    pub async fn pull_issue_for_runtime(
+        pool: &SqlitePool,
+        runtime_id: &str,
+        issue_id: &str,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<Option<PulledCard>, sqlx::Error> {
+        Self::pull(pool, runtime_id, Some(issue_id), idgen, clock).await
+    }
+
+    /// The shared body of both pull entry points. `only_issue = None` is the
+    /// unconstrained board-wide pull; `Some(id)` narrows it to one card.
+    async fn pull(
+        pool: &SqlitePool,
+        runtime_id: &str,
+        only_issue: Option<&str>,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<Option<PulledCard>, sqlx::Error> {
         let task_id = idgen.new_ulid();
         let now = clock.now_ms();
 
@@ -162,6 +206,7 @@ impl PullService {
             .bind(&task_id)
             .bind(now)
             .bind(runtime_id)
+            .bind(only_issue)
             .fetch_optional(pool)
             .await?;
 
@@ -298,7 +343,12 @@ RETURNING board_id, column_id";
 /// The atomic pull statement: select the most urgent pullable `(card, agent)`
 /// pair for the runtime and INSERT its `queued` task row in one statement.
 ///
-/// `?1` = new task id, `?2` = `created_at` (now), `?3` = `runtime_id`.
+/// `?1` = new task id, `?2` = `created_at` (now), `?3` = `runtime_id`, `?4` =
+/// an OPTIONAL issue to narrow to (NULL = the whole board).
+///
+/// `?4` keeps the constrained and unconstrained pulls ONE statement rather than
+/// two that can drift: a caller that just enqueued one card and must report the
+/// task owning THAT card gets exactly the same six predicates, only narrower.
 ///
 /// `agent_kind` is derived from the PULLING AGENT, not from the card. Under pull
 /// the agent is chosen per stage, so the provider CLI that runs the stage must be
@@ -377,6 +427,7 @@ SELECT ?1, \
   JOIN issue AS i ON i.id = bc.issue_id \
   JOIN agent AS a ON a.workspace_id = bd.workspace_id \
  WHERE col.services_role IS NOT NULL \
+   AND (?4 IS NULL OR bc.issue_id = ?4) \
    AND a.runtime_id = ?3 \
    AND a.archived = 0 \
    AND i.state NOT IN ('closed','cancelled') \

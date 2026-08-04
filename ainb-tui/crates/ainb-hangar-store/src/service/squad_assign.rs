@@ -379,7 +379,8 @@ impl SquadAssignService {
             match PipelineService::enqueue(pool, workspace, issue_id, clock).await {
                 Ok(_) => {
                     let pulled =
-                        Self::pull_once_in_workspace(pool, workspace, idgen, clock).await?;
+                        Self::pull_once_in_workspace(pool, workspace, issue_id, idgen, clock)
+                            .await?;
                     return Ok(SquadFanout {
                         leader: SquadAssignment {
                             // The single OWNER of the stage. Empty when the card is
@@ -574,8 +575,8 @@ impl SquadAssignService {
         })
     }
 
-    /// Attempt ONE pull across every runtime in `workspace`, stopping at the
-    /// first that yields.
+    /// Attempt ONE pull of `issue_id` across every runtime in `workspace`,
+    /// stopping at the first that yields.
     ///
     /// Used by [`Self::assign_fanout`] so a squad dispatch answers with the task
     /// that actually owns the work rather than merely "the card is on the board".
@@ -583,10 +584,23 @@ impl SquadAssignService {
     /// makes the dispatch synchronous from the operator's point of view; the
     /// daemon's own tick still covers the case where no agent is eligible yet.
     ///
+    /// # Why this is narrowed to ONE issue
+    ///
+    /// The unconstrained pull answers with whatever the BOARD ranks first, and
+    /// the ranking (`priority DESC, col.ord DESC, ...`, "pull from the right")
+    /// actively PREFERS a later-stage card. A dispatch of a freshly-enqueued
+    /// card, which sits in the FIRST stage, therefore reported the task id of any
+    /// card already sitting further down the pipeline. That id flows through
+    /// `SquadFanout.leader.task_id` into the run result and the dispatch log, so
+    /// an operator cancelling or attaching by it reached a different card's
+    /// agent. The daemon tick still pulls board-wide; only this answer is
+    /// narrowed.
+    ///
     /// At most ONE card is ever taken, whichever runtime wins.
     async fn pull_once_in_workspace(
         pool: &SqlitePool,
         workspace: &WorkspaceId,
+        issue_id: &str,
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<Option<crate::service::pull::PulledCard>, sqlx::Error> {
@@ -596,9 +610,14 @@ impl SquadAssignService {
                 .fetch_all(pool)
                 .await?;
         for runtime_id in runtimes {
-            if let Some(p) =
-                crate::service::pull::PullService::pull_for_runtime(pool, &runtime_id, idgen, clock)
-                    .await?
+            if let Some(p) = crate::service::pull::PullService::pull_issue_for_runtime(
+                pool,
+                &runtime_id,
+                issue_id,
+                idgen,
+                clock,
+            )
+            .await?
             {
                 return Ok(Some(p));
             }

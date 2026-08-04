@@ -225,6 +225,9 @@ async fn pull_mutant(pool: &SqlitePool, id: &str, clause: &str) -> Option<String
         .bind(id)
         .bind(NOW_MS)
         .bind("rt-1")
+        // `?4` narrows the pull to one issue; NULL is the whole board, which is
+        // what every mutation proof exercises.
+        .bind(Option::<&str>::None)
         .fetch_optional(pool)
         .await
         .expect("mutant runs");
