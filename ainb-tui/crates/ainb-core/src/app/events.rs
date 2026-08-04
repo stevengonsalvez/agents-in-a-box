@@ -406,6 +406,13 @@ pub enum AppEvent {
     FleetPanelRefresh, // Fleet panel: force-refresh request
     /// Route one canonical reducer key through main ainb Fleet panel.
     FleetPanelCanonicalKey(FleetKey),
+    /// Forward one click in the rendered structured-interview card stack.
+    FleetPanelAnswerCardClick {
+        column: u16,
+        row: u16,
+        area_width: u16,
+        area_height: u16,
+    },
     /// Apply canonical Fleet roster filter.
     FleetPanelSetFilter(FleetFilter),
     /// Request canonical lifecycle or control action.
@@ -866,6 +873,18 @@ impl EventHandler {
         }
         match event {
             AppEvent::MouseClick { x, y } => {
+                if state.current_screen == screen_ids::FLEET_PANEL
+                    && state.fleet_panel_state.canonical_modal_open()
+                {
+                    let (area_width, area_height) = crossterm::terminal::size().unwrap_or((80, 24));
+                    return Some(AppEvent::FleetPanelAnswerCardClick {
+                        column: x,
+                        row: y,
+                        area_width,
+                        area_height,
+                    });
+                }
+
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
                     if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
                         return None;
@@ -6209,6 +6228,20 @@ impl EventHandler {
             AppEvent::FleetPanelCanonicalKey(key) => {
                 Self::reduce_fleet_event(state, FleetEvent::Key(key));
             }
+            AppEvent::FleetPanelAnswerCardClick {
+                column,
+                row,
+                area_width,
+                area_height,
+            } => Self::reduce_fleet_event(
+                state,
+                FleetEvent::AnswerCardClick {
+                    column,
+                    row,
+                    area_width,
+                    area_height,
+                },
+            ),
             AppEvent::FleetPanelSetFilter(filter) => {
                 Self::reduce_fleet_event(state, FleetEvent::SetFilter(filter));
             }
