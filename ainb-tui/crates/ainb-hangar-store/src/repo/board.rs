@@ -314,11 +314,12 @@ impl BoardRepo {
         Ok(column_id.to_string())
     }
 
-    /// Update a column's `name`, `fsm_state`, and/or `auto_move`.
+    /// Update a column's `name`, `fsm_state`, `auto_move`, and/or `stage_prompt`.
     ///
-    /// `name` / `auto_move`: `None` leaves unchanged. `fsm_state`: the OUTER
-    /// `None` leaves it unchanged; `Some(None)` clears it to NULL (a manual
-    /// column); `Some(Some(s))` sets it.
+    /// `name` / `auto_move`: `None` leaves unchanged. `fsm_state` and
+    /// `stage_prompt` are TRI-STATE: the OUTER `None` leaves it unchanged;
+    /// `Some(None)` clears it to NULL (a manual column / a stage that adds no
+    /// instruction); `Some(Some(s))` sets it.
     ///
     /// # Errors
     ///
@@ -332,6 +333,7 @@ impl BoardRepo {
         name: Option<&str>,
         fsm_state: Option<Option<&str>>,
         auto_move: Option<bool>,
+        stage_prompt: Option<Option<&str>>,
     ) -> Result<(), BoardRepoError> {
         let mut tx = pool.begin().await?;
         Self::ensure_column_in_ws(&mut tx, workspace, board_id, column_id).await?;
@@ -375,6 +377,13 @@ impl BoardRepo {
         if let Some(am) = auto_move {
             sqlx::query("UPDATE board_column SET auto_move = ? WHERE id = ?")
                 .bind(i64::from(am))
+                .bind(column_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(sp) = stage_prompt {
+            sqlx::query("UPDATE board_column SET stage_prompt = ? WHERE id = ?")
+                .bind(sp)
                 .bind(column_id)
                 .execute(&mut *tx)
                 .await?;
@@ -1417,9 +1426,10 @@ mod tests {
         .unwrap();
 
         // Flipping the manual `done` column's auto-move ON now clashes with c1: rejected.
-        let flip = BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c3", None, None, Some(true))
-            .await
-            .unwrap_err();
+        let flip =
+            BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c3", None, None, Some(true), None)
+                .await
+                .unwrap_err();
         assert!(
             matches!(flip, BoardRepoError::DuplicateAutoMove),
             "got {flip:?}"
@@ -1435,6 +1445,7 @@ mod tests {
             None,
             Some(Some("done")),
             Some(true),
+            None,
         )
         .await
         .unwrap();

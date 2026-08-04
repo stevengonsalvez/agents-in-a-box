@@ -5427,9 +5427,10 @@ Provision and inspect the role-gated pull pipeline
 Usage: ainb hangar pipeline [OPTIONS] <COMMAND>
 
 Commands:
-  init  Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
-  show  Show each stage with its role gate, WIP limit and current card count
-  help  Print this message or the help of the given subcommand(s)
+  init          Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+  show          Show each stage with its role gate, WIP limit and current card count
+  stage-prompt  Set (or clear) a stage's prompt addendum: the instruction every card entering that stage carries, whichever agent pulls it
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -5465,6 +5466,25 @@ Usage: ainb hangar pipeline show [OPTIONS]
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug to provision. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar pipeline stage-prompt`
+
+Set (or clear) a stage's prompt addendum: the instruction every card entering that stage carries, whichever agent pulls it
+
+```console
+$ ainb hangar pipeline stage-prompt --help
+Set (or clear) a stage's prompt addendum: the instruction every card entering that stage carries, whichever agent pulls it
+
+Usage: ainb hangar pipeline stage-prompt [OPTIONS] --stage <STAGE>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+      --stage <STAGE>          The stage (board column) name, e.g. `Review`. Case-insensitive
+      --text <TEXT>            The instruction to prepend to every brief pulled from this stage. Omit (or pass `--clear`) to remove it
+      --clear                  Clear the stage's prompt addendum
   -h, --help                   Print help
 ```
 

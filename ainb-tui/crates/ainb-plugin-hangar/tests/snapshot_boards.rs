@@ -49,6 +49,7 @@ fn col(
         fsm_state: fsm.map(str::to_string),
         auto_move: auto,
         cards,
+        health: None,
     }
 }
 
