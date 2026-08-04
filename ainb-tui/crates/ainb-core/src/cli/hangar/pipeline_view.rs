@@ -351,12 +351,23 @@ mod tests {
         );
     }
 
-    /// With colour on, the lights carry 24-bit escapes and the padding is still
-    /// computed off the PLAIN width (a coloured strip lines up identically).
+    /// With colour on, the lights carry 24-bit escapes and every cell is still
+    /// padded to its PLAIN width, so a coloured strip lines up column-for-column
+    /// with the plain one.
+    ///
+    /// TWO stages on purpose. With one stage the only padded region is the end of
+    /// the line, which `stage_strip` then `trim_end`s away in BOTH the coloured
+    /// and the plain path, so the assertion collapses to `"tester ✗" ==
+    /// "tester ✗"` and passes however the padding is computed. A second stage puts
+    /// an interior cell in front of a `│` separator, which makes the pad width
+    /// load-bearing: get it wrong and the separator moves.
     #[test]
     fn lights_are_coloured_and_padding_ignores_escapes() {
         let health = PipelineHealth {
-            stages: vec![stage("QA", Some("tester"), Some(1), 0, 0, 0, 1, 0)],
+            stages: vec![
+                stage("QA", Some("tester"), Some(1), 0, 0, 0, 1, 0),
+                stage("Review", Some("reviewer"), None, 0, 1, 1, 0, 0),
+            ],
         };
         let colored = render(&health, true, true);
         assert!(
@@ -364,9 +375,32 @@ mod tests {
             "{}",
             colored[0]
         );
+
+        // The plain strip, pinned exactly: each column is as wide as its widest
+        // of the three rows (11 for QA's `1 (wip 0/1)`, 10 for Review's role
+        // cell), so the separator sits at the same offset on every row.
         let plain = render(&health, true, false);
-        let stripped: String = strip_ansi(&colored[3]);
-        assert_eq!(stripped, plain[3]);
+        assert_eq!(
+            &plain[2..],
+            [
+                "QA          │ Review",
+                "tester ✗    │ reviewer ●",
+                "1 (wip 0/1) │ 0",
+            ],
+            "rendered strip:\n{}",
+            plain.join("\n")
+        );
+
+        // Colouring changes the bytes and nothing else. If the pad count were
+        // taken off the RENDERED width the escapes would eat the padding and the
+        // separator would slide left on every coloured row.
+        for row in 2..plain.len() {
+            assert_eq!(
+                strip_ansi(&colored[row]),
+                plain[row],
+                "row {row} must be identical once the escapes are stripped"
+            );
+        }
     }
 
     fn strip_ansi(s: &str) -> String {
