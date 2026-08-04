@@ -235,9 +235,7 @@ where
         }
         let canonical_cwd = canonical_cwd(&cwd);
         let head = fleet_git_head(&canonical_cwd);
-        let stale = cache
-            .get(&canonical_cwd)
-            .is_none_or(|entry| entry.head != head);
+        let stale = cache.get(&canonical_cwd).is_none_or(|entry| entry.head != head);
         if stale {
             cache.insert(
                 canonical_cwd.clone(),
@@ -721,7 +719,11 @@ mod tests {
         let path = temp.path().join("branch-repo");
         let (repository, commit) = seed_git_repository(&path);
         repository
-            .branch("next", &repository.find_commit(commit).expect("find commit"), false)
+            .branch(
+                "next",
+                &repository.find_commit(commit).expect("find commit"),
+                false,
+            )
             .expect("create next branch");
         let cwd = path.to_string_lossy().into_owned();
         let mut cache = HashMap::new();
