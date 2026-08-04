@@ -1051,10 +1051,13 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         state.feedback = Some("no actionable structured interviews".into());
         return;
     }
-    let active = answers
+    let Some(active) = answers
         .iter()
         .position(|answer| answer.session_key == selected_key)
-        .unwrap_or(0);
+    else {
+        state.feedback = Some("selected session has no structured interview".into());
+        return;
+    };
     state.mode = FleetMode::Answer(AnswerQueue { answers, active });
 }
 
@@ -2234,19 +2237,20 @@ fn render_detail(
     } else {
         CARD_BORDER
     };
-    if card_right > card_left.saturating_add(3) && y.saturating_add(4) < bottom {
-        for x in card_left.saturating_add(1)..card_right {
-            put_char(buffer, x, y, '─', border);
-            put_char(buffer, x, y.saturating_add(4), '─', border);
-        }
-        put_char(buffer, card_left, y, '╭', border);
-        put_char(buffer, card_right, y, '╮', border);
-        put_char(buffer, card_left, y.saturating_add(4), '╰', border);
-        put_char(buffer, card_right, y.saturating_add(4), '╯', border);
-        for card_y in y.saturating_add(1)..y.saturating_add(4) {
-            put_char(buffer, card_left, card_y, '│', border);
-            put_char(buffer, card_right, card_y, '│', border);
-        }
+    if card_right <= card_left.saturating_add(3) || y.saturating_add(4) >= bottom {
+        return;
+    }
+    for x in card_left.saturating_add(1)..card_right {
+        put_char(buffer, x, y, '─', border);
+        put_char(buffer, x, y.saturating_add(4), '─', border);
+    }
+    put_char(buffer, card_left, y, '╭', border);
+    put_char(buffer, card_right, y, '╮', border);
+    put_char(buffer, card_left, y.saturating_add(4), '╰', border);
+    put_char(buffer, card_right, y.saturating_add(4), '╯', border);
+    for card_y in y.saturating_add(1)..y.saturating_add(4) {
+        put_char(buffer, card_left, card_y, '│', border);
+        put_char(buffer, card_right, card_y, '│', border);
     }
     let card_content_left = left.saturating_add(2);
     let card_content_right = card_right;
@@ -2653,7 +2657,19 @@ fn render_interview(
     bottom: u16,
     queue: &AnswerQueue,
 ) {
+    if area_width == 0 || top >= bottom {
+        return;
+    }
     if area_width < 28 {
+        fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+        put_str(
+            buffer,
+            0,
+            top,
+            "Enlarge pane to answer interview",
+            GOLD,
+            area_width,
+        );
         return;
     }
     fill_background(buffer, 0, top, area_width, bottom, SURFACE);
@@ -2665,6 +2681,14 @@ fn render_interview(
     };
     let lane_count = queue.answers.len().min(3);
     if bottom.saturating_sub(top) < (lane_count as u16 * 2 + 15) {
+        put_str(
+            buffer,
+            left,
+            top,
+            "Enlarge pane to answer interview",
+            GOLD,
+            right,
+        );
         return;
     }
     put_str(
@@ -2712,7 +2736,7 @@ fn render_interview(
             if active_lane { GOLD } else { MUTED },
             right,
         );
-        tab_x = tab_x.saturating_add(lane_label.len() as u16);
+        tab_x = tab_x.saturating_add(lane_label.chars().count() as u16);
         for (question_index, question) in lane.questions.iter().enumerate() {
             let done = answer_question_complete(lane, question_index, question);
             let active_card = active_lane && question_index == lane.question_index;
@@ -2722,7 +2746,8 @@ fn render_interview(
                 question_index + 1,
                 truncate(&question.header, 11)
             );
-            if tab_x.saturating_add(card.len() as u16) >= right {
+            let card_width = card.chars().count() as u16;
+            if tab_x.saturating_add(card_width) >= right {
                 break;
             }
             put_str(
@@ -2739,7 +2764,7 @@ fn render_interview(
                 },
                 right,
             );
-            tab_x = tab_x.saturating_add(card.len() as u16 + 1);
+            tab_x = tab_x.saturating_add(card_width + 1);
         }
     }
     for x in left..right {
@@ -3431,6 +3456,26 @@ mod tests {
     }
 
     #[test]
+    fn enter_refuses_to_open_another_sessions_interview() {
+        let mut interview = session("claude:interview", "claude", "IDLE", "ASK", "managed");
+        interview.current_request_fingerprint = Some("interview-request".into());
+        interview.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let other = session("claude:other", "claude", "IDLE", "ASK", "managed");
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![interview, other]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Down)).state;
+
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Browse));
+        assert_eq!(
+            state.feedback(),
+            Some("selected session has no structured interview")
+        );
+    }
+
+    #[test]
     fn interview_tabs_preserve_answers_and_refuse_incomplete_batch() {
         let mut row = session("claude:interview", "claude", "IDLE", "ASK", "managed");
         row.current_request_fingerprint = Some("interview-fingerprint".into());
@@ -4061,6 +4106,17 @@ mod tests {
     }
 
     #[test]
+    fn detail_does_not_write_below_its_pane() {
+        let state = state_with_roster();
+        let mut buffer = WireBuffer::new(120, 4);
+        render_detail(&mut buffer, 80, 120, 0, 3, &state);
+        assert!(
+            !buffer.cells.iter().any(|(coord, _)| coord.x >= 80 && coord.y >= 3),
+            "detail must stay inside the supplied pane"
+        );
+    }
+
+    #[test]
     fn operator_cards_keep_semantic_colours_and_selected_outline_without_fill() {
         let mut error = session("error", "claude", "IDLE", "ERROR", "managed");
         error.current_request = Some(serde_json::json!({"message": "review failure"}));
@@ -4189,6 +4245,26 @@ mod tests {
         assert!(rendered.contains("Checks"));
         assert!(rendered.contains("0  /  2 answered"));
         assert!(rendered.contains("verified Fleet work only"));
+    }
+
+    #[test]
+    fn interview_renderer_explains_when_pane_is_too_small() {
+        let mut row = session("claude:small", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("small-request".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+
+        let mut narrow = WireBuffer::new(27, 30);
+        render_fleet(&mut narrow, 27, 0, 29, &state);
+        assert!(row_text(&narrow, 0, 27).contains("Enlarge pane"));
+
+        let mut short = WireBuffer::new(120, 17);
+        render_fleet(&mut short, 120, 0, 16, &state);
+        assert!(row_text(&short, 0, 120).contains("Enlarge pane"));
     }
 
     #[test]
