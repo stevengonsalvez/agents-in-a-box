@@ -1018,6 +1018,8 @@ pub struct DaemonsFetchResult {
     /// pending-waiter count). Sockets are tracked here too, not just daemons.
     pub approve_running: bool,
     pub approve_reason: String,
+    pub hangar_running: bool,
+    pub hangar_reason: String,
 }
 
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
@@ -1032,6 +1034,8 @@ pub struct DaemonsOverlayState {
     /// approve.sock liveness + health reason (see [`DaemonsFetchResult`]).
     pub approve_running: bool,
     pub approve_reason: String,
+    pub hangar_running: bool,
+    pub hangar_reason: String,
     pub loading: bool,
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
@@ -1041,6 +1045,8 @@ pub struct DaemonsOverlayState {
     pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Last restart outcome line (transient, shown until the next refresh).
     pub notifyd_restart_status: Option<String>,
+    pub hangar_start_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub hangar_start_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -1050,6 +1056,7 @@ pub(crate) fn daemons_sync_probe() -> (
     bool,
     Vec<String>,
     Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    (bool, String),
     (bool, String),
 ) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
@@ -1075,7 +1082,10 @@ pub(crate) fn daemons_sync_probe() -> (
         }
         Err(e) => (false, format!("home unresolved: {e}")),
     };
-    (mcp_alive, headroom_consumers, notifyd, approve)
+    let hangar = crate::fleet::bridge::daemon::socket_path()
+        .and_then(|socket| std::os::unix::net::UnixStream::connect(socket).ok())
+        .map_or((false, "not running".to_string()), |_| (true, "serving".to_string()));
+    (mcp_alive, headroom_consumers, notifyd, approve, hangar)
 }
 
 // ============================================================================
@@ -4999,6 +5009,10 @@ impl AppState {
             fetch_rx: None,
             notifyd_restart_rx: None,
             notifyd_restart_status: None,
+            hangar_running: false,
+            hangar_reason: "probing…".to_string(),
+            hangar_start_rx: None,
+            hangar_start_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -5023,11 +5037,12 @@ impl AppState {
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
             // blocking pool.
-            let (mcp_alive, headroom_consumers, notifyd, approve) =
+            let (mcp_alive, headroom_consumers, notifyd, approve, hangar) =
                 tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
                     false,
                     Vec::new(),
                     Vec::new(),
+                    (false, "probe failed".to_string()),
                     (false, "probe failed".to_string()),
                 ));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
@@ -5039,6 +5054,8 @@ impl AppState {
                 notifyd,
                 approve_running: approve.0,
                 approve_reason: approve.1,
+                hangar_running: hangar.0,
+                hangar_reason: hangar.1,
             };
             let _ = tx.send(result);
         });
@@ -5084,6 +5101,21 @@ impl AppState {
         });
     }
 
+    pub fn spawn_hangar_start(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else { return; };
+        if o.hangar_start_rx.is_some() { return; }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.hangar_start_rx = Some(rx);
+        o.hangar_start_status = Some("starting Hangar daemon…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                crate::cli::hangar::ensure_hangar_daemon();
+                "Hangar start requested".to_string()
+            }).await.unwrap_or_else(|e| format!("Hangar start failed: {e}"));
+            let _ = tx.send(line);
+        });
+    }
+
     /// Drain a completed daemons fetch. Called from the 250ms app tick.
     pub fn check_daemons_overlay(&mut self) {
         let Some(o) = self.daemons_overlay.as_mut() else {
@@ -5099,7 +5131,17 @@ impl AppState {
                 o.notifyd = result.notifyd;
                 o.approve_running = result.approve_running;
                 o.approve_reason = result.approve_reason;
+                o.hangar_running = result.hangar_running;
+                o.hangar_reason = result.hangar_reason;
                 o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+        let mut refresh_after_start = false;
+        if let Some(rx) = o.hangar_start_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.hangar_start_rx = None;
+                o.hangar_start_status = Some(line);
+                refresh_after_start = true;
             }
         }
         // A finished restart updates the status line and triggers a fresh scan
@@ -5108,8 +5150,12 @@ impl AppState {
             if let Ok(line) = rx.try_recv() {
                 o.notifyd_restart_rx = None;
                 o.notifyd_restart_status = Some(line);
-                self.spawn_daemons_fetch();
+                refresh_after_start = true;
             }
+        }
+        drop(o);
+        if refresh_after_start {
+            self.spawn_daemons_fetch();
         }
     }
 

@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 
     let block = Block::default()
         .title(Span::styled(
-            " ⚙ Daemons — MCP pool · Headroom proxy · notifyd ",
+            " ⚙ Daemons — MCP pool · Headroom proxy · Hangar · notifyd ",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -93,7 +93,7 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
         return;
     }
 
-    // Rows: MCP, Headroom, Headroom consumers, then the notifyd section.
+    // Rows: MCP, Headroom, consumers, Hangar, then notifyd.
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -102,6 +102,8 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
             Constraint::Length(2), // Headroom row
             Constraint::Length(1), // spacer
             Constraint::Length(2), // Headroom consumers
+            Constraint::Length(1), // spacer
+            Constraint::Length(2), // Hangar row
             Constraint::Length(1), // spacer
             Constraint::Min(3),    // notifyd section
         ])
@@ -176,7 +178,20 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
     );
 
     // ── notifyd processes ───────────────────────────────────────────────────────
-    render_notifyd_section(frame, rows[6], state);
+    let mut hangar = vec![
+        Span::styled("  Hangar daemon ", Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+        status_dot(state.hangar_running),
+        Span::styled(format!("    {}", state.hangar_reason), Style::default().fg(MUTED_GRAY)),
+    ];
+    if !state.hangar_running {
+        hangar.push(Span::styled("   S start", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    }
+    if let Some(status) = &state.hangar_start_status {
+        hangar.push(Span::styled(format!("   {status}"), Style::default().fg(MUTED_GRAY)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(hangar)), rows[6]);
+
+    render_notifyd_section(frame, rows[8], state);
 }
 
 /// Render every running `notifyd` process, one line each, with its
@@ -332,6 +347,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("R", Style::default().fg(GOLD)),
         Span::styled(" restart notifyd  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(" start Hangar  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("esc", Style::default().fg(GOLD)),
         Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         Span::styled(
@@ -374,6 +391,10 @@ mod tests {
             fetch_rx: None,
             notifyd_restart_rx: None,
             notifyd_restart_status: None,
+            hangar_running: false,
+            hangar_reason: "not running".to_string(),
+            hangar_start_rx: None,
+            hangar_start_status: None,
         }
     }
 
@@ -438,6 +459,10 @@ mod tests {
             fetch_rx: None,
             notifyd_restart_rx: None,
             notifyd_restart_status: None,
+            hangar_running: false,
+            hangar_reason: "not running".to_string(),
+            hangar_start_rx: None,
+            hangar_start_status: None,
         };
         let backend = TestBackend::new(120, 30);
         let mut term = Terminal::new(backend).unwrap();

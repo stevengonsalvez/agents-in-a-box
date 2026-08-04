@@ -58,6 +58,7 @@ pub enum AppEvent {
     DaemonsOverlayRefresh,
     /// Restart the notifyd daemon (single resume/repair) from the overlay.
     DaemonsOverlayRestartNotifyd,
+    DaemonsOverlayStartHangar,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -1399,7 +1400,7 @@ impl EventHandler {
         }
 
         // Daemons overlay captures all keys while open: r refresh, R restart
-        // notifyd (single resume/repair), esc/q/d close.
+        // notifyd resume/repair, Hangar start, esc/q/d close.
         if state.daemons_overlay.is_some() {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
@@ -1407,6 +1408,7 @@ impl EventHandler {
                 }
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
                 KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+                KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
                 _ => None,
             };
         }
@@ -3602,6 +3604,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
+            AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
