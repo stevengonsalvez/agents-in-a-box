@@ -1515,10 +1515,10 @@ mod menu_bar_tests {
 
         // The restart slot shows `r resume`.
         for token in [
-            "ew",      // new
-            "xpand",   // expand
-            "focus",   // Tab focus
-            "ttach",   // attach
+            "ew",    // new
+            "xpand", // expand
+            "focus", // Tab focus
+            "ttach", // attach
             "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select
@@ -1606,8 +1606,8 @@ mod menu_bar_tests {
         );
 
         for token in [
-            "ew",      // new
-            "ttach",   // attach
+            "ew",    // new
+            "ttach", // attach
             "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select

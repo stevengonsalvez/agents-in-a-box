@@ -1680,7 +1680,8 @@ mod old_config_tests {
             session_filter: SessionFilter::ActiveOnly,
             ..UiPreferences::default()
         };
-        let decoded: UiPreferences = toml::from_str(&toml::to_string(&preferences).unwrap()).unwrap();
+        let decoded: UiPreferences =
+            toml::from_str(&toml::to_string(&preferences).unwrap()).unwrap();
         assert_eq!(decoded.session_filter, SessionFilter::ActiveOnly);
     }
 
