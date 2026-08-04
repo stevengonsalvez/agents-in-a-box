@@ -582,6 +582,7 @@ pub struct SessionsPaneState {
     last_preview_rect: Option<Rect>,
     last_list_scroll_offset: usize,
     last_attachable_click: Option<(AttachableRef, Instant)>,
+    filter_toggle_area: Option<Rect>,
 }
 
 impl Default for SessionsPaneState {
@@ -595,6 +596,7 @@ impl Default for SessionsPaneState {
             last_preview_rect: None,
             last_list_scroll_offset: 0,
             last_attachable_click: None,
+            filter_toggle_area: None,
         }
     }
 }
@@ -614,6 +616,19 @@ impl SessionsPaneState {
 
     pub fn set_list_scroll_offset(&mut self, offset: usize) {
         self.last_list_scroll_offset = offset;
+    }
+
+    pub fn set_filter_toggle_area(&mut self, area: Rect) {
+        self.filter_toggle_area = Some(area);
+    }
+
+    pub fn is_on_filter_toggle(&self, x: u16, y: u16) -> bool {
+        self.filter_toggle_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
     }
 
     pub fn last_content_width(&self) -> Option<u16> {
@@ -2769,13 +2784,14 @@ impl ClaudeChatState {
     }
 }
 
-/// View filter for the session tree, cycled by `Shift+F` on the sessions screen.
+/// View filter for the session tree, cycled by `Shift+F` or its clickable title chip.
 ///
 /// Phase 2 of `load_interactive_mode_sessions` started surfacing Stopped sessions
 /// (tmux-dead but worktree-alive) alongside Running ones. With many worktrees
 /// the tree gets crowded; this filter lets the user hide stopped rows or focus
-/// on stopped-only without losing access. In-memory only (resets each launch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// on stopped-only without losing access. Persisted in UI preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionFilter {
     #[default]
     All,
@@ -2800,6 +2816,14 @@ impl SessionFilter {
             Self::All => None,
             Self::ActiveOnly => Some("active"),
             Self::StoppedOnly => Some("stopped"),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ActiveOnly => "active",
+            Self::StoppedOnly => "stopped",
         }
     }
 }
@@ -3454,7 +3478,7 @@ impl Default for AppState {
             shell_selected: false,
             selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
-            session_filter: SessionFilter::All,
+            session_filter: app_config.ui_preferences.session_filter,
             current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
             logs: HashMap::new(),
@@ -6521,6 +6545,10 @@ impl AppState {
     /// Resets the session selection so it doesn't point to a now-hidden row.
     pub fn cycle_session_filter(&mut self) {
         self.session_filter = self.session_filter.next();
+        self.app_config.ui_preferences.session_filter = self.session_filter;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist session filter: {}", e);
+        }
         // Selection indices are positional over the *displayed* list. Resetting
         // to the first session of the first workspace is simplest and matches
         // what `load_real_workspaces` already does after a refresh.

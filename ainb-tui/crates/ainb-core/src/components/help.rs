@@ -41,10 +41,7 @@ impl HelpComponent {
                 "a",
                 "Attach — full-screen takeover (Ctrl+B then D to leave)",
             ),
-            row(
-                "→",
-                "Attach in a split pane (keeps the session list visible)",
-            ),
+            row("→", "Pane attach (keeps the session list visible)"),
             row("1-9", "Quick-attach to numbered session"),
             row("Enter", "Resume (stopped) / attach (running)"),
             row("r", "Resume stopped session (tmux)"),

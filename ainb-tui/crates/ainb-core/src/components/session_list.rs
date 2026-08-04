@@ -41,7 +41,10 @@ const PILL_RIGHT: &str = "\u{e0b4}"; //
 
 use ainb_plugin_notifyd::AlertKind;
 
-use crate::app::AppState;
+use crate::app::{
+    AppState,
+    state::{AttachableRef, SessionListRowTarget},
+};
 use crate::models::{SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace};
 
 /// Width of the leading badge slot rendered before every list row.
@@ -74,6 +77,31 @@ fn next_badge(attach_no: &mut usize) -> Span<'static> {
 
 pub struct SessionListComponent {
     list_state: ListState,
+}
+
+fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
+    if let Some(workspace_idx) = state.selected_workspace_index {
+        return match (state.selected_session_index, state.shell_selected) {
+            (Some(session_idx), _) => Some(SessionListRowTarget::Attachable(
+                AttachableRef::WorkspaceSession {
+                    workspace_idx,
+                    session_idx,
+                },
+            )),
+            (None, true) => Some(SessionListRowTarget::Attachable(
+                AttachableRef::WorkspaceShell { workspace_idx },
+            )),
+            (None, false) => Some(SessionListRowTarget::WorkspaceHeader { workspace_idx }),
+        };
+    }
+    state
+        .selected_ssh_session_index
+        .map(|ssh_idx| SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }))
+        .or_else(|| {
+            state.selected_other_tmux_index.map(|other_idx| {
+                SessionListRowTarget::Attachable(AttachableRef::OtherTmux { other_idx })
+            })
+        })
 }
 
 impl Default for SessionListComponent {
@@ -137,13 +165,15 @@ impl SessionListComponent {
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        if let Some(label) = state.session_filter.title_label() {
-            title_spans.push(Span::raw(" "));
-            title_spans.push(Span::styled(
-                format!("[{}]", label),
-                Style::default().fg(GOLD),
-            ));
-        }
+        let filter_label = format!("F [{}]", state.session_filter.label());
+        let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}) ");
+        state.sessions_pane_state.set_filter_toggle_area(Rect::new(
+            area.x.saturating_add(1 + title_prefix.chars().count() as u16),
+            area.y,
+            filter_label.chars().count() as u16,
+            1,
+        ));
+        title_spans.push(Span::styled(filter_label, Style::default().fg(GOLD)));
         title_spans.push(Span::raw(" "));
         // 'B' is the keyboard twin of clicking the [-] glyph (hint lives next
         // to the control it drives, not in the bottom menu bar).
@@ -796,120 +826,30 @@ impl SessionListComponent {
     }
 
     fn update_selection(&mut self, state: &AppState) {
-        if let Some(workspace_idx) = state.selected_workspace_index {
-            let mut current_index = 0;
-            let mut workspace_header_index = 0;
-
-            // When expand_all is true, we need to count items from all workspaces
-            for (idx, workspace) in state.workspaces.iter().enumerate() {
-                if idx == workspace_idx {
-                    // Found the selected workspace
-                    current_index += idx; // Add workspace line itself (accounting for skipped sessions)
-
-                    // When expand_all, add all sessions from prior workspaces
-                    if state.expand_all_workspaces {
-                        for prior_workspace in state.workspaces.iter().take(idx) {
-                            current_index += prior_workspace.sessions.len();
-                            if prior_workspace.shell_session.is_some() {
-                                current_index += 1;
-                            }
-                        }
-                    }
-
-                    // Remember the workspace header position before adding session offset
-                    workspace_header_index = current_index;
-
-                    // Add session offset if a regular session is selected
-                    if let Some(session_idx) = state.selected_session_index {
-                        current_index += session_idx + 1;
-                    } else if state.shell_selected {
-                        // Shell selected: add all regular sessions + 1 for shell
-                        current_index += workspace.sessions.len() + 1;
-                    }
-                    break;
-                }
-            }
-
-            self.list_state.select(Some(current_index));
-
-            // Ensure the parent workspace header stays visible when a child session is selected.
-            // ratatui auto-scrolls to show the selected item, but this can push the parent
-            // folder line off the top of the viewport. Clamp the scroll offset so the
-            // workspace header is always the topmost visible item (at minimum).
-            if state.selected_session_index.is_some() || state.shell_selected {
-                let current_offset = self.list_state.offset();
-                if current_offset > workspace_header_index {
-                    *self.list_state.offset_mut() = workspace_header_index;
-                }
-            }
-        } else if state.selected_ssh_session_index.is_some() {
-            // Selection is in "SSH Sessions" section
-            let mut current_index = 0;
-
-            // Count all workspace items first
-            for workspace in &state.workspaces {
-                current_index += 1; // Workspace header
-                if state.expand_all_workspaces {
-                    current_index += workspace.sessions.len();
-                    if workspace.shell_session.is_some() {
-                        current_index += 1;
-                    }
-                }
-            }
-
-            // Add separator + "SSH Sessions" header
-            if !state.workspaces.is_empty() && !state.ssh_sessions.is_empty() {
-                current_index += 1; // Empty separator line
-            }
-            current_index += 1; // "SSH Sessions" header
-
-            // Add offset for selected SSH session
-            if let Some(ssh_idx) = state.selected_ssh_session_index {
-                current_index += ssh_idx;
-            }
-
-            self.list_state.select(Some(current_index));
-        } else if state.selected_other_tmux_index.is_some() {
-            // Selection is in "Other tmux" section
-            let mut current_index = 0;
-
-            // Count all workspace items first
-            for workspace in &state.workspaces {
-                current_index += 1; // Workspace header
-                if state.expand_all_workspaces {
-                    current_index += workspace.sessions.len();
-                    if workspace.shell_session.is_some() {
-                        current_index += 1;
-                    }
-                }
-            }
-
-            // Add SSH Sessions section
-            if !state.ssh_sessions.is_empty() {
-                if !state.workspaces.is_empty() {
-                    current_index += 1; // Empty separator line
-                }
-                current_index += 1; // "SSH Sessions" header
-                if state.ssh_sessions_expanded {
-                    current_index += state.ssh_sessions.len();
-                }
-            }
-
-            // Add separator + "Other tmux" header
-            let has_items_above = !state.workspaces.is_empty() || !state.ssh_sessions.is_empty();
-            if has_items_above && !state.other_tmux_sessions.is_empty() {
-                current_index += 1; // Empty separator line
-            }
-            current_index += 1; // "Other tmux" header
-
-            // Add offset for selected other session
-            if let Some(other_idx) = state.selected_other_tmux_index {
-                current_index += other_idx;
-            }
-
-            self.list_state.select(Some(current_index));
-        } else {
+        let Some(selected) = selected_row_target(state) else {
             self.list_state.select(None);
+            return;
+        };
+        let item_count = Self::build_list_items_static(state).len();
+        let selected_index =
+            (0..item_count).find(|&index| state.session_list_row_target(index) == Some(selected));
+        self.list_state.select(selected_index);
+
+        let workspace_header = match selected {
+            SessionListRowTarget::Attachable(
+                AttachableRef::WorkspaceSession { workspace_idx, .. }
+                | AttachableRef::WorkspaceShell { workspace_idx },
+            ) => Some(SessionListRowTarget::WorkspaceHeader { workspace_idx }),
+            _ => None,
+        };
+        if let Some(workspace_header) = workspace_header {
+            if let Some(header_index) = (0..item_count)
+                .find(|&index| state.session_list_row_target(index) == Some(workspace_header))
+            {
+                if self.list_state.offset() > header_index {
+                    *self.list_state.offset_mut() = header_index;
+                }
+            }
         }
     }
 
@@ -984,5 +924,44 @@ fn agent_brand_color(agent: &SessionAgentType) -> Color {
         SessionAgentType::Kiro => BRAND_KIRO,
         SessionAgentType::Shell => BRAND_SHELL,
         SessionAgentType::Ssh => BRAND_SSH,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::SessionFilter;
+    use crate::models::{Session, SessionStatus};
+
+    #[test]
+    fn selection_uses_visible_row_when_stopped_sessions_are_filtered() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.session_filter = SessionFilter::ActiveOnly;
+        state.expand_all_workspaces = true;
+
+        let mut workspace = Workspace::new("workspace".to_string(), "/tmp/workspace".into());
+        let stopped = Session::new("stopped".to_string(), "/tmp/workspace".to_string());
+        let mut running = Session::new("running".to_string(), "/tmp/workspace".to_string());
+        running.status = SessionStatus::Running;
+        workspace.add_session(stopped);
+        workspace.add_session(running);
+        state.workspaces.push(workspace);
+        state.selected_workspace_index = Some(0);
+        state.selected_session_index = Some(1);
+
+        let mut list = SessionListComponent::new();
+        list.update_selection(&state);
+
+        let selected_row = list.list_state.selected().expect("visible selection");
+        assert_eq!(
+            state.session_list_row_target(selected_row),
+            Some(SessionListRowTarget::Attachable(
+                AttachableRef::WorkspaceSession {
+                    workspace_idx: 0,
+                    session_idx: 1,
+                }
+            ))
+        );
     }
 }

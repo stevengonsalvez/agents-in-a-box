@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use crate::app::state::SessionFilter;
 use crate::audit::{self, AuditResult, AuditTrigger};
 use anyhow::{Context, Result};
 use dirs;
@@ -687,6 +688,10 @@ pub struct UiPreferences {
     #[serde(default = "default_true")]
     pub show_session_menu_bar: bool,
 
+    /// Session-status filter retained across workspace refreshes and restarts.
+    #[serde(default)]
+    pub session_filter: SessionFilter,
+
     /// Preferred editor command (e.g., "code", "cursor", "nvim")
     /// If None, falls back to: code -> $EDITOR -> error
     #[serde(default)]
@@ -760,6 +765,7 @@ impl Default for UiPreferences {
             show_container_status: true,
             show_git_status: true,
             show_session_menu_bar: true,
+            session_filter: SessionFilter::default(),
             preferred_editor: None,
             home_sidebar_width: None,
             sessions_sidebar_width: None,
@@ -996,6 +1002,7 @@ impl AppConfig {
             self.ui_preferences.show_container_status = other.ui_preferences.show_container_status;
             self.ui_preferences.show_git_status = other.ui_preferences.show_git_status;
             self.ui_preferences.show_session_menu_bar = other.ui_preferences.show_session_menu_bar;
+            self.ui_preferences.session_filter = other.ui_preferences.session_filter;
         }
         // Old configs keep the default (true) values
         if other.ui_preferences.preferred_editor.is_some() {
@@ -1668,6 +1675,17 @@ mod old_config_tests {
     use super::*;
 
     #[test]
+    fn session_filter_preference_round_trips() {
+        let preferences = UiPreferences {
+            session_filter: SessionFilter::ActiveOnly,
+            ..UiPreferences::default()
+        };
+        let decoded: UiPreferences =
+            toml::from_str(&toml::to_string(&preferences).unwrap()).unwrap();
+        assert_eq!(decoded.session_filter, SessionFilter::ActiveOnly);
+    }
+
+    #[test]
     fn test_old_config_merge_keeps_default_true_for_booleans() {
         // Start with defaults (which have true for show_container_status and show_git_status)
         let mut defaults = AppConfig::default();
@@ -1687,6 +1705,7 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 show_session_menu_bar: false,
+                session_filter: SessionFilter::default(),
                 preferred_editor: None,
                 home_sidebar_width: None,
                 sessions_sidebar_width: None,
@@ -1733,6 +1752,7 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 show_session_menu_bar: false,
+                session_filter: SessionFilter::default(),
                 preferred_editor: None,
                 home_sidebar_width: Some(38),
                 sessions_sidebar_width: Some(46),

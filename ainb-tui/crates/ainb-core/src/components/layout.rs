@@ -306,9 +306,9 @@ impl LayoutComponent {
             return;
         }
         // Below this width the two-column split can't hold the widest
-        // session-action line (~41 cols) plus the panels column without
+        // session-action line (~50 cols) plus the panels column without
         // clipping, so fall back to the stacked legend.
-        const TWO_COL_MIN_WIDTH: u16 = 100;
+        const TWO_COL_MIN_WIDTH: u16 = 110;
         if area.width >= TWO_COL_MIN_WIDTH {
             self.render_menu_bar_two_col(frame, area, state);
         } else {
@@ -366,7 +366,7 @@ impl LayoutComponent {
             key("a", SELECTION_GREEN),
             desc("ttach "),
             key("→", SELECTION_GREEN),
-            desc(" pane "),
+            desc(" Pane attach "),
             key("1-9", SELECTION_GREEN),
             desc(" quick "),
             key("Space", SELECTION_GREEN),
@@ -489,7 +489,7 @@ impl LayoutComponent {
                 key("a", SELECTION_GREEN),
                 desc("ttach  "),
                 key("→", SELECTION_GREEN),
-                desc(" pane  "),
+                desc(" Pane attach  "),
                 key("1-9", SELECTION_GREEN),
                 desc(" quick  "),
                 key("Space", SELECTION_GREEN),
@@ -1501,7 +1501,8 @@ mod menu_bar_tests {
         use ratatui::{Terminal, backend::TestBackend};
 
         let layout = LayoutComponent::new();
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.app_config.ui_preferences.show_session_menu_bar = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
         terminal
             .draw(|f| {
@@ -1515,11 +1516,11 @@ mod menu_bar_tests {
 
         // The restart slot shows `r resume`.
         for token in [
-            "ew",      // new
-            "xpand",   // expand
-            "focus",   // Tab focus
-            "ttach",   // attach
-            "pane",    // A — in-pane interactive embed
+            "ew",    // new
+            "xpand", // expand
+            "focus", // Tab focus
+            "ttach", // attach
+            "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select
             "tar",     // star
@@ -1577,7 +1578,8 @@ mod menu_bar_tests {
         use ratatui::{Terminal, backend::TestBackend};
 
         let layout = LayoutComponent::new();
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.app_config.ui_preferences.show_session_menu_bar = true;
         // Comfortably above TWO_COL_MIN_WIDTH so the split path renders.
         let mut terminal = Terminal::new(TestBackend::new(140, 6)).unwrap();
         terminal
@@ -1606,9 +1608,9 @@ mod menu_bar_tests {
         );
 
         for token in [
-            "ew",      // new
-            "ttach",   // attach
-            "pane",    // A — in-pane interactive embed
+            "ew",    // new
+            "ttach", // attach
+            "Pane attach",
             "1-9",     // quick attach
             "Space",   // multi-select
             "tar",     // star
@@ -1641,7 +1643,7 @@ mod menu_bar_tests {
         }
     }
 
-    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (100),
+    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (110),
     /// which is also where its columns are narrowest and clipping would first
     /// bite. Render at the boundary and assert the longest token in each column
     /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
@@ -1654,8 +1656,9 @@ mod menu_bar_tests {
         use ratatui::{Terminal, backend::TestBackend};
 
         let layout = LayoutComponent::new();
-        let state = AppState::default();
-        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        let mut state = AppState::default();
+        state.app_config.ui_preferences.show_session_menu_bar = true;
+        let mut terminal = Terminal::new(TestBackend::new(110, 6)).unwrap();
         terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
 
         let buf = terminal.backend().buffer();
@@ -1669,16 +1672,16 @@ mod menu_bar_tests {
         for token in ["re-auth", "resume", "del-sel", "abtop", "home", "witr"] {
             assert!(
                 rendered.contains(token),
-                "token {token:?} clipped at threshold width 100:\nRendered:\n{rendered}"
+                "token {token:?} clipped at threshold width 110:\nRendered:\n{rendered}"
             );
         }
-        // Inner edges (cols 1 and 98) must stay blank on every content row.
+        // Inner edges (cols 1 and 108) must stay blank on every content row.
         for y in 1..=4u16 {
             let left = buf.get(1, y).symbol().to_string();
-            let right = buf.get(98, y).symbol().to_string();
+            let right = buf.get(108, y).symbol().to_string();
             assert!(
                 left == " " && right == " ",
-                "menu row {y} clipped to the edge at width 100. left={left:?} right={right:?}"
+                "menu row {y} clipped to the edge at width 110. left={left:?} right={right:?}"
             );
         }
     }
