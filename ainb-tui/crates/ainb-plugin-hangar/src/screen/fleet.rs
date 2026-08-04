@@ -163,6 +163,17 @@ impl FleetSessionRow {
         self.management_state.eq_ignore_ascii_case("managed")
     }
 
+    /// Count actionable structured questions without guessing from generic input.
+    fn structured_question_count(&self) -> Option<usize> {
+        self.attention_state
+            .eq_ignore_ascii_case("ASK")
+            .then(|| self.current_request.as_ref())
+            .flatten()
+            .map(answer_questions)
+            .filter(|questions| !questions.is_empty())
+            .map(|questions| questions.len())
+    }
+
     fn session_name(&self) -> String {
         self.display_name.clone().unwrap_or_else(|| {
             self.tmux_target
@@ -706,6 +717,7 @@ impl AnswerQueue {
 enum AnswerDelivery {
     Ready,
     Confirming,
+    AwaitingSessionResume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -841,19 +853,37 @@ impl FleetPaneState {
             _ => return,
         };
         let before = queue.answers.len();
+        let mut resumed = false;
+        let mut superseded = false;
         queue.answers.retain(|answer| {
-            self.roster
-                .iter()
-                .find(|row| row.session_key == answer.session_key)
-                .is_some_and(|row| {
-                    row.version == answer.expected_version
-                        && row.current_request_fingerprint.as_deref()
-                            == Some(answer.request_fingerprint.as_str())
-                })
+            let Some(row) = self.roster.iter().find(|row| row.session_key == answer.session_key)
+            else {
+                return false;
+            };
+            let same_request = row.version == answer.expected_version
+                && row.current_request_fingerprint.as_deref()
+                    == Some(answer.request_fingerprint.as_str());
+            if same_request {
+                return true;
+            }
+            if answer.delivery == AnswerDelivery::AwaitingSessionResume
+                && !row.attention_state.eq_ignore_ascii_case("ASK")
+            {
+                resumed = true;
+            } else {
+                superseded = true;
+            }
+            false
         });
         if queue.answers.is_empty() {
             self.mode = FleetMode::Browse;
-            self.feedback = Some("interview closed: authoritative request changed".into());
+            self.feedback = Some(if resumed {
+                "answer received by session".into()
+            } else if superseded {
+                "interview closed: authoritative request changed".into()
+            } else {
+                "interview closed: session disappeared".into()
+            });
         } else {
             queue.active = queue.active.min(queue.answers.len() - 1);
             if queue.answers.len() != before {
@@ -952,12 +982,13 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         } => reduce_answer_card_click(&mut next, column, row, area_width, area_height),
         FleetEvent::RequestAction(action) => request_action(&mut next, action),
         FleetEvent::ActionSucceeded { session_key } => {
-            if let FleetMode::Answer(queue) = &next.mode {
-                if queue.answers.iter().any(|answer| {
+            if let FleetMode::Answer(queue) = &mut next.mode {
+                if let Some(answer) = queue.answers.iter_mut().find(|answer| {
                     answer.session_key == session_key
                         && answer.delivery == AnswerDelivery::Confirming
                 }) {
-                    next.feedback = Some("delivered, confirming authoritative Fleet state".into());
+                    answer.delivery = AnswerDelivery::AwaitingSessionResume;
+                    next.feedback = Some("broker accepted answer, waiting for session resume".into());
                     return FleetReduction {
                         state: next,
                         intent: None,
@@ -2198,11 +2229,15 @@ fn render_session_card(
     }
 
     let age_width = age.chars().count() as u16;
+    let state_label = session.structured_question_count().map_or_else(
+        || status.to_string(),
+        |question_count| format!("ASK · {question_count} Q"),
+    );
     let status_label = if selected {
         let action = available_action_labels(session).into_iter().next().unwrap_or_default();
-        format!(" {status}  ·  {action} ")
+        format!(" {state_label}  ·  {action} ")
     } else {
-        format!(" {status} ")
+        format!(" {state_label} ")
     };
     let status_width =
         usize::from(inner_right.saturating_sub(age_width.saturating_add(4)).saturating_sub(2));
@@ -2344,11 +2379,15 @@ fn render_detail(
     let card_content_left = left.saturating_add(2);
     let card_content_right = card_right;
     let card_width = usize::from(card_content_right.saturating_sub(card_content_left)).max(1);
+    let detail_state = session.structured_question_count().map_or_else(
+        || home_state_label(session).to_string(),
+        |question_count| format!("ASK · {question_count} QUESTIONS"),
+    );
     put_str(
         buffer,
         card_content_left,
         y,
-        home_state_label(session),
+        &detail_state,
         operator_state_color(session),
         card_content_right,
     );
@@ -2397,6 +2436,17 @@ fn render_detail(
     if session.is_actionable() {
         put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
+        if let Some(question_count) = session.structured_question_count() {
+            put_str(
+                buffer,
+                left,
+                y,
+                &format!("STRUCTURED INTERVIEW · {question_count} QUESTIONS"),
+                GOLD,
+                right,
+            );
+            y = y.saturating_add(1);
+        }
         if let Some(question) = session
             .current_request
             .as_ref()
@@ -2852,7 +2902,9 @@ fn render_interview(
     }
     let complete = answered_questions(answer) == answer.questions.len();
     let help = if answer.delivery == AnswerDelivery::Confirming {
-        "Refreshing authoritative state, Esc leaves queue"
+        "Submitting exact answer, Esc leaves queue"
+    } else if answer.delivery == AnswerDelivery::AwaitingSessionResume {
+        "BROKER ACCEPTED  ·  Waiting for target session resume  ·  Esc leaves queue"
     } else if complete {
         "READY  ·  Enter or s submit  ←→ card  x reject  Esc leave"
     } else if answer.editing_text {
@@ -3046,7 +3098,19 @@ fn render_interview_question_card(
                 buffer,
                 inner_left,
                 y,
-                "● delivered, waiting for Fleet snapshot confirmation",
+                "● submitting exact answer…",
+                GOLD,
+                inner_right,
+            );
+            y = y.saturating_add(1);
+        }
+    } else if answer.delivery == AnswerDelivery::AwaitingSessionResume && active {
+        if y < bottom.saturating_sub(2) {
+            put_str(
+                buffer,
+                inner_left,
+                y,
+                "● broker accepted, awaiting session resume…",
                 GOLD,
                 inner_right,
             );
@@ -3814,15 +3878,51 @@ mod tests {
         )
         .state;
         assert!(matches!(delivered.mode, FleetMode::Answer(_)));
+        let FleetMode::Answer(queue) = &delivered.mode else {
+            panic!("delivered interview must remain visible");
+        };
+        assert_eq!(
+            queue.current().expect("active interview").delivery,
+            AnswerDelivery::AwaitingSessionResume
+        );
         assert_eq!(
             delivered.feedback(),
-            Some("delivered, confirming authoritative Fleet state")
+            Some("broker accepted answer, waiting for session resume")
         );
 
         row.current_request_fingerprint = Some("after".into());
         row.version += 1;
         let closed = apply(&delivered, FleetEvent::Snapshot(vec![row])).state;
         assert!(matches!(closed.mode, FleetMode::Browse));
+    }
+
+    #[test]
+    fn delivered_answer_closes_only_after_session_resumes() {
+        let mut row = session("claude:resume", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("before".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(
+            &state,
+            FleetEvent::ActionSucceeded {
+                session_key: "claude:resume".into(),
+            },
+        )
+        .state;
+        let mut resumed = row;
+        resumed.version += 1;
+        resumed.lifecycle_state = "RUNNING".into();
+        resumed.attention_state = "NONE".into();
+        resumed.current_request = None;
+        resumed.current_request_fingerprint = None;
+        let resumed = apply(&state, FleetEvent::Snapshot(vec![resumed])).state;
+        assert!(matches!(resumed.mode, FleetMode::Browse));
+        assert_eq!(resumed.feedback(), Some("answer received by session"));
     }
 
     #[test]
@@ -4366,6 +4466,27 @@ mod tests {
         assert!(rendered.contains("Enter Answer"));
         assert!(!rendered.contains("CONNECTION"));
         assert!(!rendered.contains("REPOSITORY / BRANCH"));
+    }
+
+    #[test]
+    fn structured_interviews_show_question_badges_in_queue_and_detail() {
+        let mut ask = session("claude:ask", "claude", "IDLE", "ASK", "managed");
+        ask.current_request = Some(serde_json::json!({
+            "questions": [
+                {"id": "scope", "question": "Scope?", "options": ["Focused"]},
+                {"id": "rollout", "question": "Rollout?", "options": ["Now"]}
+            ]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![ask]);
+        let mut buffer = WireBuffer::new(120, 24);
+        render_fleet(&mut buffer, 120, 0, 20, &state);
+
+        let rendered =
+            (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(row_text(&buffer, 3, 90).contains("ASK · 2 Q"));
+        assert!(rendered.contains("ASK · 2 QUESTIONS"));
+        assert!(rendered.contains("STRUCTURED INTERVIEW · 2 QUESTIONS"));
     }
 
     #[test]
