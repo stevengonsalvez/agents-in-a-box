@@ -108,6 +108,42 @@ async fn store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+/// Add `i-dep`, blocked by `blocker`.
+async fn seed_dependent_on(pool: &SqlitePool, blocker: &str) {
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("dependent issue");
+    sqlx::query(
+        "INSERT INTO card_dependency \
+         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+         VALUES ('ws-1','i-dep',?1,0,'blocked_by')",
+    )
+    .bind(blocker)
+    .execute(pool)
+    .await
+    .expect("dependency");
+}
+
+/// Give `issue_id` a PRIOR stage that already ran and finished at `generation`,
+/// so the issue's `MAX(generation)` is non-zero before the next dispatch.
+async fn seed_finished_prior_run(pool: &SqlitePool, issue_id: &str, generation: i64) {
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+         VALUES ('t-prior','ws-1','rt-1','ag-lead',?1,'done',0,?2)",
+    )
+    .bind(issue_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .expect("prior run");
+}
+
 /// Count every task row on the issue, in ANY status. Deliberately unfiltered:
 /// the defect was N rows written at once, so any filter could hide it.
 async fn task_count(pool: &SqlitePool) -> i64 {
@@ -505,37 +541,39 @@ async fn redundant_more_than_the_roster_dispatches_to_everyone() {
 /// The three states that must each keep the dependent blocked: any sibling still
 /// active, all siblings terminal but NONE succeeded, and a success that arrived
 /// in an older generation.
+///
+/// # The fixture deliberately carries PRIOR history
+///
+/// The blocker already ran a stage that finished at generation 1. Without it the
+/// cluster's generation is trivially the max whatever it is stamped with, and
+/// this test would pass even against a caller that left the generation at the
+/// `0` default, which is exactly the defect
+/// [`a_generation_zero_cluster_is_invisible_to_blocked_detection`] pins. The
+/// generation is resolved the way both real callers resolve it.
 #[tokio::test]
 async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+    use ainb_hangar_store::repo::task::TaskRepo;
 
     let (_d, s) = store().await;
     let pool = s.pool();
     seed_squad_of_three(pool).await;
-    sqlx::query(
-        "INSERT INTO issue \
-         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
-         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
-    )
-    .execute(pool)
-    .await
-    .expect("dependent issue");
-    sqlx::query(
-        "INSERT INTO card_dependency \
-         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
-         VALUES ('ws-1','i-dep','i-1',0,'blocked_by')",
-    )
-    .execute(pool)
-    .await
-    .expect("dependency");
+    seed_dependent_on(pool, "i-1").await;
+    seed_finished_prior_run(pool, "i-1", 1).await;
 
-    // A deliberate cluster of three concurrent runs on the blocker.
+    // A deliberate cluster of three concurrent runs on the blocker, at a freshly
+    // minted generation (2) rather than the `0` default.
+    let generation = TaskRepo::next_generation_for_issue(pool, "i-1")
+        .await
+        .expect("resolve the generation");
+    assert_eq!(generation, 2, "the prior run put the issue at generation 1");
     SquadAssignService::assign_redundant(
         pool,
         &ws(),
         "sq-1",
         &SquadAssignRequest {
             issue_id: Some("i-1"),
+            generation,
             ..SquadAssignRequest::default()
         },
         3,
@@ -545,11 +583,13 @@ async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     .await
     .expect("redundant dispatch");
 
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM agent_task_queue WHERE issue_id='i-1' ORDER BY id")
-            .fetch_all(pool)
-            .await
-            .expect("cluster ids");
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM agent_task_queue \
+          WHERE issue_id='i-1' AND run_group IS NOT NULL ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("cluster ids");
     assert_eq!(ids.len(), 3);
 
     let blocked = |pool: &sqlx::SqlitePool| {
@@ -594,6 +634,78 @@ async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
     assert!(
         !blocked(pool).await,
         "the cluster has drained with a success, so the dependent unblocks"
+    );
+}
+
+/// WHY the generation must be resolved rather than left at the `0` default:
+/// a cluster stamped `0` behind a prior run is INVISIBLE to blocked-detection.
+///
+/// Every generation-scoped fold reads the issue's `MAX(generation)` and then
+/// looks at that generation ALONE. A cluster at `0` sitting behind a stage that
+/// finished at 1 is below the max, so `unfinished_blockers_of` probes generation
+/// 1, sees a `done` task with nothing active, and declares the blocker finished.
+/// The dependent then unblocks (and auto-runs, if it opted in) while three
+/// implementations of the blocker are still live.
+///
+/// This is the harm the CLI's `..SquadAssignRequest::default()` caused, kept as a
+/// standing description of the failure mode rather than as a claim about any one
+/// caller.
+#[tokio::test]
+async fn a_generation_zero_cluster_is_invisible_to_blocked_detection() {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    seed_dependent_on(pool, "i-1").await;
+    seed_finished_prior_run(pool, "i-1", 1).await;
+
+    // The defect: stamp the cluster with the `0` default instead of resolving it.
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_task_queue \
+          WHERE issue_id='i-1' AND status IN ('queued','dispatched','running')",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count live runs");
+    assert_eq!(live, 3, "three implementations are live on the blocker");
+
+    let remaining = CardDependencyRepo::unfinished_blockers_of(pool, "i-dep")
+        .await
+        .expect("blockers");
+    assert!(
+        remaining.is_empty(),
+        "the fold reads MAX(generation)=1 and never sees the generation-0 cluster, \
+         so the blocker reads as FINISHED while three runs are live"
+    );
+
+    // Resolved to the real next generation, the very same cluster IS seen.
+    sqlx::query("UPDATE agent_task_queue SET generation = 2 WHERE run_group IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("restamp the cluster");
+    let remaining = CardDependencyRepo::unfinished_blockers_of(pool, "i-dep")
+        .await
+        .expect("blockers");
+    assert_eq!(
+        remaining,
+        vec!["i-1".to_string()],
+        "at the issue's real max generation the live cluster blocks the dependent"
     );
 }
 

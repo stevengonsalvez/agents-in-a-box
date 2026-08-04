@@ -2642,3 +2642,187 @@ fn issue_subscribe_rejects_a_malformed_actor() {
     assert!(!ok, "a malformed actor must exit non-zero; out={out}");
     assert!(out.contains("bad --actor"), "the refusal text:\n{out}");
 }
+
+/// Seed a runtime and `count` agents into the test's hangar db, returning their
+/// ids. Mirrors [`seed_agent`]'s open-the-same-file pattern; must run AFTER a
+/// verb that bootstraps the workspace.
+fn seed_agents(home: &std::path::Path, count: usize) -> Vec<String> {
+    use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.expect("open hangar db");
+        let pool = store.pool();
+        let workspace_id: String = sqlx::query_scalar("SELECT id FROM workspace LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("default workspace exists");
+        let owner_id: String = sqlx::query_scalar("SELECT id FROM user LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("default owner exists");
+        sqlx::query(
+            "INSERT INTO agent_runtime \
+             (id, workspace_id, daemon_id, provider, runtime_mode, status) \
+             VALUES ('rt-1', ?, 'daemon-1', 'claude', 'local', 'online')",
+        )
+        .bind(&workspace_id)
+        .execute(pool)
+        .await
+        .expect("insert runtime");
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let id = format!("agent-{n}");
+            AgentRepo::insert(
+                pool,
+                &Agent {
+                    id: id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    name: format!("Builder {n}"),
+                    runtime_id: "rt-1".into(),
+                    instructions: None,
+                    visibility: "workspace".into(),
+                    permission_mode: "private".into(),
+                    owner_id: owner_id.clone(),
+                    ..Agent::default()
+                },
+            )
+            .await
+            .expect("insert agent");
+            ids.push(id);
+        }
+        ids
+    })
+}
+
+/// Insert a PRIOR, already-finished run on `issue_id` at `generation`, so the
+/// issue's `MAX(generation)` is non-zero before the CLI dispatches again.
+fn seed_finished_run(home: &std::path::Path, issue_id: &str, agent_id: &str, generation: i64) {
+    use ainb_hangar_store::Store;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.expect("open hangar db");
+        let workspace_id: String = sqlx::query_scalar("SELECT id FROM workspace LIMIT 1")
+            .fetch_one(store.pool())
+            .await
+            .expect("default workspace exists");
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+             VALUES ('t-prior', ?, 'rt-1', ?, ?, 'done', 0, ?)",
+        )
+        .bind(&workspace_id)
+        .bind(agent_id)
+        .bind(issue_id)
+        .bind(generation)
+        .execute(store.pool())
+        .await
+        .expect("insert prior run");
+    });
+}
+
+/// Read `(generation, run_group)` for every task on `issue_id`, oldest id first.
+fn task_generations(home: &std::path::Path, issue_id: &str) -> Vec<(i64, Option<String>)> {
+    use ainb_hangar_store::Store;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.expect("open hangar db");
+        sqlx::query_as(
+            "SELECT generation, run_group FROM agent_task_queue \
+              WHERE issue_id = ? ORDER BY id",
+        )
+        .bind(issue_id)
+        .fetch_all(store.pool())
+        .await
+        .expect("read generations")
+    })
+}
+
+/// `hangar squad assign --redundant N` must stamp a RESOLVED generation, never
+/// the `0` sentinel.
+///
+/// Every generation-scoped fold (the aggregate terminal state, the
+/// blocker-finished predicate, the auto-move) reads `MAX(generation)` for the
+/// issue and looks at that generation ALONE, so a cluster stamped `0` behind a
+/// prior run at generation 1 sits BELOW the max and is invisible to all of them.
+/// The concrete harm: `unfinished_blockers_of` probes generation 1, sees the
+/// prior stage done with nothing active, declares the blocker finished, and a
+/// dependent card auto-runs while three implementations are still live.
+///
+/// The RPC path resolves this correctly (`squad_assign_generation`); the CLI
+/// built its request with `..SquadAssignRequest::default()`, which yields
+/// `generation: 0`.
+#[test]
+fn squad_assign_redundant_stamps_a_resolved_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let issue = create_issue(tmp.path(), "Blocker card");
+    let agents = seed_agents(tmp.path(), 3);
+    // A prior stage of this same card already ran and finished at generation 1.
+    seed_finished_run(tmp.path(), &issue, &agents[0], 1);
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            &format!("agent:{}", agents[0]),
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+    for agent in &agents[1..] {
+        let (ok, out) = run(
+            tmp.path(),
+            &[
+                "hangar",
+                "squad",
+                "add-member",
+                &squad_id,
+                "--member",
+                &format!("agent:{agent}"),
+            ],
+        );
+        assert!(ok, "add-member should exit 0; out={out}");
+    }
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "assign",
+            &squad_id,
+            "--issue",
+            &issue,
+            "--redundant",
+            "3",
+        ],
+    );
+    assert!(ok, "squad assign --redundant should exit 0; out={out}");
+
+    let rows = task_generations(tmp.path(), &issue);
+    let cluster: Vec<i64> =
+        rows.iter().filter(|(_, group)| group.is_some()).map(|(gen, _)| *gen).collect();
+    assert_eq!(cluster.len(), 3, "three clustered runs:\n{rows:?}");
+    let max = rows.iter().map(|(gen, _)| *gen).max().expect("tasks exist");
+    assert!(
+        cluster.iter().all(|gen| *gen == max),
+        "the cluster must sit at the issue's MAX(generation) or every \
+         generation-scoped fold looks straight past it; rows={rows:?}"
+    );
+    assert!(
+        cluster.iter().all(|gen| *gen > 1),
+        "the cluster must be a NEW generation, above the prior run's 1; \
+         rows={rows:?}"
+    );
+}
