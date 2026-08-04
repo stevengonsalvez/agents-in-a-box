@@ -212,6 +212,14 @@ pub async fn advance_issue_lifecycle_after_transition(
 /// [`advance_issue_lifecycle_after_transition`], which no-ops on `failed` /
 /// `cancelled`), so a failed or still-running set never advances the issue.
 ///
+/// # A finished STAGE is not a finished ISSUE
+///
+/// A pipeline card crosses several role-gated stages, each its own run. The
+/// `done` aggregate of ONE stage therefore does not mean the issue is done, and
+/// promoting on it marked a card `done` with Review and QA still to go. The
+/// promotion is held back while [`pipeline_stages_remain`] reports a role-gated
+/// column to the right of where the card now sits.
+///
 /// Best-effort — every fault is logged and swallowed (the task's terminal state
 /// has already committed).
 pub async fn advance_issue_lifecycle_after_terminal(pool: &SqlitePool, task: &Task) {
@@ -227,9 +235,68 @@ pub async fn advance_issue_lifecycle_after_terminal(pool: &SqlitePool, task: &Ta
     match TaskRepo::issue_aggregate_terminal_state(pool, ws.as_str(), issue_id).await {
         // Active set not drained — a sibling still runs; do not advance yet.
         Ok(None) => {}
-        Ok(Some(state)) => advance_issue_lifecycle_after_transition(pool, task, &state).await,
+        Ok(Some(state)) => {
+            // A pipeline card completes ONE STAGE at a time, and a stage is not
+            // the issue. Promoting on the first stage's aggregate marked the
+            // issue `done` with Review and QA still to run, so it rendered Done
+            // on the default Kanban and in `hangar/issues_list` three stages
+            // early. `is_terminal()` then FROZE it there, so the remaining stages
+            // could never move it again.
+            //
+            // This runs AFTER `auto_move_after_terminal` at every call site, so
+            // the card has already advanced: "a role-gated column to the right of
+            // where the card now sits" means stages remain. A card that has
+            // reached the pipeline's terminal column has none, and advances
+            // normally. Every non-pipeline issue (no card, or a board with no
+            // role-gated columns) answers false and is unaffected.
+            if state == "done" && pipeline_stages_remain(pool, issue_id).await {
+                tracing::info!(
+                    task_id = %task.id,
+                    issue_id = %issue_id,
+                    "issue lifecycle: stage finished but the card has stages left; staying In Progress"
+                );
+                return;
+            }
+            advance_issue_lifecycle_after_transition(pool, task, &state).await;
+        }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle terminal advance: aggregate read failed");
+        }
+    }
+}
+
+/// Whether `issue_id`'s card still has a ROLE-GATED column to its RIGHT, i.e.
+/// the pipeline has stages left to run.
+///
+/// `false` for an issue on no board, an issue on a board with no role-gated
+/// columns (every board predating migration 0074), and a card that has reached
+/// the terminal column of its pipeline. Those are exactly the cases where the
+/// task's terminal outcome IS the issue's outcome.
+///
+/// Best-effort like every hook in this module: a store fault answers `false`, so
+/// a fault degrades to the pre-existing behaviour (advance the issue) rather
+/// than stranding an issue at `in_progress` forever.
+async fn pipeline_stages_remain(pool: &SqlitePool, issue_id: &str) -> bool {
+    let found: Result<Option<i64>, _> = sqlx::query_scalar(
+        "SELECT 1 FROM board_card AS bc \
+           JOIN board_column AS cur ON cur.id = bc.column_id \
+          WHERE bc.issue_id = ?1 \
+            AND EXISTS ( \
+                 SELECT 1 FROM board_column AS n \
+                  WHERE n.board_id = bc.board_id \
+                    AND n.services_role IS NOT NULL \
+                    AND n.ord > cur.ord \
+                ) \
+          LIMIT 1",
+    )
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await;
+    match found {
+        Ok(row) => row.is_some(),
+        Err(e) => {
+            tracing::warn!(error = %e, issue_id = %issue_id, "issue lifecycle: reading remaining stages failed; treating the issue as complete");
+            false
         }
     }
 }

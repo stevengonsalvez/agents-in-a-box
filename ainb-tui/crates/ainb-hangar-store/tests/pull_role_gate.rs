@@ -757,6 +757,66 @@ async fn a_re_enqueued_card_is_pullable_again_at_an_earlier_stage() {
     assert_eq!(again.generation, 3);
 }
 
+// ---------------------------------------------------------------------------
+// The closed-issue guard
+// ---------------------------------------------------------------------------
+
+/// A CLOSED issue is not pullable, tested against the token the codebase
+/// actually WRITES.
+///
+/// The guard read `i.state NOT IN ('closed','cancelled')`. `closed` is the
+/// LEGACY token: `IssueLifecycle::as_str` writes `done`, and migration 0023
+/// rewrote the stored legacy values forward. So the only issues the guard ever
+/// excluded were beads-synced ones (`beads_sync/reconcile.rs` still writes
+/// `closed`); a hangar-native closed issue stayed fully pullable and an agent
+/// could be handed a card for work somebody had already closed.
+#[tokio::test]
+async fn a_closed_issue_is_not_pullable() {
+    for state in ["done", "cancelled", "closed"] {
+        let (_d, s) = store().await;
+        let pool = s.pool();
+        seed_world(pool).await;
+        add_agent(pool, "ag-impl", "implementer", 5).await;
+        add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+        add_card(pool, "i-1", "col-impl", 0).await;
+        sqlx::query("UPDATE issue SET state = ?1 WHERE id='i-1'")
+            .bind(state)
+            .execute(pool)
+            .await
+            .expect("close the issue");
+
+        assert!(
+            pull(pool, "t-1").await.is_none(),
+            "an issue in state `{state}` is closed and must not be pulled"
+        );
+    }
+}
+
+/// The live states stay pullable, so the guard closes the hole without freezing
+/// the pipeline. `in_progress` matters most: a card walking the pipeline sits
+/// there for every stage after the first.
+#[tokio::test]
+async fn a_live_issue_is_still_pullable() {
+    for state in ["open", "todo", "in_progress", "in_review", "backlog"] {
+        let (_d, s) = store().await;
+        let pool = s.pool();
+        seed_world(pool).await;
+        add_agent(pool, "ag-impl", "implementer", 5).await;
+        add_column(pool, "col-impl", 1, Some("implementer"), None, false).await;
+        add_card(pool, "i-1", "col-impl", 0).await;
+        sqlx::query("UPDATE issue SET state = ?1 WHERE id='i-1'")
+            .bind(state)
+            .execute(pool)
+            .await
+            .expect("set the issue state");
+
+        assert!(
+            pull(pool, "t-1").await.is_some(),
+            "an issue in state `{state}` is live and must stay pullable"
+        );
+    }
+}
+
 /// A card with an UNFINISHED blocker is not pullable at any stage (the F7
 /// refuse-run guard, reused verbatim), and becomes pullable once the blocker's
 /// latest generation drains with a `done`.

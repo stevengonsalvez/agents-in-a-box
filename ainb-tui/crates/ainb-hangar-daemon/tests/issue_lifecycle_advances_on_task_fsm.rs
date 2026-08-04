@@ -216,3 +216,93 @@ async fn null_issue_chat_task_advance_is_a_noop() {
         "a null-issue chat task leaves every issue untouched"
     );
 }
+
+/// Provision the default six-stage pipeline in the fixture's workspace and park
+/// `issue-1`'s card in the column named `column`.
+async fn park_issue1_in_pipeline(pool: &SqlitePool, column: &str) {
+    use ainb_hangar_core::clock::FixedClock;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::service::pipeline::PipelineService;
+
+    let ws = WorkspaceId::from_str(WS_ID.to_string()).expect("workspace id");
+    PipelineService::provision_default(pool, &ws, &SystemIdGen, &FixedClock(0))
+        .await
+        .expect("provision the pipeline");
+    let (board_id, column_id): (String, String) = sqlx::query_as(
+        "SELECT b.id, c.id FROM board AS b JOIN board_column AS c ON c.board_id = b.id \
+          WHERE b.workspace_id = ?1 AND c.name = ?2",
+    )
+    .bind(WS_ID)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .expect("the pipeline column exists");
+    sqlx::query("DELETE FROM board_card WHERE issue_id = 'issue-1'")
+        .execute(pool)
+        .await
+        .expect("clear any seeded card");
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES (?1, 'issue-1', ?2, 0, 0)",
+    )
+    .bind(&board_id)
+    .bind(&column_id)
+    .execute(pool)
+    .await
+    .expect("park the card");
+}
+
+/// A card MID-PIPELINE must not render as Done.
+///
+/// The lifecycle advance promoted the issue to `done` the moment the FIRST
+/// stage's aggregate landed, and `is_terminal()` then froze it there. So a card
+/// that had only finished Implement, with Review and QA still to run, already
+/// rendered Done on the default Kanban and in `hangar/issues_list`. Worse, the
+/// terminal freeze meant the remaining stages could never move it again.
+#[tokio::test]
+async fn a_card_mid_pipeline_does_not_render_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+    let pool = store.pool();
+    // The Implement stage has just finished, so the card has ADVANCED into
+    // Review. Two stages remain.
+    park_issue1_in_pipeline(pool, "Review").await;
+
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+    set_task1_status(pool, "done").await;
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+
+    assert_eq!(
+        issue1_state(pool).await,
+        "in_progress",
+        "Review and QA are still to run, so the issue is not Done"
+    );
+}
+
+/// The other side of the same rule: a card that has reached the pipeline's
+/// TERMINAL column has no stage left, so its issue does advance to Done.
+#[tokio::test]
+async fn a_card_at_the_end_of_the_pipeline_does_render_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+    let pool = store.pool();
+    // QA finished and the card advanced into the ungated Done column.
+    park_issue1_in_pipeline(pool, "Done").await;
+
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+    set_task1_status(pool, "done").await;
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+
+    assert_eq!(
+        issue1_state(pool).await,
+        "done",
+        "the card walked the whole pipeline, so the issue is Done"
+    );
+}

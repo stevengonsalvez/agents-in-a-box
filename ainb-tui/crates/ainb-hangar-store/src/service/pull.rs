@@ -386,6 +386,18 @@ RETURNING board_id, column_id";
 /// read across stages, so nothing new is introduced. The first stage of a card
 /// has no `done` predecessor and correctly chains to NULL.
 ///
+/// The closed-issue guard names `done` FIRST because that is the token the
+/// codebase actually writes: `IssueLifecycle::as_str` produces `done`, and
+/// migration 0023 rewrote the stored legacy values forward. `closed` is kept
+/// only for the beads-sync reconciler, which still writes it. Listing `closed`
+/// alone made the guard inert for every hangar-native issue.
+///
+/// This guard is only safe because the lifecycle no longer promotes an issue to
+/// `done` when its FIRST stage lands: `advance_issue_lifecycle_after_terminal`
+/// holds the issue at `in_progress` until the card reaches the terminal column of
+/// its pipeline. Without that half, adding `done` here would freeze every
+/// pipeline after its first stage.
+///
 /// `board_column_id` (migration 0077) records WHICH STAGE the run serves. Only
 /// the pull writes it; every push-path task leaves it NULL. It exists so the
 /// finished-stage predicate can distinguish "this stage is done and the card has
@@ -439,7 +451,7 @@ SELECT ?1, \
    AND (?4 IS NULL OR bc.issue_id = ?4) \
    AND a.runtime_id = ?3 \
    AND a.archived = 0 \
-   AND i.state NOT IN ('closed','cancelled') \
+   AND i.state NOT IN ('done','cancelled','closed') \
    AND EXISTS ( \
         SELECT 1 FROM squad_member AS sm \
           JOIN squad AS sq ON sq.id = sm.squad_id \
