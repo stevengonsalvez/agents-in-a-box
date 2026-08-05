@@ -398,6 +398,8 @@ The bus ships useful WITHOUT any ACP code: `message_send` to N tmux sessions is 
 - [ ] Append `fleet.message.send`, `fleet.message.read`, `fleet.transcript.read` to `FLEET_PROTOCOL_CAPABILITY_IDS` (`fleet.rs`), in the SAME change as the dispatch arms (consts were defined in Phase 2; advertisement deliberately deferred to here so no daemon build advertises -32601 methods)
 - [ ] Tracing spans + counters per the Observability section (DE review 2026-08-04)
 - [ ] CLI verbs `ainb fleet msg send|list|follow` per the CLI surface section (same PR as the dispatch arms; contract tests + `docs/tui/cli.md`)
+- [ ] Unknown `after_id` semantics pinned (review 2026-08-05): an `after_id` that does not resolve via `seq_for_id` is `invalid_params`, never treated as start-of-log; contract test for both list and subscribe
+- [ ] Pre-migration auto-backup (review 2026-08-05, turns the Rollback section's documented file-restore from procedure into guarantee): before `apply_migrations` runs any PENDING migration, the daemon copies `hangar.db` (WAL checkpointed first) to `hangar.db.pre-<version>.bak`, keeping the newest N=2 backups; test: seeded store + pending migration produces the backup, re-boot with nothing pending does not
 
 **Wiring** (`lib.rs`):
 - [ ] Broker construction + forwarder spawn parity with fleet stream (boot wiring at `lib.rs:422-432` pattern)
