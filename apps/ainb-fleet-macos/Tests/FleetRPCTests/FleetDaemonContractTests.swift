@@ -34,10 +34,52 @@ final class FleetDaemonContractTests: XCTestCase {
         defer { Task { await connection.close() } }
 
         let result = try await connection.negotiate()
-        XCTAssertEqual(result.protocolVersion, 1)
+        XCTAssertEqual(result.protocolVersion, 2)
         XCTAssertTrue(result.readCompatible)
         XCTAssertTrue(result.writeCompatible)
         XCTAssertTrue(result.capabilityIDs.contains("fleet.subscription.live"))
+    }
+
+    /// I9 bump-and-refuse: a client whose declared range excludes v2 is refused
+    /// by the real daemon on BOTH legs, and the connection surfaces the read
+    /// refusal as a typed error.
+    func testRealDaemonRefusesV1OnlyClientOnBothLegs() async throws {
+        let fixture = try FixtureDaemon()
+        defer { fixture.stop() }
+        let connection = try await fixture.authenticatedConnection()
+        defer { Task { await connection.close() } }
+
+        do {
+            _ = try await connection.negotiate(
+                readVersions: FleetProtocolRange(min: 1, max: 1),
+                writeVersions: FleetProtocolRange(min: 1, max: 1)
+            )
+            XCTFail("expected read-incompatible refusal")
+        } catch let FleetConnectionError.protocolReadIncompatible(result) {
+            XCTAssertEqual(result.protocolVersion, 2)
+            XCTAssertFalse(result.readCompatible)
+            XCTAssertFalse(result.writeCompatible)
+        }
+    }
+
+    /// The provider after `acp` must be capability-only: a token this build has
+    /// never heard of decodes to `.unknown` instead of failing the snapshot.
+    func testProviderDecodeIsTolerantAndKnowsAcp() throws {
+        func decode(_ raw: String) throws -> FleetProvider {
+            try JSONDecoder().decode(FleetProvider.self, from: Data("\"\(raw)\"".utf8))
+        }
+        XCTAssertEqual(try decode("acp"), .acp)
+        XCTAssertEqual(try decode("some-future-provider"), .unknown)
+    }
+
+    /// The write leg is the trap: reading v2 while writing v1 connects fine and
+    /// then fails every action at `requireWriteCapability`. Assert the ranges
+    /// the SHIPPED store declares, not the `FleetConnection` defaults alone.
+    @MainActor
+    func testShippedStoreDeclaresV2OnReadAndWriteLegs() {
+        let store = FleetStore()
+        XCTAssertEqual(store.readVersions, FleetProtocolRange(min: 1, max: 2))
+        XCTAssertEqual(store.writeVersions, FleetProtocolRange(min: 1, max: 2))
     }
 
     func testRealDaemonReturnsTypedSnapshot() async throws {

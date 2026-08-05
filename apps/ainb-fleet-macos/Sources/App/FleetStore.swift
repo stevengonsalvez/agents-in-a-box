@@ -78,7 +78,10 @@ final class FleetStore: ObservableObject {
     @Published private(set) var lastStart: FleetStartResult?
 
     private let location: HangarLocation
-    private let readVersions: FleetProtocolRange
+    // Internal (not private) so the contract tests can assert the ranges the
+    // SHIPPED store actually declares, not the FleetConnection defaults alone.
+    let readVersions: FleetProtocolRange
+    let writeVersions: FleetProtocolRange
     private let makeConnection: (HangarLocation) -> FleetConnection
     private let reconnectDelayNanoseconds: (Int) -> UInt64
     private let notificationCenter = FleetNotificationCenter()
@@ -98,12 +101,14 @@ final class FleetStore: ObservableObject {
 
     init(
         location: HangarLocation = HangarLocation(),
-        readVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 1),
+        readVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 2),
+        writeVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 2),
         makeConnection: @escaping (HangarLocation) -> FleetConnection = { FleetConnection(location: $0) },
         reconnectDelayNanoseconds: @escaping (Int) -> UInt64 = { UInt64($0) * 500_000_000 }
     ) {
         self.location = location
         self.readVersions = readVersions
+        self.writeVersions = writeVersions
         self.makeConnection = makeConnection
         self.reconnectDelayNanoseconds = reconnectDelayNanoseconds
     }
@@ -459,7 +464,10 @@ final class FleetStore: ObservableObject {
         do {
             try await newConnection.connect()
             try await newConnection.authenticate(token: location.readToken())
-            let result = try await newConnection.negotiate(readVersions: readVersions)
+            // Declaring the write range is load-bearing: omitting it left the
+            // connection's default in charge, and a stale default silently
+            // fails every action at requireWriteCapability after a bump.
+            let result = try await newConnection.negotiate(readVersions: readVersions, writeVersions: writeVersions)
             negotiation = result
             let stream = await newConnection.incoming()
             let subscription = try await newConnection.subscribe(afterRevision: projection.committedRevision)

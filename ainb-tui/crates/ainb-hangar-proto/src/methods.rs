@@ -412,9 +412,50 @@ pub const FLEET_START: &str = "fleet/start";
 pub const FLEET_TIMELINE: &str = "fleet/timeline";
 /// Rebuild one stale Claude interview through the live daemon broker.
 pub const FLEET_REPROJECT_CLAUDE_INTERVIEW: &str = "fleet/reproject_claude_interview";
+/// Create a daemon-owned ACP session pair without spawning an adapter process.
+///
+/// Params: [`crate::fleet::FleetAcpSessionCreateParams`]; result:
+/// [`crate::fleet::FleetAcpSessionCreateResult`]. Gated by `fleet.acp.spawn`.
+pub const FLEET_ACP_SESSION_CREATE: &str = "fleet/acp_session_create";
+/// Persist one chat message and fan deliveries out to explicit recipients.
+///
+/// Params: [`crate::fleet::FleetMessageSendParams`]; result:
+/// [`crate::fleet::FleetMessageSendResult`]. Idempotent by `request_id`;
+/// gated by `fleet.message.send`.
+pub const FLEET_MESSAGE_SEND: &str = "fleet/message_send";
+/// Page chat messages by scope, thread origin, or the whole log.
+///
+/// Params: [`crate::fleet::FleetMessageListParams`]; result:
+/// [`crate::fleet::FleetMessageListResult`]. Gated by `fleet.message.read`.
+pub const FLEET_MESSAGE_LIST: &str = "fleet/message_list";
+/// Subscribe to committed chat messages after a cursor.
+///
+/// Params: [`crate::fleet::FleetMessageSubscribeParams`]; result:
+/// [`crate::fleet::FleetMessageSubscribeResult`], then `fleet/message_event`
+/// notifications ([`crate::fleet::FleetMessageEventParams`]). Gated by
+/// `fleet.message.read`.
+pub const FLEET_MESSAGE_SUBSCRIBE: &str = "fleet/message_subscribe";
+/// Page one session's ACP transcript chunks by ingest order.
+///
+/// Params: [`crate::fleet::FleetTranscriptListParams`]; result:
+/// [`crate::fleet::FleetTranscriptListResult`]. Gated by
+/// `fleet.transcript.read`.
+pub const FLEET_TRANSCRIPT_LIST: &str = "fleet/transcript_list";
+/// Subscribe to one session's live ACP transcript stream.
+///
+/// Params: [`crate::fleet::FleetTranscriptSubscribeParams`]; result:
+/// [`crate::fleet::FleetTranscriptSubscribeResult`], then
+/// `fleet/transcript_event` notifications
+/// ([`crate::fleet::FleetTranscriptEventParams`]). Gated by
+/// `fleet.transcript.read`.
+pub const FLEET_TRANSCRIPT_SUBSCRIBE: &str = "fleet/transcript_subscribe";
 
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
-pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &["fleet/resync_required"];
+pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
+    "fleet/resync_required",
+    "fleet/message_event",
+    "fleet/transcript_event",
+];
 
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
 /// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
@@ -1676,6 +1717,14 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_METADATA_GET,
     HANGAR_ISSUE_METADATA_SET,
     HANGAR_ISSUE_METADATA_DELETE,
+    // Chat bus + ACP session create (Fleet protocol v2) are APPENDED at the
+    // catalogue tail; the wire catalogue is append-only.
+    FLEET_ACP_SESSION_CREATE,
+    FLEET_MESSAGE_SEND,
+    FLEET_MESSAGE_LIST,
+    FLEET_MESSAGE_SUBSCRIBE,
+    FLEET_TRANSCRIPT_LIST,
+    FLEET_TRANSCRIPT_SUBSCRIBE,
 ];
 
 #[cfg(test)]
@@ -1952,6 +2001,12 @@ mod tests {
             HANGAR_ISSUE_METADATA_SET,
             HANGAR_ISSUE_METADATA_DELETE,
             HANGAR_COMMENT_MENTION_PREVIEW,
+            FLEET_ACP_SESSION_CREATE,
+            FLEET_MESSAGE_SEND,
+            FLEET_MESSAGE_LIST,
+            FLEET_MESSAGE_SUBSCRIBE,
+            FLEET_TRANSCRIPT_LIST,
+            FLEET_TRANSCRIPT_SUBSCRIBE,
         ];
         for m in declared {
             assert!(

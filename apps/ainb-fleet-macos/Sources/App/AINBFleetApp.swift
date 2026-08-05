@@ -35,12 +35,14 @@ struct AINBFleetApp: App {
 
     private static var testReadVersions: FleetProtocolRange {
         #if DEBUG
-        if CommandLine.arguments.contains("--fleet-test-read-range=2...2")
-            || ProcessInfo.processInfo.environment["AINB_FLEET_TEST_READ_RANGE"] == "2...2" {
-            return FleetProtocolRange(min: 2, max: 2)
+        // 3...3 excludes the daemon's v2, simulating a read-incompatible client
+        // for the protocol-compatibility UI journey.
+        if CommandLine.arguments.contains("--fleet-test-read-range=3...3")
+            || ProcessInfo.processInfo.environment["AINB_FLEET_TEST_READ_RANGE"] == "3...3" {
+            return FleetProtocolRange(min: 3, max: 3)
         }
         #endif
-        return FleetProtocolRange(min: 1, max: 1)
+        return FleetProtocolRange(min: 1, max: 2)
     }
 
     private static var presentationDefaults: UserDefaults {

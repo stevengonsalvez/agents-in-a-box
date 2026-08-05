@@ -9,7 +9,7 @@ final class CanonicalFixtureTests: XCTestCase {
             as: RPCRequest<AuthHelloParams>.self
         )
         try assertJSON(
-            #"{"capability_ids":["fleet.snapshot.read"],"daemon_version":"fixture-daemon","protocol_version":1,"read_compatible":true,"write_compatible":true}"#,
+            #"{"capability_ids":["fleet.snapshot.read"],"daemon_version":"fixture-daemon","protocol_version":2,"read_compatible":true,"write_compatible":true}"#,
             as: FleetNegotiateResult.self
         )
         try assertJSON(

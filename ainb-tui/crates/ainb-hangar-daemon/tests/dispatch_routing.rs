@@ -562,3 +562,13 @@ fn wired_providers_route_and_unknown_defaults_to_claude() {
     assert_eq!(Backend::from_provider("CODEX"), Backend::Codex);
     assert_eq!(Backend::from_provider("Copilot"), Backend::Copilot);
 }
+
+#[test]
+fn acp_token_is_not_a_tmux_routable_backend() {
+    // "acp" is a chat-transport token, never an exec backend: no `Backend`
+    // variant may ever claim it, so issue dispatch keeps falling to the safe
+    // default above. The Fleet-side trap (an explicit ACP arm in
+    // `handle_fleet_action` ahead of the `verified_tmux_send` fallthrough)
+    // lands with the ACP session rows (plan Phase 5, I8).
+    assert_eq!(Backend::from_provider("acp"), Backend::Claude);
+}
