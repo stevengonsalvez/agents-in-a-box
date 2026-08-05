@@ -988,7 +988,8 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
                         && answer.delivery == AnswerDelivery::Confirming
                 }) {
                     answer.delivery = AnswerDelivery::AwaitingSessionResume;
-                    next.feedback = Some("broker accepted answer, waiting for session resume".into());
+                    next.feedback =
+                        Some("broker accepted answer, waiting for session resume".into());
                     return FleetReduction {
                         state: next,
                         intent: None,

@@ -594,23 +594,19 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let hook_response: serde_json::Value =
         serde_json::from_slice(&hook_output.stdout).expect("active Claude hook response JSON");
     assert_eq!(
-        hook_response["hookSpecificOutput"]["permissionDecision"],
-        "allow",
+        hook_response["hookSpecificOutput"]["permissionDecision"], "allow",
         "Claude must receive an allow response, not generic injected text"
     );
     assert_eq!(
-        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]
-            ["What release scope should Fleet use?"],
+        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]["What release scope should Fleet use?"],
         "Focused"
     );
     assert_eq!(
-        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]
-            ["Which proof should gate launch?"],
+        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]["Which proof should gate launch?"],
         "Tests, Tripwire"
     );
     assert_eq!(
-        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]
-            ["When should the release launch?"],
+        hook_response["hookSpecificOutput"]["updatedInput"]["answers"]["When should the release launch?"],
         "Now"
     );
 
