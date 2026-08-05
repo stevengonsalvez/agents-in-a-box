@@ -1,28 +1,42 @@
-//! Durable raw provider-event ledger for Fleet projections.
+//! Durable raw provider-event ledger for Fleet projections, and (since 0079)
+//! the ACP transcript store.
 //!
-//! ## RETENTION: none. This ledger is never trimmed.
+//! ## RETENTION: two regimes, split by `source`.
 //!
-//! Like `activity_log` (0059) and unlike `dispatch_attempt` (0058, bounded to
-//! 20/issue), this table keeps every row forever, on purpose.
+//! **Projection sources (`source <> 'acp'`): never trimmed.** Like
+//! `activity_log` (0059) and unlike `dispatch_attempt` (0058, bounded to
+//! 20/issue), these rows are kept forever, on purpose. `raw_payload` is the
+//! verbatim provider envelope, and the whole point of keeping it is that a
+//! FUTURE reducer can replay history and re-derive Fleet state that today's
+//! reducer does not extract. Trimming would silently destroy exactly the rows
+//! that make a re-reduction possible, oldest-first. On these rows
+//! `projection_revision IS NULL` marks pending recovery work which the Codex
+//! manager replays on startup, not garbage; nothing may ever delete such a
+//! row. Their measured growth (roughly 21 rows per 2 days at a ~344 byte mean
+//! payload, ~1.3 MB per YEAR) remains negligible.
 //!
-//! `raw_payload` is the verbatim provider envelope, and the whole point of
-//! keeping it is that a FUTURE reducer can replay history and re-derive Fleet
-//! state that today's reducer does not extract. Trimming would silently destroy
-//! exactly the rows that make a re-reduction possible, and it would do so
-//! oldest-first — discarding the beginning of every session's story.
+//! **ACP transcript rows (`source = 'acp'`): eligible for operator-invoked
+//! export-then-delete via [`FleetProviderEventRepo::delete_acp_before`].**
+//! These rows carry NO `projection_revision` recovery contract (no reducer
+//! ever projects them; `NULL` is their steady state, not pending work), which
+//! is exactly what makes deleting them safe. They also invalidate the old
+//! growth measurement by two to three orders of magnitude: one ACP turn emits
+//! tens to low hundreds of coalesced chunk rows, so five sessions at twenty
+//! turns a day at fifty rows a turn is ~5,000 rows and roughly 1.8 MB per
+//! DAY, on the order of 650 MB per year. The old "never trim" stance is
+//! therefore scoped to the projection sources above; there is still NO
+//! automatic sweep, only the explicit operator export-then-delete.
 //!
-//! The growth case does not justify that risk. Measured on a heavy real profile
-//! (15-20 concurrent agent sessions): roughly 21 rows per 2 days at a ~344 byte
-//! mean `raw_payload`, i.e. on the order of 1.3 MB per YEAR, against a whole
-//! hangar database of ~4 MB. There is no horizon on which this is the thing that
-//! fills a disk.
+//! Revisit trigger: `source='acp'` rows exceeding ~1M rows or ~100 MB on a
+//! real profile without the export-then-delete command having shipped, or ACP
+//! write volume visibly contending the single `SQLite` writer (watch the
+//! commits-issued counter).
 //!
-//! If unbounded growth ever does bite, the fix is an explicit operator-invoked
-//! export-then-delete, NOT an automatic sweep, and it must never remove a row
-//! with `projection_revision IS NULL` — that marks pending recovery work which
-//! the Codex manager replays on startup, not garbage.
-//!
-//! Revisit trigger: this table exceeding ~1M rows or ~100 MB on a real profile.
+//! The pending-recovery partial index keeps its predicate
+//! (`WHERE projection_revision IS NULL`) across 0079; ACP rows are pushed out
+//! of the recovery scan's way by the index KEY
+//! (`source, provider, projection_revision`), never by a predicate the
+//! planner could not prove for a bound `source = ?` parameter.
 
 use blake3::Hasher;
 use sqlx::{Row, SqlitePool};
@@ -200,6 +214,53 @@ impl FleetProviderEventRepo {
         .await?;
         rows.iter().map(row_from).collect()
     }
+
+    /// Page one session's rows after an `ingest_order` cursor, oldest first
+    /// (the transcript read model; rides `idx_fleet_provider_event_session_order`).
+    pub async fn list_by_session_after(
+        pool: &SqlitePool,
+        session_key: &str,
+        after_order: i64,
+        limit: i64,
+    ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event WHERE session_key = ? AND ingest_order > ? \
+             ORDER BY ingest_order ASC LIMIT ?",
+        )
+        .bind(session_key)
+        .bind(after_order)
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(row_from).collect()
+    }
+
+    /// The operator export-then-delete leg: remove one session's ACP
+    /// transcript rows below `before_ingest_order`, returning the count.
+    ///
+    /// Two refusal rules, both enforced by the statement itself:
+    /// - a row with `source <> 'acp'` is never touched, regardless of the
+    ///   range asked for;
+    /// - therefore no row carrying the `projection_revision IS NULL` pending
+    ///   recovery contract is ever touched, because that contract exists only
+    ///   on the non-ACP projection sources (see the header: on ACP rows NULL
+    ///   is the steady state, which is what makes them deletable at all).
+    pub async fn delete_acp_before(
+        pool: &SqlitePool,
+        session_key: &str,
+        before_ingest_order: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM fleet_provider_event \
+             WHERE session_key = ? AND ingest_order < ? AND source = 'acp'",
+        )
+        .bind(session_key)
+        .bind(before_ingest_order)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 fn digest(payload: &str) -> String {
@@ -310,5 +371,176 @@ mod tests {
             FleetProviderEventRepo::mark_projected(store.pool(), "missing", 1).await,
             Err(FleetProviderEventError::EventNotFound { .. })
         ));
+    }
+
+    fn acp_event(id: &str, session_key: &str) -> NewFleetProviderEvent {
+        NewFleetProviderEvent {
+            event_id: id.to_string(),
+            provider: "claude-agent-acp".to_string(),
+            source: "acp".to_string(),
+            session_key: Some(session_key.to_string()),
+            provider_session_id: Some("adapter-1".to_string()),
+            observed_at: 100,
+            received_at: 101,
+            event_type: "acp.message".to_string(),
+            raw_payload: format!("{{\"chunk\":\"{id}\"}}"),
+        }
+    }
+
+    /// Seed both ACP transcript rows and the classic projection-source rows,
+    /// so the plans and deletions below are asserted against mixed content.
+    async fn seed_mixed(store: &Store) {
+        for i in 0..5 {
+            FleetProviderEventRepo::append(
+                store.pool(),
+                &acp_event(&format!("acp-{i}"), "acp:s-1"),
+            )
+            .await
+            .unwrap();
+        }
+        FleetProviderEventRepo::append(store.pool(), &event("codex-1", "{}"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_row_carries_a_valid_raw_blake3_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let row = FleetProviderEventRepo::append(store.pool(), &acp_event("acp-1", "acp:s-1"))
+            .await
+            .unwrap();
+        assert_eq!(row.raw_blake3.len(), 64);
+        assert_eq!(row.raw_blake3, digest(&row.raw_payload));
+    }
+
+    /// I10: the REAL consumer query still plans onto the recreated partial
+    /// index with ACP rows present. Asserting the index merely EXISTS is not
+    /// enough; only the plan proves the recovery scan did not degrade to a
+    /// full table scan over the table ACP transcripts inflate.
+    #[tokio::test]
+    async fn recovery_scan_plans_onto_the_projection_index_with_acp_rows_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_mixed(&store).await;
+
+        // The exact SQL `unprojected` runs, prefixed with EXPLAIN QUERY PLAN.
+        let rows = sqlx::query(
+            "EXPLAIN QUERY PLAN \
+             SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event WHERE provider = ? AND source = ? AND projection_revision IS NULL \
+             ORDER BY ingest_order ASC LIMIT ?",
+        )
+        .bind("codex")
+        .bind("codex_app_server")
+        .bind(10_i64)
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        let detail = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            detail.contains("idx_fleet_provider_event_projection"),
+            "the consumer query must use the partial index, plan was:\n{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_by_session_after_pages_one_session_by_ingest_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_mixed(&store).await;
+        FleetProviderEventRepo::append(store.pool(), &acp_event("acp-other", "acp:s-2"))
+            .await
+            .unwrap();
+
+        let page = FleetProviderEventRepo::list_by_session_after(store.pool(), "acp:s-1", 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|r| r.event_id.as_str()).collect::<Vec<_>>(),
+            vec!["acp-2", "acp-3"],
+            "cursor-exclusive, limit-bounded, single-session"
+        );
+    }
+
+    /// The export-then-delete leg removes ONLY `source='acp'` rows below the
+    /// watermark; every row carrying the pending-recovery contract survives.
+    #[tokio::test]
+    async fn delete_acp_before_removes_only_acp_rows_below_the_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_mixed(&store).await;
+        let watermark = FleetProviderEventRepo::get(store.pool(), "acp-3")
+            .await
+            .unwrap()
+            .unwrap()
+            .ingest_order;
+
+        let deleted = FleetProviderEventRepo::delete_acp_before(store.pool(), "acp:s-1", watermark)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 3, "acp-0..2 fall below the watermark");
+        assert!(FleetProviderEventRepo::get(store.pool(), "acp-0").await.unwrap().is_none());
+        assert!(FleetProviderEventRepo::get(store.pool(), "acp-3").await.unwrap().is_some());
+        assert!(FleetProviderEventRepo::get(store.pool(), "acp-4").await.unwrap().is_some());
+    }
+
+    /// Refusal rule one: a non-ACP row is never touched, even when the caller
+    /// hands a range that covers it.
+    #[tokio::test]
+    async fn delete_acp_before_refuses_a_non_acp_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let codex = FleetProviderEventRepo::append(store.pool(), &event("codex-1", "{}"))
+            .await
+            .unwrap();
+
+        let deleted = FleetProviderEventRepo::delete_acp_before(
+            store.pool(),
+            codex.session_key.as_deref().unwrap(),
+            codex.ingest_order + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 0);
+        assert!(
+            FleetProviderEventRepo::get(store.pool(), "codex-1").await.unwrap().is_some(),
+            "a non-acp row survives an in-range delete"
+        );
+    }
+
+    /// Refusal rule two: a row marking pending recovery work
+    /// (`projection_revision IS NULL` on a projection source) is never
+    /// touched. On ACP rows NULL is the steady state, not pending work, so the
+    /// guard is the `source` filter itself; this pins the recovery-contract
+    /// half of it.
+    #[tokio::test]
+    async fn delete_acp_before_refuses_a_pending_recovery_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pending = FleetProviderEventRepo::append(store.pool(), &event("codex-pending", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(pending.projection_revision, None, "seeded as pending work");
+
+        let deleted = FleetProviderEventRepo::delete_acp_before(
+            store.pool(),
+            pending.session_key.as_deref().unwrap(),
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 0);
+        assert!(
+            FleetProviderEventRepo::get(store.pool(), "codex-pending")
+                .await
+                .unwrap()
+                .is_some(),
+            "pending recovery work survives any delete range"
+        );
     }
 }
