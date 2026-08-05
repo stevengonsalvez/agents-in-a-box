@@ -114,16 +114,20 @@ fn fire_copilot_hook(script: &Path, home: &Path, json: &str) {
 fn atc_hook_prefers_ainb_bin_over_path() {
     let script = hook_script();
     let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
     let explicit_bin = dir.path().join("source-ainb");
     let path_dir = dir.path().join("path-bin");
     let path_bin = path_dir.join("ainb");
     let capture = dir.path().join("captured-bin");
+    fs::create_dir(&home).unwrap();
     fs::create_dir(&path_dir).unwrap();
 
     for (bin, marker) in [(&explicit_bin, "explicit"), (&path_bin, "path")] {
         fs::write(
             bin,
-            format!("#!/usr/bin/env bash\nprintf '%s' '{marker}' > \"$AINB_HOOK_CAPTURE\"\n"),
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s %s\\n' '{marker}' \"$*\" >> \"$AINB_HOOK_CAPTURE\"\n"
+            ),
         )
         .unwrap();
         let mut permissions = fs::metadata(bin).unwrap().permissions();
@@ -134,11 +138,11 @@ fn atc_hook_prefers_ainb_bin_over_path() {
     let original_path = std::env::var("PATH").unwrap();
     let out = Command::new("bash")
         .arg(&script)
+        .env("HOME", &home)
         .env("AINB_AGENT", "claude")
         .env("AINB_MANAGED", "atc")
         .env("AINB_BIN", &explicit_bin)
         .env("AINB_HOOK_CAPTURE", &capture)
-        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
         .env("PATH", format!("{}:{original_path}", path_dir.display()))
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -152,7 +156,10 @@ fn atc_hook_prefers_ainb_bin_over_path() {
         .expect("running hook");
 
     assert!(out.success(), "hook failed: {out}");
-    assert_eq!(fs::read_to_string(capture).unwrap(), "explicit");
+    let calls = fs::read_to_string(capture).unwrap();
+    assert!(calls.contains("explicit notifyd"), "calls: {calls}");
+    assert!(calls.contains("explicit fleet atc hook"), "calls: {calls}");
+    assert!(!calls.contains("path "), "calls: {calls}");
 }
 
 #[tokio::test]
