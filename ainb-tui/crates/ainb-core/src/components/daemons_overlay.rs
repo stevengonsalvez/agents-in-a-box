@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn daemons_overlay_renders_headroom_port() {
         let state = make_state(true, 8787, Some(12345), Some(9876));
-        let backend = TestBackend::new(120, 30);
+        let backend = TestBackend::new(120, 36);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| {
             let area = f.size();
@@ -513,7 +513,7 @@ mod tests {
                 binary_drift: true,
             },
         ];
-        let backend = TestBackend::new(120, 30);
+        let backend = TestBackend::new(120, 36);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| {
             let area = f.size();
