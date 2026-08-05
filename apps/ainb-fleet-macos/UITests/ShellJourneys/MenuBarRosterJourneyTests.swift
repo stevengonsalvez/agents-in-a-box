@@ -17,14 +17,36 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
     }
 
     @MainActor
-    func testNotchOpensFleetWindow() throws {
+    func testNotchExpandsControlsAndExplicitCTAOpensFleetWindow() throws {
         launchApp()
 
         let notch = app.buttons["fleet.notch"]
         waitFor(notch)
         notch.click()
 
+        waitFor(app.textFields["fleet.notch.search"])
+        XCTAssertFalse(app.windows["Fleet"].exists, "notch click must not open full Fleet")
+        app.buttons["fleet.notch.show-all"].click()
         XCTAssertTrue(app.windows["Fleet"].waitForExistence(timeout: 8), app.debugDescription)
+    }
+
+    @MainActor
+    func testNotchFilterSelectsOnlyVisibleSessions() throws {
+        try fixture.seed(eventID: "active", sessionID: "active", eventType: "UserPromptSubmit", observedAt: 1_700_000_000_001)
+        try fixture.seed(eventID: "ask", provider: "codex", sessionID: "ask", eventType: "AskUserQuestion", observedAt: 1_700_000_000_002)
+        launchApp()
+
+        let notch = app.buttons["fleet.notch"]
+        waitFor(notch)
+        notch.click()
+        app.buttons["fleet.notch.filter.all"].click()
+        waitFor(app.buttons["fleet.notch.row.claude:active"])
+        waitFor(app.buttons["fleet.notch.row.codex:ask"])
+
+        app.buttons["fleet.notch.filter.ask"].click()
+        waitFor(app.buttons["fleet.notch.row.codex:ask"])
+        XCTAssertFalse(app.buttons["fleet.notch.row.claude:active"].exists)
+        waitFor(app.staticTexts["fleet.notch.detail.codex:ask"])
     }
 
     @MainActor

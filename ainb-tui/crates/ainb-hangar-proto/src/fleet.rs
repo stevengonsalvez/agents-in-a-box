@@ -218,6 +218,8 @@ pub struct FleetCapabilities {
     pub structured_dismiss: bool,
     /// Approve or deny exact provider requests.
     pub approvals: bool,
+    /// Approve an exact request for the remainder of the current provider session.
+    pub approval_session: bool,
     /// Send generic prompt text.
     pub send_prompt: bool,
     /// Continue a paused session.
@@ -567,6 +569,14 @@ pub enum ControlAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_identity: Option<FleetRequestIdentity>,
     },
+    /// Approve an exact provider request for the remainder of the current provider session.
+    ApproveForSession {
+        /// Provider request fingerprint verified against current state.
+        request_fingerprint: String,
+        /// Exact provider routing identity when provider protocol requires it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_identity: Option<FleetRequestIdentity>,
+    },
     /// Deny exact provider request.
     Deny {
         /// Provider request fingerprint verified against current state.
@@ -624,6 +634,7 @@ impl ControlAction {
             Self::StructuredAnswer { .. } => "structured_answer",
             Self::DismissStructured { .. } => "dismiss_structured",
             Self::Approve { .. } => "approve",
+            Self::ApproveForSession { .. } => "approve_for_session",
             Self::Deny { .. } => "deny",
             Self::VerifiedPicker { .. } => "verified_picker",
             Self::SendPrompt { .. } => "send_prompt",

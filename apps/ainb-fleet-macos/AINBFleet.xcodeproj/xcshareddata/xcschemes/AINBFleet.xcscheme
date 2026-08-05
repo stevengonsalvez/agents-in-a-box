@@ -38,6 +38,16 @@
                ReferencedContainer = "container:AINBFleet.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A10000000000000000000003"
+               BuildableName = "FleetUITests.xctest"
+               BlueprintName = "FleetUITests"
+               ReferencedContainer = "container:AINBFleet.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

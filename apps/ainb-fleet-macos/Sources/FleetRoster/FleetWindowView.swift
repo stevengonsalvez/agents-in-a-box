@@ -206,7 +206,7 @@ struct FleetWindowView: View {
     }
 }
 
-private struct FleetAnswerQueue: View {
+struct FleetAnswerQueue: View {
     @ObservedObject var store: FleetStore
     @Environment(\.dismiss) private var dismiss
     @State private var selectedSessionKey: String?
