@@ -137,6 +137,36 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let _ainb_home = EnvGuard::set("AINB_HOME", home_tmp.path().join(".agents-in-a-box"));
     let _disable_tmux_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
     let hangar = FleetHangar::start(&hangar_home);
+    let questions = serde_json::json!([
+        {
+            "id": "scope",
+            "question": "What release scope should Fleet use?",
+            "header": "Scope",
+            "options": [
+                {"label": "Focused", "description": "ship only verified Fleet work"},
+                {"label": "Broad", "description": "include adjacent changes"}
+            ]
+        },
+        {
+            "id": "validation",
+            "question": "Which proof should gate launch?",
+            "header": "Validation",
+            "multiSelect": true,
+            "options": [
+                {"label": "Tests", "description": "run targeted Rust coverage"},
+                {"label": "Tripwire", "description": "capture live terminal truth"}
+            ]
+        },
+        {
+            "id": "rollout",
+            "question": "When should the release launch?",
+            "header": "Rollout",
+            "options": [
+                {"label": "Now", "description": "start after proof completes"},
+                {"label": "Later", "description": "hold for a manual window"}
+            ]
+        }
+    ]);
     hangar.apply_hook(
         "fleet-panel-ask-start",
         "fleet-panel-ask-1",
@@ -153,38 +183,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         serde_json::json!({
             "payload": {
                 "tool_use_id": "ask-tool-1",
-                "tool_input": {
-                    "questions": [
-                        {
-                            "id": "scope",
-                            "question": "What release scope should Fleet use?",
-                            "header": "Scope",
-                            "options": [
-                                {"label": "Focused", "description": "ship only verified Fleet work"},
-                                {"label": "Broad", "description": "include adjacent changes"}
-                            ]
-                        },
-                        {
-                            "id": "validation",
-                            "question": "Which proof should gate launch?",
-                            "header": "Validation",
-                            "multiSelect": true,
-                            "options": [
-                                {"label": "Tests", "description": "run targeted Rust coverage"},
-                                {"label": "Tripwire", "description": "capture live terminal truth"}
-                            ]
-                        },
-                        {
-                            "id": "rollout",
-                            "question": "When should the release launch?",
-                            "header": "Rollout",
-                            "options": [
-                                {"label": "Now", "description": "start after proof completes"},
-                                {"label": "Later", "description": "hold for a manual window"}
-                            ]
-                        }
-                    ]
-                }
+                "tool_input": { "questions": questions.clone() }
             }
         }),
         4_000_000_000_300,
@@ -199,38 +198,8 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         serde_json::json!({
             "matcher": "AskUserQuestion",
             "payload": {
-                "tool_input": {
-                    "questions": [
-                        {
-                            "id": "scope",
-                            "question": "What release scope should Fleet use?",
-                            "header": "Scope",
-                            "options": [
-                                {"label": "Focused", "description": "ship only verified Fleet work"},
-                                {"label": "Broad", "description": "include adjacent changes"}
-                            ]
-                        },
-                        {
-                            "id": "validation",
-                            "question": "Which proof should gate launch?",
-                            "header": "Validation",
-                            "multiSelect": true,
-                            "options": [
-                                {"label": "Tests", "description": "run targeted Rust coverage"},
-                                {"label": "Tripwire", "description": "capture live terminal truth"}
-                            ]
-                        },
-                        {
-                            "id": "rollout",
-                            "question": "When should the release launch?",
-                            "header": "Rollout",
-                            "options": [
-                                {"label": "Now", "description": "start after proof completes"},
-                                {"label": "Later", "description": "hold for a manual window"}
-                            ]
-                        }
-                    ]
-                }
+                "tool_use_id": "ask-tool-1",
+                "tool_input": { "questions": questions.clone() }
             }
         }),
         4_000_000_000_301,
@@ -318,38 +287,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     }
     let hook_payload = serde_json::json!({
         "tool_use_id": "ask-tool-1",
-        "tool_input": {
-            "questions": [
-                {
-                    "id": "scope",
-                    "question": "What release scope should Fleet use?",
-                    "header": "Scope",
-                    "options": [
-                        {"label": "Focused", "description": "ship only verified Fleet work"},
-                        {"label": "Broad", "description": "include adjacent changes"}
-                    ]
-                },
-                {
-                    "id": "validation",
-                    "question": "Which proof should gate launch?",
-                    "header": "Validation",
-                    "multiSelect": true,
-                    "options": [
-                        {"label": "Tests", "description": "run targeted Rust coverage"},
-                        {"label": "Tripwire", "description": "capture live terminal truth"}
-                    ]
-                },
-                {
-                    "id": "rollout",
-                    "question": "When should the release launch?",
-                    "header": "Rollout",
-                    "options": [
-                        {"label": "Now", "description": "start after proof completes"},
-                        {"label": "Later", "description": "hold for a manual window"}
-                    ]
-                }
-            ]
-        }
+        "tool_input": { "questions": questions }
     });
     let hook_cwd = home_tmp.path().join("fleet-tripwire-project");
     let mut hook = Command::new(ainb_bin())
@@ -371,6 +309,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn active Claude structured hook");
     hook.stdin
@@ -394,12 +333,13 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         }
         thread::sleep(Duration::from_millis(100));
     }
+    let pending = broker::client_list(&paths.approve_socket).expect("list active hook waiter");
     assert!(
-        broker::client_list(&paths.approve_socket)
-            .expect("list active hook waiter")
-            .iter()
-            .any(|entry| entry.session_id == "fleet-panel-ask-1"),
-        "actual lifecycle hook never registered its structured waiter"
+        pending.iter().any(|entry| {
+            entry.session_id == "fleet-panel-ask-1"
+                && entry.request_fingerprint.as_deref() == Some(request_fingerprint.as_str())
+        }),
+        "actual lifecycle hook never registered matching structured waiter, expected {request_fingerprint}, seeded {seeded:#?}, pending {pending:#?}"
     );
 
     let session_name = std::env::var("AINB_FLEET_TRIPWIRE_SESSION")
@@ -590,7 +530,11 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         Some("claude structured hook broker")
     );
     let hook_output = hook.wait_with_output().expect("wait active Claude hook");
-    assert!(hook_output.status.success(), "active Claude hook failed");
+    assert!(
+        hook_output.status.success(),
+        "active Claude hook failed: {}",
+        String::from_utf8_lossy(&hook_output.stderr)
+    );
     let hook_response: serde_json::Value =
         serde_json::from_slice(&hook_output.stdout).expect("active Claude hook response JSON");
     assert_eq!(
@@ -611,7 +555,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     );
 
     // Claude receives the hook output then emits its next lifecycle signal.
-    // That authoritative signal closes Fleet's delivery-pending card.
+    // The authoritative state must clear the answered interview.
     hangar.apply_hook(
         "fleet-panel-ask-resumed",
         "fleet-panel-ask-1",
@@ -620,17 +564,16 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         serde_json::json!({"tool_name": "AskUserQuestion"}),
         4_000_000_000_303,
     );
-    let resumed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains("ACTION QUEUE")
-            && c.contains("answer received by session")
-            && !c.contains("STRUCTURED INTERVIEW")
-    });
-    assert!(
-        resumed.is_some(),
-        "Fleet did not confirm target session resume:\n{}",
-        capture_pane(&session)
+    let resumed_snapshot = hangar
+        .session("claude:fleet-panel-ask-1")
+        .expect("resumed session remains in authoritative snapshot");
+    assert_eq!(
+        resumed_snapshot.attention,
+        ainb_hangar_proto::fleet::AttentionState::None
     );
 
+    // First Esc leaves the open interview draft. Second Esc returns Fleet to Home.
+    send_key(&session, "Escape");
     send_key(&session, "Escape");
     let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats")

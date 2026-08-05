@@ -3093,28 +3093,16 @@ fn render_interview_question_card(
         put_str(buffer, inner_left, y, &part, FG, inner_right);
         y = y.saturating_add(1);
     }
-    if answer.delivery == AnswerDelivery::Confirming && active {
-        if y < bottom.saturating_sub(2) {
-            put_str(
-                buffer,
-                inner_left,
-                y,
-                "● submitting exact answer…",
-                GOLD,
-                inner_right,
-            );
-            y = y.saturating_add(1);
+    let progress = active.then(|| match answer.delivery {
+        AnswerDelivery::Confirming => Some("● submitting exact answer…"),
+        AnswerDelivery::AwaitingSessionResume => {
+            Some("● broker accepted, awaiting session resume…")
         }
-    } else if answer.delivery == AnswerDelivery::AwaitingSessionResume && active {
+        AnswerDelivery::Ready => None,
+    });
+    if let Some(message) = progress.flatten() {
         if y < bottom.saturating_sub(2) {
-            put_str(
-                buffer,
-                inner_left,
-                y,
-                "● broker accepted, awaiting session resume…",
-                GOLD,
-                inner_right,
-            );
+            put_str(buffer, inner_left, y, message, GOLD, inner_right);
             y = y.saturating_add(1);
         }
     } else if question.options.is_empty() {
@@ -3915,6 +3903,13 @@ mod tests {
             },
         )
         .state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("interview must stay open until the session resumes");
+        };
+        assert_eq!(
+            queue.current().expect("active interview").delivery,
+            AnswerDelivery::AwaitingSessionResume
+        );
         let mut resumed = row;
         resumed.version += 1;
         resumed.lifecycle_state = "RUNNING".into();
