@@ -144,6 +144,14 @@ ainb_send() {
   return 2
 }
 
+# Dev launches set AINB_BIN to their freshly built binary. Do not fall back to
+# a different installed `ainb`: that silently projects hook events with stale
+# Fleet code while the visible TUI is current.
+AINB_HOOK_BIN="${AINB_BIN:-}"
+if [ -z "${AINB_HOOK_BIN}" ]; then
+  AINB_HOOK_BIN="$(command -v ainb 2>/dev/null || true)"
+fi
+
 ainb_socket_alive() {
   # True only when a daemon is actually ACCEPTING on the socket. A bare
   # socket *file* left behind by a crashed daemon must NOT count — testing
@@ -172,7 +180,7 @@ ainb_lazy_spawn() {
   if ainb_socket_alive; then
     return 0
   fi
-  if ! command -v ainb >/dev/null 2>&1; then
+  if [ -z "${AINB_HOOK_BIN}" ] || [ ! -x "${AINB_HOOK_BIN}" ]; then
     return 1
   fi
   # Mutual exclusion across concurrent first-fires. `mkdir` is atomic on
@@ -197,7 +205,7 @@ ainb_lazy_spawn() {
   # the suspected cause of daemons wedging in startup before they ever
   # bind), stdout/stderr discarded, nohup so a closing pane/tmux can't
   # SIGHUP it.
-  nohup ainb notifyd </dev/null >/dev/null 2>&1 &
+  nohup "${AINB_HOOK_BIN}" notifyd </dev/null >/dev/null 2>&1 &
   # Wait up to 1s for the socket to come up, then release the lock.
   ainb_attempts=0
   while [ "${ainb_attempts}" -lt 100 ]; do
@@ -233,7 +241,7 @@ fi
 # {"decision":"block",...}). The shell only forwards what it already parsed and
 # relays the command's stdout verbatim so Claude Code sees the block JSON.
 if { [ "${AINB_MANAGED:-}" = "atc" ] || [ "${AINB_AGENT:-}" = "claude" ] || [ "${AINB_AGENT:-}" = "codex" ]; } \
-  && command -v ainb >/dev/null 2>&1; then
+  && [ -n "${AINB_HOOK_BIN}" ] && [ -x "${AINB_HOOK_BIN}" ]; then
   AINB_HOOK_EVENT="${AINB_HOOK_EVENT:-${AINB_RAW_EVENT}}"
   # Resolve the matcher to forward: the managed command sets AINB_HOOK_MATCHER
   # (e.g. AskUserQuestion for the PreToolUse hook); otherwise fall back to the
@@ -245,7 +253,7 @@ if { [ "${AINB_MANAGED:-}" = "atc" ] || [ "${AINB_AGENT:-}" = "claude" ] || [ "$
   # Forward the original payload on stdin so the Rust side can extract a
   # done_summary (last assistant line) + transcript_path without re-reading the
   # transcript.
-  AINB_HOOK_OUT="$(printf '%s' "${AINB_INPUT}" | ainb fleet atc hook \
+  AINB_HOOK_OUT="$(printf '%s' "${AINB_INPUT}" | "${AINB_HOOK_BIN}" fleet atc hook \
     --event "${AINB_HOOK_EVENT}" \
     --session-id "${AINB_SESSION_ID}" \
     --cwd "${AINB_CWD}" \
