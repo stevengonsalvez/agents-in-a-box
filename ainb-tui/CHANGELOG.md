@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.1] - 2026-08-05
+### Added
+- Merge pull request #571 from stevengonsalvez/f/atc-4
+- Merge pull request #573 from stevengonsalvez/f/atc-4
+- Merge pull request #576 from stevengonsalvez/feat/pipeline-health-and-stage-prompts
+- Merge pull request #577 from stevengonsalvez/f/atc-4
+- Merge pull request #581 from stevengonsalvez/f/atc-4
+- Merge pull request #585 from stevengonsalvez/f/atc-4
+- feat(burndown)!: replace Daily and Weekly tabs with Activity
+- **burndown**: add contribution heatmap data layer
+- **burndown**: add heatmap cursor and metric state
+- **burndown**: wire heatmap navigation keys
+- **fleet**: confirm structured interview delivery
+- **fleet**: polish interview card queue
+- **fleet**: queue structured interviews
+- **fleet**: ship responsive operator board
+- **hangar**: derive pipeline health at query time and ship it on the board
+- **hangar**: layer a per-stage prompt addendum into the dispatch brief
+- **hangar**: render the pipeline health strip and add pipeline stage-prompt
+- **usage**: add shared ainb-model-rates crate
+- add Fleet interview answer queue
+- redesign Fleet priority roster
+
+### Fixed
+- Merge pull request #568 from stevengonsalvez/fix/codex-hook-trust
+- Merge pull request #572 from stevengonsalvez/f/burndown-ops
+- Merge pull request #575 from stevengonsalvez/f/minor-bugs
+- Merge pull request #578 from stevengonsalvez/f/minor-bugs
+- Merge pull request #582 from stevengonsalvez/fix/pipeline-health-review-findings
+- Merge pull request #583 from stevengonsalvez/fix/pull-pipeline-review-findings
+- Merge pull request #589 from stevengonsalvez/fix/atc-hook-bin
+- Merge pull request #590 from stevengonsalvez/fix/fleet-structured-hook-timeout
+- docs: harden buzz port plans after design review
+- **ainb-hooks**: correct the documented Codex payload delivery
+- **burndown**: show tokens for unpriced rows, not "cost n/a"
+- **fleet**: harden interview delivery proof
+- **fleet**: harden interview queue rendering
+- **fleet**: keep structured hooks alive
+- **fleet**: preserve interview cards at compact height
+- **hangar**: answer a squad dispatch with its own card's task
+- **hangar**: enqueue snapshot refreshes promptly
+- **hangar**: gate --redundant by the card's stage, and say so in the docs
+- **hangar**: ignore stale snapshot replies
+- **hangar**: make the closed-issue guard real, and stop rendering Done early
+- **hangar**: paint role dots on the stage they describe when the board scrolls
+- **hangar**: resolve the run generation on the squad-assign CLI path
+- **hangar**: ship column health only on role-gated columns
+- **hangar**: source the stage addendum from the pipeline board only
+- **hangar**: stop a pipeline stage executing twice in the finalize window
+- **hooks**: honor AINB_BIN for ATC events
+- **hooks**: reuse hook binary for lazy spawn
+- **plugin-notifyd**: warn that Codex will not run untrusted hooks
+- **release**: defer version bump to workflow
+- **session-reader**: drop price-stale cache rows on upgrade
+- **usage**: rank unpriced rows below priced ones
+- add Claude interview reprojection
+- align filtered session selection
+- avoid pane attach legend clipping
+- navigate only visible sessions
+- preserve Claude interview state
+- preserve workspace jump order
+- report Claude recovery outcome
+- retain session status filter
+- route Claude recovery live
+
+### Documentation
+- Merge pull request #574 from stevengonsalvez/f/buzz
+- Merge pull request #579 from stevengonsalvez/f/buzz
+- Merge pull request #586 from stevengonsalvez/f/buzz
+- **ainb-hooks**: document the Codex hook trust gate
+- add acp resume and steering spike report
+- add buzz acp port explainer page
+- add buzz to ainb port research
+- add coupling enforcement to part 1 plan
+- add frontmatter titles to plan pages
+- drop committed research copies in favour of discussion
+- harden buzz port plans after design review
+- move buzz port plans under docs/plans
+- plan daemon chat bus and acp adapter (part 1)
+- plan fleet chat and copilot surfaces (part 2)
+- refresh CLI reference
+
+### Other
+- Merge pull request #566 from stevengonsalvez/chore/release-v1.18.0
+- **hangar**: renumber the stage-stamp migration to 0078
+- ignore impeccable hook cache
+- **hangar**: stop paying for the health fold on every board refresh
+- **usage**: source rates from the shared crate
+
+
 ## [1.18.0] - 2026-08-01
 ### Added
 - Merge pull request #522 from stevengonsalvez/codex/ainb-fleet-macos-contract-v2
