@@ -59,7 +59,7 @@ Boundary decision (2026-08-05): `ainb-acp` runs IN-PROCESS as a daemon library, 
 - Fleet event delivery is durable-log + wakeup: `fleet_tx` broadcasts ONLY committed revision numbers; per-connection forwarders page durable rows from a cursor (`events.rs:87,171-173`, `rpc/mod.rs:567-610`). The chat bus rides this exact pattern with its own cursors.
 - Fleet revisions are commit-ordered because SQLite assigns them: `last_insert_rowid()` inside the write transaction (`repo/fleet.rs:396-413`). Any new cursor must inherit this property, not approximate it (DE review 2026-08-04).
 - `fleet_provider_event` (migration 0071) already has `ingest_order INTEGER PRIMARY KEY AUTOINCREMENT`, `event_id UNIQUE`, `(session_key, ingest_order)` index, `raw_blake3 NOT NULL CHECK(length=64)`, and a partial index `WHERE projection_revision IS NULL` whose documented meaning is "pending recovery work" (`ainb-hangar-store/src/repo/fleet_provider_event.rs:22`).
-- That partial index has exactly ONE consumer query: `repo/fleet_provider_event.rs:192-194`, `WHERE provider = ? AND source = ? AND projection_revision IS NULL` (DE review 2026-08-04, this constrains how migration 0075 may touch it).
+- That partial index has exactly ONE consumer query: `repo/fleet_provider_event.rs:192-194`, `WHERE provider = ? AND source = ? AND projection_revision IS NULL` (DE review 2026-08-04, this constrains how migration 0079 may touch it).
 - `fleet_provider_event`'s header doc (`repo/fleet_provider_event.rs:3-25`) declares "RETENTION: none. This ledger is never trimmed", justified by a MEASURED rate of roughly 21 rows per 2 days at a ~344 byte mean payload (~1.3 MB per YEAR), with an explicit "revisit trigger: this table exceeding ~1M rows or ~100 MB". Putting ACP transcripts in this table invalidates that measurement by two to three orders of magnitude (DE review 2026-08-04, see Retention and growth).
 - `FLEET_PROTOCOL_VERSION = 1` (`ainb-hangar-proto/src/fleet.rs:9`); `FleetProvider` is `Claude | Codex | Unknown` and on the wire (`fleet.rs:93-98`); Swift mirror `FleetWire.swift:124` decodes non-tolerantly.
 - The Swift client genuinely enforces refusal: `FleetConnection.swift:118-120` throws `protocolReadIncompatible` when `read_compatible` is false, and every write goes through `requireWriteCapability` (`FleetConnection.swift:422`) which gates on `write_compatible`. BUT `FleetStore.swift:386` calls `negotiate(readVersions:)` and never passes `writeVersions`, so it keeps the `(min:1,max:1)` default at `FleetConnection.swift:104` (DE review 2026-08-04, see Phase 2).
@@ -120,9 +120,9 @@ Boundary decision (2026-08-05): `ainb-acp` runs IN-PROCESS as a daemon library, 
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Data model (migration 0075, hangar store)
+## Data model (migration 0079, hangar store)
 
-Three new tables plus one index amendment. All in `ainb-tui/crates/ainb-hangar-store/migrations/0075_chat_bus.sql`.
+Three new tables plus one index amendment. All in `ainb-tui/crates/ainb-hangar-store/migrations/0079_chat_bus.sql`.
 
 ```sql
 -- Chat messages. Scope is a minted string: "session:<key>", "broadcast:<ulid>",
@@ -300,13 +300,13 @@ Manual:
 
 ---
 
-## Phase 1: Store, migration 0075 + repos
+## Phase 1: Store, migration 0079 + repos
 
-<!-- wave: 1 | depends_on: [] | files: [ainb-tui/crates/ainb-hangar-store/migrations/0075_chat_bus.sql, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_message.rs, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_acp_session.rs, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_provider_event.rs, ainb-tui/crates/ainb-hangar-store/src/repo/mod.rs, ainb-tui/crates/ainb-hangar-store/tests/migration_0075_upgrade.rs] -->
+<!-- wave: 1 | depends_on: [] | files: [ainb-tui/crates/ainb-hangar-store/migrations/0079_chat_bus.sql, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_message.rs, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_acp_session.rs, ainb-tui/crates/ainb-hangar-store/src/repo/fleet_provider_event.rs, ainb-tui/crates/ainb-hangar-store/src/repo/mod.rs, ainb-tui/crates/ainb-hangar-store/tests/migration_0079_upgrade.rs] -->
 
 ### Changes
 
-- [ ] `migrations/0075_chat_bus.sql` exactly per the Data model section above (3 tables, their indexes, and the projection-index recreation that keeps the PREDICATE unchanged)
+- [ ] `migrations/0079_chat_bus.sql` exactly per the Data model section above (3 tables, their indexes, and the projection-index recreation that keeps the PREDICATE unchanged)
 - [ ] New `repo/fleet_message.rs`: `insert_message` (takes `origin_message_id` and `request_fingerprint`; on `request_id` conflict, fetch the existing row and REJECT when the stored fingerprint differs, mirroring `rpc/mod.rs:1676-1687`, per graft 4), `list_by_scope(after_seq, limit)`, `list_all(after_seq, limit)`, `list_by_origin(origin_id, after_seq, limit)` (I11 thread join), `list_for_session(session_key, limit)` (the delivery-join re-prime corpus per Scope + threading rules: inbound via `fleet_message_delivery` + outbound via `sender`; Phase 6 consumer), `seq_for_id(id)` (wire `after_id` to cursor resolution), `insert_delivery`, `claim_delivery(fingerprint)` / `resolve_delivery(state, detail)` (B's receipt-claim pattern, delivery legs only), `deliveries_for_message`, `pending_deliveries_for_session` (I7/I16 convergence input)
 - [ ] Every list reader pages by `seq`, never by `id` (DE review 2026-08-04, graft 9). No public repo function accepts an id as a cursor
 - [ ] New `repo/fleet_acp_session.rs`: mint (`'acp:' || ulid`), insert idempotent per live scope (partial unique index; on conflict return the existing ACTIVE/IDLE row, backing `fleet/acp_session_create`), `set_acp_session_id`, `set_provider_version`, `set_state`, `set_open_turn` / `clear_open_turn` (both stamp `open_turn_started_at`), `list_dirty` (open turn or PENDING deliveries; the ONE query shared by the boot scan and the runtime convergence path per I16), `list_open_turns_older_than(deadline_ms)` (I16 deadline sweep); provider validated against the adapter registry at the RPC layer (schema only length-checks, see Data model)
@@ -321,7 +321,7 @@ Automated:
 - [ ] Repo tests cover: request_id replay with a matching fingerprint returns the original row and with a differing fingerprint is rejected (I1 insert half); delivery claim is single-winner under concurrent claimers (I3); `event_id` duplicate insert is a no-op (I10); one-live-session-per-scope constraint fires and conflicting insert returns the existing live row; `list_by_origin` returns exactly the rows inserted with that origin (I11 store half); `list_for_session` includes a broadcast-delivered row and the session's own replies, excludes unrelated scopes
 - [ ] I10 index test: `EXPLAIN QUERY PLAN` for the ACTUAL consumer query (`WHERE provider = ? AND source = ? AND projection_revision IS NULL`) names `idx_fleet_provider_event_projection`, asserted against a table seeded with both ACP and non-ACP rows. Asserting the index EXISTS is not enough; the original design would have passed that and still full-scanned (DE review 2026-08-04)
 - [ ] `delete_acp_before` refuses a non-ACP row and refuses a row with `projection_revision IS NULL`
-- [ ] New `tests/migration_0075_upgrade.rs` per the repo's populated-database convention (`tests/migration_0050_upgrade.rs` is the model): migration applies cleanly to a snapshot holding pre-existing `fleet_provider_event` rows, the dropped index is recreated, and the consumer query still plans onto it
+- [ ] New `tests/migration_0079_upgrade.rs` per the repo's populated-database convention (`tests/migration_0050_upgrade.rs` is the model): migration applies cleanly to a snapshot holding pre-existing `fleet_provider_event` rows, the dropped index is recreated, and the consumer query still plans onto it
 
 Manual:
 - [ ] None (pure store phase)
@@ -397,6 +397,9 @@ The bus ships useful WITHOUT any ACP code: `message_send` to N tmux sessions is 
 - [ ] Capability gating on all five message/transcript handlers, per existing write-surface pattern
 - [ ] Append `fleet.message.send`, `fleet.message.read`, `fleet.transcript.read` to `FLEET_PROTOCOL_CAPABILITY_IDS` (`fleet.rs`), in the SAME change as the dispatch arms (consts were defined in Phase 2; advertisement deliberately deferred to here so no daemon build advertises -32601 methods)
 - [ ] Tracing spans + counters per the Observability section (DE review 2026-08-04)
+- [ ] CLI verbs `ainb fleet msg send|list|follow` per the CLI surface section (same PR as the dispatch arms; contract tests + `docs/tui/cli.md`)
+- [ ] Unknown `after_id` semantics pinned (review 2026-08-05): an `after_id` that does not resolve via `seq_for_id` is `invalid_params`, never treated as start-of-log; contract test for both list and subscribe
+- [ ] Pre-migration auto-backup (review 2026-08-05, turns the Rollback section's documented file-restore from procedure into guarantee): before `apply_migrations` runs any PENDING migration, the daemon copies `hangar.db` (WAL checkpointed first) to `hangar.db.pre-<version>.bak`, keeping the newest N=2 backups; test: seeded store + pending migration produces the backup, re-boot with nothing pending does not
 
 **Wiring** (`lib.rs`):
 - [ ] Broker construction + forwarder spawn parity with fleet stream (boot wiring at `lib.rs:422-432` pattern)
@@ -500,6 +503,7 @@ Manual:
 - [ ] Answering rides the EXISTING `fleet/action` Approve/Deny/StructuredAnswer with fingerprint staleness (no new method), THROUGH the new ACP arms above; the daemon routes the answer back to the adapter's pending JSON-RPC id
 - [ ] A pending permission whose adapter process dies is resolved by the convergence routine, not left as a ghost attention row (I7/I16)
 - [ ] Fleet snapshot surfaces these sessions with `provider: Acp` (this works only because of the `fleet_session` row from Session identity and the `"acp"` mapping arm added in Phase 2)
+- [ ] CLI verbs `ainb fleet acp create` + `ainb fleet transcript [--follow]` per the CLI surface section (same PR as the dispatch arms)
 
 ### Success criteria
 
@@ -599,12 +603,12 @@ Required work:
 
 The original plan had no back-out path for a one-way door. Both halves of this change are one-way:
 
-- Migrations are forward-only with no down files (`ainb-hangar-store/src/lib.rs:9-13`) and `apply_migrations` is `sqlx::migrate!().run()` (`:118-120`), which refuses to start against a database holding an applied migration the binary does not embed. A daemon downgraded below 0075 therefore does not start at all. `schema_drift` (`:139`) already exists to surface the softer stale-binary case in the daemon-health pane
+- Migrations are forward-only with no down files (`ainb-hangar-store/src/lib.rs:9-13`) and `apply_migrations` is `sqlx::migrate!().run()` (`:118-120`), which refuses to start against a database holding an applied migration the binary does not embed. A daemon downgraded below 0079 therefore does not start at all. `schema_drift` (`:139`) already exists to surface the softer stale-binary case in the daemon-health pane
 - Bump-and-refuse is symmetric: a v1 client is refused by a v2 daemon (by design, I9), and a v2 client is equally useless against a v1 daemon
 
 Required work:
 
-- [ ] Document the back-out procedure in the PR that lands 0075: restore the pre-upgrade database file (the only real rollback) and pin the client train to match. Say plainly that there is no in-place downgrade
+- [ ] Document the back-out procedure in the PR that lands 0079: restore the pre-upgrade database file (the only real rollback) and pin the client train to match. Say plainly that there is no in-place downgrade
 - [ ] Walk the procedure once against a scratch database before the Phase 2 checkpoint is approved, and record the result in the checkpoint
 - [ ] Client train claim CONFIRMED (2026-08-04): `release.yml` builds Rust targets only; the macOS app is a local Xcode build from the same checkout, coupling accepted. The bump PR's description must state: rebuild the app from the same train when updating the daemon; there is no distributed app artifact
 
@@ -616,12 +620,28 @@ Three questions an operator will ask, each of which must have an answer built by
 2. **"Why is the copilot stuck?"** `hangar/daemon_health` pool fields give queue depth, oldest in-flight turn age, and breaker state. The remedy is `fleet/action Interrupt` on the session (Phase 5 arms), and failing that the turn deadline converges it automatically (I16). Before this review the honest answer was "restart the daemon"
 3. **"What is the pool doing?"** Live/cap/evicted counts and per-scope state on the same pane, with the `acp.spawn` span recording whether each session resumed by load or by re-prime
 
+## CLI surface (parity rule, added 2026-08-05)
+
+Everything in ainb is CLI compatible. Rule: every chat-bus wire method ships its CLI verb IN THE SAME PHASE as its dispatch arm, never later, so the CLI is a first-class client of the same frozen contract the TUI and macOS app use (and the surface `ainb-web` proxies stays complete).
+
+Transport: the CLI speaks `hangar.sock` directly (auth token from `hangar/daemon.token`, Content-Length JSON-RPC, negotiate v2). Task at Phase 3 start: extract or reuse an existing daemon client (candidates: `ainb-web`'s `DaemonClient`, the daemon test `Client`) rather than writing a third one.
+
+Output contract (buzz-cli ergonomics, research doc recommendation 5): JSON on stdout by default under `--format json`; errors as JSON on stderr with a `retryable` boolean; semantic exit codes `0` ok, `1` bad input, `2` daemon/network, `3` auth, `4` other, `5` idempotency conflict (`request_fingerprint` mismatch maps here); stdin `-` accepted for any free-text argument; errors name the follow-up command where one exists.
+
+| Phase | CLI verbs (land with that phase's dispatch arms) |
+|---|---|
+| 3 | `ainb fleet msg send --target <session_key>... [--text <t> \| -] [--request-id <id>]` · `ainb fleet msg list [--scope <k>] [--origin <id>] [--after <id>] [--limit N]` · `ainb fleet msg follow [--after <id>]` (subscribe rendered as NDJSON stream; the `--follow` mode buzz-cli lacks) |
+| 5 | `ainb fleet acp create --provider <p> --cwd <dir> [--scope <k>]` · `ainb fleet transcript <session_key> [--after N] [--limit N] [--follow]` |
+| 6 | `ainb fleet transcript prune --session <key> --before <order> --export <path>` (the Retention section's operator export-then-delete lands as this CLI verb; refuses without `--export` unless `--no-export` is explicit) |
+
+Tests + docs per phase: CLI contract tests against the fixture daemon (exit codes, JSON error shape, `--follow` streams before turn end riding I12); `docs/tui/cli.md` updated in the same PR (the `CLI reference freshness` CI lane enforces drift).
+
 ## Testing strategy
 
 | Layer | Tool | Notes |
 |---|---|---|
 | Store | `cargo test -p ainb-hangar-store` unit tests | idempotency, claim races, index contracts (I1 insert half, I3, I10), `EXPLAIN QUERY PLAN` on the real consumer query |
-| Migration | `tests/migration_0075_upgrade.rs` per the repo convention (`migration_0050_upgrade.rs` is the model) | populated-database upgrade incl. the index drop/recreate |
+| Migration | `tests/migration_0079_upgrade.rs` per the repo convention (`migration_0050_upgrade.rs` is the model) | populated-database upgrade incl. the index drop/recreate |
 | Proto contract | round-trip tests in `ainb-hangar-proto` + registry-drift guards | append-only registries, I9 negotiate |
 | Swift contract | `Tests/FleetRPCTests` (`FleetDaemonContractTests` + fixtures), CI `swift-contract-paths` | tolerant decode, v2 fixtures, read AND write range assertions on the shipped store; ONE fixture set shared with part 2 once its gate runs |
 | Daemon | RPC integration tests against fake adapter + fake tmux recorder | I1, I2, I3, I4, I6, I7, I8, I11, I12, I14, I16 |
@@ -645,7 +665,7 @@ Three questions an operator will ask, each of which must have an answer built by
 | Broadcast-lag correctness without resync frames | I2 page-to-head test under forced lag; append-only logs make it safe by construction, given a commit-ordered cursor |
 | Part 2 lands assumptions this file broke (e.g. `fleet/thread_list`) | Wire-contract checkpoint in Phase 2; part 2's Phase 0 gate reconciles; divergence already flagged in the Wire contract section |
 | v2 bump strands an out-of-train client | Bump-and-refuse is explicit and tested (I9), tolerant decode makes the next provider bump-free. The write-leg trap (`FleetStore.swift:386` never passing `writeVersions`) is a named Phase 2 task; the macOS distribution train is an Open question |
-| No way back after 0075 | Rollback and rollout section: documented file-restore procedure, walked once before the Phase 2 checkpoint |
+| No way back after 0079 | Rollback and rollout section: documented file-restore procedure, walked once before the Phase 2 checkpoint |
 
 ## Open questions (pre-implementation gates, none block Phases 0-3)
 

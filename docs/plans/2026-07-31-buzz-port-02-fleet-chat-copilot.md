@@ -139,7 +139,7 @@ Disclosure rule: every test comments real-adapter vs fixture, matching repo habi
 
 ### A2 daemon: copilot service
 - [ ] Standing ACP session via part-1 AgentPool, created with `fleet/acp_session_create {scope_key: "channel:copilot"}` (idempotent per live scope = singleton); provider claude|codex, version floor asserted from `agentInfo` and persisted to `fleet_acp_session.provider_version` (part 1 schema), `ainb-fleet-tools` passed via `session/new mcpServers`
-- [ ] Per-session config columns migration (0076: `fleet_acp_session_config` or columns on `fleet_acp_session`): model/reasoning/persona for `fleet/copilot_configure`; part 1 deliberately shipped static daemon config only and delegated this here. `permission_mode` is NOT among them (DE review 2026-08-04, Contract section)
+- [ ] Per-session config columns migration (next free number at implementation time; chat bus landed as 0079: `fleet_acp_session_config` or columns on `fleet_acp_session`): model/reasoning/persona for `fleet/copilot_configure`; part 1 deliberately shipped static daemon config only and delegated this here. `permission_mode` is NOT among them (DE review 2026-08-04, Contract section)
 - [ ] Persona is a privileged field: it is a system prompt for an agent holding destructive tools. Gate it behind `fleet.copilot.configure`, log every change to the activity feed, and bound its length (DE review 2026-08-04)
 - [ ] Resume path integration: per-session config (when set) OVERRIDES static daemon adapter config in part 1's Phase 6 re-apply-after-load step; amend that step to read the override; codex `session/set_config_option` uses `configId` param name (spike). The permission-mode re-assertion in that same step (part 1 I13) is NOT overridable and its failure still fails the spawn
 - [ ] PIN permission mode explicitly at session/new; never inherit ambient (spike security flag: bypassPermissions leaked from env). This is part 1's I13 and part 2 inherits the assertion rather than re-implementing it
@@ -193,6 +193,8 @@ Disclosure rule: every test comments real-adapter vs fixture, matching repo habi
 - [ ] Success: "run tests" to 3 sessions → 3 threaded replies + 3 receipts, identical on both UIs
 
 ## Cross-cutting tasks
+
+- [ ] CLI parity (part 1's CLI surface rule applies here too): every part-2 method ships its CLI verb with its dispatch arms. `ainb fleet channel create|list`, `ainb fleet confirm list|answer <id> --approve|--deny`, `ainb fleet activity [--scope]`, `ainb fleet copilot configure --provider [--model] [--persona-file]`; same JSON/exit-code contract, `docs/tui/cli.md` updated per phase
 
 - [ ] Capability gating: steer/broadcast-steer surfaced per-adapter capability flag (gemini future: no steering); probe fallback on -32601 is safe per spike, assert version floors
 - [ ] Config: pinned adapter versions in daemon config; `fleet/copilot_configure` validation

@@ -24,8 +24,8 @@ class FleetUITestCase: XCTestCase {
         if arguments.contains("--fleet-test-open-window") {
             app.launchEnvironment["AINB_FLEET_TEST_OPEN_WINDOW"] = "1"
         }
-        if arguments.contains("--fleet-test-read-range=2...2") {
-            app.launchEnvironment["AINB_FLEET_TEST_READ_RANGE"] = "2...2"
+        if arguments.contains("--fleet-test-read-range=3...3") {
+            app.launchEnvironment["AINB_FLEET_TEST_READ_RANGE"] = "3...3"
         }
         app.launchArguments = arguments
         app.launch()

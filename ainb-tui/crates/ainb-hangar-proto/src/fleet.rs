@@ -6,7 +6,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Current Fleet wire protocol version.
-pub const FLEET_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 carries the one bump-and-refuse break for the chat bus: the `Acp`
+/// provider token plus the `fleet/message_*`, `fleet/transcript_*` and
+/// `fleet/acp_session_create` method family. Clients whose declared range
+/// excludes 2 are refused on both the read and the write leg.
+pub const FLEET_PROTOCOL_VERSION: u32 = 2;
 
 /// Negotiated capability required for versioned selected-session actions.
 pub const FLEET_CAPABILITY_ACTION_EXECUTE: &str = "fleet.action.execute";
@@ -20,8 +25,20 @@ pub const FLEET_CAPABILITY_START_EXECUTE: &str = "fleet.start.execute";
 pub const FLEET_CAPABILITY_ATC_READ: &str = "fleet.atc.read";
 /// Negotiated capability for the payload-free Fleet revision timeline.
 pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
+/// Negotiated capability required for chat-bus message sends.
+pub const FLEET_CAPABILITY_MESSAGE_SEND: &str = "fleet.message.send";
+/// Negotiated capability required for chat-bus message list and subscribe.
+pub const FLEET_CAPABILITY_MESSAGE_READ: &str = "fleet.message.read";
+/// Negotiated capability required for ACP transcript list and subscribe.
+pub const FLEET_CAPABILITY_TRANSCRIPT_READ: &str = "fleet.transcript.read";
+/// Negotiated capability required for daemon-owned ACP session creation.
+pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
+///
+/// The chat-bus capability consts above are part of the frozen v2 surface but
+/// are appended here only in the phase their dispatch arms land, so no daemon
+/// build ever advertises a capability whose methods answer -32601.
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_ACTION_EXECUTE,
     FLEET_CAPABILITY_ATC_READ,
@@ -97,6 +114,9 @@ pub enum FleetProvider {
     Codex,
     /// GitHub Copilot CLI.
     Copilot,
+    /// ACP-backed headless session; the concrete adapter lives in the
+    /// `fleet_acp_session` store row, not on the wire.
+    Acp,
     /// Provider could not be determined.
     #[default]
     Unknown,
@@ -776,6 +796,212 @@ pub struct FleetBroadcastResult {
     pub receipts: Vec<FleetActionReceipt>,
 }
 
+/// Maximum rows one `fleet/message_list` page may return.
+pub const FLEET_MESSAGE_LIST_MAX: u32 = 100;
+/// Maximum chunks one `fleet/transcript_list` page may return.
+pub const FLEET_TRANSCRIPT_LIST_MAX: u32 = 100;
+
+/// Chat message kind on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetMessageKind {
+    /// Operator- or client-authored prompt.
+    User,
+    /// An agent session's final reply.
+    Agent,
+    /// Daemon-minted lifecycle marker.
+    Marker,
+}
+
+/// One persisted chat message.
+///
+/// `id` is the stable external identity used for threading and cursors on the
+/// wire; the daemon resolves every `after_id` to its commit-ordered `seq`
+/// server-side, so `seq` itself never crosses the socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessage {
+    /// Daemon-minted stable message identity.
+    pub id: String,
+    /// Minted scope string, for example `session:<key>` or `broadcast:<ulid>`.
+    pub scope_key: String,
+    /// Replies only: the message id this row answers (the thread join).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_message_id: Option<String>,
+    /// `operator` or a `session_key`.
+    pub sender: String,
+    /// Message kind.
+    pub kind: FleetMessageKind,
+    /// Message body.
+    pub body: String,
+    /// Creation time in epoch milliseconds.
+    pub created_at: i64,
+}
+
+/// Parameters for `fleet/acp_session_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetAcpSessionCreateParams {
+    /// Adapter token validated against the daemon's adapter registry.
+    pub provider: String,
+    /// Working directory for the ACP session.
+    pub cwd: String,
+    /// Scope to bind; the daemon mints `session:<session_key>` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
+}
+
+/// Result for `fleet/acp_session_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetAcpSessionCreateResult {
+    /// Daemon-minted stable session identity (`acp:<ulid>`).
+    pub session_key: String,
+    /// Scope the session answers in.
+    pub scope_key: String,
+}
+
+/// Parameters for `fleet/message_send`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageSendParams {
+    /// Explicit scope; the daemon derives the recipient's own scope for a
+    /// direct send and mints `broadcast:<ulid>` for a multi-target send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
+    /// Recipient session keys; every target must already exist.
+    pub targets: Vec<String>,
+    /// Message body.
+    pub text: String,
+    /// Client idempotency token; replay with different content is rejected.
+    pub request_id: String,
+}
+
+/// Per-recipient delivery state, reusing the durable receipt vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageDelivery {
+    /// Recipient session.
+    pub session_key: String,
+    /// Honest delivery status for this leg.
+    pub state: ActionReceiptStatus,
+}
+
+/// Result for `fleet/message_send`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageSendResult {
+    /// Persisted message identity.
+    pub message_id: String,
+    /// One entry per requested recipient.
+    pub deliveries: Vec<FleetMessageDelivery>,
+}
+
+/// Parameters for `fleet/message_list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageListParams {
+    /// Optional exact scope filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
+    /// Optional thread join: only replies to this message id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
+    /// Return rows strictly after this message id's commit position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_id: Option<String>,
+    /// Requested row count, clamped to [`FLEET_MESSAGE_LIST_MAX`].
+    pub limit: u32,
+}
+
+/// Result for `fleet/message_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageListResult {
+    /// Messages in ascending commit order.
+    pub messages: Vec<FleetMessage>,
+    /// Cursor for the next page, or `null` when this page is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_id: Option<String>,
+}
+
+/// Parameters for `fleet/message_subscribe`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageSubscribeParams {
+    /// Deliver messages strictly after this id; `null` starts at the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_id: Option<String>,
+}
+
+/// Result for `fleet/message_subscribe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageSubscribeResult {
+    /// Newest committed message id, or `null` on an empty log.
+    pub head_id: Option<String>,
+}
+
+/// Payload of the `fleet/message_event` notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetMessageEventParams {
+    /// The committed message.
+    pub message: FleetMessage,
+}
+
+/// One ACP transcript chunk (a `fleet_provider_event` row with `source='acp'`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptChunk {
+    /// Commit-ordered transcript cursor (`ingest_order`).
+    pub ingest_order: i64,
+    /// Replay-safe chunk identity.
+    pub event_id: String,
+    /// Owning Fleet session.
+    pub session_key: String,
+    /// Normalized discriminator, `acp.<kind>`.
+    pub event_type: String,
+    /// Normalized chunk body.
+    pub payload: serde_json::Value,
+    /// Observation time in epoch milliseconds.
+    pub observed_at: i64,
+}
+
+/// Parameters for `fleet/transcript_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptListParams {
+    /// Exact stable session identity.
+    pub session_key: String,
+    /// Return chunks strictly after this `ingest_order`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_order: Option<i64>,
+    /// Requested chunk count, clamped to [`FLEET_TRANSCRIPT_LIST_MAX`].
+    pub limit: u32,
+}
+
+/// Result for `fleet/transcript_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptListResult {
+    /// Chunks in ascending `ingest_order`.
+    pub chunks: Vec<FleetTranscriptChunk>,
+    /// Cursor for the next page, or `null` when this page is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_order: Option<i64>,
+}
+
+/// Parameters for `fleet/transcript_subscribe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptSubscribeParams {
+    /// Exact stable session identity.
+    pub session_key: String,
+    /// Deliver chunks strictly after this order; `null` starts at the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_order: Option<i64>,
+}
+
+/// Result for `fleet/transcript_subscribe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptSubscribeResult {
+    /// Newest committed `ingest_order` for the session, or `null` when empty.
+    pub head_order: Option<i64>,
+}
+
+/// Payload of the `fleet/transcript_event` notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptEventParams {
+    /// The committed chunk.
+    pub chunk: FleetTranscriptChunk,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,5 +1077,140 @@ mod tests {
         assert!(!capabilities.structured_answer);
         assert!(!capabilities.kill);
         assert!(!capabilities.tmux_text);
+    }
+
+    #[test]
+    fn acp_provider_uses_snake_case_wire_token() {
+        assert_eq!(serde_json::json!(FleetProvider::Acp), "acp");
+        let decoded: FleetProvider = serde_json::from_str("\"acp\"").unwrap();
+        assert_eq!(decoded, FleetProvider::Acp);
+    }
+
+    #[test]
+    fn v2_capability_consts_are_defined_but_not_yet_advertised() {
+        // Advertisement lands with each capability's dispatch arms (message /
+        // transcript in Phase 3, acp.spawn in Phase 5); a daemon built between
+        // phases must never advertise methods that answer -32601.
+        for id in [
+            FLEET_CAPABILITY_MESSAGE_SEND,
+            FLEET_CAPABILITY_MESSAGE_READ,
+            FLEET_CAPABILITY_TRANSCRIPT_READ,
+            FLEET_CAPABILITY_ACP_SPAWN,
+        ] {
+            assert!(
+                !FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
+                "{id:?} advertised before its dispatch arms exist"
+            );
+        }
+    }
+
+    fn round_trip<T>(value: &T)
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let encoded = serde_json::to_value(value).unwrap();
+        let decoded: T = serde_json::from_value(encoded).unwrap();
+        assert_eq!(&decoded, value);
+    }
+
+    fn sample_message() -> FleetMessage {
+        FleetMessage {
+            id: "01J0MSG".to_string(),
+            scope_key: "session:acp:01J0KEY".to_string(),
+            origin_message_id: Some("01J0ORIGIN".to_string()),
+            sender: "operator".to_string(),
+            kind: FleetMessageKind::User,
+            body: "hello".to_string(),
+            created_at: 1_700_000_000_000,
+        }
+    }
+
+    fn sample_chunk() -> FleetTranscriptChunk {
+        FleetTranscriptChunk {
+            ingest_order: 41,
+            event_id: "01J0CHUNK".to_string(),
+            session_key: "acp:01J0KEY".to_string(),
+            event_type: "acp.message".to_string(),
+            payload: serde_json::json!({ "text": "thinking" }),
+            observed_at: 1_700_000_000_100,
+        }
+    }
+
+    #[test]
+    fn message_family_params_and_results_round_trip() {
+        round_trip(&FleetAcpSessionCreateParams {
+            provider: "claude-agent-acp".to_string(),
+            cwd: "/repo".to_string(),
+            scope_key: None,
+        });
+        round_trip(&FleetAcpSessionCreateResult {
+            session_key: "acp:01J0KEY".to_string(),
+            scope_key: "session:acp:01J0KEY".to_string(),
+        });
+        round_trip(&FleetMessageSendParams {
+            scope_key: None,
+            targets: vec!["acp:01J0KEY".to_string()],
+            text: "hello".to_string(),
+            request_id: "req-1".to_string(),
+        });
+        round_trip(&FleetMessageSendResult {
+            message_id: "01J0MSG".to_string(),
+            deliveries: vec![FleetMessageDelivery {
+                session_key: "acp:01J0KEY".to_string(),
+                state: ActionReceiptStatus::Pending,
+            }],
+        });
+        round_trip(&FleetMessageListParams {
+            scope_key: Some("session:acp:01J0KEY".to_string()),
+            origin_id: None,
+            after_id: Some("01J0MSG".to_string()),
+            limit: FLEET_MESSAGE_LIST_MAX,
+        });
+        round_trip(&FleetMessageListResult {
+            messages: vec![sample_message()],
+            next_after_id: Some("01J0MSG".to_string()),
+        });
+        round_trip(&FleetMessageSubscribeParams { after_id: None });
+        round_trip(&FleetMessageSubscribeResult {
+            head_id: Some("01J0MSG".to_string()),
+        });
+        round_trip(&FleetMessageEventParams {
+            message: sample_message(),
+        });
+    }
+
+    #[test]
+    fn transcript_family_params_and_results_round_trip() {
+        round_trip(&FleetTranscriptListParams {
+            session_key: "acp:01J0KEY".to_string(),
+            after_order: Some(7),
+            limit: FLEET_TRANSCRIPT_LIST_MAX,
+        });
+        round_trip(&FleetTranscriptListResult {
+            chunks: vec![sample_chunk()],
+            next_after_order: Some(41),
+        });
+        round_trip(&FleetTranscriptSubscribeParams {
+            session_key: "acp:01J0KEY".to_string(),
+            after_order: None,
+        });
+        round_trip(&FleetTranscriptSubscribeResult { head_order: None });
+        round_trip(&FleetTranscriptEventParams {
+            chunk: sample_chunk(),
+        });
+    }
+
+    #[test]
+    fn message_wire_fields_use_stable_snake_case_names() {
+        let encoded = serde_json::to_value(sample_message()).unwrap();
+        assert_eq!(encoded["kind"], "user");
+        assert_eq!(encoded["origin_message_id"], "01J0ORIGIN");
+        let delivery = serde_json::to_value(FleetMessageDelivery {
+            session_key: "acp:01J0KEY".to_string(),
+            state: ActionReceiptStatus::Rejected,
+        })
+        .unwrap();
+        // Delivery states reuse the durable receipt vocabulary verbatim.
+        assert_eq!(delivery["state"], "REJECTED");
     }
 }

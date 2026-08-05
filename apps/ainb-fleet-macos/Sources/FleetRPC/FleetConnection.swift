@@ -100,8 +100,8 @@ actor FleetConnection {
     func negotiate(
         clientName: String = "ainb-fleet-macos",
         clientVersion: String = "0.1.0",
-        readVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 1),
-        writeVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 1)
+        readVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 2),
+        writeVersions: FleetProtocolRange = FleetProtocolRange(min: 1, max: 2)
     ) async throws -> FleetNegotiateResult {
         guard authenticated else {
             throw FleetConnectionError.notAuthenticated

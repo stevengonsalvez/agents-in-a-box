@@ -613,3 +613,43 @@ async fn broadcast_returns_ordered_receipt_for_every_target() {
     assert_eq!(receipts[0]["status"], "REJECTED");
     assert_eq!(receipts[1]["status"], "REJECTED");
 }
+
+#[tokio::test]
+async fn negotiate_refuses_v1_only_client_on_both_legs() {
+    // I9 bump-and-refuse: a client whose declared range excludes v2 is refused
+    // on BOTH the read and the write leg; an in-train v2 client is accepted.
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+
+    let stale = client
+        .call(
+            methods::FLEET_NEGOTIATE,
+            serde_json::json!({
+                "client_name": "stale-client",
+                "client_version": "0.0.1",
+                "read_versions": { "min": 1, "max": 1 },
+                "write_versions": { "min": 1, "max": 1 }
+            }),
+        )
+        .await;
+    assert!(stale["error"].is_null(), "negotiate must answer: {stale}");
+    assert_eq!(stale["result"]["protocol_version"], 2);
+    assert_eq!(stale["result"]["read_compatible"], false);
+    assert_eq!(stale["result"]["write_compatible"], false);
+
+    let current = client
+        .call(
+            methods::FLEET_NEGOTIATE,
+            serde_json::json!({
+                "client_name": "current-client",
+                "client_version": "0.0.1",
+                "read_versions": { "min": 1, "max": 2 },
+                "write_versions": { "min": 1, "max": 2 }
+            }),
+        )
+        .await;
+    assert_eq!(current["result"]["read_compatible"], true);
+    assert_eq!(current["result"]["write_compatible"], true);
+}

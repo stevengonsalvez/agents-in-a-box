@@ -179,6 +179,7 @@ struct FleetWindowView: View {
         case .claude: "Claude"
         case .codex: "Codex"
         case .copilot: "Copilot"
+        case .acp: "ACP"
         case .unknown: "Unknown"
         case nil: "All providers"
         }

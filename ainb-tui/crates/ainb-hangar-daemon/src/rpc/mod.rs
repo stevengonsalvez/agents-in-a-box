@@ -1859,6 +1859,12 @@ async fn execute_fleet_start(
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
+        // ACP sessions are daemon-owned and created via fleet/acp_session_create,
+        // never through the tmux-backed start path.
+        FleetProvider::Acp => (
+            ActionReceiptStatus::Rejected,
+            Some("ACP sessions are created via fleet/acp_session_create".to_string()),
+        ),
     };
     receipt.status = receipt_status_token(status).to_string();
     receipt.detail = detail;
@@ -1878,6 +1884,7 @@ fn prospective_start_session_key(
         ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
         ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
         ainb_hangar_proto::fleet::FleetProvider::Copilot => "copilot",
+        ainb_hangar_proto::fleet::FleetProvider::Acp => "acp",
         ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
     };
     format!("start:{provider}:{}", stable_fingerprint(request_id))
