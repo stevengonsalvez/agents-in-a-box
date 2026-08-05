@@ -137,9 +137,16 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Step 8: send the initial prompt (if any) once the input box is ready.
     // A fixed sleep loses keystrokes into Claude Code's not-yet-ready splash.
+    // Routed through fleet-core's hardened send (`-l --` literal so a
+    // `-`-prefixed prompt is not eaten as a tmux flag, paste settle + submit
+    // verification for multi-line). Best-effort: a failed prompt send must
+    // not abort a session that already exists.
     if let Some(ref prompt) = args.prompt {
         wait_for_prompt_ready(&tmux_name, Duration::from_secs(30)).await;
-        send_prompt_to_tmux(&tmux_name, prompt).await?;
+        match ainb_fleet_core::fleet::send::tmux::tmux_send(&tmux_name, prompt).await {
+            Ok(()) => info!("Sent initial prompt to session"),
+            Err(e) => warn!("Failed to send initial prompt: {e:#}"),
+        }
     }
 
     // Step 9: Save session to SessionStore (TUI-compatible format)
@@ -452,26 +459,6 @@ fn build_agent_command(args: &RunArgs) -> String {
         .map(|part| shell_escape::escape(part.into()).into_owned())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Send a prompt to the tmux session
-async fn send_prompt_to_tmux(session_name: &str, prompt: &str) -> Result<()> {
-    // Send the prompt text
-    let output = Command::new("tmux")
-        .args(["send-keys", "-t", session_name, prompt, "C-m"])
-        .output()
-        .await?;
-
-    if output.status.success() {
-        info!("Sent initial prompt to session");
-    } else {
-        warn!(
-            "Failed to send prompt: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(())
 }
 
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
