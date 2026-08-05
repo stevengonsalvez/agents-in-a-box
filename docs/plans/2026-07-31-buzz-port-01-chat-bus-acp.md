@@ -51,6 +51,8 @@ Grafts applied:
 8. **Explicit trap so no ACP session reaches the tmux send machinery** (from A), plus A's `-p ainb-acp` CI verify-by-forced-failure step. (DE review 2026-08-04: the trap has MOVED. The original graft aimed at `Backend::from_provider`, citing `materialise.rs:97`. That citation is wrong and the target is wrong: `materialise.rs:97` is `ProviderSkillLayout::from_provider`, a different function returning `GeminiOrDefault`; the real `Backend::from_provider` is `runner.rs:611` and its ONLY production caller is `resolve_dispatch` at `run_loop.rs:2448`, which resolves an AGENT's provider for issue dispatch and never sees a chat session. Worse, `dispatch_routing.rs:557-560` deliberately pins "a genuinely not-wired / misconfigured provider must still dispatch (to the safe default) rather than strand the task", so making it fallible reverses a live invariant for unrelated callers. The real exposure is `handle_fleet_action`, `rpc/mod.rs:1571-1579`, where any non-codex provider's `SendPrompt` falls through to `verified_tmux_send`. The trap now lives there. `Backend::from_provider` is left alone.)
 9. **Commit-ordered cursor for `fleet_message`** (DE review 2026-08-04, NEW). The message stream's cursor is a SQLite-assigned `INTEGER PRIMARY KEY AUTOINCREMENT`, exactly as `fleet_provider_event.ingest_order` already does (`migrations/0071_fleet_provider_event.sql:6`). A daemon-minted ULID is NOT a safe cursor: it is minted in application code before the write transaction, so two concurrent `message_send` handlers can commit out of id order, and a forwarder that has already paged past the higher id will never re-read the lower one. The existing fleet stream is gapless precisely because `revision` is `last_insert_rowid()` assigned INSIDE the write transaction (`repo/fleet.rs:396-413`) and SQLite serialises writers. See I14.
 
+Boundary decision (2026-08-05): `ainb-acp` runs IN-PROCESS as a daemon library, not as a wire client. Rationale: turn-end atomicity (final message + delivery resolve + transcript marker commit together), the transcript hot path stays off the socket, and no ingest-only methods widen the frozen v2 surface. Every UI client rides the same fleet/* wire contract; exactly ONE process touches SQLite. Extraction path stays open by construction: `ainb-acp` has no EventBroker access and `store_writer` returns high-water marks, so promoting it to a standalone wire-speaking process (the buzz harness shape, if isolation is ever needed) is a bounded refactor, not a redesign.
+
 ## Current state analysis (key discoveries, file:line)
 
 - Method registration is 3 append-only places: proto consts + `ALL_METHODS` tail (`ainb-hangar-proto/src/methods.rs:1576-1578`, fleet block at `:1650-1660`), the mirrored `declared` list in `all_methods_covers_every_const` (`methods.rs:1818-1951`), and the daemon dispatch match (`ainb-hangar-daemon/src/rpc/mod.rs:724-954`, fleet arms `:920-931`, unknown method -32601 at `:949-953`). Names must be `<area>/<verb>` namespaced and unique (`methods.rs:1685-1702`).
@@ -436,9 +438,11 @@ Pure library phase, shippable with zero daemon wiring. Parallel with Phase 3 (no
 - [ ] `circuit.rs`: SlotCircuit verbatim from B (per-process crash breaker, jittered exponential backoff; adapt buzz `lib.rs:1027-1136` pattern)
 - [ ] Real-adapter integration tests behind `#[ignore]` + env gate (spike probes promoted; disclosure comment real-adapter vs fixture per house rule)
 
-**CI** (graft 8, A's step):
+**CI** (graft 8, A's step; coupling enforcement added 2026-08-05):
 - [ ] Add `-p ainb-acp` to the workspace test lane
 - [ ] Verify-by-forced-failure: one throwaway commit with a failing `ainb-acp` test proving the lane actually executes it; revert before merge, link the red run in the PR description
+- [ ] Coupled-lane path filters: any change under `ainb-tui/crates/ainb-hangar-store/**` (migrations especially) triggers the daemon lane, the `ainb-acp` lane, AND the Swift contract lane (`swift-contract-paths` precedent, commit 79cc417b); any change under `ainb-tui/crates/ainb-acp/**` triggers the daemon lane. Verified by the same forced-failure trick, once per new filter rule
+- [ ] Store-fence test (structural, not grep): a workspace test parses `cargo metadata` and asserts `sqlx` appears in the dependency set of `ainb-hangar-store` ONLY. Repo functions are the single door to the store; a crate reaching for raw SQL fails CI with a message pointing at this rule
 
 ### Success criteria
 
@@ -450,6 +454,8 @@ Automated:
 - [ ] Commit-cadence test: a 500-chunk scripted turn produces a bounded number of transactions, not one per chunk
 - [ ] `cargo test -p ainb-acp -- --ignored` green locally against real `claude-agent-acp` 0.64.0 and `codex-acp` 1.1.7 (documented in PR, not CI-required), including the assertion that the negotiated mode is the requested one and not `bypassPermissions`
 - [ ] Red CI run linked, proving the `-p ainb-acp` lane fires
+- [ ] Red runs linked for each new coupled-lane path filter (store change fires daemon + acp + Swift lanes)
+- [ ] Store-fence test green; a scratch commit adding `sqlx` to `ainb-acp`'s Cargo.toml turns it red (reverted before merge)
 
 Manual:
 - [ ] None (library phase)
@@ -622,6 +628,7 @@ Three questions an operator will ask, each of which must have an answer built by
 | Library | `ainb-acp` unit tests against a scripted fake adapter | I13 (mode pinning, env allowlist), I15 (re-prime escaping), commit cadence |
 | Real adapters | spike probes promoted to `ainb-acp/tests/` behind `#[ignore]` + env gate | resume secret-word, load-failure fallback, mode assertion; every test comments real-adapter vs fixture |
 | CI | `-p ainb-acp` lane, verify-by-forced-failure once | graft 8 |
+| Coupling | coupled-lane path filters (store change fires daemon + acp + Swift lanes) + cargo-metadata store-fence test (`sqlx` only in `ainb-hangar-store`) | added 2026-08-05; compiler covers Rust-level coupling, this covers lane routing and the raw-SQL bypass |
 
 ## Risks
 
