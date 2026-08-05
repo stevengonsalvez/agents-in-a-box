@@ -397,6 +397,7 @@ The bus ships useful WITHOUT any ACP code: `message_send` to N tmux sessions is 
 - [ ] Capability gating on all five message/transcript handlers, per existing write-surface pattern
 - [ ] Append `fleet.message.send`, `fleet.message.read`, `fleet.transcript.read` to `FLEET_PROTOCOL_CAPABILITY_IDS` (`fleet.rs`), in the SAME change as the dispatch arms (consts were defined in Phase 2; advertisement deliberately deferred to here so no daemon build advertises -32601 methods)
 - [ ] Tracing spans + counters per the Observability section (DE review 2026-08-04)
+- [ ] CLI verbs `ainb fleet msg send|list|follow` per the CLI surface section (same PR as the dispatch arms; contract tests + `docs/tui/cli.md`)
 
 **Wiring** (`lib.rs`):
 - [ ] Broker construction + forwarder spawn parity with fleet stream (boot wiring at `lib.rs:422-432` pattern)
@@ -500,6 +501,7 @@ Manual:
 - [ ] Answering rides the EXISTING `fleet/action` Approve/Deny/StructuredAnswer with fingerprint staleness (no new method), THROUGH the new ACP arms above; the daemon routes the answer back to the adapter's pending JSON-RPC id
 - [ ] A pending permission whose adapter process dies is resolved by the convergence routine, not left as a ghost attention row (I7/I16)
 - [ ] Fleet snapshot surfaces these sessions with `provider: Acp` (this works only because of the `fleet_session` row from Session identity and the `"acp"` mapping arm added in Phase 2)
+- [ ] CLI verbs `ainb fleet acp create` + `ainb fleet transcript [--follow]` per the CLI surface section (same PR as the dispatch arms)
 
 ### Success criteria
 
@@ -615,6 +617,22 @@ Three questions an operator will ask, each of which must have an answer built by
 1. **"Why did this message not deliver?"** `fleet/message_list` gives the row; the delivery join gives per-recipient state plus an enumerated `detail` reason (Observability); the `fleet.message.send` span in `daemon.<date>` gives the request-scoped trace. If `detail` is free text only, this question is unanswerable at scale
 2. **"Why is the copilot stuck?"** `hangar/daemon_health` pool fields give queue depth, oldest in-flight turn age, and breaker state. The remedy is `fleet/action Interrupt` on the session (Phase 5 arms), and failing that the turn deadline converges it automatically (I16). Before this review the honest answer was "restart the daemon"
 3. **"What is the pool doing?"** Live/cap/evicted counts and per-scope state on the same pane, with the `acp.spawn` span recording whether each session resumed by load or by re-prime
+
+## CLI surface (parity rule, added 2026-08-05)
+
+Everything in ainb is CLI compatible. Rule: every chat-bus wire method ships its CLI verb IN THE SAME PHASE as its dispatch arm, never later, so the CLI is a first-class client of the same frozen contract the TUI and macOS app use (and the surface `ainb-web` proxies stays complete).
+
+Transport: the CLI speaks `hangar.sock` directly (auth token from `hangar/daemon.token`, Content-Length JSON-RPC, negotiate v2). Task at Phase 3 start: extract or reuse an existing daemon client (candidates: `ainb-web`'s `DaemonClient`, the daemon test `Client`) rather than writing a third one.
+
+Output contract (buzz-cli ergonomics, research doc recommendation 5): JSON on stdout by default under `--format json`; errors as JSON on stderr with a `retryable` boolean; semantic exit codes `0` ok, `1` bad input, `2` daemon/network, `3` auth, `4` other, `5` idempotency conflict (`request_fingerprint` mismatch maps here); stdin `-` accepted for any free-text argument; errors name the follow-up command where one exists.
+
+| Phase | CLI verbs (land with that phase's dispatch arms) |
+|---|---|
+| 3 | `ainb fleet msg send --target <session_key>... [--text <t> \| -] [--request-id <id>]` · `ainb fleet msg list [--scope <k>] [--origin <id>] [--after <id>] [--limit N]` · `ainb fleet msg follow [--after <id>]` (subscribe rendered as NDJSON stream; the `--follow` mode buzz-cli lacks) |
+| 5 | `ainb fleet acp create --provider <p> --cwd <dir> [--scope <k>]` · `ainb fleet transcript <session_key> [--after N] [--limit N] [--follow]` |
+| 6 | `ainb fleet transcript prune --session <key> --before <order> --export <path>` (the Retention section's operator export-then-delete lands as this CLI verb; refuses without `--export` unless `--no-export` is explicit) |
+
+Tests + docs per phase: CLI contract tests against the fixture daemon (exit codes, JSON error shape, `--follow` streams before turn end riding I12); `docs/tui/cli.md` updated in the same PR (the `CLI reference freshness` CI lane enforces drift).
 
 ## Testing strategy
 

@@ -194,6 +194,8 @@ Disclosure rule: every test comments real-adapter vs fixture, matching repo habi
 
 ## Cross-cutting tasks
 
+- [ ] CLI parity (part 1's CLI surface rule applies here too): every part-2 method ships its CLI verb with its dispatch arms. `ainb fleet channel create|list`, `ainb fleet confirm list|answer <id> --approve|--deny`, `ainb fleet activity [--scope]`, `ainb fleet copilot configure --provider [--model] [--persona-file]`; same JSON/exit-code contract, `docs/tui/cli.md` updated per phase
+
 - [ ] Capability gating: steer/broadcast-steer surfaced per-adapter capability flag (gemini future: no steering); probe fallback on -32601 is safe per spike, assert version floors
 - [ ] Config: pinned adapter versions in daemon config; `fleet/copilot_configure` validation
 - [ ] Docs: `docs/tui/` chat page + `docs/toolkit` update; amendment section in this file per house convention
