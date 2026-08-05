@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.1] - 2026-08-05
+### Fixed
+- Keep the Claude AskUserQuestion hook alive while Fleet waits for an exact structured answer.
+
 ## [1.18.0] - 2026-08-01
 ### Added
 - Merge pull request #522 from stevengonsalvez/codex/ainb-fleet-macos-contract-v2
