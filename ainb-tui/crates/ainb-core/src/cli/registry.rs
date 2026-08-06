@@ -2110,6 +2110,61 @@ impl CliCommand for FleetCommand {
                             .help("Resume after this message id (default: the log head)"),
                     ),
             );
+        // The ACP half of the bus: a daemon-owned headless session, and the
+        // transcript stream that shows what it is doing DURING a turn.
+        let acp =
+            Command::new("acp")
+                .about("ACP sessions: daemon-owned headless agents that answer on the chat bus")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("create")
+                        .about("Mint an ACP session; no adapter starts until its first message")
+                        .arg(
+                            clap::Arg::new("provider")
+                                .long("provider")
+                                .required(true)
+                                .help("Adapter token (claude-agent-acp, codex-acp)"),
+                        )
+                        .arg(clap::Arg::new("cwd").long("cwd").required(true).help(
+                            "Working directory for the session (resolved to an absolute path)",
+                        ))
+                        .arg(
+                            clap::Arg::new("scope")
+                                .long("scope")
+                                .help("Explicit scope key (default: session:<session_key>)"),
+                        )
+                        .after_help(
+                            "Creating is idempotent per live scope: a second create for the same \
+                         --scope returns the existing session_key.",
+                        ),
+                );
+        let transcript = Command::new("transcript")
+            .about("Page or follow one session's full execution transcript")
+            .arg(
+                clap::Arg::new("session_key")
+                    .required(true)
+                    .help("The session whose transcript to read"),
+            )
+            .arg(
+                clap::Arg::new("after")
+                    .long("after")
+                    .value_parser(clap::value_parser!(i64))
+                    .help("Return chunks after this ingest_order"),
+            )
+            .arg(
+                clap::Arg::new("limit")
+                    .long("limit")
+                    .value_parser(clap::value_parser!(u32))
+                    .default_value("50")
+                    .help("Page size (clamped to the daemon's maximum)"),
+            )
+            .arg(
+                clap::Arg::new("follow").long("follow").action(clap::ArgAction::SetTrue).help(
+                    "Stream chunks until stopped; NDJSON under --format json. They arrive \
+                         DURING the turn, not after it",
+                ),
+            );
         let sequence = Command::new("sequence")
             .about("Ordered prompts with ack between steps")
             .arg(
@@ -2226,6 +2281,8 @@ impl CliCommand for FleetCommand {
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(msg)
+                .subcommand(acp)
+                .subcommand(transcript)
                 .subcommand(sequence)
                 .subcommand(needs)
                 .subcommand(cost)
@@ -2241,6 +2298,8 @@ impl CliCommand for FleetCommand {
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
                      ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts\n  \
                      ainb fleet msg follow --format json   Stream chat messages as NDJSON\n  \
+                     ainb fleet acp create --provider claude-agent-acp --cwd .  Mint an ACP session\n  \
+                     ainb fleet transcript <key> --follow  Stream one session's execution log\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
                      ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
@@ -2659,7 +2718,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_thirteen_subcommands_including_approve_deny() {
+    fn fleet_exposes_fifteen_subcommands_including_the_chat_bus_verbs() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2676,6 +2735,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "acp",
                 "approve",
                 "atc",
                 "bridge",
@@ -2689,13 +2749,14 @@ mod tests {
                 "needs",
                 "sequence",
                 "standup",
+                "transcript",
             ],
             "fleet subcommand surface changed — update this guard"
         );
         assert_eq!(
             names.len(),
-            13,
-            "expected 13 fleet subcommands, got {names:?}"
+            15,
+            "expected 15 fleet subcommands, got {names:?}"
         );
     }
 

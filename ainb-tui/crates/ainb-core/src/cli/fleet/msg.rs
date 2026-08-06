@@ -32,7 +32,11 @@ const EXIT_IDEMPOTENCY_CONFLICT: i32 = 5;
 
 /// One structured failure: what went wrong, whether retrying can help, and the
 /// command that answers the question next.
-struct CliFailure {
+///
+/// Shared with the other chat-bus verbs (`fleet acp`, `fleet transcript`) so
+/// every one of them exits with the same semantic codes and the same JSON error
+/// shape a script parses.
+pub(crate) struct CliFailure {
     kind: &'static str,
     message: String,
     retryable: bool,
@@ -41,7 +45,7 @@ struct CliFailure {
 }
 
 impl CliFailure {
-    fn bad_input(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_input(message: impl Into<String>) -> Self {
         Self {
             kind: "bad_input",
             message: message.into(),
@@ -52,7 +56,7 @@ impl CliFailure {
     }
 
     /// Print the failure as JSON on stderr and exit with its semantic code.
-    fn exit(self) -> ! {
+    pub(crate) fn exit(self) -> ! {
         let mut payload = serde_json::json!({
             "error": {
                 "kind": self.kind,
@@ -190,7 +194,7 @@ fn resolve_text(raw: Option<&String>) -> Result<String, CliFailure> {
     Ok(text)
 }
 
-fn client() -> DaemonClient {
+pub(crate) fn client() -> DaemonClient {
     match DaemonClient::from_env() {
         Ok(client) => client,
         Err(error) => CliFailure::from(error).exit(),
@@ -333,7 +337,7 @@ fn render_message(message: &FleetMessage) -> String {
 }
 
 /// Replace every control character with a visible escape.
-fn escape_control(text: &str) -> String {
+pub(crate) fn escape_control(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

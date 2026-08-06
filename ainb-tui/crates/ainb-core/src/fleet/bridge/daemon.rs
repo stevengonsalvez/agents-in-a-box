@@ -152,6 +152,34 @@ impl MessageSubscription {
     }
 }
 
+/// Live transcript connection retained after the subscribe acknowledgement.
+pub struct TranscriptSubscription {
+    reader: BufReader<OwnedReadHalf>,
+    // Retain the write half so the server does not observe EOF and tear down
+    // this connection's transcript forwarder after the acknowledgement.
+    _writer: OwnedWriteHalf,
+}
+
+impl TranscriptSubscription {
+    /// Wait for the next committed transcript chunk for the subscribed session.
+    /// Like the message stream this is an append-only log with no resync frame:
+    /// the forwarder pages to head from its own cursor after lag.
+    pub async fn next_chunk(
+        &mut self,
+    ) -> Result<ainb_hangar_proto::fleet::FleetTranscriptChunk, DaemonError> {
+        loop {
+            let frame = read_frame(&mut self.reader).await?;
+            if frame.get("method").and_then(Value::as_str) != Some("fleet/transcript_event") {
+                continue;
+            }
+            let params: ainb_hangar_proto::fleet::FleetTranscriptEventParams =
+                serde_json::from_value(frame.get("params").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| DaemonError::Decode(error.to_string()))?;
+            return Ok(params.chunk);
+        }
+    }
+}
+
 impl DaemonClient {
     /// Resolve the socket + token from the environment. Errors when the home is
     /// unresolvable or the token file is absent (daemon not up) — the caller
@@ -303,6 +331,78 @@ impl DaemonClient {
         let value = serde_json::to_value(params).expect("FleetMessageSendParams serializes");
         let result = self.call(methods::FLEET_MESSAGE_SEND, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Mint an ACP session (the `fleet_session` + `fleet_acp_session` pair). No
+    /// adapter is spawned here; the pool does that lazily on the first prompt.
+    pub async fn acp_session_create(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetAcpSessionCreateParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetAcpSessionCreateResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetAcpSessionCreateParams serializes");
+        let result = self.call(methods::FLEET_ACP_SESSION_CREATE, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Page one session's transcript by `ingest_order`.
+    pub async fn transcript_list(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetTranscriptListParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetTranscriptListResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetTranscriptListParams serializes");
+        let result = self.call(methods::FLEET_TRANSCRIPT_LIST, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Open a persistent transcript subscription and retain its live stream.
+    ///
+    /// Only the acknowledgement is deadlined; the stream runs until the caller
+    /// stops it, which is what makes `transcript --follow` able to show chunks
+    /// DURING a turn rather than after it (I12).
+    pub async fn open_transcript_subscription(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetTranscriptSubscribeParams,
+    ) -> Result<
+        (
+            ainb_hangar_proto::fleet::FleetTranscriptSubscribeResult,
+            TranscriptSubscription,
+        ),
+        DaemonError,
+    > {
+        tokio::time::timeout(RPC_TIMEOUT, self.open_transcript_subscription_inner(params))
+            .await
+            .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
+    }
+
+    async fn open_transcript_subscription_inner(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetTranscriptSubscribeParams,
+    ) -> Result<
+        (
+            ainb_hangar_proto::fleet::FleetTranscriptSubscribeResult,
+            TranscriptSubscription,
+        ),
+        DaemonError,
+    > {
+        let (mut reader, mut writer) = self.dial().await?;
+        let value = serde_json::to_value(params).expect("params serialize");
+        write_frame(&mut writer, methods::FLEET_TRANSCRIPT_SUBSCRIBE, value, 2).await?;
+        let response = read_response(&mut reader).await?;
+        if let Some(error) = response.error {
+            return Err(DaemonError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let ack = serde_json::from_value(response.result.unwrap_or(Value::Null))
+            .map_err(|error| DaemonError::Decode(error.to_string()))?;
+        Ok((
+            ack,
+            TranscriptSubscription {
+                reader,
+                _writer: writer,
+            },
+        ))
     }
 
     /// Page the chat log by its commit-ordered cursor.

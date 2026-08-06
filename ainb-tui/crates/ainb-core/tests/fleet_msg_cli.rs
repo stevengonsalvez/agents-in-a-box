@@ -1,4 +1,5 @@
-//! `ainb fleet msg` contract tests against a FIXTURE daemon.
+//! `ainb fleet msg` / `acp` / `transcript` contract tests against a FIXTURE
+//! daemon.
 //!
 //! The fixture is a real Unix socket speaking the daemon's framing and the
 //! frozen `fleet/message_*` shapes, so these tests pin the CLI's half of the
@@ -91,6 +92,72 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                     "next_after_id": "msg-01",
                 },
             }),
+            "fleet/acp_session_create" => {
+                // The daemon validates `provider` against the adapter registry,
+                // so the fixture answers the refusal for an unknown one: the
+                // CLI's job is to turn that -32602 into exit 1 with a JSON
+                // error, not to second-guess the registry.
+                if request["params"]["provider"] == "nope-acp" {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32602, "message": "unknown ACP provider \"nope-acp\"" },
+                    })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "session_key": "acp:01J0FIXTURE",
+                            "scope_key": "session:acp:01J0FIXTURE",
+                        },
+                    })
+                }
+            }
+            "fleet/transcript_list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "chunks": [{
+                        "ingest_order": 4,
+                        "event_id": "evt-4",
+                        "session_key": request["params"]["session_key"],
+                        "event_type": "acp.message",
+                        // Adapter-authored text is NOT trusted: an adapter that
+                        // emits ANSI plus a newline must not repaint the
+                        // operator's terminal or forge a second transcript line.
+                        "payload": { "text": "hello\u{1b}[2J\nforged 99 acp.message {}" },
+                        "observed_at": 1,
+                    }],
+                    "next_after_order": 4,
+                },
+            }),
+            "fleet/transcript_subscribe" => {
+                write_frame(
+                    &mut writer,
+                    &json!({ "jsonrpc": "2.0", "id": id, "result": { "head_order": 4 } }),
+                )
+                .await;
+                for order in 5..7 {
+                    write_frame(
+                        &mut writer,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "fleet/transcript_event",
+                            "params": { "chunk": {
+                                "ingest_order": order,
+                                "event_id": format!("evt-{order}"),
+                                "session_key": "acp:01J0FIXTURE",
+                                "event_type": "acp.message",
+                                "payload": { "text": format!("live {order}") },
+                                "observed_at": order,
+                            }},
+                        }),
+                    )
+                    .await;
+                }
+                return; // closing the stream ends `--follow`
+            }
             "fleet/message_subscribe" => {
                 write_frame(
                     &mut writer,
@@ -499,4 +566,223 @@ async fn follow_streams_ndjson() {
         },
     )
     .await;
+}
+
+// ------------------------------------------------- the Phase 5 verbs (ACP)
+
+/// `fleet acp create` prints the daemon's result verbatim and exits 0.
+///
+/// The `--cwd` is resolved to an ABSOLUTE path before it leaves the CLI,
+/// because the daemon's working directory is not the operator's.
+#[tokio::test]
+async fn acp_create_prints_json_and_sends_an_absolute_cwd() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let relative = cwd.path().join("nested");
+    std::fs::create_dir_all(&relative).expect("nested dir");
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "acp",
+            "create",
+            "--provider",
+            "claude-agent-acp",
+            "--cwd",
+            relative.to_str().expect("utf8"),
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            let result: Value = serde_json::from_slice(&output.stdout).expect("json on stdout");
+            assert_eq!(result["session_key"], "acp:01J0FIXTURE");
+            assert_eq!(result["scope_key"], "session:acp:01J0FIXTURE");
+        },
+    )
+    .await;
+}
+
+/// An unknown adapter is the daemon's -32602, rendered as exit 1 plus the JSON
+/// error shape every chat-bus verb shares.
+#[tokio::test]
+async fn acp_create_with_an_unknown_provider_exits_bad_input() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "fleet",
+            "acp",
+            "create",
+            "--provider",
+            "nope-acp",
+            "--cwd",
+            cwd.path().to_str().expect("utf8"),
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let error = stderr_error(&output);
+            assert_eq!(error["error"]["kind"], "bad_input");
+            assert_eq!(error["error"]["retryable"], false);
+            assert!(output.stdout.is_empty(), "nothing may reach stdout");
+        },
+    )
+    .await;
+}
+
+/// `fleet transcript` pages the execution log; `--follow` streams NDJSON,
+/// which is the CLI half of I12's live leg.
+#[tokio::test]
+async fn transcript_lists_and_follows() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "transcript",
+            "acp:01J0FIXTURE",
+            "--limit",
+            "10",
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            let result: Value = serde_json::from_slice(&output.stdout).expect("json on stdout");
+            assert_eq!(result["chunks"][0]["event_type"], "acp.message");
+            assert_eq!(result["next_after_order"], 4);
+        },
+    )
+    .await;
+
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "transcript",
+            "acp:01J0FIXTURE",
+            "--follow",
+        ],
+        None,
+        |output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<Value> = stdout
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("each line is one JSON document"))
+                .collect();
+            assert_eq!(lines.len(), 3, "ack plus two live chunks: {stdout}");
+            assert_eq!(lines[0]["head_order"], 4);
+            assert_eq!(lines[1]["ingest_order"], 5);
+            assert_eq!(lines[2]["ingest_order"], 6);
+            // The fixture went away mid-stream: the retryable daemon case.
+            assert_eq!(output.status.code(), Some(2));
+        },
+    )
+    .await;
+}
+
+/// The text renderer is the LOSSY, terminal-safe surface: one chunk stays one
+/// line and no control character survives, so an adapter cannot repaint the
+/// screen or forge a transcript entry the operator would read as real.
+#[tokio::test]
+async fn transcript_text_output_escapes_control_characters() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &["fleet", "transcript", "acp:01J0FIXTURE"],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+            assert_eq!(lines.len(), 1, "one chunk stays one line: {stdout:?}");
+            assert!(
+                !lines[0].chars().any(char::is_control),
+                "no control character may reach the terminal: {:?}",
+                lines[0]
+            );
+            // The ESC and the newline survive only as VISIBLE text. The payload
+            // is JSON-serialized before escaping, so they arrive already
+            // neutralised as escaped u001b / n and `escape_control` then escapes
+            // the backslash; either way nothing actionable reaches the terminal.
+            assert!(
+                lines[0].contains("u001b[2J"),
+                "ESC is inert text: {stdout:?}"
+            );
+            assert!(lines[0].contains("nforged"), "newline is inert: {stdout:?}");
+            assert!(
+                lines[0].starts_with("4 acp.message "),
+                "ingest_order and event_type lead the line: {stdout:?}"
+            );
+        },
+    )
+    .await;
+}
+
+/// The Phase 5 verbs share `msg`'s refusal of tabular formats: there is no
+/// honest csv/markdown rendering of a transcript or a session-create receipt,
+/// so they are refused rather than silently emitted as single-column prose.
+#[tokio::test]
+async fn acp_and_transcript_refuse_csv_and_markdown() {
+    for format in ["csv", "markdown"] {
+        for verb in [
+            vec!["fleet", "transcript", "acp:01J0FIXTURE"],
+            vec![
+                "fleet",
+                "acp",
+                "create",
+                "--provider",
+                "claude-agent-acp",
+                "--cwd",
+                ".",
+            ],
+        ] {
+            let mut args = vec!["--format", format];
+            args.extend(verb.iter().copied());
+            with_fixture(SendBehaviour::Ok, &args, None, |output| {
+                assert_eq!(
+                    output.status.code(),
+                    Some(1),
+                    "--format {format} on {verb:?} must be refused, not rendered"
+                );
+                let error = stderr_error(&output);
+                assert_eq!(error["error"]["kind"], "bad_input");
+                assert_eq!(error["error"]["retryable"], false);
+                assert!(output.stdout.is_empty(), "nothing may reach stdout");
+            })
+            .await;
+        }
+    }
+}
+
+/// A down daemon is the RETRYABLE case for the Phase 5 verbs too: exit 2 with
+/// `retryable: true`, not the exit-1 bad-input code a caller would give up on.
+#[tokio::test]
+async fn the_phase_five_verbs_exit_two_when_the_daemon_is_missing() {
+    let home = tempfile::tempdir().expect("temp home");
+    prepare_home(home.path()); // token but no listener
+    let cwd = tempfile::tempdir().expect("cwd");
+    let create = vec![
+        "--format",
+        "json",
+        "fleet",
+        "acp",
+        "create",
+        "--provider",
+        "claude-agent-acp",
+        "--cwd",
+        cwd.path().to_str().expect("utf8"),
+    ];
+    let transcript = vec!["--format", "json", "fleet", "transcript", "acp:01J0FIXTURE"];
+    for args in [create, transcript] {
+        let output = run_cli(home.path(), &args, None).await;
+        assert_eq!(output.status.code(), Some(2), "{args:?} -> {output:?}");
+        let error = stderr_error(&output);
+        assert_eq!(error["error"]["kind"], "daemon");
+        assert_eq!(error["error"]["retryable"], true);
+        assert!(output.stdout.is_empty(), "nothing may reach stdout");
+    }
 }
