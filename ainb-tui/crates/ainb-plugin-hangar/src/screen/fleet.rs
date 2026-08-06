@@ -3884,7 +3884,13 @@ mod tests {
     #[test]
     fn reconcile_key_keeps_restart_confirmation_for_non_interview_session() {
         let mut state = FleetPaneState::default();
-        state.set_sessions(vec![session("claude:waiting", "claude", "IDLE", "WAITING", "managed")]);
+        state.set_sessions(vec![session(
+            "claude:waiting",
+            "claude",
+            "IDLE",
+            "WAITING",
+            "managed",
+        )]);
 
         let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
 
