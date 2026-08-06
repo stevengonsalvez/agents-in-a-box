@@ -88,6 +88,7 @@ impl Store {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new().connect_with(opts).await?;
+        backup_before_pending_migrations(&pool, &db_path).await?;
         apply_migrations(&pool).await?;
         Ok(Self { pool })
     }
@@ -139,6 +140,145 @@ impl Store {
     #[must_use]
     pub const fn home_env() -> &'static str {
         HOME_ENV
+    }
+}
+
+/// Makes each in-flight snapshot's path unique per CALL, not just per process:
+/// two `Store::open_in`s can run concurrently inside one process (daemon boot
+/// plus an in-process reader).
+static STAGING_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many `hangar.db.pre-<version>.bak` files survive a boot. Two is the
+/// last-known-good plus the one before it; more just eats the disk the daemon
+/// runs on.
+const BACKUP_KEEP: usize = 2;
+
+/// Snapshot the database aside BEFORE any pending migration touches it.
+///
+/// Migrations here are forward-only with no down files, so restoring this file
+/// is the ONLY rollback that exists. The backup is therefore a precondition of
+/// migrating, not best effort: a failure to write it aborts the open rather
+/// than walking through the one-way door unprotected.
+///
+/// Every opener races here, because `Store::open_in` is on the daemon boot
+/// path AND on every `ainb hangar *` CLI invocation. Three properties keep the
+/// artifact trustworthy under that race:
+///
+/// 1. `VACUUM INTO` writes a consistent snapshot of THIS connection's read
+///    view. Unlike a file copy it cannot interleave with another process's
+///    writes, and it needs no checkpoint (a `wal_checkpoint(TRUNCATE)` that
+///    reports `busy = 1` did not run, which would have left the copy's tail in
+///    `-wal`).
+/// 2. The snapshot is re-opened and its own `MAX(version)` asserted to still be
+///    `applied`. A process that read `applied` and then blocked on the
+///    `busy_timeout` while another migrated would otherwise file a POST-upgrade
+///    database under the `pre-<applied>` name, and restoring it would be a
+///    silent no-op that looks correct.
+/// 3. It lands under a caller-unique temp name and is `rename`d into place, so
+///    the visible `.bak` is always a complete file and concurrent openers
+///    cannot interleave into one another's output.
+///
+/// No-ops when nothing is pending (the ordinary boot) and on a fresh database
+/// (no `_sqlx_migrations` table yet: there is no prior state to preserve).
+async fn backup_before_pending_migrations(pool: &SqlitePool, db_path: &Path) -> anyhow::Result<()> {
+    let applied: Result<Option<i64>, sqlx::Error> =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(pool)
+            .await;
+    let Ok(Some(applied)) = applied else {
+        return Ok(()); // fresh database, or no migration ever applied
+    };
+    let embedded = sqlx::migrate!("./migrations").iter().map(|m| m.version).max().unwrap_or(0);
+    if applied >= embedded {
+        return Ok(());
+    }
+
+    // Prune to one slot BELOW the retention target first: pruning after the
+    // snapshot would need room for three databases at once, and a host short on
+    // disk would get a daemon that refuses to boot on the upgrade path.
+    prune_backups(db_path, BACKUP_KEEP.saturating_sub(1));
+    let backup = db_path.with_file_name(format!("{DB_FILE_NAME}.pre-{applied}.bak"));
+    let staging = db_path.with_file_name(format!(
+        "{DB_FILE_NAME}.pre-{applied}.{}-{}.tmp",
+        std::process::id(),
+        STAGING_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = tokio::fs::remove_file(&staging).await; // VACUUM INTO refuses an existing file
+    let staging_arg = staging
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("backup path is not valid UTF-8: {}", staging.display()))?;
+    sqlx::query("VACUUM INTO ?").bind(staging_arg).execute(pool).await?;
+
+    let snapshot_version = snapshot_applied_version(&staging).await;
+    match snapshot_version {
+        Ok(Some(version)) if version == applied => {}
+        other => {
+            // Another opener migrated while this one was queued behind the
+            // busy_timeout: its own backup is the pre-upgrade one, and keeping
+            // this post-upgrade snapshot under the pre-upgrade name would make
+            // a restore a silent no-op.
+            let _ = tokio::fs::remove_file(&staging).await;
+            tracing::warn!(
+                from_version = applied,
+                observed = ?other.ok().flatten(),
+                "pre-migration backup discarded: the database moved under it"
+            );
+            return Ok(());
+        }
+    }
+    tokio::fs::rename(&staging, &backup).await?;
+    tracing::info!(
+        backup = %backup.display(),
+        from_version = applied,
+        to_version = embedded,
+        "pre-migration database backup written"
+    );
+    prune_backups(db_path, BACKUP_KEEP);
+    Ok(())
+}
+
+/// Re-open a snapshot on its own and read the schema version it actually holds.
+/// Read-only and `create_if_missing(false)`, so a missing or corrupt file is an
+/// error rather than a freshly minted empty database that would "verify".
+async fn snapshot_applied_version(path: &Path) -> anyhow::Result<Option<i64>> {
+    use sqlx::{ConnectOptions as _, Connection as _};
+
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .read_only(true)
+        .connect()
+        .await?;
+    let version: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&mut conn)
+        .await?;
+    conn.close().await?;
+    Ok(version)
+}
+
+/// Keep only the newest `keep` pre-migration backups beside the database.
+///
+/// Best effort: a stale extra file is harmless, a failed boot is not.
+fn prune_backups(db_path: &Path, keep: usize) {
+    let Some(dir) = db_path.parent() else {
+        return;
+    };
+    let prefix = format!("{DB_FILE_NAME}.pre-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<(i64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let version = name.strip_prefix(&prefix)?.strip_suffix(".bak")?.parse().ok()?;
+            Some((version, path))
+        })
+        .collect();
+    backups.sort_unstable_by_key(|(version, _)| std::cmp::Reverse(*version));
+    for (_, path) in backups.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
