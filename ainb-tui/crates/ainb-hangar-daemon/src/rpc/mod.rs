@@ -1505,6 +1505,10 @@ async fn execute_fleet_action(
             request_fingerprint,
             ..
         }
+        | ControlAction::ApproveForSession {
+            request_fingerprint,
+            ..
+        }
         | ControlAction::Deny {
             request_fingerprint,
             ..
@@ -1662,6 +1666,7 @@ async fn execute_fleet_action(
                 ControlAction::StructuredAnswer { .. }
                 | ControlAction::DismissStructured { .. }
                 | ControlAction::Approve { .. }
+                | ControlAction::ApproveForSession { .. }
                 | ControlAction::Deny { .. } => (
                     ActionReceiptStatus::Unknown,
                     Some("authoritative provider request transport is not active".to_string()),
@@ -2201,15 +2206,19 @@ async fn execute_codex_action(
             ControlAction::Approve {
                 request_identity, ..
             }
+            | ControlAction::ApproveForSession {
+                request_identity, ..
+            }
             | ControlAction::Deny {
                 request_identity, ..
             } => {
                 let request = load_codex_approval(pool, &session.session_key).await?;
                 require_codex_identity(request_identity.as_ref(), &request.identity)?;
-                let decision = if matches!(action, ControlAction::Approve { .. }) {
-                    ApprovalDecision::Approve
-                } else {
-                    ApprovalDecision::Deny
+                let decision = match action {
+                    ControlAction::Approve { .. } => ApprovalDecision::Approve,
+                    ControlAction::ApproveForSession { .. } => ApprovalDecision::ApproveForSession,
+                    ControlAction::Deny { .. } => ApprovalDecision::Deny,
+                    _ => unreachable!("approval branch matches only approval actions"),
                 };
                 manager
                     .decide_approval(&request, decision)
@@ -2974,6 +2983,7 @@ fn action_capability(
         ControlAction::StructuredAnswer { .. } => capabilities.structured_answer,
         ControlAction::DismissStructured { .. } => capabilities.structured_dismiss,
         ControlAction::Approve { .. } | ControlAction::Deny { .. } => capabilities.approvals,
+        ControlAction::ApproveForSession { .. } => capabilities.approval_session,
         ControlAction::VerifiedPicker { .. } => capabilities.verified_picker,
         ControlAction::SendPrompt { .. } => capabilities.send_prompt || capabilities.tmux_text,
         ControlAction::Continue => capabilities.continue_turn,
@@ -9431,6 +9441,23 @@ mod tests {
             method: method.into(),
             params,
         }
+    }
+
+    #[test]
+    fn session_approval_requires_its_own_capability() {
+        use ainb_hangar_proto::fleet::{ControlAction, FleetCapabilities};
+
+        let action = ControlAction::ApproveForSession {
+            request_fingerprint: "request".to_string(),
+            request_identity: None,
+        };
+        let mut capabilities = FleetCapabilities {
+            approvals: true,
+            ..FleetCapabilities::default()
+        };
+        assert!(!action_capability(&capabilities, &action));
+        capabilities.approval_session = true;
+        assert!(action_capability(&capabilities, &action));
     }
 
     #[tokio::test]

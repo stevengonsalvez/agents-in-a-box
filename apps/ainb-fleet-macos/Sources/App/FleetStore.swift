@@ -64,6 +64,28 @@ enum FleetStartPreflight {
     }
 }
 
+enum FleetApprovalDecision: Equatable {
+    case allowOnce, deny, bypassSession
+
+    var title: String {
+        switch self {
+        case .allowOnce: "Allow once"
+        case .deny: "Deny"
+        case .bypassSession: "Bypass session"
+        }
+    }
+
+    func action(for session: FleetSession) -> ControlAction {
+        let fingerprint = session.currentRequestFingerprint ?? ""
+        let identity = FleetRequestIdentity.from(request: session.currentRequest)
+        return switch self {
+        case .allowOnce: .approve(requestFingerprint: fingerprint, requestIdentity: identity)
+        case .deny: .deny(requestFingerprint: fingerprint, requestIdentity: identity)
+        case .bypassSession: .approveForSession(requestFingerprint: fingerprint, requestIdentity: identity)
+        }
+    }
+}
+
 @MainActor
 final class FleetStore: ObservableObject {
     @Published private(set) var sessions: [FleetSession] = []
@@ -279,19 +301,46 @@ final class FleetStore: ObservableObject {
         )
     }
 
+    func canDecideApproval(_ decision: FleetApprovalDecision, on session: FleetSession) -> Bool {
+        guard session.attention == .approval,
+              session.capabilities.approvals,
+              !session.currentRequestFingerprint.orEmpty.isEmpty else { return false }
+        if decision == .bypassSession {
+            return session.provider == .codex && session.capabilities.approvalSession && canPerformRequest(on: session)
+        }
+        return canPerformRequest(on: session)
+    }
+
+    func decideApproval(_ decision: FleetApprovalDecision, on session: FleetSession) {
+        guard canDecideApproval(decision, on: session) else {
+            controlNotice = "Approval action is unavailable or stale."
+            return
+        }
+        performStructured(
+            decision.action(for: session),
+            on: session,
+            allowed: true,
+            failurePrefix: "Approval"
+        )
+    }
+
+    private func canPerformRequest(on session: FleetSession) -> Bool {
+        canWrite
+            && pendingIntentID == nil
+            && negotiation?.capabilityIDs.contains("fleet.action.execute") == true
+            && selectedSessionKey == session.sessionKey
+            && !session.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && session.version > 0
+    }
+
     private func performStructured(
         _ action: ControlAction,
         on session: FleetSession,
         allowed: Bool,
         failurePrefix: String
     ) {
-        guard canWrite,
-              pendingIntentID == nil,
-              negotiation?.capabilityIDs.contains("fleet.action.execute") == true,
-              selectedSessionKey == session.sessionKey,
+        guard canPerformRequest(on: session),
               allowed,
-              !session.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              session.version > 0,
               let fingerprint = session.currentRequestFingerprint,
               !fingerprint.isEmpty,
               let connection else {
@@ -688,4 +737,8 @@ final class FleetStore: ObservableObject {
             controlNotice = "Receipt refresh refused: \(String(describing: error))"
         }
     }
+}
+
+private extension Optional where Wrapped == String {
+    var orEmpty: String { self ?? "" }
 }

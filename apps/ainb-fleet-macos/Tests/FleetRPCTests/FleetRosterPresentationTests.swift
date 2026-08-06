@@ -26,6 +26,24 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertFalse(FleetRosterPresentation.matches(value, search: "", filters: FleetRosterFilters(provider: .claude)))
     }
 
+    func testFocusFiltersReturnOnlyVisibleSessionKinds() {
+        let sessions = [
+            session(key: "active", lifecycle: .running),
+            session(key: "ask", lifecycle: .idle, attention: .ask),
+            session(key: "idle", lifecycle: .idle),
+            session(key: "done", lifecycle: .turnComplete),
+        ]
+
+        XCTAssertEqual(
+            FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .ask)).map(\.sessionKey),
+            ["ask"]
+        )
+        XCTAssertEqual(
+            FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .active)).map(\.sessionKey),
+            ["active"]
+        )
+    }
+
     func testVersionedPresentationPreferencesRestoreOnlyCurrentSchema() {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -57,6 +75,12 @@ final class FleetRosterPresentationTests: XCTestCase {
     func testFreshnessUsesDaemonMilliseconds() {
         let value = session(key: "fresh", lifecycle: .idle, observedAt: 1_700_000_000_000)
         XCTAssertEqual(FleetRosterPresentation.freshnessLabel(for: value), "2023-11-14T22:13:20Z")
+    }
+
+    func testSessionWorkCountRoundTripsFromDaemonWire() throws {
+        let value = session(key: "working", lifecycle: .running, activeWorkCount: 3)
+        let decoded = try JSONDecoder().decode(FleetSession.self, from: JSONEncoder().encode(value))
+        XCTAssertEqual(decoded.activeWorkCount, 3)
     }
 
     func testStatusIconPrefersDegradedSessionOverAttention() {
@@ -107,7 +131,7 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(event.deepLink.absoluteString, "ainbfleet://session/codex%2Fa%3Fb%23c")
     }
 
-    private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
-        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
+    private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
+        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
 }

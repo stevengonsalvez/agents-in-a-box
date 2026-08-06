@@ -1,6 +1,35 @@
 import Foundation
 
+enum FleetRosterFocus: String, Codable, CaseIterable, Identifiable {
+    case all, active, needsYou, ask, idle, done
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .all: "All"
+        case .active: "Active"
+        case .needsYou: "Needs you"
+        case .ask: "Ask"
+        case .idle: "Idle"
+        case .done: "Done"
+        }
+    }
+
+    func matches(_ session: FleetSession) -> Bool {
+        switch self {
+        case .all: true
+        case .active: session.lifecycle == .starting || session.lifecycle == .running
+        case .needsYou: session.attention != .none
+        case .ask: session.attention == .ask
+        case .idle: session.lifecycle == .idle
+        case .done: session.lifecycle == .turnComplete
+        }
+    }
+}
+
 struct FleetRosterFilters: Codable, Equatable {
+    var focus: FleetRosterFocus = .all
     var attentionOnly = false
     var lifecycle: LifecycleState?
     var provider: FleetProvider?
@@ -26,8 +55,8 @@ enum FleetRosterSort: String, Codable, CaseIterable, Identifiable {
 }
 
 struct FleetPresentationPreferences: Codable, Equatable {
-    static let currentVersion = 2
-    private static let defaultsKey = "ainb.fleet.presentation.v2"
+    static let currentVersion = 3
+    private static let defaultsKey = "ainb.fleet.presentation.v3"
 
     var version = currentVersion
     var filters = FleetRosterFilters.all
@@ -86,6 +115,7 @@ enum FleetRosterPresentation {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let searchable = [session.sessionKey, session.displayName ?? "", session.cwd, session.provider.rawValue]
         return (query.isEmpty || searchable.contains { $0.lowercased().contains(query) })
+            && filters.focus.matches(session)
             && (!filters.attentionOnly || session.attention != .none)
             && (filters.lifecycle == nil || session.lifecycle == filters.lifecycle)
             && (filters.provider == nil || session.provider == filters.provider)

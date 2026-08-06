@@ -200,6 +200,18 @@ final class FleetConnectionTests: XCTestCase {
 
         let legacy = try JSONDecoder().decode(FleetCapabilities.self, from: Data("{}".utf8))
         XCTAssertFalse(legacy.structuredDismiss)
+        XCTAssertFalse(legacy.approvalSession)
+
+        let bypass = ControlAction.approveForSession(
+            requestFingerprint: "sha256:approval",
+            requestIdentity: FleetRequestIdentity(
+                requestID: .string("request-2"), threadID: "thread-1", turnID: "turn-2", itemID: "item-3"
+            )
+        )
+        let bypassData = try JSONEncoder().encode(bypass)
+        let bypassEncoded = try JSONSerialization.jsonObject(with: bypassData) as? [String: Any]
+        XCTAssertEqual(bypassEncoded?["action"] as? String, "approve_for_session")
+        XCTAssertEqual(try JSONDecoder().decode(ControlAction.self, from: bypassData), bypass)
     }
 
     @MainActor
