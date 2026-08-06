@@ -1176,7 +1176,9 @@ fn reconcile_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent
         .as_deref()
         .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
     let request_fingerprint = row.current_request_fingerprint.clone()?;
-    if !row.attention_state.eq_ignore_ascii_case("ASK")
+    if !row.provider.eq_ignore_ascii_case("claude")
+        || !row.is_managed()
+        || !row.attention_state.eq_ignore_ascii_case("ASK")
         || !row.capabilities.contains("structured_answer")
     {
         return None;
@@ -3891,6 +3893,25 @@ mod tests {
             "WAITING",
             "managed",
         )]);
+
+        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
+
+        assert!(reduced.intent.is_none());
+        assert!(matches!(
+            reduced.state.mode,
+            FleetMode::Confirm {
+                action: FleetAction::Restart,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reconcile_key_keeps_restart_confirmation_for_codex_interview() {
+        let mut state = FleetPaneState::default();
+        let mut row = session("codex:ask", "codex", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("fingerprint-1".into());
+        state.set_sessions(vec![row]);
 
         let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
 

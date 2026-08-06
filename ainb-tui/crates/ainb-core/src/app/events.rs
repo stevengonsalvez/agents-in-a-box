@@ -2965,7 +2965,8 @@ impl EventHandler {
     ///   - Enter            answer the selected structured question
     ///   - B                open broadcast composer for the current lens
     ///   - 1 / 2 / 3 / 4 / 5 switch Needs input / Idle / Completed / Running / All
-    ///   - r                restart the selected session after confirmation
+    ///   - r                reconcile the selected Claude interview
+    ///   - R                restart the selected session after confirmation
     ///   - q / Esc          back to the screen it was opened from (PanelBack)
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that

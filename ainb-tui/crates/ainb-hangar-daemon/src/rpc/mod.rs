@@ -45,7 +45,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
 use ainb_hangar_core::actor::{ActorKind, ActorRef, local_member};
@@ -85,9 +85,6 @@ const INTERNAL_ERROR: i32 = -32603;
 const PERMISSION_DENIED: i32 = -32000;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-/// Bound the short hand-off between Claude's hook event and broker registration.
-const STRUCTURED_RECONCILE_GRACE: Duration = Duration::from_secs(1);
-const STRUCTURED_RECONCILE_POLL: Duration = Duration::from_millis(100);
 
 /// Cross-process, crash-safe ownership of one operation against one Hangar DB.
 ///
@@ -2701,32 +2698,40 @@ async fn reconcile_claude_structured(
         Ok(socket) => socket,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
+    let pending = match tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_list(&socket)
+    })
+    .await
+    {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error)) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
     let session_id = session.provider_session_id.as_deref().unwrap_or_default();
-    let deadline = Instant::now() + STRUCTURED_RECONCILE_GRACE;
-    loop {
-        let socket = socket.clone();
-        let pending = match tokio::task::spawn_blocking(move || {
-            ainb_plugin_notifyd::broker::client_list(&socket)
-        })
-        .await
-        {
-            Ok(Ok(pending)) => pending,
-            Ok(Err(error)) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
-            Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
-        };
-        if pending.iter().any(|entry| {
-            entry.session_id == session_id
-                && entry.request_fingerprint.as_deref() == Some(request_fingerprint)
-        }) {
-            return (
-                ActionReceiptStatus::Delivered,
-                Some("Claude interview is live".to_string()),
-            );
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(STRUCTURED_RECONCILE_POLL).await;
+    if pending.iter().any(|entry| {
+        entry.session_id == session_id
+            && entry.request_fingerprint.as_deref() == Some(request_fingerprint)
+    }) {
+        return (
+            ActionReceiptStatus::Delivered,
+            Some("Claude interview is live".to_string()),
+        );
+    }
+    let Some(target) = session.tmux_target.as_deref() else {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("Claude interview liveness is unresolved; Fleet card retained".to_string()),
+        );
+    };
+    let pane = match ainb_fleet_core::read::capture_pane(target, 0).await {
+        Ok(pane) => pane,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    if !claude_interview_was_declined(&pane) {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("Claude interview liveness is unresolved; Fleet card retained".to_string()),
+        );
     }
 
     let event = NewFleetEvent {
@@ -2762,6 +2767,10 @@ async fn reconcile_claude_structured(
         }
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
     }
+}
+
+fn claude_interview_was_declined(pane: &str) -> bool {
+    pane.contains("User declined to answer questions")
 }
 
 fn approve_socket_path() -> std::io::Result<PathBuf> {
@@ -9584,7 +9593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_claude_structured_clears_only_a_missing_broker_waiter() {
+    async fn reconcile_claude_structured_retains_unproven_stale_card() {
         use ainb_hangar_proto::fleet::ActionReceiptStatus;
         use ainb_hangar_store::repo::fleet::{
             FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
@@ -9634,80 +9643,11 @@ mod tests {
         set_approve_socket_for_test(None);
         server.abort();
 
-        assert_eq!(status, ActionReceiptStatus::Delivered);
+        assert_eq!(status, ActionReceiptStatus::Unknown);
         assert_eq!(
             detail.as_deref(),
-            Some("Claude interview ended, cleared stale Fleet card")
+            Some("Claude interview liveness is unresolved; Fleet card retained")
         );
-        let session =
-            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
-        assert_eq!(session.attention_state, "NONE");
-        assert!(session.current_request_fingerprint.is_none());
-    }
-
-    #[tokio::test]
-    async fn reconcile_claude_structured_keeps_a_just_starting_waiter() {
-        use ainb_hangar_proto::fleet::ActionReceiptStatus;
-        use ainb_hangar_store::repo::fleet::{
-            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-        };
-        use tokio::net::UnixListener;
-
-        let _socket_guard = APPROVE_SOCKET_TEST_LOCK.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_in(dir.path()).await.unwrap();
-        let socket = dir.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
-            listener,
-            ainb_plugin_notifyd::broker::BrokerState::default(),
-        ));
-        set_approve_socket_for_test(Some(socket.clone()));
-        let created = FleetRepo::apply_event(
-            store.pool(),
-            &NewFleetEvent {
-                event_id: "ask".into(),
-                session_key: "claude:session-1".into(),
-                observed_at: 1,
-                authority: ObservationAuthority::Authoritative,
-                event_type: "AskUserQuestion".into(),
-                payload: serde_json::json!({"questions": [{"question": "Where?"}]}).to_string(),
-                patch: FleetSessionPatch {
-                    provider: Some("claude".into()),
-                    provider_session_id: Some("session-1".into()),
-                    lifecycle_state: Some("IDLE".into()),
-                    attention_state: Some("ASK".into()),
-                    current_request_fingerprint: Some(Some("fingerprint-1".into())),
-                    ..FleetSessionPatch::default()
-                },
-            },
-        )
-        .await
-        .unwrap();
-        let reconcile = tokio::spawn({
-            let pool = store.pool().clone();
-            let session = created.session.clone();
-            async move {
-                reconcile_claude_structured(&pool, &sink(), &session, "fingerprint-1", 1).await
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        let waiter = tokio::task::spawn_blocking({
-            let socket = socket.clone();
-            move || {
-                ainb_plugin_notifyd::broker::client_await_structured(
-                    &socket,
-                    "session-1",
-                    "fingerprint-1",
-                    &[serde_json::json!({ "question": "Where?" })],
-                    Duration::from_secs(5),
-                )
-            }
-        });
-
-        let (status, detail) = reconcile.await.unwrap();
-        assert_eq!(status, ActionReceiptStatus::Delivered);
-        assert_eq!(detail.as_deref(), Some("Claude interview is live"));
         let session =
             FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
         assert_eq!(session.attention_state, "ASK");
@@ -9715,22 +9655,16 @@ mod tests {
             session.current_request_fingerprint.as_deref(),
             Some("fingerprint-1")
         );
+    }
 
-        let socket_for_dismiss = socket.clone();
-        tokio::task::spawn_blocking(move || {
-            ainb_plugin_notifyd::broker::client_dismiss_structured(
-                &socket_for_dismiss,
-                "session-1",
-                "fingerprint-1",
-                "test cleanup",
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        waiter.await.unwrap();
-        set_approve_socket_for_test(None);
-        server.abort();
+    #[test]
+    fn declined_claude_interview_requires_native_completion_text() {
+        assert!(claude_interview_was_declined(
+            "User declined to answer questions\n · Where? (North / South)"
+        ));
+        assert!(!claude_interview_was_declined(
+            "Where is the place? (North / South)"
+        ));
     }
 
     #[tokio::test]
