@@ -1739,7 +1739,6 @@ fn route_fleet(states: &mut ScreenStates, key: &KeyEvent) {
             KeyCode::Char { ch: '4' } => Some(FleetEvent::SetFilter(FleetFilter::Running)),
             KeyCode::Char { ch: '5' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
             KeyCode::Char { ch: 's' } => Some(FleetEvent::RequestAction(FleetAction::Stop)),
-            KeyCode::Char { ch: 'r' } => Some(FleetEvent::RequestAction(FleetAction::Restart)),
             KeyCode::Char { ch: 'i' } => Some(FleetEvent::RequestAction(FleetAction::Interrupt)),
             KeyCode::Char { ch: 'n' } => {
                 Some(approval_event(&states.fleet, false, FleetAction::Continue))
@@ -2915,6 +2914,7 @@ mod fleet_routing_tests {
                 ("approvals".into(), true),
                 ("send_prompt".into(), true),
                 ("start".into(), true),
+                ("restart".into(), true),
             ])),
             version: 9,
             active_work_count: 0,
@@ -2968,5 +2968,22 @@ mod fleet_routing_tests {
             }) if text == "1"
         ));
         assert_eq!(states.fleet.filter(), FleetFilter::All);
+    }
+
+    #[test]
+    fn fleet_routes_r_to_reconcile_for_selected_structured_interview() {
+        let mut states = ScreenStates::default();
+        states.fleet.set_sessions(vec![row("ASK")]);
+
+        route_fleet(&mut states, &key(KeyCode::Char { ch: 'r' }));
+
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                session_key,
+                expected_version: 9,
+                action: FleetAction::ReconcileStructured { request_fingerprint },
+            }) if session_key == "claude:one" && request_fingerprint == "fingerprint"
+        ));
     }
 }

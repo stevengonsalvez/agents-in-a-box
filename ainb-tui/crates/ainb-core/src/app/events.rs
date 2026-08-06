@@ -3026,9 +3026,8 @@ impl EventHandler {
                     Some(AppEvent::FleetPanelNewAtcOpen)
                 }
             }
-            KeyCode::Char('r' | 'R') => {
-                Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
-            }
+            KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
+            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
             KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Continue)),
@@ -3303,6 +3302,7 @@ impl EventHandler {
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
                     FleetAction::DismissStructured { .. } => "rejected interview",
+                    FleetAction::ReconcileStructured { .. } => "reconciled interview",
                     FleetAction::Approve { .. } => "approved request",
                     FleetAction::Deny { .. } => "denied request",
                     FleetAction::SendText { .. } => "sent prompt",
@@ -8814,7 +8814,7 @@ mod panel_back_tests {
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r')))
         ));
 
         // Esc/q pop back to the saved origin, not hardcoded home.
