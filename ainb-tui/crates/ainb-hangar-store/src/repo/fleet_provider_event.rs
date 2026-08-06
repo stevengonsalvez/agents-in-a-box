@@ -113,6 +113,38 @@ pub enum FleetProviderEventError {
     Sql(#[from] sqlx::Error),
 }
 
+impl FleetProviderEventError {
+    /// Whether this failure can NEVER clear, however often the same rows are
+    /// retried.
+    ///
+    /// A buffering writer needs the distinction to decide whether to keep a
+    /// rejected batch: restoring a permanently doomed one pins it at the head
+    /// of the buffer forever and nothing behind it ever commits (see
+    /// `ainb-acp`'s `StoreWriter::flush`). The taxonomy lives here because the
+    /// store owns the error, and because `ainb-acp` is fenced off from `sqlx`
+    /// and cannot inspect the underlying database error itself.
+    ///
+    /// Only failures that are a property of the ROWS qualify. Anything
+    /// environmental (lock contention, a closed pool, a full disk, a
+    /// read-only file) is retryable, because an operator can clear it and the
+    /// rows are still good. Erring in that direction costs a retry; erring the
+    /// other way throws away data that would have committed.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            // A committed row already owns this event_id under a different
+            // envelope. The ledger is append-only, so no retry changes that.
+            Self::EventIdCollision { .. } | Self::EventNotFound { .. } => true,
+            // Constraint violations are the batch's own shape: a CHECK the
+            // payload fails, a duplicate key, a parent row that is not there.
+            Self::Sql(sqlx::Error::Database(db)) => {
+                db.is_check_violation() || db.is_unique_violation() || db.is_foreign_key_violation()
+            }
+            Self::Sql(_) => false,
+        }
+    }
+}
+
 /// Typed access to the raw provider-event ledger.
 pub struct FleetProviderEventRepo;
 

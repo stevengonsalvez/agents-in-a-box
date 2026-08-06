@@ -65,6 +65,19 @@ use crate::config::{AdapterConfig, allowlisted_env};
 /// How long the adapter has to echo a mode change before the spawn fails.
 pub const MODE_ASSERT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long each SPAWN-PHASE request (`initialize`, `session/new`,
+/// `session/load`) has to answer before the adapter is declared dead.
+///
+/// The upstream connection has no request timeout of its own, so an adapter
+/// that accepts the pipe and then never replies otherwise parks the pool's
+/// spawn path forever, holding the slot against every session queued behind
+/// it. 30 s is well past a cold `npx` start on a loaded box and well short of
+/// an operator wondering why nothing happened.
+///
+/// Deliberately NOT applied to `session/prompt`: a turn legitimately runs for
+/// minutes, and its deadline is the pool's business, not this file's.
+pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// JSON-RPC `Invalid params`.
 const INVALID_PARAMS: i32 = -32602;
 
@@ -177,7 +190,7 @@ impl AdapterProcess {
         let connection = connect(stdin, stdout, updates, Arc::clone(&observed_modes));
         let (connection, shutdown) = connection.await?;
 
-        let initialized = send(
+        let initialized = send_within_spawn_timeout(
             &connection,
             "initialize",
             InitializeRequest::new(ProtocolVersion::V1),
@@ -227,7 +240,9 @@ impl AdapterProcess {
 
     /// `session/new` plus the I13 mode assertion. Returns the adapter's id.
     pub async fn new_session(&self, cwd: &Path) -> Result<String, AcpError> {
-        let reply = send(&self.connection, "session/new", NewSessionRequest::new(cwd)).await?;
+        let reply =
+            send_within_spawn_timeout(&self.connection, "session/new", NewSessionRequest::new(cwd))
+                .await?;
         let session_id = reply.session_id.to_string();
         self.assert_mode(&session_id, reply.modes.as_ref()).await?;
         Ok(session_id)
@@ -244,7 +259,7 @@ impl AdapterProcess {
                 adapter: self.provider.clone(),
             });
         }
-        let reply = send(
+        let reply = send_within_spawn_timeout(
             &self.connection,
             "session/load",
             LoadSessionRequest::new(session_id.to_string(), cwd),
@@ -394,9 +409,13 @@ fn spawn_child(config: &AdapterConfig) -> Result<Child, AcpError> {
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // stderr is left on the daemon's, so adapter diagnostics reach the
-        // daemon log instead of a pipe nobody drains (a full stderr pipe
-        // deadlocks the adapter).
+        // stderr is INHERITED, so it goes wherever the daemon's own fd 2 goes
+        // (its console under `just dev`, its redirect under a service manager)
+        // NOT into the daemon's tracing log, which nothing here writes to.
+        // The reason to inherit rather than pipe is that a pipe nobody drains
+        // fills and then deadlocks the adapter mid-turn; piping would mean
+        // owning a reader task, which is a bigger commitment than adapter
+        // diagnostics have earned.
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     for (name, value) in allowlisted_env(config, &|name| std::env::var(name).ok()) {
@@ -474,6 +493,27 @@ where
         .block_task()
         .await
         .map_err(|error| classify(method, &error))
+}
+
+/// [`send`] under [`SPAWN_TIMEOUT`]. An adapter that never answers is a dead
+/// adapter, not a slow one, and the spawn path has no other way to find out.
+async fn send_within_spawn_timeout<Req>(
+    connection: &ConnectionTo<Agent>,
+    method: &'static str,
+    request: Req,
+) -> Result<Req::Response, AcpError>
+where
+    Req: JsonRpcRequest,
+    Req::Response: Send,
+{
+    tokio::time::timeout(SPAWN_TIMEOUT, send(connection, method, request))
+        .await
+        .map_err(|_| {
+            AcpError::Transport(format!(
+                "{method}: no reply within {}s",
+                SPAWN_TIMEOUT.as_secs()
+            ))
+        })?
 }
 
 fn classify(method: &'static str, error: &agent_client_protocol::Error) -> AcpError {

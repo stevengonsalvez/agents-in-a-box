@@ -801,6 +801,21 @@ pub struct FleetBroadcastResult {
 
 /// Maximum rows one `fleet/message_list` page may return.
 pub const FLEET_MESSAGE_LIST_MAX: u32 = 100;
+/// Maximum recipients one `fleet/message_send` may name.
+///
+/// Every target costs a durable delivery row plus a verified transport submit
+/// that can take seconds, all inside one request. Without a ceiling a single
+/// call can hold the daemon for minutes and write an unbounded leg set; 64 is
+/// far above any real fan-out (`fleet/broadcast` is the tool for more) and far
+/// below a self-inflicted outage.
+pub const FLEET_MESSAGE_TARGETS_MAX: usize = 64;
+/// Maximum `fleet/message_send` body size, in bytes.
+///
+/// The body is persisted verbatim and re-submitted to every recipient, so an
+/// unbounded one is an unbounded write amplified by the target count. 256 KiB
+/// is far past any prompt a human or agent writes and short enough that the
+/// worst case stays bounded.
+pub const FLEET_MESSAGE_BODY_MAX: usize = 256 * 1024;
 /// Maximum chunks one `fleet/transcript_list` page may return.
 pub const FLEET_TRANSCRIPT_LIST_MAX: u32 = 100;
 

@@ -180,13 +180,25 @@ const BACKUP_KEEP: usize = 2;
 ///
 /// No-ops when nothing is pending (the ordinary boot) and on a fresh database
 /// (no `_sqlx_migrations` table yet: there is no prior state to preserve).
+/// Every OTHER failure to establish the pre-upgrade state aborts the open:
+/// "cannot read the version" and "there is no version" are different facts, and
+/// treating the first as the second migrates a populated database with no
+/// rollback behind it.
 async fn backup_before_pending_migrations(pool: &SqlitePool, db_path: &Path) -> anyhow::Result<()> {
-    let applied: Result<Option<i64>, sqlx::Error> =
-        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+    let applied =
+        match sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(pool)
-            .await;
-    let Ok(Some(applied)) = applied else {
-        return Ok(()); // fresh database, or no migration ever applied
+            .await
+        {
+            Ok(applied) => applied,
+            Err(error) if is_fresh_database(&error) => return Ok(()),
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context("could not read the applied schema version; refusing to migrate"));
+            }
+        };
+    let Some(applied) = applied else {
+        return Ok(()); // the table exists but no migration has ever applied
     };
     let embedded = sqlx::migrate!("./migrations").iter().map(|m| m.version).max().unwrap_or(0);
     if applied >= embedded {
@@ -209,21 +221,24 @@ async fn backup_before_pending_migrations(pool: &SqlitePool, db_path: &Path) -> 
         .ok_or_else(|| anyhow::anyhow!("backup path is not valid UTF-8: {}", staging.display()))?;
     sqlx::query("VACUUM INTO ?").bind(staging_arg).execute(pool).await?;
 
-    let snapshot_version = snapshot_applied_version(&staging).await;
-    match snapshot_version {
-        Ok(Some(version)) if version == applied => {}
-        other => {
-            // Another opener migrated while this one was queued behind the
-            // busy_timeout: its own backup is the pre-upgrade one, and keeping
-            // this post-upgrade snapshot under the pre-upgrade name would make
-            // a restore a silent no-op.
+    let read = snapshot_applied_version(&staging).await.map_err(|error| error.to_string());
+    match snapshot_verdict(applied, read) {
+        Verdict::Keep => {}
+        Verdict::Discard { observed } => {
             let _ = tokio::fs::remove_file(&staging).await;
             tracing::warn!(
                 from_version = applied,
-                observed = ?other.ok().flatten(),
+                observed,
                 "pre-migration backup discarded: the database moved under it"
             );
             return Ok(());
+        }
+        Verdict::Broken { reason } => {
+            let _ = tokio::fs::remove_file(&staging).await;
+            anyhow::bail!(
+                "pre-migration backup for version {applied} could not be verified ({reason}); \
+                 refusing to migrate without a rollback"
+            );
         }
     }
     tokio::fs::rename(&staging, &backup).await?;
@@ -235,6 +250,56 @@ async fn backup_before_pending_migrations(pool: &SqlitePool, db_path: &Path) -> 
     );
     prune_backups(db_path, BACKUP_KEEP);
     Ok(())
+}
+
+/// The ONE read failure that means "fresh database" rather than "broken
+/// database": `sqlx` has not created `_sqlx_migrations` yet.
+///
+/// Everything else (a corrupt file, an I/O fault, a `_sqlx_migrations` whose
+/// shape no longer answers the query) is a database whose pre-upgrade state we
+/// failed to establish, and the caller aborts on it. The distinction matters
+/// because the two are indistinguishable at the call site once the error is
+/// discarded, and guessing "fresh" is the guess that skips the backup.
+fn is_fresh_database(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db) if db.message().contains("no such table: _sqlx_migrations"))
+}
+
+/// What a just-written snapshot's own schema version means for the backup.
+enum Verdict {
+    /// The snapshot holds `applied`: file it under the pre-upgrade name.
+    Keep,
+    /// The snapshot holds a DIFFERENT version. Another opener migrated while
+    /// this one was queued behind the `busy_timeout`; its own backup is the
+    /// pre-upgrade one, and filing this post-upgrade snapshot under the
+    /// pre-upgrade name would make a restore a silent no-op. Discard and boot.
+    Discard {
+        /// The version the snapshot actually holds.
+        observed: i64,
+    },
+    /// The snapshot cannot be read back at all, or carries no schema version.
+    /// That is a broken artifact rather than a race, and migrating on the
+    /// strength of it walks through the one-way door with no rollback.
+    Broken {
+        /// Operator-facing cause.
+        reason: String,
+    },
+}
+
+/// Classify the snapshot re-read.
+///
+/// Split out from [`backup_before_pending_migrations`] because the three
+/// outcomes are otherwise only reachable by racing a live `VACUUM INTO`, and
+/// the two that are NOT `Keep` mean opposite things: one is a healthy
+/// concurrent opener, the other is a backup that does not exist.
+fn snapshot_verdict(applied: i64, read: Result<Option<i64>, String>) -> Verdict {
+    match read {
+        Ok(Some(version)) if version == applied => Verdict::Keep,
+        Ok(Some(observed)) => Verdict::Discard { observed },
+        Ok(None) => Verdict::Broken {
+            reason: "it holds no schema version".to_string(),
+        },
+        Err(reason) => Verdict::Broken { reason },
+    }
 }
 
 /// Re-open a snapshot on its own and read the schema version it actually holds.
@@ -318,6 +383,88 @@ mod tests {
         assert!(
             msg.contains("FOREIGN KEY constraint failed"),
             "expected an FK violation, got: {msg}"
+        );
+    }
+
+    /// A version query that fails for any reason OTHER than "the table is not
+    /// there yet" must abort the open. Read as "fresh database" it would skip
+    /// the pre-migration backup and walk a populated database through the
+    /// forward-only door with nothing to restore from.
+    ///
+    /// Simulated by shadowing `_sqlx_migrations` with a VIEW that has no
+    /// `version` column: the table is present under that name, the query is
+    /// the real one, and it fails deterministically with `no such column`.
+    #[tokio::test]
+    async fn an_unreadable_schema_version_aborts_the_open() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real, fully migrated database first, so the only thing wrong on the
+        // next open is the version query itself.
+        drop(Store::open_in(dir.path()).await.expect("first open"));
+
+        let opts = SqliteConnectOptions::new().filename(dir.path().join(DB_FILE_NAME));
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+        sqlx::query("ALTER TABLE _sqlx_migrations RENAME TO _sqlx_migrations_data")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE VIEW _sqlx_migrations AS SELECT description FROM _sqlx_migrations_data",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let error = Store::open_in(dir.path())
+            .await
+            .expect_err("an unreadable schema version must abort, not look fresh");
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("could not read the applied schema version"),
+            "the abort must name its cause, got: {chain}"
+        );
+        assert!(
+            !dir.path().join(format!("{DB_FILE_NAME}.pre-0.bak")).exists(),
+            "a database that could not be read must not be filed as a version-0 backup"
+        );
+    }
+
+    /// The verdict split: only a version that MOVED is the concurrent-opener
+    /// case that keeps booting. A snapshot that cannot be read back, or that
+    /// carries no version at all, is a MISSING backup and must abort.
+    #[test]
+    fn only_a_moved_version_is_discarded_the_rest_abort() {
+        assert!(matches!(snapshot_verdict(7, Ok(Some(7))), Verdict::Keep));
+        assert!(matches!(
+            snapshot_verdict(7, Ok(Some(8))),
+            Verdict::Discard { observed: 8 }
+        ));
+        assert!(matches!(
+            snapshot_verdict(7, Ok(None)),
+            Verdict::Broken { .. }
+        ));
+        assert!(matches!(
+            snapshot_verdict(7, Err("disk I/O error".to_string())),
+            Verdict::Broken { .. }
+        ));
+    }
+
+    /// The `Broken` verdict is reachable from a real file, not just from a
+    /// hand-built `Err`: a staging path that is not a database (a torn
+    /// `VACUUM INTO`, a truncated write) and one that is not there at all both
+    /// fail the re-read rather than verifying as an empty database.
+    #[tokio::test]
+    async fn a_snapshot_that_is_not_a_database_fails_its_re_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let torn = dir.path().join("hangar.db.pre-7.torn.tmp");
+        std::fs::write(&torn, b"not a sqlite file").unwrap();
+        assert!(
+            snapshot_applied_version(&torn).await.is_err(),
+            "a non-database staging file must not read as a verified snapshot"
+        );
+        assert!(
+            snapshot_applied_version(&dir.path().join("absent.tmp")).await.is_err(),
+            "create_if_missing(false) must make an absent snapshot an error"
         );
     }
 }

@@ -196,7 +196,15 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&str>) -> std::proces
     if let Some(stdin) = stdin {
         use tokio::io::AsyncWriteExt as _;
         let mut pipe = child.stdin.take().expect("stdin pipe");
-        pipe.write_all(stdin.as_bytes()).await.expect("write stdin");
+        // A CLI that BOUNDS its stdin read stops reading before we stop
+        // writing, so a broken pipe here is the bound working as intended.
+        if let Err(error) = pipe.write_all(stdin.as_bytes()).await {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "unexpected stdin write failure: {error}"
+            );
+        }
         drop(pipe);
     }
     tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
@@ -371,6 +379,100 @@ async fn list_prints_the_page_as_json() {
         },
     )
     .await;
+}
+
+/// The CLI enforces the daemon's body ceiling itself, so a piped file that can
+/// never be accepted is refused without buffering all of it or making the round
+/// trip.
+#[tokio::test]
+async fn a_stdin_body_past_the_ceiling_is_bad_input() {
+    use ainb_hangar_proto::fleet::FLEET_MESSAGE_BODY_MAX;
+
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "msg",
+            "send",
+            "--target",
+            "claude:one",
+            "--text",
+            "-",
+        ],
+        Some(&"x".repeat(FLEET_MESSAGE_BODY_MAX + 4096)),
+        |output| {
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr_error(&output);
+            assert_eq!(error["error"]["kind"], "bad_input");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("at most")),
+                "the refusal names the ceiling: {error}"
+            );
+        },
+    )
+    .await;
+}
+
+/// `--origin` and `--scope` are different cuts of the log, so asking for both
+/// is a mistake worth naming rather than a silent pick of one.
+#[tokio::test]
+async fn origin_and_scope_together_is_bad_input() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "msg",
+            "list",
+            "--origin",
+            "msg-01",
+            "--scope",
+            "session:a",
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr_error(&output);
+            assert_eq!(error["error"]["kind"], "bad_input");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("mutually exclusive")),
+                "the refusal names the conflict: {error}"
+            );
+        },
+    )
+    .await;
+}
+
+/// There is no tabular rendering of a chat log worth having. `--format csv`
+/// used to silently render the TEXT shape, which a script consuming csv had no
+/// way to detect.
+#[tokio::test]
+async fn csv_and_markdown_are_refused_rather_than_rendered_as_text() {
+    for format in ["csv", "markdown"] {
+        with_fixture(
+            SendBehaviour::Ok,
+            &["--format", format, "fleet", "msg", "list", "--limit", "5"],
+            None,
+            |output| {
+                assert_eq!(
+                    output.status.code(),
+                    Some(1),
+                    "--format {format} must be refused, not rendered"
+                );
+                let error = stderr_error(&output);
+                assert_eq!(error["error"]["kind"], "bad_input");
+                assert!(output.stdout.is_empty(), "nothing may reach stdout");
+            },
+        )
+        .await;
+    }
 }
 
 /// `follow` streams NDJSON: the acknowledgement first, then one committed

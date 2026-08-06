@@ -2038,7 +2038,7 @@ EXAMPLES:
   ainb fleet needs                 Sessions blocked on input / errors
   ainb fleet broadcast "git pull" --all     Send a prompt to every session
   ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts
-  ainb fleet msg follow            Stream committed chat messages as NDJSON
+  ainb fleet msg follow --format json   Stream chat messages as NDJSON
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
   ainb fleet approve <session-id>  Approve that session's pending permission request
@@ -2134,7 +2134,7 @@ Usage: ainb fleet msg [OPTIONS] <COMMAND>
 Commands:
   send    Send one message to explicit sessions, with receipts
   list    Page the chat log, oldest first
-  follow  Stream committed messages as NDJSON until stopped
+  follow  Stream committed messages until stopped; NDJSON under --format json
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2184,11 +2184,11 @@ Options:
 
 #### `ainb fleet msg follow`
 
-Stream committed messages as NDJSON until stopped
+Stream committed messages until stopped; NDJSON under --format json
 
 ```console
 $ ainb fleet msg follow --help
-Stream committed messages as NDJSON until stopped
+Stream committed messages until stopped; NDJSON under --format json
 
 Usage: ainb fleet msg follow [OPTIONS]
 

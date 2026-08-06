@@ -97,6 +97,7 @@ pub struct TranscriptReducer {
     session_id: String,
     pending: Option<Pending>,
     final_message: String,
+    replaying: bool,
 }
 
 #[derive(Debug)]
@@ -113,16 +114,42 @@ impl TranscriptReducer {
             session_id: session_id.into(),
             pending: None,
             final_message: String::new(),
+            replaying: false,
         }
+    }
+
+    /// Suppress transcript output while the adapter replays history.
+    ///
+    /// `session/load` replays the WHOLE prior conversation as `session/update`
+    /// notifications, ahead of its own reply. Those chunks are already in the
+    /// transcript from the turns that produced them, so classifying them
+    /// normally would write every row a second time and rebuild
+    /// [`Self::final_message`] out of an old turn's text: the chat timeline
+    /// would show a stale reply as if it had just arrived. The plan's resume
+    /// contract is "No client-side transcript replay for `session/load`
+    /// resume", and this is the seam that keeps it: while the flag is set,
+    /// every update classifies as [`Classified::Replayed`] and produces
+    /// nothing at all, so the store writer is never handed a row to persist.
+    ///
+    /// The caller flushes any pending text BEFORE turning this on, and clears
+    /// it once the `session/load` reply has landed.
+    pub fn set_replaying(&mut self, replaying: bool) {
+        self.replaying = replaying;
     }
 
     /// Feed one update. Returns the chunks it completed, in order.
     ///
     /// Returns 0, 1 or 2 chunks: a kind boundary flushes the pending text
     /// chunk BEFORE emitting the structural chunk that caused the boundary.
+    /// Always 0 while [`Self::set_replaying`] is on.
     pub fn push(&mut self, update: &SessionUpdate) -> Vec<TranscriptChunk> {
         let mut out = Vec::new();
-        match classify(update) {
+        let classified = if self.replaying {
+            Classified::Replayed
+        } else {
+            classify(update)
+        };
+        match classified {
             Classified::Text { kind, text } => {
                 if self.pending.as_ref().is_some_and(|p| p.kind != kind) {
                     out.extend(self.flush());
@@ -151,7 +178,22 @@ impl TranscriptReducer {
                     payload: serde_json::to_value(update).unwrap_or(serde_json::Value::Null),
                 });
             }
-            Classified::Ignored => {}
+            Classified::NonText { kind } => {
+                out.extend(self.flush());
+                out.push(TranscriptChunk {
+                    kind,
+                    session_id: self.session_id.clone(),
+                    event_id: None,
+                    text: String::new(),
+                    payload: serde_json::json!({
+                        "kind": kind.event_type(),
+                        "text": "",
+                        "coalescedDeltas": 0,
+                        "block": serde_json::to_value(update).unwrap_or(serde_json::Value::Null),
+                    }),
+                });
+            }
+            Classified::Replayed | Classified::Ignored => {}
         }
         out
     }
@@ -204,15 +246,35 @@ impl TranscriptReducer {
 }
 
 enum Classified {
-    Text { kind: ChunkKind, text: String },
-    Structural { kind: ChunkKind },
+    Text {
+        kind: ChunkKind,
+        text: String,
+    },
+    Structural {
+        kind: ChunkKind,
+    },
+    /// A message or thought chunk whose `ContentBlock` is not text: an image,
+    /// an audio blob, an embedded resource.
+    ///
+    /// It gets the SAME payload shape a coalesced text chunk gets (empty
+    /// `text`, zero deltas, the verbatim update under `block`), so every
+    /// `acp.message` / `acp.thought` row decodes one way. Routing it through
+    /// [`Classified::Structural`] instead would give the same `event_type` two
+    /// incompatible payload shapes, and a reader that assumed the coalesced one
+    /// would silently read `text` as absent rather than as empty.
+    NonText {
+        kind: ChunkKind,
+    },
+    /// An update replayed by `session/load`; see
+    /// [`TranscriptReducer::set_replaying`].
+    Replayed,
     Ignored,
 }
 
 fn classify(update: &SessionUpdate) -> Classified {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => block_text(&chunk.content).map_or(
-            Classified::Structural {
+            Classified::NonText {
                 kind: ChunkKind::Message,
             },
             |text| Classified::Text {
@@ -221,7 +283,7 @@ fn classify(update: &SessionUpdate) -> Classified {
             },
         ),
         SessionUpdate::UserMessageChunk(chunk) => block_text(&chunk.content).map_or(
-            Classified::Structural {
+            Classified::NonText {
                 kind: ChunkKind::UserMessage,
             },
             |text| Classified::Text {
@@ -230,7 +292,7 @@ fn classify(update: &SessionUpdate) -> Classified {
             },
         ),
         SessionUpdate::AgentThoughtChunk(chunk) => block_text(&chunk.content).map_or(
-            Classified::Structural {
+            Classified::NonText {
                 kind: ChunkKind::Thought,
             },
             |text| Classified::Text {
@@ -422,6 +484,86 @@ mod tests {
         .expect("current_mode_update");
         let mut reducer = TranscriptReducer::new("sess-1");
         assert!(reducer.push(&update).is_empty());
+    }
+
+    fn agent_text(text: &str) -> SessionUpdate {
+        serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": text},
+        }))
+        .expect("agent_message_chunk")
+    }
+
+    /// The `session/load` history replay must not re-persist: those rows are
+    /// already in the transcript from the turns that wrote them, and rebuilding
+    /// `final_message` from them would show an old reply as the current one.
+    #[test]
+    fn a_replayed_history_produces_no_chunks_and_no_final_message() {
+        let mut reducer = TranscriptReducer::new("sess-1");
+        reducer.set_replaying(true);
+        for text in ["replayed ", "history"] {
+            assert!(
+                reducer.push(&agent_text(text)).is_empty(),
+                "a replayed chunk must produce nothing at all"
+            );
+        }
+        assert!(reducer.flush().is_none(), "nothing accumulated to flush");
+        assert_eq!(
+            reducer.final_message(),
+            "",
+            "replayed agent text must never reach the timeline"
+        );
+    }
+
+    /// Replay suppression is a WINDOW, not a one-way switch: the live turn that
+    /// follows a resume behaves exactly as it would have without the replay.
+    #[test]
+    fn live_chunks_after_a_replay_behave_normally() {
+        let mut reducer = TranscriptReducer::new("sess-1");
+        reducer.set_replaying(true);
+        reducer.push(&agent_text("old reply"));
+        reducer.set_replaying(false);
+
+        assert!(reducer.push(&agent_text("fresh ")).is_empty());
+        assert!(reducer.push(&agent_text("reply")).is_empty());
+        let chunk = reducer.flush().expect("the live text flushes");
+        assert_eq!(chunk.kind, ChunkKind::Message);
+        assert_eq!(chunk.text, "fresh reply");
+        assert_eq!(
+            reducer.final_message(),
+            "fresh reply",
+            "the replayed text left nothing behind"
+        );
+    }
+
+    /// A non-text `ContentBlock` still lands under `acp.message`, so it must
+    /// carry the SAME payload shape a coalesced text chunk carries. One
+    /// `event_type` with two incompatible payload shapes is a reader bug
+    /// waiting to happen.
+    #[test]
+    fn a_non_text_agent_block_keeps_the_coalesced_envelope_shape() {
+        let update: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+        }))
+        .expect("agent_message_chunk with an image block");
+
+        let mut reducer = TranscriptReducer::new("sess-1");
+        let chunks = reducer.push(&update);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Message);
+        assert_eq!(chunks[0].payload["kind"], "acp.message");
+        assert_eq!(chunks[0].payload["text"], "");
+        assert_eq!(chunks[0].payload["coalescedDeltas"], 0);
+        assert_eq!(
+            chunks[0].payload["block"]["content"]["type"], "image",
+            "the verbatim block is preserved alongside the common shape"
+        );
+        assert_eq!(
+            reducer.final_message(),
+            "",
+            "a non-text block contributes no timeline text"
+        );
     }
 
     #[test]

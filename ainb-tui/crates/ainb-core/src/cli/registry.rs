@@ -2103,7 +2103,7 @@ impl CliCommand for FleetCommand {
             )
             .subcommand(
                 Command::new("follow")
-                    .about("Stream committed messages as NDJSON until stopped")
+                    .about("Stream committed messages until stopped; NDJSON under --format json")
                     .arg(
                         clap::Arg::new("after")
                             .long("after")
@@ -2240,7 +2240,7 @@ impl CliCommand for FleetCommand {
                      ainb fleet needs                 Sessions blocked on input / errors\n  \
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
                      ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts\n  \
-                     ainb fleet msg follow            Stream committed chat messages as NDJSON\n  \
+                     ainb fleet msg follow --format json   Stream chat messages as NDJSON\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
                      ainb fleet approve <session-id>  Approve that session's pending permission request\n  \

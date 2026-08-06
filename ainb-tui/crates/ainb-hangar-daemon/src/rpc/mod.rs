@@ -701,7 +701,18 @@ fn spawn_message_forwarder(
             let mut cursor = match start_id.as_deref() {
                 Some(id) => match FleetMessageRepo::seq_for_id(&pool, id).await {
                     Ok(Some(seq)) => seq,
-                    Ok(None) => 0,
+                    Ok(None) => {
+                        // The socket thread already rejected an unknown
+                        // after_id, so reaching here means the row went away
+                        // between the acknowledgement and this task. Falling
+                        // back to 0 would REWIND to the head of the log and
+                        // replay the entire history as if it were live.
+                        tracing::warn!(
+                            after_id = %id,
+                            "chat message cursor id resolved to nothing; refusing to rewind to the log head"
+                        );
+                        return;
+                    }
                     Err(error) => {
                         tracing::warn!(error = %error, "chat message cursor read failed");
                         return;
@@ -1567,12 +1578,30 @@ async fn message_send_inner(
     use std::collections::{HashMap, HashSet};
 
     use ainb_hangar_proto::fleet::{
-        ActionReceiptStatus, FleetMessageDelivery, FleetMessageSendResult,
+        ActionReceiptStatus, FLEET_MESSAGE_BODY_MAX, FLEET_MESSAGE_TARGETS_MAX,
+        FleetMessageDelivery, FleetMessageSendResult,
     };
     use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
 
     if params.text.trim().is_empty() {
         return Err(invalid_params("text must not be empty"));
+    }
+    // Bounded BEFORE any of the work below: the body is persisted verbatim and
+    // re-submitted once per recipient, so an unbounded one is an unbounded
+    // write multiplied by the target count.
+    if params.text.len() > FLEET_MESSAGE_BODY_MAX {
+        return Err(invalid_params(&format!(
+            "text must be at most {FLEET_MESSAGE_BODY_MAX} bytes, got {}",
+            params.text.len()
+        )));
+    }
+    // The RAW list, not the deduplicated one: the ceiling exists to bound the
+    // work this request can ask for, and deduplicating is already part of it.
+    if params.targets.len() > FLEET_MESSAGE_TARGETS_MAX {
+        return Err(invalid_params(&format!(
+            "targets must name at most {FLEET_MESSAGE_TARGETS_MAX} sessions, got {}",
+            params.targets.len()
+        )));
     }
     if params.request_id.trim().is_empty() {
         return Err(invalid_params("request_id must not be empty"));
@@ -1792,6 +1821,17 @@ async fn deliver_message_leg(
                 );
             }
         };
+        // The plan's delivery taxonomy names `target_not_running` for a target
+        // that EXISTS but has no live session. Its pane is gone, so a verified
+        // send would either fail on a stale tmux identity or type into a dead
+        // shell; either way the honest token is this one and not a transport
+        // symptom that reads like a bug in the bus.
+        if session.lifecycle_state == "EXITED" {
+            return (
+                ActionReceiptStatus::Rejected,
+                Some("target_not_running".to_string()),
+            );
+        }
         // ACP recipients join the bus in a later phase; until their action arms
         // exist a chat send must not fall through to the tmux machinery.
         if session.provider == "acp" {
@@ -1866,9 +1906,21 @@ async fn handle_fleet_message_list(
     if params.origin_id.as_deref().is_some_and(|origin| origin.trim().is_empty()) {
         return Err(invalid_params("origin_id must not be empty"));
     }
+    // A thread and a scope are different cuts of the same log, and a reply
+    // lives in ITS RECIPIENT's scope rather than the origin's, so the two
+    // filters intersect to almost nothing. Silently letting origin_id win
+    // answers a question the caller did not ask; refusing says which one they
+    // have to pick.
+    if params.origin_id.is_some() && params.scope_key.is_some() {
+        return Err(invalid_params(
+            "origin_id and scope_key are mutually exclusive; replies live in their recipients' scopes",
+        ));
+    }
     let after_seq = message_cursor_for(pool, params.after_id.as_deref()).await?;
     let limit = i64::from(params.limit.clamp(1, FLEET_MESSAGE_LIST_MAX));
     let rows = match (params.origin_id.as_deref(), params.scope_key.as_deref()) {
+        // The both-set case is rejected above, so this arm only ever sees a
+        // thread filter on its own.
         (Some(origin_id), _) => {
             FleetMessageRepo::list_by_origin(pool, origin_id, after_seq, limit).await
         }
@@ -3812,6 +3864,19 @@ fn action_capability(
     }
 }
 
+/// A stable, process-independent digest of `value`, prefixed with the algorithm
+/// that produced it.
+///
+/// FNV-1a 64: NON-CRYPTOGRAPHIC, and deliberately so. Every caller uses this to
+/// decide whether two requests are the SAME request (idempotency replay, action
+/// fingerprints, per-leg receipt identity), never to authenticate or authorise
+/// one. A forged collision buys an attacker the ability to replay a message
+/// they were already able to send under their own `request_id`, so the
+/// preimage resistance a SHA-2 would add has nothing to protect here.
+///
+/// The prefix is the upgrade path: values are persisted in durable receipts, so
+/// the day a stronger digest IS needed, `fnv1a64:` distinguishes old rows from
+/// new ones instead of making them silently incomparable.
 fn stable_fingerprint(value: &str) -> String {
     let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)

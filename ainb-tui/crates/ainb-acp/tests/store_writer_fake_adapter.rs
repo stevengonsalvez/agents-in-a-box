@@ -10,7 +10,9 @@ use std::path::Path;
 
 use ainb_acp::client::AdapterProcess;
 use ainb_acp::reducer::TranscriptReducer;
-use ainb_acp::store_writer::{ACP_SOURCE, Lifecycle, StoreWriter, WriterConfig};
+use ainb_acp::store_writer::{
+    ACP_SOURCE, Lifecycle, MAX_BUFFERED_BYTES, StoreWriter, WriterConfig,
+};
 use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::fleet_provider_event::{
@@ -181,11 +183,16 @@ async fn a_reused_adapter_event_id_never_writes_a_second_row() {
     assert_eq!(stored.ingest_order, first.ingest_order);
 }
 
-/// A failed commit must not eat the transcript: the rows stay buffered and a
-/// later flush commits them. The failure is a real one (a reused `event_id`
-/// carrying a different envelope), cleared by deleting the offending row.
+/// A batch that can NEVER commit is dropped rather than restored, and the hole
+/// it leaves is recorded. Restoring it would pin it at the head of the buffer:
+/// every later flush retries the same doomed rows, nothing behind them ever
+/// commits, and the buffer grows until the cap starts eating live transcript.
+///
+/// The failure is a real permanent one (a reused `event_id` carrying a
+/// different envelope), which no retry can clear while the committed row
+/// stands.
 #[tokio::test]
-async fn a_failed_flush_keeps_its_rows_for_the_next_one() {
+async fn a_permanently_doomed_batch_is_dropped_with_a_truncation_marker() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("store");
 
@@ -216,24 +223,143 @@ async fn a_failed_flush_keeps_its_rows_for_the_next_one() {
 
     writer.push(&collides).await.expect("buffer the colliding chunk");
     writer.push(&survivor).await.expect("buffer the second chunk");
-    writer.flush().await.expect_err("the collision must fail the commit");
+    let error = writer.flush().await.expect_err("the collision must fail the commit");
+    assert!(
+        matches!(error, FleetProviderEventError::EventIdCollision { .. }),
+        "the caller still sees the real error: {error:?}"
+    );
     assert_eq!(writer.commits(), 0);
+    assert_eq!(writer.rows_dropped(), 2, "both doomed rows were let go");
+    assert_eq!(
+        writer.buffered_rows(),
+        1,
+        "the doomed batch is gone, replaced by exactly one marker"
+    );
     assert_eq!(
         rows(&store).await.len(),
         1,
         "the whole batch rolled back; only the seeded row is there"
     );
 
-    // Clear the collision, then retry the SAME buffered rows.
-    FleetProviderEventRepo::delete_acp_before(store.pool(), SESSION_KEY, 2)
-        .await
-        .expect("delete the seeded row");
-    writer.flush().await.expect("the retry commits").expect("high water");
-
+    // The buffer DRAINS: the very next flush commits, and what it commits is
+    // the marker, so a transcript reader can see that rows went missing here
+    // instead of reading a short stream as a complete one.
+    writer.flush().await.expect("the next flush commits").expect("high water");
     let rows = rows(&store).await;
-    assert_eq!(rows.len(), 2, "both buffered rows survived the failure");
-    assert_eq!(writer.commits(), 1);
-    assert_eq!(writer.rows_written(), 2);
+    assert_eq!(
+        rows.iter().map(|row| row.event_type.as_str()).collect::<Vec<_>>(),
+        vec!["acp.permission", "acp.transcript_truncated"],
+    );
+    let marker: serde_json::Value =
+        serde_json::from_str(&rows[1].raw_payload).expect("marker payload");
+    assert_eq!(marker["droppedRows"], 2);
+}
+
+/// A failure that CAN clear must not eat the transcript: the rows stay
+/// buffered for a later flush. A closed pool is the deterministic stand-in for
+/// the contended-writer case the store's own `busy_timeout` comment warns
+/// about; both are environmental, so both restore.
+#[tokio::test]
+async fn a_transient_store_fault_keeps_its_rows_for_a_later_flush() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let mut writer = writer(&store, WriterConfig::default());
+    let reducer = TranscriptReducer::new("fake-session-1");
+
+    writer
+        .push(&reducer.permission_chunk(serde_json::json!({"options": ["allow"]})))
+        .await
+        .expect("buffer the first chunk");
+    writer
+        .push(&reducer.permission_chunk(serde_json::json!({"options": ["deny"]})))
+        .await
+        .expect("buffer the second chunk");
+
+    store.pool().close().await;
+    let error = writer.flush().await.expect_err("a closed pool fails the commit");
+    assert!(
+        matches!(error, FleetProviderEventError::Sql(_)),
+        "an environmental fault, not a row-shaped one: {error:?}"
+    );
+    assert_eq!(writer.commits(), 0);
+    assert_eq!(
+        writer.rows_dropped(),
+        0,
+        "nothing may be thrown away for a fault the operator can clear"
+    );
+    assert_eq!(
+        writer.buffered_rows(),
+        2,
+        "both rows are still there for the retry"
+    );
+}
+
+/// A store that keeps refusing writes must not be able to grow this buffer
+/// without bound: an unbounded buffer turns one wedged session into an
+/// OOM-killed daemon, which loses EVERY session's transcript instead of the
+/// oldest slice of one.
+#[tokio::test]
+async fn a_wedged_store_cannot_grow_the_buffer_without_bound() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let mut writer = writer(&store, WriterConfig::default());
+    let reducer = TranscriptReducer::new("fake-session-1");
+    store.pool().close().await; // every flush from here on fails, retryably
+
+    let blob = "x".repeat(8 * 1024);
+    for index in 0..400 {
+        // Errors are expected and irrelevant: what matters is that the pump
+        // keeps feeding a writer that cannot commit.
+        let _ = writer
+            .push(&reducer.permission_chunk(serde_json::json!({"index": index, "blob": blob})))
+            .await;
+    }
+
+    assert!(
+        writer.buffered_bytes() <= MAX_BUFFERED_BYTES + blob.len(),
+        "3 MiB of chunks left {} bytes buffered against a {MAX_BUFFERED_BYTES} cap",
+        writer.buffered_bytes()
+    );
+    assert!(
+        writer.rows_dropped() > 0,
+        "the cap must actually have shed rows"
+    );
+    assert!(
+        writer.buffered_rows() > 0,
+        "the live tail of the conversation survives"
+    );
+}
+
+/// The reducer's replay suppression reaches all the way to the store: a
+/// `session/load` history replay writes NO transcript rows, so a resumed
+/// session does not duplicate the turns that produced it.
+#[tokio::test]
+async fn a_replayed_history_writes_no_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let mut writer = writer(&store, WriterConfig::default());
+
+    let mut reducer = TranscriptReducer::new("fake-session-1");
+    reducer.set_replaying(true);
+    for text in ["replayed ", "history"] {
+        let update: agent_client_protocol::schema::v1::SessionUpdate =
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }))
+            .expect("agent_message_chunk");
+        for chunk in reducer.push(&update) {
+            writer.push(&chunk).await.expect("push");
+        }
+    }
+    assert!(reducer.flush().is_none(), "nothing accumulated to flush");
+    writer.flush().await.expect("flush");
+
+    assert!(
+        rows(&store).await.is_empty(),
+        "a replayed history must not re-persist"
+    );
+    assert_eq!(reducer.final_message(), "");
 }
 
 /// The cadence's timer leg is caller-driven: `tick` commits a chunk that no

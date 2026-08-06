@@ -916,6 +916,154 @@ async fn transcript_readers_answer_empty_and_the_forwarder_filters_its_session()
     assert_eq!(chunks[0]["chunk"]["session_key"], "acp:mine");
 }
 
+/// An unbounded `targets` list is one request that writes an unbounded leg set
+/// and holds the daemon across a verified transport submit per recipient.
+#[tokio::test]
+async fn a_send_past_the_target_ceiling_is_invalid_params() {
+    use ainb_hangar_proto::fleet::FLEET_MESSAGE_TARGETS_MAX;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:one").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let targets: Vec<String> =
+        (0..=FLEET_MESSAGE_TARGETS_MAX).map(|index| format!("claude:{index}")).collect();
+    let response = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({ "targets": targets, "text": "hi", "request_id": "req-fanout" }),
+        )
+        .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("at most")),
+        "the refusal names the ceiling: {response}"
+    );
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_message")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(persisted, 0, "a refused send writes nothing");
+}
+
+/// The body is persisted verbatim and re-submitted once per recipient, so an
+/// unbounded one is an unbounded write multiplied by the target count.
+#[tokio::test]
+async fn a_send_past_the_body_ceiling_is_invalid_params() {
+    use ainb_hangar_proto::fleet::FLEET_MESSAGE_BODY_MAX;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:one").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let response = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "x".repeat(FLEET_MESSAGE_BODY_MAX + 1),
+                "request_id": "req-fat",
+            }),
+        )
+        .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("at most")),
+        "the refusal names the ceiling: {response}"
+    );
+
+    // The byte BELOW the ceiling still goes through, so the bound is a ceiling
+    // and not an off-by-one that quietly moved the usable limit.
+    let accepted = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "x".repeat(FLEET_MESSAGE_BODY_MAX),
+                "request_id": "req-exact",
+            }),
+        )
+        .await;
+    assert!(
+        accepted["result"]["message_id"].is_string(),
+        "exactly at the ceiling must be accepted: {accepted}"
+    );
+}
+
+/// A thread and a scope are different cuts of the same log and a reply lives in
+/// its RECIPIENT's scope, so the intersection is almost always empty. Answering
+/// the origin-only question would be answering a question nobody asked.
+#[tokio::test]
+async fn list_refuses_a_thread_and_a_scope_filter_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let response = client
+        .call(
+            methods::FLEET_MESSAGE_LIST,
+            serde_json::json!({ "origin_id": "bcast", "scope_key": "session:a", "limit": 10 }),
+        )
+        .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("mutually exclusive") && message.contains("recipients' scopes"),
+        "the refusal names the conflict and why: {response}"
+    );
+}
+
+/// A target that EXISTS but whose session has exited gets the plan's
+/// `target_not_running` token, not a transport symptom that reads like a bug in
+/// the bus.
+#[tokio::test]
+async fn an_exited_target_resolves_with_the_not_running_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    sqlx::query(
+        "INSERT INTO fleet_session \
+         (session_key, provider, cwd, capabilities, lifecycle_state, discovered_at, \
+          last_observed_at, version) \
+         VALUES ('claude:gone', 'claude', '/work', '{\"send_prompt\":true}', 'EXITED', 1, 1, 1)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("seed an exited session");
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let response = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:gone"],
+                "text": "anyone home",
+                "request_id": "req-gone",
+            }),
+        )
+        .await;
+
+    assert_eq!(response["result"]["deliveries"][0]["state"], "REJECTED");
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail FROM fleet_message_delivery WHERE session_key = 'claude:gone'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read the durable leg");
+    assert_eq!(
+        detail, "target_not_running",
+        "the durable receipt carries the enumerated reason, not free text"
+    );
+}
+
 async fn seed_transcript_row(store: &Store, session_key: &str, event_id: &str) {
     use ainb_hangar_store::repo::fleet_provider_event::{
         FleetProviderEventRepo, NewFleetProviderEvent,

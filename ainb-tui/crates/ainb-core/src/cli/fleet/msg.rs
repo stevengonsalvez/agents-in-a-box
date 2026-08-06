@@ -14,7 +14,8 @@
 use std::io::Read as _;
 
 use ainb_hangar_proto::fleet::{
-    FLEET_MESSAGE_LIST_MAX, FleetMessage, FleetMessageListParams, FleetMessageSendParams,
+    FLEET_MESSAGE_BODY_MAX, FLEET_MESSAGE_LIST_MAX, FleetMessage, FleetMessageListParams,
+    FleetMessageSendParams,
 };
 use anyhow::Result;
 
@@ -140,6 +141,15 @@ impl From<DaemonError> for CliFailure {
 }
 
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    // `--format csv|markdown` used to render the TEXT shape, so a script asking
+    // for csv got single-column prose and no way to tell. There is no tabular
+    // rendering of a chat log worth having; say so instead of pretending.
+    if matches!(format, OutputFormat::Csv | OutputFormat::Markdown) {
+        CliFailure::bad_input(
+            "`ainb fleet msg` renders text or `--format json`; csv and markdown are not supported",
+        )
+        .exit();
+    }
     match matches.subcommand() {
         Some(("send", sub)) => send(sub, format).await,
         Some(("list", sub)) => list(sub, format).await,
@@ -150,20 +160,34 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
 }
 
 /// Resolve a free-text argument, reading stdin when it is `-`.
+///
+/// The stdin read is BOUNDED by [`FLEET_MESSAGE_BODY_MAX`], the same ceiling
+/// the daemon enforces: `ainb fleet msg send --text - < some-huge-file` would
+/// otherwise buffer the whole file in this process only to have the daemon
+/// refuse it. One byte past the limit is read deliberately, so "exactly at the
+/// limit" and "over it" are distinguishable without reading the rest.
 fn resolve_text(raw: Option<&String>) -> Result<String, CliFailure> {
     let Some(raw) = raw else {
         return Err(CliFailure::bad_input(
             "--text is required (use `-` to read stdin)",
         ));
     };
-    if raw != "-" {
-        return Ok(raw.clone());
+    let text = if raw == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .take(FLEET_MESSAGE_BODY_MAX as u64 + 1)
+            .read_to_string(&mut buffer)
+            .map_err(|error| CliFailure::bad_input(format!("reading stdin: {error}")))?;
+        buffer
+    } else {
+        raw.clone()
+    };
+    if text.len() > FLEET_MESSAGE_BODY_MAX {
+        return Err(CliFailure::bad_input(format!(
+            "message text must be at most {FLEET_MESSAGE_BODY_MAX} bytes"
+        )));
     }
-    let mut buffer = String::new();
-    std::io::stdin()
-        .read_to_string(&mut buffer)
-        .map_err(|error| CliFailure::bad_input(format!("reading stdin: {error}")))?;
-    Ok(buffer)
+    Ok(text)
 }
 
 fn client() -> DaemonClient {
@@ -223,6 +247,16 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
 
 async fn list(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let limit = matches.get_one::<u32>("limit").copied().unwrap_or(20);
+    // Rejected here as well as in the daemon so the operator gets the exit-1
+    // bad-input path (and no socket round trip) rather than a -32602 that has
+    // to be translated back.
+    if matches.get_one::<String>("scope").is_some() && matches.get_one::<String>("origin").is_some()
+    {
+        CliFailure::bad_input(
+            "--origin and --scope are mutually exclusive; replies live in their recipients' scopes",
+        )
+        .exit();
+    }
     let result = client()
         .message_list(FleetMessageListParams {
             scope_key: matches.get_one::<String>("scope").cloned(),
@@ -278,9 +312,98 @@ async fn follow(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     }
 }
 
+/// Render one message as EXACTLY one line of terminal-safe text.
+///
+/// Message bodies are attacker-influenced: anything on the bus can send one,
+/// and `msg list` / `msg follow` print them straight to a terminal. Left raw, a
+/// body could repaint the screen, move the cursor, or embed newlines that forge
+/// extra log lines an operator would read as separate messages. Escaping every
+/// control character (C0 including ESC, DEL, and C1) keeps the one-message-
+/// one-line contract that `follow`'s consumers parse against.
+///
+/// This is the LOSSY surface by design; `--format json` is the lossless one.
 fn render_message(message: &FleetMessage) -> String {
     format!(
         "{} [{}] {}: {}",
-        message.id, message.scope_key, message.sender, message.body
+        escape_control(&message.id),
+        escape_control(&message.scope_key),
+        escape_control(&message.sender),
+        escape_control(&message.body)
     )
+}
+
+/// Replace every control character with a visible escape.
+fn escape_control(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            // Covers C0 (ESC included), DEL and C1.
+            control if control.is_control() => {
+                out.push_str(&format!("\\u{{{:04x}}}", control as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ainb_hangar_proto::fleet::FleetMessageKind;
+
+    fn message(body: &str) -> FleetMessage {
+        FleetMessage {
+            id: "01J0MSG".to_string(),
+            scope_key: "session:claude:one".to_string(),
+            origin_message_id: None,
+            sender: "operator".to_string(),
+            kind: FleetMessageKind::User,
+            body: body.to_string(),
+            created_at: 1,
+        }
+    }
+
+    /// An ANSI-laden body must not be able to repaint the operator's terminal
+    /// or forge a second log line.
+    #[test]
+    fn an_ansi_laden_body_renders_as_one_inert_line() {
+        let rendered = render_message(&message(
+            "\u{1b}[2J\u{1b}[31mred\u{1b}[0m\nforged 01J0FAKE [scope] agent: pwned\u{7}",
+        ));
+
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "one message must stay one line: {rendered}"
+        );
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "no control character may survive to the terminal: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u{001b}[2J"),
+            "ESC is escaped: {rendered}"
+        );
+        assert!(
+            rendered.contains("\\nforged"),
+            "the newline is escaped: {rendered}"
+        );
+        assert!(rendered.contains("\\u{0007}"), "BEL is escaped: {rendered}");
+        assert!(
+            rendered.starts_with("01J0MSG [session:claude:one] operator: "),
+            "ordinary text is untouched: {rendered}"
+        );
+    }
+
+    /// The escape is reversible-looking rather than ambiguous: a literal
+    /// backslash in a body must not read as the start of an escape.
+    #[test]
+    fn a_literal_backslash_is_escaped_too() {
+        assert!(render_message(&message(r"C:\n")).ends_with(r"C:\\n"));
+    }
 }
