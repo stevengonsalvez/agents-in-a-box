@@ -188,7 +188,16 @@ pub async fn apply_hook(
     // Claude emits a PermissionRequest and then a generic notification around an
     // AskUserQuestion. They describe the same picker, not two operator actions.
     let event_type = canonical_hook_event_type(observation.event_type, observation.payload);
-    let preserve_active_request = observation.event_type == "Notification"
+    let source_event_type = observation
+        .payload
+        .pointer("/payload/hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or(observation.event_type);
+    let duplicate_claude_structured_permission = provider == Provider::Claude
+        && source_event_type == "PermissionRequest"
+        && claude_hook_tool_name(observation.payload) == Some("AskUserQuestion");
+    let preserve_active_request = (observation.event_type == "Notification"
+        || duplicate_claude_structured_permission)
         && FleetRepo::get_session(pool, session_key.as_str())
             .await?
             .is_some_and(|session| {
@@ -429,14 +438,17 @@ pub async fn current_request_wire(
     session_key: &str,
 ) -> Result<Option<Value>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
-        "SELECT payload FROM fleet_event \
-         WHERE session_key = ? AND event_type IN (\
+        "SELECT event.payload FROM fleet_session AS session \
+         JOIN fleet_event AS event ON event.session_key = session.session_key \
+         WHERE session.session_key = ? \
+           AND event.request_fingerprint = session.current_request_fingerprint \
+           AND event.event_type IN (\
             'AskUserQuestion', 'PermissionRequest', \
             'item/tool/requestUserInput', \
             'item/commandExecution/requestApproval', \
             'item/fileChange/requestApproval', \
             'item/permissions/requestApproval'\
-         ) AND applied = 1 ORDER BY revision DESC LIMIT 1",
+         ) AND event.applied = 1 ORDER BY event.revision DESC LIMIT 1",
     )
     .bind(session_key)
     .fetch_optional(pool)
@@ -2032,13 +2044,16 @@ mod tests {
 
         let permission = serde_json::json!({
             "matcher": "AskUserQuestion",
-            "payload": { "tool_input": question.clone() }
+            "payload": {
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "AskUserQuestion"
+            }
         });
         let notification = serde_json::json!({
             "payload": { "notification_type": "permission_prompt" }
         });
         for (event_id, event_type, payload, observed_at) in [
-            ("permission", "PermissionRequest", &permission, 2),
+            ("permission", "AskUserQuestion", &permission, 2),
             ("notification", "Notification", &notification, 3),
         ] {
             apply_hook(
@@ -2062,6 +2077,14 @@ mod tests {
             FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
         assert_eq!(session.attention_state, "ASK");
         assert_eq!(session.current_request_fingerprint, expected);
+        let current = current_request_wire(store.pool(), "claude:session-1")
+            .await
+            .unwrap()
+            .expect("the active Ask payload survives duplicate PermissionRequest");
+        assert_eq!(
+            current["payload"]["tool_input"]["questions"][0]["question"],
+            "When?"
+        );
     }
 
     #[tokio::test]

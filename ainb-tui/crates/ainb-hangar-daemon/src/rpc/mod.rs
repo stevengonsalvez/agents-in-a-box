@@ -1501,6 +1501,9 @@ async fn execute_fleet_action(
             request_fingerprint,
             ..
         }
+        | ControlAction::ReconcileStructured {
+            request_fingerprint,
+        }
         | ControlAction::Approve {
             request_fingerprint,
             ..
@@ -1632,6 +1635,18 @@ async fn execute_fleet_action(
                 } if session.provider == "claude" => {
                     execute_claude_structured_dismiss(&session, request_fingerprint).await
                 }
+                ControlAction::ReconcileStructured {
+                    request_fingerprint,
+                } if session.provider == "claude" => {
+                    reconcile_claude_structured(
+                        pool,
+                        events,
+                        &session,
+                        request_fingerprint,
+                        params.expected_version,
+                    )
+                    .await
+                }
                 ControlAction::Approve {
                     request_fingerprint,
                     ..
@@ -1661,6 +1676,7 @@ async fn execute_fleet_action(
                 }
                 ControlAction::StructuredAnswer { .. }
                 | ControlAction::DismissStructured { .. }
+                | ControlAction::ReconcileStructured { .. }
                 | ControlAction::Approve { .. }
                 | ControlAction::Deny { .. } => (
                     ActionReceiptStatus::Unknown,
@@ -2663,6 +2679,80 @@ async fn execute_claude_structured_dismiss(
     }
 }
 
+async fn reconcile_claude_structured(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    expected_version: i64,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
+    let socket = match approve_socket_path() {
+        Ok(socket) => socket,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let pending = match tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_list(&socket)
+    })
+    .await
+    {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error)) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let session_id = session.provider_session_id.as_deref().unwrap_or_default();
+    if pending.iter().any(|entry| {
+        entry.session_id == session_id
+            && entry.request_fingerprint.as_deref() == Some(request_fingerprint)
+    }) {
+        return (
+            ActionReceiptStatus::Delivered,
+            Some("Claude interview is live".to_string()),
+        );
+    }
+
+    let event = NewFleetEvent {
+        event_id: format!(
+            "fleet-reconcile:{}:{request_fingerprint}",
+            session.session_key
+        ),
+        session_key: session.session_key.clone(),
+        observed_at: SystemClock.now_ms(),
+        authority: ObservationAuthority::Authoritative,
+        event_type: "structured_interview_ended".to_string(),
+        payload: serde_json::json!({
+            "reason": "broker_no_longer_waiting",
+            "request_fingerprint": request_fingerprint,
+        })
+        .to_string(),
+        patch: FleetSessionPatch {
+            lifecycle_state: Some("IDLE".to_string()),
+            attention_state: Some("NONE".to_string()),
+            current_request_fingerprint: Some(None),
+            ..FleetSessionPatch::default()
+        },
+    };
+    match FleetRepo::apply_event_if_version(pool, &event, expected_version).await {
+        Ok(result) => {
+            if !result.duplicate {
+                events.emit_fleet_revision(result.revision);
+            }
+            (
+                ActionReceiptStatus::Delivered,
+                Some("Claude interview ended, cleared stale Fleet card".to_string()),
+            )
+        }
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
 fn approve_socket_path() -> std::io::Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(path) = APPROVE_SOCKET_OVERRIDE
@@ -2964,7 +3054,9 @@ fn action_capability(
 ) -> bool {
     use ainb_hangar_proto::fleet::ControlAction;
     match action {
-        ControlAction::StructuredAnswer { .. } => capabilities.structured_answer,
+        ControlAction::StructuredAnswer { .. } | ControlAction::ReconcileStructured { .. } => {
+            capabilities.structured_answer
+        }
         ControlAction::DismissStructured { .. } => capabilities.structured_dismiss,
         ControlAction::Approve { .. } | ControlAction::Deny { .. } => capabilities.approvals,
         ControlAction::VerifiedPicker { .. } => capabilities.verified_picker,
@@ -9476,6 +9568,67 @@ mod tests {
         let result: FleetReprojectClaudeInterviewResult =
             serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(revisions.recv().await.unwrap(), result.revision);
+    }
+
+    #[tokio::test]
+    async fn reconcile_claude_structured_clears_only_a_missing_broker_waiter() {
+        use ainb_hangar_proto::fleet::ActionReceiptStatus;
+        use ainb_hangar_store::repo::fleet::{
+            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+        };
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            ainb_plugin_notifyd::broker::BrokerState::default(),
+        ));
+        set_approve_socket_for_test(Some(socket));
+        let created = FleetRepo::apply_event(
+            store.pool(),
+            &NewFleetEvent {
+                event_id: "ask".into(),
+                session_key: "claude:session-1".into(),
+                observed_at: 1,
+                authority: ObservationAuthority::Authoritative,
+                event_type: "AskUserQuestion".into(),
+                payload: serde_json::json!({"questions": [{"question": "Where?"}]}).to_string(),
+                patch: FleetSessionPatch {
+                    provider: Some("claude".into()),
+                    provider_session_id: Some("session-1".into()),
+                    lifecycle_state: Some("IDLE".into()),
+                    attention_state: Some("ASK".into()),
+                    current_request_fingerprint: Some(Some("fingerprint-1".into())),
+                    ..FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, detail) = reconcile_claude_structured(
+            store.pool(),
+            &sink(),
+            &created.session,
+            "fingerprint-1",
+            created.session_version,
+        )
+        .await;
+        set_approve_socket_for_test(None);
+        server.abort();
+
+        assert_eq!(status, ActionReceiptStatus::Delivered);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Claude interview ended, cleared stale Fleet card")
+        );
+        let session =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(session.attention_state, "NONE");
+        assert!(session.current_request_fingerprint.is_none());
     }
 
     #[tokio::test]
