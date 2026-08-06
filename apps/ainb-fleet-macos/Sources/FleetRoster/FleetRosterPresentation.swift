@@ -162,6 +162,14 @@ struct FleetSessionIdentity: Equatable {
         [repository, worktree, branch].compactMap { $0 }.joined(separator: ", ")
     }
 
+    var contextLabel: String {
+        [branch, worktree].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var displayLabel: String {
+        contextLabel.isEmpty ? repository : "\(repository) · \(contextLabel)"
+    }
+
     init(session: FleetSession) {
         let path = URL(fileURLWithPath: session.cwd)
         let components = path.pathComponents
@@ -179,7 +187,7 @@ struct FleetSessionIdentity: Equatable {
             branch = Self.branchLabel(labels[1])
         } else {
             repository = candidate.isEmpty || candidate == "/" ? (session.displayName ?? session.sessionKey) : candidate
-            worktree = candidate.isEmpty || candidate == "/" ? nil : candidate
+            worktree = nil
             branch = nil
         }
     }

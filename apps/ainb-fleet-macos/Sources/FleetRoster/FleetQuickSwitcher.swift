@@ -9,7 +9,7 @@ struct FleetQuickSwitcher: View {
     var body: some View {
         NavigationStack {
             List(FleetRosterPresentation.visibleSessions(store.sessions, search: search, filters: .all, sort: sort), id: \.sessionKey) { session in
-                Button(session.displayName ?? session.sessionKey) {
+                Button(FleetRosterPresentation.sessionIdentity(for: session).displayLabel) {
                     store.selectedSessionKey = session.sessionKey
                     isPresented = false
                 }

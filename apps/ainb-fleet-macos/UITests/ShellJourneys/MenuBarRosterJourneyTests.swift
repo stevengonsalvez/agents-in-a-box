@@ -74,7 +74,7 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         let row = fleetRow("claude:alpha")
         waitFor(row)
 
-        XCTAssertEqual(row.label, "claude:alpha")
+        XCTAssertEqual(row.label, "workspace")
         XCTAssertEqual(row.value as? String, "IDLE · ASK")
     }
 }

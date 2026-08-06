@@ -246,7 +246,7 @@ struct FleetAnswerQueue: View {
                             choose(item)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(item.session.displayName ?? item.session.sessionKey)
+                                Text(FleetRosterPresentation.sessionIdentity(for: item.session).displayLabel)
                                     .font(.subheadline.weight(.semibold))
                                     .lineLimit(1)
                                 Text("\(item.questions.count) questions · \(item.session.provider.rawValue.uppercased())")
@@ -501,7 +501,7 @@ private struct FleetRosterRow: View {
                     .padding(.top, 6)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text(session.displayName ?? session.sessionKey)
+                        Text(identity.repository)
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(1)
                         Spacer(minLength: 0)
@@ -513,7 +513,7 @@ private struct FleetRosterRow: View {
                         .font(.caption)
                         .foregroundStyle(isSelected ? FleetPalette.ink : FleetPalette.muted)
                         .lineLimit(1)
-                    Text(session.cwd)
+                    Text(identity.contextLabel)
                         .font(.caption2)
                         .foregroundStyle(FleetPalette.muted)
                         .lineLimit(1)
@@ -526,7 +526,7 @@ private struct FleetRosterRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("fleet.row.\(session.sessionKey)")
-        .accessibilityLabel(session.displayName ?? session.sessionKey)
+        .accessibilityLabel(identity.accessibilityLabel)
         .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: connection))
     }
 
@@ -534,6 +534,10 @@ private struct FleetRosterRow: View {
         if session.attention != .none { return FleetPalette.amber }
         if session.management == .degraded || session.transportHealth != .healthy { return FleetPalette.coral }
         return FleetPalette.mint
+    }
+
+    private var identity: FleetSessionIdentity {
+        FleetRosterPresentation.sessionIdentity(for: session)
     }
 }
 
@@ -725,7 +729,7 @@ private struct FleetBroadcastForm: View {
             TextField("Message", text: $text, axis: .vertical)
             Section("Recipients") {
                 ForEach(targets, id: \.sessionKey) { session in
-                    Toggle(session.displayName ?? session.sessionKey, isOn: Binding(
+                    Toggle(FleetRosterPresentation.sessionIdentity(for: session).displayLabel, isOn: Binding(
                         get: { selected.contains(session.sessionKey) },
                         set: { enabled in
                             if enabled { selected.insert(session.sessionKey) }

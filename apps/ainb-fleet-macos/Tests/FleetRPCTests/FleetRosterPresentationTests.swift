@@ -90,6 +90,8 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(identity.worktree, "agents-in-a-box--f-minor-bugs--abcd")
         XCTAssertEqual(identity.branch, "f/minor-bugs")
         XCTAssertEqual(identity.accessibilityLabel, "agents-in-a-box, agents-in-a-box--f-minor-bugs--abcd, f/minor-bugs")
+        XCTAssertEqual(identity.contextLabel, "f/minor-bugs · agents-in-a-box--f-minor-bugs--abcd")
+        XCTAssertEqual(identity.displayLabel, "agents-in-a-box · f/minor-bugs · agents-in-a-box--f-minor-bugs--abcd")
     }
 
     func testStatusIconPrefersDegradedSessionOverAttention() {

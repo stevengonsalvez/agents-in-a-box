@@ -23,7 +23,7 @@ struct FleetSessionDetailView: View {
         .background(FleetDetailPalette.canvas)
         .accessibilityIdentifier("fleet.detail.\(session.sessionKey)")
         .confirmationDialog(
-            "Confirm \(pendingDestructiveAction?.title ?? "action") for \(session.displayName ?? session.sessionKey)?",
+            "Confirm \(pendingDestructiveAction?.title ?? "action") for \(identity.displayLabel)?",
             isPresented: Binding(
                 get: { pendingDestructiveAction != nil },
                 set: { if !$0 { pendingDestructiveAction = nil } }
@@ -47,10 +47,10 @@ struct FleetSessionDetailView: View {
                 .frame(width: 12, height: 12)
                 .padding(.top, 8)
             VStack(alignment: .leading, spacing: 5) {
-                Text(session.displayName ?? session.sessionKey)
+                Text(identity.repository)
                     .font(.title2.weight(.bold))
                     .textSelection(.enabled)
-                Text(session.cwd)
+                Text(identity.contextLabel)
                     .font(.subheadline)
                     .foregroundStyle(FleetDetailPalette.muted)
                     .textSelection(.enabled)
@@ -158,6 +158,13 @@ struct FleetSessionDetailView: View {
                     detail("Revision", String(session.updatedRevision))
                     detail("Structured answer", session.capabilities.structuredAnswer ? "Available" : "Unavailable")
                 }
+                GridRow {
+                    detail("Worktree", identity.worktree ?? "Unknown")
+                    detail("Branch", identity.branch ?? "Unknown")
+                }
+                GridRow {
+                    detail("Working directory", session.cwd)
+                }
             }
             .padding(.top, 10)
         }
@@ -182,6 +189,10 @@ struct FleetSessionDetailView: View {
         Text(connection.message)
             .font(.caption)
             .foregroundStyle(FleetDetailPalette.muted)
+    }
+
+    private var identity: FleetSessionIdentity {
+        FleetRosterPresentation.sessionIdentity(for: session)
     }
 
     private func detail(_ label: String, _ value: String) -> some View {
