@@ -84,7 +84,7 @@ final class FleetRosterPresentationTests: XCTestCase {
     }
 
     func testSessionIdentityUsesWorktreeRepositoryAndBranch() {
-        let value = session(key: "claude:uuid", lifecycle: .idle, cwd: "/Users/stevie/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-minor-bugs--abcd")
+        let value = session(key: "claude:uuid", lifecycle: .idle, cwd: "/Users/stevie/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-minor-bugs--abcd/apps/ainb-fleet-macos")
         let identity = FleetRosterPresentation.sessionIdentity(for: value)
         XCTAssertEqual(identity.repository, "agents-in-a-box")
         XCTAssertEqual(identity.worktree, "agents-in-a-box--f-minor-bugs--abcd")

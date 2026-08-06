@@ -165,7 +165,7 @@ struct FleetSessionIdentity: Equatable {
         let candidate = worktreeIndex.flatMap { index -> String? in
             let remainder = components.dropFirst(index + 1)
             guard !remainder.isEmpty else { return nil }
-            return remainder.first == "by-name" ? remainder.dropFirst().last : remainder.last
+            return remainder.first == "by-name" ? remainder.dropFirst().first : remainder.first
         } ?? path.lastPathComponent
         let labels = candidate.split(separator: "--", omittingEmptySubsequences: true).map(String.init)
 
