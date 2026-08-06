@@ -40,6 +40,7 @@ pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
 /// are appended here only in the phase their dispatch arms land, so no daemon
 /// build ever advertises a capability whose methods answer -32601.
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
+    FLEET_CAPABILITY_ACP_SPAWN,
     FLEET_CAPABILITY_ACTION_EXECUTE,
     FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
@@ -1130,16 +1131,17 @@ mod tests {
             FLEET_CAPABILITY_MESSAGE_SEND,
             FLEET_CAPABILITY_MESSAGE_READ,
             FLEET_CAPABILITY_TRANSCRIPT_READ,
+            // Phase 5 landed `fleet/acp_session_create`'s dispatch arm, so its
+            // capability is advertised in the SAME change. Before that arm
+            // existed this assertion ran the other way round, which is the
+            // point: the catalogue never advertises a -32601 method.
+            FLEET_CAPABILITY_ACP_SPAWN,
         ] {
             assert!(
                 FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
                 "{id:?} has dispatch arms but is not advertised"
             );
         }
-        assert!(
-            !FLEET_PROTOCOL_CAPABILITY_IDS.contains(&FLEET_CAPABILITY_ACP_SPAWN),
-            "fleet.acp.spawn advertised before its dispatch arm exists"
-        );
     }
 
     fn round_trip<T>(value: &T)

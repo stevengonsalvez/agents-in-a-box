@@ -13,6 +13,12 @@ use ainb_hangar_store::Store;
 
 use crate::run_loop::{DaemonConfig, run};
 
+/// The daemon-owned ACP agent pool (plan Phase 5): one adapter process per
+/// PROVIDER hosting many sessions, demultiplexed by ACP `sessionId`, plus the
+/// shared [`acp_pool::converge_dirty_session`] routine the boot scan
+/// ([`acp_pool::converge_dirty_sessions_at_boot`], run from [`boot`]), the
+/// process-exit path and the turn-deadline sweep all fan out to.
+pub mod acp_pool;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,
@@ -463,6 +469,24 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         )
         .spawn();
     }
+
+    // The ACP boot scan (I16), BEFORE the pool is installed: a daemon that was
+    // SIGKILLed mid-turn left `open_turn_id` set, its legs PENDING and its
+    // parked permissions' attention rows open, and no runtime path revisits a
+    // session this process never hosted. Same shared routine the process-exit
+    // and deadline paths run, so the outcomes cannot drift.
+    crate::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink()).await;
+
+    // The ACP agent pool. Installed BEFORE the socket accepts a connection so
+    // `fleet/acp_session_create` can never answer "no pool" on a daemon that
+    // has one; nothing is spawned until the first prompt reaches it.
+    let acp_pool = crate::acp_pool::AcpPool::new(
+        store.clone(),
+        broker.sink(),
+        crate::acp_pool::PoolConfig::default(),
+    );
+    let _acp_sweeper = acp_pool.spawn_sweeper();
+    crate::acp_pool::install(acp_pool).await;
 
     // Tmux reconciliation keeps unhooked and standalone provider sessions in
     // the canonical Fleet roster as degraded rows with exact pane identity.

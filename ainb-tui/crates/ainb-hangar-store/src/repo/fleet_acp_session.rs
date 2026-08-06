@@ -299,6 +299,74 @@ impl FleetAcpSessionRepo {
         Self::require_hit(result.rows_affected(), session_key)
     }
 
+    /// Insert the `fleet_acp_session` row AND its `fleet_session` twin in ONE
+    /// transaction, per the plan's Session identity rule.
+    ///
+    /// An ACP session is one identity spread over two tables: `fleet_session`
+    /// is what the snapshot, attention rows, receipts and `fleet/action` key
+    /// on, and this table is the ACP-specific adjunct. Writing them in two
+    /// transactions would let a crash in the gap leave either a Fleet session
+    /// no pool can drive or an ACP row no surface can see, and there is no
+    /// reconciler for either shape.
+    ///
+    /// Idempotent per LIVE scope, exactly like [`FleetAcpSessionRepo::insert`]:
+    /// when the scope already holds an `ACTIVE`/`IDLE` session the whole
+    /// transaction rolls back and the existing row is returned, so a replayed
+    /// `fleet/acp_session_create` never mints a second Fleet session either.
+    pub async fn insert_with_fleet_session(
+        pool: &SqlitePool,
+        session: &NewFleetAcpSession,
+        event: &super::fleet::NewFleetEvent,
+    ) -> Result<(FleetAcpSessionRow, Option<i64>), FleetAcpSessionError> {
+        let mut tx = pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO fleet_acp_session \
+             (session_key, scope_key, provider, cwd, permission_mode, state, created_at, last_active_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&session.session_key)
+        .bind(&session.scope_key)
+        .bind(&session.provider)
+        .bind(&session.cwd)
+        .bind(&session.permission_mode)
+        .bind(&session.state)
+        .bind(session.created_at)
+        .bind(session.last_active_at)
+        .execute(&mut *tx)
+        .await;
+        match inserted {
+            Ok(_) => {}
+            Err(e) if is_unique_violation(&e) => {
+                drop(tx);
+                let existing = Self::get_live_by_scope(pool, &session.scope_key)
+                    .await?
+                    .ok_or(FleetAcpSessionError::Sql(e))?;
+                return Ok((existing, None));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let applied = super::fleet::FleetRepo::apply_event_in_tx(&mut tx, event, None)
+            .await
+            .map_err(|error| match error {
+                super::fleet::FleetRepoError::Sql(sql) => FleetAcpSessionError::Sql(sql),
+                other => FleetAcpSessionError::Sql(sqlx::Error::Protocol(other.to_string())),
+            })?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM fleet_acp_session WHERE session_key = ?"
+        ))
+        .bind(&session.session_key)
+        .fetch_optional(&mut *tx)
+        .await?
+        .as_ref()
+        .map(row_from)
+        .transpose()?
+        .ok_or_else(|| FleetAcpSessionError::SessionNotFound {
+            session_key: session.session_key.clone(),
+        })?;
+        tx.commit().await?;
+        Ok((row, Some(applied.revision)))
+    }
+
     fn require_hit(rows_affected: u64, session_key: &str) -> Result<(), FleetAcpSessionError> {
         if rows_affected == 0 {
             return Err(FleetAcpSessionError::SessionNotFound {

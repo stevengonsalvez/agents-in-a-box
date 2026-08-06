@@ -3,8 +3,15 @@
 //! Speaks newline-delimited JSON-RPC on stdio, exactly like `claude-agent-acp`
 //! and `codex-acp` do, but every answer comes from an environment variable
 //! instead of a model. That is what makes the client's invariants (mode
-//! pinning, env allowlist, handler-before-load, `-32602` surfacing) assertable
-//! on a machine with no adapters and no credentials.
+//! pinning, env allowlist, handler-before-load, `-32602` surfacing) and the
+//! pool's invariants (session demux, deadline, convergence) assertable on a
+//! machine with no adapters and no credentials.
+//!
+//! It is CONCURRENT by construction: every `session/prompt` runs on its own
+//! thread behind a shared stdout lock. A multiplexed pool hosts several
+//! sessions on one process, so a fixture that answered prompts one at a time
+//! could not express "session A hangs while session B completes", which is
+//! exactly the I16 deadline case.
 //!
 //! | Variable | Effect |
 //! |---|---|
@@ -16,10 +23,32 @@
 //! | `FAKE_ACP_REFUSE_SET_MODE` | answer `session/set_mode` with `-32602` |
 //! | `FAKE_ACP_SCRIPT` | ndjson file of `session/update` payloads to emit per prompt |
 //! | `FAKE_ACP_CHUNKS` | emit N `agent_message_chunk` updates per prompt instead of a script |
+//! | `FAKE_ACP_CHUNK_DELAY_MS` | sleep this long between chunks (paced streaming, I12) |
 //! | `FAKE_ACP_LOAD_REPLAY` | emit N updates BEFORE answering `session/load` (the replay-ordering probe) |
 //! | `FAKE_ACP_MODE_FLIP` | emit a `current_mode_update` carrying this mode at the END of every prompt turn (the mid-conversation flip) |
+//! | `FAKE_ACP_SESSION_PREFIX` | prefix for minted adapter session ids (default `fake-session`) |
+//! | `FAKE_ACP_HANG_SESSIONS` | comma list of adapter session ids (or `*`) whose prompt NEVER answers |
+//! | `FAKE_ACP_PERMISSION_SESSIONS` | comma list of adapter session ids (or `*`) that raise one `session/request_permission` per turn |
+//! | `FAKE_ACP_FAIL_TURN_SESSIONS` | comma list (or `*`) whose prompt answers `stopReason: refusal` |
+//! | `FAKE_ACP_HANG_PROMPTS` | comma list (or `*`) of prompt TEXTS whose turn never answers |
+//! | `FAKE_ACP_ECHO_PROMPT` | append the prompt text to the final agent message |
+//! | `FAKE_ACP_GHOST_SESSION` | per turn, emit one `session/update` AND one `session/request_permission` for THIS adapter session id, which no client session owns |
+//! | `FAKE_ACP_RPC_LOG` | append every `spawn`/`new`/`prompt`/`permission`/`cancel`/`close` this process observed to this path |
+//! | `FAKE_ACP_DIE_ON_SESSION_NEW` | marker path: the FIRST process to reach `session/new` exits without replying |
 
-use std::io::{BufRead, BufWriter, Write};
+use std::collections::HashMap;
+use std::io::{BufRead, Stdout, Write};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+
+/// stdout, shared by every prompt thread. One lock per whole line, so two
+/// concurrent turns can never interleave half a JSON frame.
+type SharedOut = Arc<Mutex<Stdout>>;
+
+/// Replies to the requests THIS process issued (only `session/request_permission`
+/// today), routed by JSON-RPC id back to the thread that is blocked on them.
+type Pending = Arc<Mutex<HashMap<String, Sender<serde_json::Value>>>>;
 
 fn main() {
     if let Ok(path) = std::env::var("FAKE_ACP_ENV_DUMP") {
@@ -32,8 +61,13 @@ fn main() {
         );
     }
 
+    record("spawn");
+    let out: SharedOut = Arc::new(Mutex::new(std::io::stdout()));
+    let pending: Pending = Arc::default();
+    let sessions = AtomicI64::new(0);
+    let mut threads = Vec::new();
+
     let stdin = std::io::stdin();
-    let mut out = BufWriter::new(std::io::stdout());
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -42,15 +76,58 @@ fn main() {
         let Ok(message): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
             continue;
         };
-        let (Some(method), Some(id)) = (message["method"].as_str(), message.get("id")) else {
-            // Notifications ($/cancel_request, session/cancel) need no reply.
+        let Some(method) = message["method"].as_str() else {
+            // No method: this is a REPLY to a request we issued. Route it to
+            // the blocked thread; an unknown id is simply dropped.
+            route_reply(&pending, &message);
             continue;
         };
-        handle(&mut out, method, id, &message["params"]);
+        let Some(id) = message.get("id") else {
+            // Notifications ($/cancel_request, session/cancel) need no reply,
+            // but WHICH session was cancelled is exactly what I16 asserts, and
+            // it is invisible from the store.
+            if method == "session/cancel" {
+                record(&format!(
+                    "cancel:{}",
+                    message["params"]["sessionId"].as_str().unwrap_or_default()
+                ));
+            }
+            continue;
+        };
+        if method == "session/prompt" {
+            // Its own thread: a hung session must not block its siblings on the
+            // same process (the multiplex case the pool exists to serve).
+            let out = Arc::clone(&out);
+            let pending = Arc::clone(&pending);
+            let id = id.clone();
+            let params = message["params"].clone();
+            threads.push(std::thread::spawn(move || {
+                prompt(&out, &pending, &id, &params);
+            }));
+            continue;
+        }
+        handle(&out, &sessions, method, id, &message["params"]);
+    }
+    for thread in threads {
+        let _ = thread.join();
     }
 }
 
-fn handle<W: Write>(out: &mut W, method: &str, id: &serde_json::Value, params: &serde_json::Value) {
+fn route_reply(pending: &Pending, message: &serde_json::Value) {
+    let key = message["id"].to_string();
+    let waiter = pending.lock().ok().and_then(|mut map| map.remove(&key));
+    if let Some(waiter) = waiter {
+        let _ = waiter.send(message.clone());
+    }
+}
+
+fn handle(
+    out: &SharedOut,
+    sessions: &AtomicI64,
+    method: &str,
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+) {
     let session_id = params["sessionId"].as_str().unwrap_or("fake-session").to_string();
     match method {
         "initialize" => respond(
@@ -64,7 +141,24 @@ fn handle<W: Write>(out: &mut W, method: &str, id: &serde_json::Value, params: &
             }),
         ),
         "session/new" => {
-            let mut result = serde_json::json!({"sessionId": "fake-session-1"});
+            // I6's pre-write window: die with the request in hand and no reply
+            // on the wire, so the client learns the transport closed BEFORE any
+            // `session/prompt` was issued. The marker file makes it fire for the
+            // first process only, so the pool's one legal requeue can succeed.
+            if let Some(marker) = var("FAKE_ACP_DIE_ON_SESSION_NEW") {
+                if !std::path::Path::new(&marker).exists() {
+                    let _ = std::fs::write(&marker, "died");
+                    record("die:session_new");
+                    std::process::exit(1);
+                }
+            }
+            // DISTINCT per session: a fixture that answered one id for every
+            // `session/new` would make a cross-attribution bug invisible,
+            // because both sessions would legitimately share a demux key.
+            let ordinal = sessions.fetch_add(1, Ordering::SeqCst) + 1;
+            let prefix =
+                var("FAKE_ACP_SESSION_PREFIX").unwrap_or_else(|| "fake-session".to_string());
+            let mut result = serde_json::json!({"sessionId": format!("{prefix}-{ordinal}")});
             if !flag("FAKE_ACP_NO_MODES") {
                 let mode = var("FAKE_ACP_MODE_ON_NEW").unwrap_or_else(|| "default".to_string());
                 result["modes"] = serde_json::json!({
@@ -76,6 +170,7 @@ fn handle<W: Write>(out: &mut W, method: &str, id: &serde_json::Value, params: &
                     ],
                 });
             }
+            record(&format!("new:{prefix}-{ordinal}"));
             respond(out, id, &result);
         }
         "session/load" => {
@@ -115,22 +210,112 @@ fn handle<W: Write>(out: &mut W, method: &str, id: &serde_json::Value, params: &
                 &serde_json::json!({"sessionUpdate": "current_mode_update", "currentModeId": echo}),
             );
         }
-        "session/prompt" => {
-            emit_turn(out, &session_id);
-            flip_mode(out, &session_id);
-            respond(out, id, &serde_json::json!({"stopReason": "end_turn"}));
+        "session/close" => {
+            record(&format!("close:{session_id}"));
+            respond(out, id, &serde_json::json!({}));
         }
-        "session/close" => respond(out, id, &serde_json::json!({})),
         _ => respond_error(out, id, -32601, "method not found"),
     }
 }
 
-fn emit_turn<W: Write>(out: &mut W, session_id: &str) {
+/// One turn, on its own thread.
+fn prompt(out: &SharedOut, pending: &Pending, id: &serde_json::Value, params: &serde_json::Value) {
+    let session_id = params["sessionId"].as_str().unwrap_or("fake-session").to_string();
+    let text = params["prompt"][0]["text"].as_str().unwrap_or_default().to_string();
+    // Recorded BEFORE any hang: "how many prompts did the adapter ever see" is
+    // the only honest way to assert I6's no-resend half.
+    record(&format!("prompt:{session_id}:{text}"));
+
+    if selected("FAKE_ACP_HANG_SESSIONS", &session_id) || selected("FAKE_ACP_HANG_PROMPTS", &text) {
+        // Never answers. The pool's turn deadline is the only thing that ends
+        // this turn, which is precisely what I16 asserts.
+        emit_turn(out, &session_id, params);
+        std::thread::park();
+        return;
+    }
+
+    // A chunk (and a blocked permission) for a session id NOBODY owns. The
+    // demux must drop the chunk rather than hand it to a neighbour on the same
+    // process, and must ANSWER the permission rather than leave this adapter
+    // blocked on a request nothing will ever reply to.
+    if let Some(ghost) = var("FAKE_ACP_GHOST_SESSION") {
+        notify_update(
+            out,
+            &ghost,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "ghost-text "},
+            }),
+        );
+        request_permission(out, pending, &ghost);
+    }
+
+    if selected("FAKE_ACP_PERMISSION_SESSIONS", &session_id) {
+        request_permission(out, pending, &session_id);
+    }
+    emit_turn(out, &session_id, params);
+    flip_mode(out, &session_id);
+    let stop = if selected("FAKE_ACP_FAIL_TURN_SESSIONS", &session_id) {
+        "refusal"
+    } else {
+        "end_turn"
+    };
+    respond(out, id, &serde_json::json!({"stopReason": stop}));
+}
+
+/// Issue one `session/request_permission` and BLOCK this turn until the client
+/// answers it, exactly like a real adapter waiting on a human.
+fn request_permission(out: &SharedOut, pending: &Pending, session_id: &str) {
+    static NEXT_ID: AtomicI64 = AtomicI64::new(9000);
+    let request_id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx): (Sender<serde_json::Value>, Receiver<serde_json::Value>) = channel();
+    if let Ok(mut map) = pending.lock() {
+        map.insert(serde_json::json!(request_id).to_string(), tx);
+    }
+    write_line(
+        out,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": session_id,
+                "toolCall": {"toolCallId": "tool-1", "title": "rm -rf /tmp/fixture"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }),
+    );
+    let reply = rx.recv().unwrap_or(serde_json::Value::Null);
+    let outcome = reply["result"]["outcome"]["outcome"]
+        .as_str()
+        .unwrap_or("cancelled")
+        .to_string();
+    let option = reply["result"]["outcome"]["optionId"].as_str().unwrap_or("").to_string();
+    // The only honest evidence that the BLOCKED adapter was answered: an
+    // unrouted permission's own `session/update` is dropped by the demux, so
+    // the transcript can never show it.
+    record(&format!("permission:{session_id}:{outcome}"));
+    notify_update(
+        out,
+        session_id,
+        &serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": format!("permission:{outcome}:{option} ")},
+        }),
+    );
+}
+
+fn emit_turn(out: &SharedOut, session_id: &str, params: &serde_json::Value) {
+    let delay = std::time::Duration::from_millis(count("FAKE_ACP_CHUNK_DELAY_MS") as u64);
     if let Some(path) = var("FAKE_ACP_SCRIPT") {
         let script = std::fs::read_to_string(path).unwrap_or_default();
         for line in script.lines().filter(|line| !line.trim().is_empty()) {
             if let Ok(update) = serde_json::from_str::<serde_json::Value>(line) {
                 notify_update(out, session_id, &update);
+                std::thread::sleep(delay);
             }
         }
         return;
@@ -144,12 +329,24 @@ fn emit_turn<W: Write>(out: &mut W, session_id: &str) {
                 "content": {"type": "text", "text": format!("chunk-{index} ")},
             }),
         );
+        std::thread::sleep(delay);
+    }
+    if flag("FAKE_ACP_ECHO_PROMPT") {
+        let echo = params["prompt"][0]["text"].as_str().unwrap_or_default().to_string();
+        notify_update(
+            out,
+            session_id,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": format!("echo:{echo}")},
+            }),
+        );
     }
 }
 
 /// A live session changing permission regime mid conversation, long after the
 /// spawn-time assertion passed.
-fn flip_mode<W: Write>(out: &mut W, session_id: &str) {
+fn flip_mode(out: &SharedOut, session_id: &str) {
     if let Some(mode) = var("FAKE_ACP_MODE_FLIP") {
         notify_update(
             out,
@@ -159,7 +356,7 @@ fn flip_mode<W: Write>(out: &mut W, session_id: &str) {
     }
 }
 
-fn notify_update<W: Write>(out: &mut W, session_id: &str, update: &serde_json::Value) {
+fn notify_update(out: &SharedOut, session_id: &str, update: &serde_json::Value) {
     write_line(
         out,
         &serde_json::json!({
@@ -170,14 +367,14 @@ fn notify_update<W: Write>(out: &mut W, session_id: &str, update: &serde_json::V
     );
 }
 
-fn respond<W: Write>(out: &mut W, id: &serde_json::Value, result: &serde_json::Value) {
+fn respond(out: &SharedOut, id: &serde_json::Value, result: &serde_json::Value) {
     write_line(
         out,
         &serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
     );
 }
 
-fn respond_error<W: Write>(out: &mut W, id: &serde_json::Value, code: i32, message: &str) {
+fn respond_error(out: &SharedOut, id: &serde_json::Value, code: i32, message: &str) {
     write_line(
         out,
         &serde_json::json!({
@@ -188,9 +385,27 @@ fn respond_error<W: Write>(out: &mut W, id: &serde_json::Value, code: i32, messa
     );
 }
 
-fn write_line<W: Write>(out: &mut W, message: &serde_json::Value) {
+fn write_line(out: &SharedOut, message: &serde_json::Value) {
+    let Ok(mut out) = out.lock() else { return };
     let _ = writeln!(out, "{message}");
     let _ = out.flush();
+}
+
+/// Append one observed RPC to `FAKE_ACP_RPC_LOG`, when set.
+///
+/// The store answers "what did the pool decide"; only this answers "what did
+/// the adapter actually receive", which is the whole of I6's no-resend claim
+/// and of the deadline's "the cancel named A's session, not B's".
+///
+/// Reopened per line: prompts run on their own threads and a process may die
+/// mid-turn, so an unflushed shared handle would lose exactly the evidence.
+fn record(line: &str) {
+    let Some(path) = var("FAKE_ACP_RPC_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 fn var(name: &str) -> Option<String> {
@@ -203,4 +418,11 @@ fn flag(name: &str) -> bool {
 
 fn count(name: &str) -> usize {
     var(name).and_then(|value| value.parse().ok()).unwrap_or(0)
+}
+
+/// Whether `session_id` is named by a comma list variable (`*` means all).
+fn selected(name: &str, session_id: &str) -> bool {
+    var(name).is_some_and(|list| {
+        list.split(',').map(str::trim).any(|entry| entry == "*" || entry == session_id)
+    })
 }

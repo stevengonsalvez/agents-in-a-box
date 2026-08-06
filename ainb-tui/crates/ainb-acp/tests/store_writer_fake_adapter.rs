@@ -55,7 +55,7 @@ async fn run_turn(
     config: WriterConfig,
 ) -> Counters {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let adapter = AdapterProcess::spawn(&fake_config("default", script_env), tx)
+    let adapter = AdapterProcess::spawn(&fake_config("default", script_env), tx, permission_sink())
         .await
         .expect("spawn fixture adapter");
     let session = adapter.new_session(Path::new("/tmp")).await.expect("session/new");
@@ -440,4 +440,14 @@ async fn a_five_hundred_chunk_turn_is_not_five_hundred_transactions() {
         500,
         "no delta was lost to coalescing"
     );
+}
+
+/// A permission sink nothing reads: these suites drive the protocol legs, not
+/// R8's answer path (that lives in the daemon's pool tests). Dropping the
+/// receiver would answer every ask `Cancelled`, so the sender is leaked
+/// deliberately to keep the fixture's behaviour unchanged.
+fn permission_sink() -> tokio::sync::mpsc::UnboundedSender<ainb_acp::client::PermissionRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::forget(rx);
+    tx
 }

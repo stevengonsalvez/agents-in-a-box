@@ -64,6 +64,12 @@ ainb-fleet-core = { path = "../ainb-fleet-core" }
 # Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
 # serialises over the unix socket (P4.10). Pure data — no host deps leak in.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# The ACP client + transcript reducer + store writer the agent pool drives
+# (plan Phase 4). The pool lives HERE, not there, because only the daemon owns
+# the EventBroker and the SQLite handle; `ainb-acp` stays a pure library.
+ainb-acp = { path = "../ainb-acp" }
+agent-client-protocol = "=1.3.0"
+blake3 = { workspace = true }
 # Claude's blocking broker owns exact structured-question and permission
 # delivery. Hangar calls its public wire client and never reads notifyd state.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd" }

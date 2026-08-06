@@ -22,7 +22,10 @@ async fn spawn(
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let config = fake_config(mode, script_env);
-    (AdapterProcess::spawn(&config, tx).await, rx)
+    (
+        AdapterProcess::spawn(&config, tx, permission_sink()).await,
+        rx,
+    )
 }
 
 #[tokio::test]
@@ -253,4 +256,14 @@ async fn a_prompt_streams_its_chunks_and_ends_the_turn() {
     let chunks = support::drain_notifications(&mut rx).await;
     assert_eq!(chunks.len(), 3);
     adapter.cancel(&session).expect("session/cancel is a notification");
+}
+
+/// A permission sink nothing reads: these suites drive the protocol legs, not
+/// R8's answer path (that lives in the daemon's pool tests). Dropping the
+/// receiver would answer every ask `Cancelled`, so the sender is leaked
+/// deliberately to keep the fixture's behaviour unchanged.
+fn permission_sink() -> tokio::sync::mpsc::UnboundedSender<ainb_acp::client::PermissionRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::forget(rx);
+    tx
 }

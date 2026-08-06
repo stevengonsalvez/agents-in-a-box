@@ -374,18 +374,35 @@ impl FleetRepo {
         expected_version: Option<i64>,
     ) -> Result<ApplyFleetEventResult, FleetRepoError> {
         let mut tx = pool.begin().await?;
+        let result = Self::apply_event_in_tx(&mut tx, event, expected_version).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
 
-        if let Some(prior) = event_by_id(&mut tx, &event.event_id).await? {
+    /// Apply one normalized event inside a CALLER-OWNED transaction, without
+    /// committing it.
+    ///
+    /// This exists so a caller can make the `fleet_session` row and its
+    /// provider-specific adjunct row commit TOGETHER. `fleet/acp_session_create`
+    /// is that caller: an ACP session is one identity spread over two tables
+    /// (`repo/fleet_acp_session.rs`), and a crash between two separate
+    /// transactions would leave either a Fleet session no pool can drive or an
+    /// ACP row the snapshot cannot see.
+    pub(crate) async fn apply_event_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        event: &NewFleetEvent,
+        expected_version: Option<i64>,
+    ) -> Result<ApplyFleetEventResult, FleetRepoError> {
+        if let Some(prior) = event_by_id(tx, &event.event_id).await? {
             if prior.session_key != event.session_key {
                 return Err(FleetRepoError::EventIdCollision {
                     event_id: event.event_id.clone(),
                     existing_session: prior.session_key,
                 });
             }
-            let session = session_by_key_tx(&mut tx, &event.session_key)
+            let session = session_by_key_tx(tx, &event.session_key)
                 .await?
                 .expect("fleet event foreign key must resolve its session");
-            tx.commit().await?;
             return Ok(ApplyFleetEventResult {
                 revision: prior.revision,
                 session_version: prior.session_version,
@@ -395,7 +412,7 @@ impl FleetRepo {
             });
         }
 
-        let prior = session_by_key_tx(&mut tx, &event.session_key).await?;
+        let prior = session_by_key_tx(tx, &event.session_key).await?;
         if let Some(expected) = expected_version {
             let actual = prior
                 .as_ref()
@@ -426,7 +443,7 @@ impl FleetRepo {
         };
 
         if is_new {
-            insert_session(&mut tx, &session).await?;
+            insert_session(tx, &session).await?;
         }
 
         let revision = sqlx::query(
@@ -444,15 +461,14 @@ impl FleetRepo {
         .bind(event.patch.current_request_fingerprint.as_ref().and_then(Clone::clone))
         .bind(session.version)
         .bind(i64::from(changed))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .last_insert_rowid();
 
         if changed {
             session.updated_revision = revision;
-            update_session(&mut tx, &session).await?;
+            update_session(tx, &session).await?;
         }
-        tx.commit().await?;
 
         Ok(ApplyFleetEventResult {
             revision,

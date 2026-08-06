@@ -853,16 +853,210 @@ async fn negotiate_advertises_the_chat_bus_capabilities() {
         "fleet.message.send",
         "fleet.message.read",
         "fleet.transcript.read",
+        // Phase 5 landed `fleet/acp_session_create`'s dispatch arm, so its
+        // capability is advertised in the SAME change. Before that arm existed
+        // this assertion ran the other way round, which is the contract: a
+        // capability is advertised exactly when its methods answer.
+        "fleet.acp.spawn",
     ] {
         assert!(
             ids.contains(&expected),
             "{expected} must be advertised: {ids:?}"
         );
     }
-    assert!(
-        !ids.contains(&"fleet.acp.spawn"),
-        "a capability whose methods answer -32601 must stay unadvertised"
+}
+
+/// `fleet/acp_session_create` refuses a provider the adapter registry does not
+/// know, BEFORE any row is written.
+///
+/// The schema only length-checks `provider` (so the next adapter needs no
+/// migration), which makes this handler the one place an unknown token can be
+/// refused at all.
+#[tokio::test]
+async fn acp_session_create_refuses_an_unknown_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let response = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            serde_json::json!({ "provider": "gemini-acp", "cwd": "/work" }),
+        )
+        .await;
+    assert_eq!(
+        response["error"]["code"], -32602,
+        "an unknown adapter is invalid_params: {response}"
     );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fleet_acp_session")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "a refused create writes nothing");
+}
+
+/// Create writes BOTH rows under one key, with exactly the wired capability
+/// set, and is idempotent per live scope.
+#[tokio::test]
+async fn acp_session_create_writes_the_row_pair_and_is_idempotent_per_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let first = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            serde_json::json!({
+                "provider": "claude-agent-acp",
+                "cwd": "/work",
+                "scope_key": "session:shared",
+            }),
+        )
+        .await;
+    assert!(first["error"].is_null(), "{first}");
+    let session_key = first["result"]["session_key"].as_str().expect("key").to_string();
+    assert_eq!(first["result"]["scope_key"], "session:shared");
+
+    // BOTH rows, one key: the fleet's session identity plus the ACP adjunct.
+    let (provider, capabilities): (String, String) =
+        sqlx::query_as("SELECT provider, capabilities FROM fleet_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .expect("fleet_session row");
+    assert_eq!(
+        provider, "acp",
+        "the WIRE token, mapped to FleetProvider::Acp"
+    );
+    let capabilities: ainb_hangar_proto::fleet::FleetCapabilities =
+        serde_json::from_str(&capabilities).expect("capability json");
+    for (name, enabled) in [
+        ("send_prompt", capabilities.send_prompt),
+        ("approvals", capabilities.approvals),
+        ("structured_answer", capabilities.structured_answer),
+        ("interrupt", capabilities.interrupt),
+        ("stop", capabilities.stop),
+        ("kill", capabilities.kill),
+    ] {
+        assert!(enabled, "{name} is one of the actions Phase 5 wires");
+    }
+    for (name, enabled) in [
+        ("tmux_attach", capabilities.tmux_attach),
+        ("tmux_text", capabilities.tmux_text),
+        ("verified_picker", capabilities.verified_picker),
+        ("restart", capabilities.restart),
+        ("archive", capabilities.archive),
+    ] {
+        assert!(
+            !enabled,
+            "{name} must stay off: an ACP session has no pane and no such path"
+        );
+    }
+    let (acp_provider, acp_state): (String, String) =
+        sqlx::query_as("SELECT provider, state FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .expect("fleet_acp_session row");
+    assert_eq!(acp_provider, "claude-agent-acp", "the CONCRETE adapter");
+    assert_eq!(acp_state, "IDLE", "no process is spawned at create");
+
+    // Idempotent per live scope, backed by the partial unique index.
+    let second = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            serde_json::json!({
+                "provider": "claude-agent-acp",
+                "cwd": "/elsewhere",
+                "scope_key": "session:shared",
+            }),
+        )
+        .await;
+    assert_eq!(
+        second["result"]["session_key"].as_str(),
+        Some(session_key.as_str()),
+        "a second create for a live scope returns the existing session: {second}"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fleet_acp_session")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "and writes no second row");
+}
+
+/// An operator `fleet/action SendPrompt` the pool REFUSES must not leak a
+/// PENDING delivery.
+///
+/// The operator path writes the message row and its leg BEFORE handing the
+/// prompt to the pool, exactly as the chat path does. The chat path resolves a
+/// refusal; this one used to return a Rejected receipt and leave the leg
+/// PENDING until some future boot scan, so the two entry points disagreed about
+/// the same rejection.
+///
+/// DISCLOSURE: the refusal is injected by seeding the `fleet_session` row
+/// WITHOUT its `fleet_acp_session` adjunct, which is what the pool reports as
+/// `session_gone`; no adapter is involved.
+#[tokio::test]
+async fn a_refused_operator_prompt_resolves_its_delivery_leg() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    // The pool must exist for the ACP action arm to run at all; it never spawns
+    // anything here because the refusal happens at the session-row read.
+    let broker = EventBroker::new();
+    ainb_hangar_daemon::acp_pool::install(ainb_hangar_daemon::acp_pool::AcpPool::new(
+        store.clone(),
+        broker.sink(),
+        ainb_hangar_daemon::acp_pool::PoolConfig::default(),
+    ))
+    .await;
+
+    sqlx::query(
+        "INSERT INTO fleet_session \
+         (session_key, provider, cwd, capabilities, discovered_at, last_observed_at, version) \
+         VALUES ('acp:orphan', 'acp', '/work', '{\"send_prompt\":true}', 1, 1, 1)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("seed an ACP fleet session with no adjunct row");
+
+    let mut client = Client::authed(dir.path(), &socket).await;
+    let response = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": "acp:orphan",
+                "expected_version": 1,
+                "request_id": "req-orphan-prompt",
+                "action": { "action": "send_prompt", "text": "are you there?" },
+            }),
+        )
+        .await;
+    assert!(
+        response["error"].is_null(),
+        "the action must ack: {response}"
+    );
+    assert_eq!(
+        response["result"]["receipt"]["status"], "REJECTED",
+        "a pool refusal is a Rejected receipt: {response}"
+    );
+
+    let leg: (String, Option<String>) = sqlx::query_as(
+        "SELECT state, detail FROM fleet_message_delivery WHERE session_key = 'acp:orphan'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("the operator prompt wrote a leg");
+    assert_eq!(
+        leg.0, "REJECTED",
+        "the leg must be terminal, not left PENDING for a future boot scan"
+    );
+    assert_eq!(
+        leg.1.as_deref().and_then(|detail| detail.split(';').next()),
+        Some("session_gone"),
+        "carrying the enumerated reason: {leg:?}"
+    );
+
+    ainb_hangar_daemon::acp_pool::uninstall().await;
 }
 
 /// The transcript readers answer on an empty transcript (rows arrive with the

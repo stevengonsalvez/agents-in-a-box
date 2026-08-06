@@ -153,6 +153,86 @@ pub struct DaemonHealthSnapshot {
     /// The pane renders this as a loud red banner instead of empty stats.
     #[serde(default)]
     pub db_error: Option<String>,
+    /// The ACP agent pool, or `None` when this daemon runs no pool.
+    ///
+    /// `#[serde(default)]` so a snapshot from a daemon that predates the pool
+    /// still decodes as "no pool", which is indistinguishable from the truth.
+    #[serde(default)]
+    pub acp_pool: Option<AcpPoolHealth>,
+}
+
+/// The ACP agent pool's live shape (`hangar/daemon_health`).
+///
+/// "Why is the copilot stuck?" must be answerable from ONE pane: queue depth,
+/// oldest in-flight turn age, and breaker state are all here, and the remedy
+/// (`fleet/action Interrupt`) keys on the `session_key` this carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpPoolHealth {
+    /// One row per LIVE adapter process (one process per provider, graft 6).
+    #[serde(default)]
+    pub processes: Vec<AcpProcessHealth>,
+    /// One row per hosted session, keyed by the scope it answers in.
+    #[serde(default)]
+    pub sessions: Vec<AcpSessionHealth>,
+    /// Sessions evicted by the session-level LRU since this daemon started.
+    /// Their `session_key`s survive; the process stayed warm.
+    #[serde(default)]
+    pub evicted_total: u32,
+}
+
+/// One live adapter process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpProcessHealth {
+    /// Adapter token (`claude-agent-acp`, `codex-acp`).
+    pub provider: String,
+    /// `running` while the transport is open, `exited` once it closed.
+    pub state: String,
+    /// Sessions currently multiplexed on this process.
+    pub sessions: u32,
+    /// The per-provider session cap.
+    pub session_cap: u32,
+    /// Turns in flight on this process right now.
+    pub in_flight: u32,
+    /// The per-process in-flight ceiling.
+    pub in_flight_cap: u32,
+    /// Whether this provider's `SlotCircuit` is open (deliveries fail fast).
+    pub breaker_open: bool,
+    /// Consecutive spawn/crash failures behind the breaker.
+    pub breaker_failures: u32,
+    /// `agentInfo.version` observed at the last successful initialize.
+    #[serde(default)]
+    pub provider_version: Option<String>,
+}
+
+/// One hosted ACP session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionHealth {
+    /// Stable Fleet identity (`acp:<ulid>`).
+    pub session_key: String,
+    /// The scope this session answers in.
+    pub scope_key: String,
+    /// Adapter token.
+    pub provider: String,
+    /// `IDLE`, `ACTIVE`, or `EVICTED`.
+    pub state: String,
+    /// Prompts queued behind the in-flight turn.
+    pub queue_depth: u32,
+    /// The bounded queue's capacity; a send to a full queue is REJECTED.
+    pub queue_capacity: u32,
+    /// Whether a turn is open right now.
+    pub turn_open: bool,
+    /// Age of the open turn in milliseconds, or `None` when idle.
+    #[serde(default)]
+    pub turn_age_ms: Option<i64>,
+    /// Permission requests raised and still unanswered.
+    pub pending_permissions: u32,
+    /// Transcript payload bytes COMMITTED for this session since the daemon
+    /// adopted it. The pool's `session/update` demux channels are unbounded by
+    /// design (dropping a chunk is data loss, and blocking the shared connection
+    /// task would stall every other tenant on the process), so this counter is
+    /// the growth signal that stands in for backpressure.
+    #[serde(default)]
+    pub transcript_bytes: u64,
 }
 
 #[cfg(test)]
@@ -183,6 +263,32 @@ mod tests {
                 .collect(),
             daemon_version: "1.16.0 (abc1234, 2026-07-17, source)".into(),
             db_error: Some("database schema (migration 41) is AHEAD".into()),
+            acp_pool: Some(AcpPoolHealth {
+                processes: vec![AcpProcessHealth {
+                    provider: "claude-agent-acp".into(),
+                    state: "running".into(),
+                    sessions: 2,
+                    session_cap: 16,
+                    in_flight: 1,
+                    in_flight_cap: 4,
+                    breaker_open: false,
+                    breaker_failures: 0,
+                    provider_version: Some("0.64.0".into()),
+                }],
+                sessions: vec![AcpSessionHealth {
+                    session_key: "acp:01j".into(),
+                    scope_key: "session:acp:01j".into(),
+                    provider: "claude-agent-acp".into(),
+                    state: "ACTIVE".into(),
+                    queue_depth: 3,
+                    queue_capacity: 32,
+                    turn_open: true,
+                    turn_age_ms: Some(4_200),
+                    pending_permissions: 1,
+                    transcript_bytes: 48_216,
+                }],
+                evicted_total: 1,
+            }),
         };
         let s = serde_json::to_string(&snap).unwrap();
         let back: DaemonHealthSnapshot = serde_json::from_str(&s).unwrap();
@@ -207,6 +313,7 @@ mod tests {
         let back: DaemonHealthSnapshot = serde_json::from_str(old_wire).unwrap();
         assert_eq!(back.daemon_version, "");
         assert_eq!(back.db_error, None);
+        assert_eq!(back.acp_pool, None);
     }
 
     /// The settings snapshots round-trip through JSON.
