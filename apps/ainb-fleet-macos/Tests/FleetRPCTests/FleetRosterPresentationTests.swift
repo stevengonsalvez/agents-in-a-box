@@ -39,8 +39,8 @@ final class FleetRosterPresentationTests: XCTestCase {
             ["ask"]
         )
         XCTAssertEqual(
-            FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .active)).map(\.sessionKey),
-            ["active"]
+            Set(FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .active)).map(\.sessionKey)),
+            Set(["active", "ask", "idle", "done"])
         )
     }
 
@@ -69,6 +69,23 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(
             FleetRosterPresentation.visibleSessions(sessions, search: "", filters: .all, sort: .recent).map(\.sessionKey),
             ["newest", "alpha", "bravo"]
+        )
+    }
+
+    func testDefaultFocusShowsEveryNonExitedSession() {
+        let sessions = [
+            session(key: "starting", lifecycle: .starting),
+            session(key: "running", lifecycle: .running),
+            session(key: "idle", lifecycle: .idle),
+            session(key: "ask", lifecycle: .idle, attention: .ask),
+            session(key: "done", lifecycle: .turnComplete),
+            session(key: "unknown", lifecycle: .unknown),
+            session(key: "exited", lifecycle: .exited),
+        ]
+        XCTAssertEqual(FleetRosterFilters().focus, .active)
+        XCTAssertEqual(
+            Set(FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters()).map(\.sessionKey)),
+            Set(["starting", "running", "idle", "ask", "done", "unknown"])
         )
     }
 
