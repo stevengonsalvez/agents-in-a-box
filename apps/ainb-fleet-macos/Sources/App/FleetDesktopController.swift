@@ -314,12 +314,21 @@ private struct FleetNotchFocusChip: View {
     let toggle: () -> Void
 
     var body: some View {
-        Button(action: toggle) {
-            Text(focus.label)
+        if selected {
+            Button(action: toggle) {
+                Text(focus.label)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(FleetNotchPalette.mint)
+            .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+        } else {
+            Button(action: toggle) {
+                Text(focus.label)
+            }
+            .buttonStyle(.bordered)
+            .tint(.gray)
+            .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
         }
-        .buttonStyle(.bordered)
-        .tint(selected ? FleetNotchPalette.mint : .gray)
-        .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
     }
 }
 
@@ -336,10 +345,7 @@ private struct FleetNotchSessionRow: View {
     var body: some View {
         Button(action: select) {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: providerSymbol)
-                    .font(.title3)
-                    .foregroundStyle(providerColor)
-                    .frame(width: 25)
+                FleetProviderIcon(provider: session.provider, size: 25)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(identity.repository)
                         .font(.subheadline.weight(.semibold))
@@ -395,26 +401,6 @@ private struct FleetNotchSessionRow: View {
     private var freshness: String {
         let seconds = max(0, Int(Date().timeIntervalSince1970 - TimeInterval(session.lastObservedAt) / 1_000))
         return seconds < 60 ? "now" : "\(seconds / 60)m"
-    }
-
-    private var providerSymbol: String {
-        switch session.provider {
-        case .claude: "sparkles"
-        case .codex: "brain.head.profile"
-        case .copilot: "cursorarrow.rays"
-        case .acp: "point.3.connected.trianglepath.dotted"
-        case .unknown: "terminal"
-        }
-    }
-
-    private var providerColor: Color {
-        switch session.provider {
-        case .claude: .orange
-        case .codex: .cyan
-        case .copilot: .purple
-        case .acp: .mint
-        case .unknown: FleetNotchPalette.muted
-        }
     }
 
     private var statusColor: Color {
