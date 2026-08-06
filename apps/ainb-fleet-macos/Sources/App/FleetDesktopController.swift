@@ -329,6 +329,10 @@ private struct FleetNotchSessionRow: View {
     let connection: FleetConnectionState
     let select: () -> Void
 
+    private var identity: FleetSessionIdentity {
+        FleetRosterPresentation.sessionIdentity(for: session)
+    }
+
     var body: some View {
         Button(action: select) {
             HStack(alignment: .top, spacing: 10) {
@@ -337,7 +341,7 @@ private struct FleetNotchSessionRow: View {
                     .foregroundStyle(providerColor)
                     .frame(width: 25)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(FleetRosterPresentation.sessionIdentity(for: session).repository)
+                    Text(identity.repository)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(metadata)
@@ -368,12 +372,11 @@ private struct FleetNotchSessionRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("fleet.notch.row.\(session.sessionKey)")
-        .accessibilityLabel(session.displayName ?? session.sessionKey)
+        .accessibilityLabel(identity.accessibilityLabel)
         .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: connection))
     }
 
     private var metadata: String {
-        let identity = FleetRosterPresentation.sessionIdentity(for: session)
         return [identity.worktree, identity.branch].compactMap { $0 }.joined(separator: " · ")
     }
 

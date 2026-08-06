@@ -158,6 +158,10 @@ struct FleetSessionIdentity: Equatable {
     let worktree: String?
     let branch: String?
 
+    var accessibilityLabel: String {
+        [repository, worktree, branch].compactMap { $0 }.joined(separator: ", ")
+    }
+
     init(session: FleetSession) {
         let path = URL(fileURLWithPath: session.cwd)
         let components = path.pathComponents
