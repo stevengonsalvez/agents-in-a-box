@@ -56,7 +56,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, warn};
 
 /// Default AWAIT ceiling — the BOTTOM of the timeout ladder, by design:
@@ -171,7 +171,7 @@ enum PendingKind {
     Structured {
         request_fingerprint: String,
         questions: Vec<serde_json::Value>,
-        tx: oneshot::Sender<StructuredResolution>,
+        tx: watch::Sender<Option<StructuredResolution>>,
     },
 }
 
@@ -344,7 +344,7 @@ impl BrokerState {
         let now = now_ms();
         let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         map.iter()
-            .map(|(session_id, pending)| {
+            .filter_map(|(session_id, pending)| {
                 let (tool, context, request_fingerprint, questions) = match &pending.kind {
                     PendingKind::Permission {
                         tool,
@@ -360,22 +360,27 @@ impl BrokerState {
                     PendingKind::Structured {
                         request_fingerprint,
                         questions,
-                        ..
-                    } => (
-                        "AskUserQuestion".to_string(),
-                        serde_json::to_string(questions).unwrap_or_default(),
-                        Some(request_fingerprint.clone()),
-                        questions.clone(),
-                    ),
+                        tx,
+                    } => {
+                        if tx.borrow().is_some() {
+                            return None;
+                        }
+                        (
+                            "AskUserQuestion".to_string(),
+                            serde_json::to_string(questions).unwrap_or_default(),
+                            Some(request_fingerprint.clone()),
+                            questions.clone(),
+                        )
+                    }
                 };
-                PendingInfo {
+                Some(PendingInfo {
                     session_id: session_id.clone(),
                     tool,
                     context,
                     request_fingerprint,
                     questions,
                     waiting_ms: now.saturating_sub(pending.since_ms),
-                }
+                })
             })
             .collect()
     }
@@ -464,33 +469,83 @@ impl BrokerState {
         }
     }
 
+    /// Register a structured request before its Fleet event is persisted.
+    ///
+    /// A matching later `await_structured` reuses this exact pending entry. This
+    /// creates the ordering fence Fleet needs: an actionable card never appears
+    /// before the broker can accept its answer.
+    fn register_structured(
+        &self,
+        session_id: String,
+        request_fingerprint: String,
+        questions: Vec<serde_json::Value>,
+    ) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if map.get(&session_id).is_some_and(|pending| {
+            matches!(
+                &pending.kind,
+                PendingKind::Structured {
+                    request_fingerprint: current,
+                    ..
+                } if current == &request_fingerprint
+            )
+        }) {
+            return;
+        }
+        let (tx, _) = watch::channel(None);
+        map.insert(
+            session_id,
+            Pending {
+                id,
+                since_ms: now_ms(),
+                kind: PendingKind::Structured {
+                    request_fingerprint,
+                    questions,
+                    tx,
+                },
+            },
+        );
+    }
+
     async fn await_structured(
         &self,
         session_id: String,
         request_fingerprint: String,
         questions: Vec<serde_json::Value>,
     ) -> StructuredResolution {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-            map.insert(
-                session_id.clone(),
-                Pending {
-                    id,
-                    since_ms: now_ms(),
-                    kind: PendingKind::Structured {
-                        request_fingerprint,
-                        questions,
-                        tx,
-                    },
-                },
-            );
-        }
+        self.register_structured(session_id.clone(), request_fingerprint.clone(), questions);
+        let (id, mut rx) = {
+            let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(pending) = map.get(&session_id) else {
+                return StructuredResolution::superseded();
+            };
+            let PendingKind::Structured {
+                request_fingerprint: current,
+                tx,
+                ..
+            } = &pending.kind
+            else {
+                return StructuredResolution::superseded();
+            };
+            if current != &request_fingerprint {
+                return StructuredResolution::superseded();
+            }
+            (pending.id, tx.subscribe())
+        };
 
-        match tokio::time::timeout(self.await_timeout, rx).await {
-            Ok(Ok(resolution)) => resolution,
-            Ok(Err(_)) => StructuredResolution::superseded(),
+        let wait = async {
+            loop {
+                if let Some(resolution) = rx.borrow().clone() {
+                    return resolution;
+                }
+                if rx.changed().await.is_err() {
+                    return StructuredResolution::superseded();
+                }
+            }
+        };
+        let resolution = match tokio::time::timeout(self.await_timeout, wait).await {
+            Ok(resolution) => resolution,
             Err(_) => {
                 let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
                 if map.get(&session_id).is_some_and(|p| p.id == id) {
@@ -498,7 +553,12 @@ impl BrokerState {
                 }
                 StructuredResolution::timed_out()
             }
+        };
+        let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if map.get(&session_id).is_some_and(|p| p.id == id) {
+            map.remove(&session_id);
         }
+        resolution
     }
 
     fn answer_structured(
@@ -508,7 +568,7 @@ impl BrokerState {
         answers: Vec<StructuredQuestionAnswer>,
     ) -> StructuredAnswerAck {
         let taken = {
-            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             let Some(pending) = map.get(session_id) else {
                 return StructuredAnswerAck::unmatched();
             };
@@ -526,21 +586,20 @@ impl BrokerState {
             if let Err(error) = validate_structured_answers(questions, &answers) {
                 return StructuredAnswerAck::invalid(error);
             }
-            map.remove(session_id)
+            match &pending.kind {
+                PendingKind::Structured { tx, .. } => {
+                    tx.send_replace(Some(StructuredResolution::Answered {
+                        answers: answers.clone(),
+                    }));
+                    true
+                }
+                _ => false,
+            }
         };
 
         match taken {
-            Some(Pending {
-                kind: PendingKind::Structured { tx, .. },
-                ..
-            }) => {
-                if tx.send(StructuredResolution::Answered { answers }).is_ok() {
-                    StructuredAnswerAck::matched()
-                } else {
-                    StructuredAnswerAck::unmatched()
-                }
-            }
-            _ => StructuredAnswerAck::unmatched(),
+            true => StructuredAnswerAck::matched(),
+            false => StructuredAnswerAck::unmatched(),
         }
     }
 
@@ -553,7 +612,7 @@ impl BrokerState {
         reason: String,
     ) -> StructuredAnswerAck {
         let taken = {
-            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             let Some(pending) = map.get(session_id) else {
                 return StructuredAnswerAck::unmatched();
             };
@@ -567,21 +626,18 @@ impl BrokerState {
             if current != request_fingerprint {
                 return StructuredAnswerAck::stale();
             }
-            map.remove(session_id)
+            match &pending.kind {
+                PendingKind::Structured { tx, .. } => {
+                    tx.send_replace(Some(StructuredResolution::Rejected { reason }));
+                    true
+                }
+                _ => false,
+            }
         };
 
         match taken {
-            Some(Pending {
-                kind: PendingKind::Structured { tx, .. },
-                ..
-            }) => {
-                if tx.send(StructuredResolution::Rejected { reason }).is_ok() {
-                    StructuredAnswerAck::matched()
-                } else {
-                    StructuredAnswerAck::unmatched()
-                }
-            }
-            _ => StructuredAnswerAck::unmatched(),
+            true => StructuredAnswerAck::matched(),
+            false => StructuredAnswerAck::unmatched(),
         }
     }
 }
@@ -622,6 +678,13 @@ enum Request {
         request_fingerprint: String,
         questions: Vec<serde_json::Value>,
     },
+    /// Register a structured request before Fleet projects it as actionable.
+    #[serde(rename = "register_structured")]
+    RegisterStructured {
+        session_id: String,
+        request_fingerprint: String,
+        questions: Vec<serde_json::Value>,
+    },
     /// Human answers an exact current AskUserQuestion request.
     #[serde(rename = "answer_structured")]
     AnswerStructured {
@@ -646,6 +709,12 @@ struct DecideAck {
     ok: bool,
     /// True when a waiter was actually blocked on that session.
     matched: bool,
+}
+
+/// Response confirming the broker owns a structured request.
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterStructuredAck {
+    ok: bool,
 }
 
 /// Response to a LIST.
@@ -740,6 +809,18 @@ async fn handle_connection(stream: UnixStream, state: BrokerState) -> Result<()>
                 state.await_structured(session_id, request_fingerprint, questions).await
             };
             write_line(reader.get_mut(), &resolution).await?;
+        }
+        Request::RegisterStructured {
+            session_id,
+            request_fingerprint,
+            questions,
+        } => {
+            let ok =
+                !session_id.is_empty() && !request_fingerprint.is_empty() && !questions.is_empty();
+            if ok {
+                state.register_structured(session_id, request_fingerprint, questions);
+            }
+            write_line(reader.get_mut(), &RegisterStructuredAck { ok }).await?;
         }
         Request::AnswerStructured {
             session_id,
@@ -908,6 +989,30 @@ pub fn client_await_structured(
             Ok(None) | Err(_) => std::thread::sleep(REDIAL_INTERVAL),
         }
     }
+}
+
+/// Establish the broker-side structured-answer fence before Fleet persists the
+/// matching AskUserQuestion event. A later [`client_await_structured`] with the
+/// same exact request reuses this pending entry, including an answer delivered
+/// in the tiny interval between registration and hook blocking.
+pub fn client_register_structured(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: &str,
+    questions: &[serde_json::Value],
+) -> std::io::Result<bool> {
+    let response = client_round_trip(
+        sock,
+        &serde_json::json!({
+            "op": "register_structured",
+            "session_id": session_id,
+            "request_fingerprint": request_fingerprint,
+            "questions": questions,
+        }),
+    )?;
+    serde_json::from_value::<RegisterStructuredAck>(response)
+        .map(|ack| ack.ok)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn try_await_structured_once(
@@ -1215,6 +1320,70 @@ mod tests {
             serde_json::from_str(round_trip(&sock, &answer_line).await.trim()).unwrap();
         assert!(!second.matched, "first structured answer must win");
         assert!(!second.stale);
+
+        handle.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn structured_registration_keeps_an_early_answer_for_the_hook() {
+        let (sock, _state, handle) = spawn_broker(Duration::from_secs(30)).await;
+        let questions = vec![serde_json::json!({
+            "question": "Continue?",
+            "options": [{"label": "Yes"}],
+        })];
+        let fingerprint = "fnv1a64:registered";
+
+        let register_socket = sock.clone();
+        let registered = tokio::task::spawn_blocking(move || {
+            client_register_structured(&register_socket, "ask-registered", fingerprint, &questions)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(registered);
+
+        let answer_socket = sock.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &answer_socket,
+                "ask-registered",
+                fingerprint,
+                &[StructuredQuestionAnswer {
+                    question: "Continue?".to_string(),
+                    selected_options: vec!["Yes".to_string()],
+                }],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(accepted.matched);
+
+        let await_socket = sock.clone();
+        let resolution = tokio::task::spawn_blocking(move || {
+            client_await_structured(
+                &await_socket,
+                "ask-registered",
+                fingerprint,
+                &[serde_json::json!({
+                    "question": "Continue?",
+                    "options": [{"label": "Yes"}],
+                })],
+                Duration::from_secs(1),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            resolution,
+            StructuredResolution::Answered {
+                answers: vec![StructuredQuestionAnswer {
+                    question: "Continue?".to_string(),
+                    selected_options: vec!["Yes".to_string()],
+                }],
+            }
+        );
 
         handle.abort();
         let _ = std::fs::remove_file(&sock);

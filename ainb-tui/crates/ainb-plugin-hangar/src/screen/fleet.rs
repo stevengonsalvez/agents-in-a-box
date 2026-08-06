@@ -422,6 +422,9 @@ pub enum FleetAction {
         request_fingerprint: String,
         request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
     },
+    ReconcileStructured {
+        request_fingerprint: String,
+    },
     Approve {
         request_fingerprint: String,
         request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
@@ -467,6 +470,11 @@ impl FleetAction {
                 request_fingerprint,
                 request_identity,
             },
+            Self::ReconcileStructured {
+                request_fingerprint,
+            } => ControlAction::ReconcileStructured {
+                request_fingerprint,
+            },
             Self::Approve {
                 request_fingerprint,
                 request_identity,
@@ -503,6 +511,7 @@ impl FleetAction {
         match self {
             Self::StructuredAnswer { .. } => capabilities.contains("structured_answer"),
             Self::DismissStructured { .. } => capabilities.contains("structured_dismiss"),
+            Self::ReconcileStructured { .. } => capabilities.contains("structured_answer"),
             Self::Approve { .. } | Self::Deny { .. } => capabilities.contains("approvals"),
             Self::SendText { .. } => {
                 capabilities.contains("send_prompt") || capabilities.contains("tmux_text")
@@ -522,6 +531,7 @@ impl FleetAction {
         match self {
             Self::StructuredAnswer { .. } => "structured_answer",
             Self::DismissStructured { .. } => "structured_dismiss",
+            Self::ReconcileStructured { .. } => "structured_answer",
             Self::Approve { .. } | Self::Deny { .. } => "approvals",
             Self::SendText { .. } => "send_prompt or tmux_text",
             Self::VerifiedPicker { .. } => "verified_picker",
@@ -540,6 +550,7 @@ impl FleetAction {
             self,
             Self::StructuredAnswer { .. }
                 | Self::DismissStructured { .. }
+                | Self::ReconcileStructured { .. }
                 | Self::Approve { .. }
                 | Self::Deny { .. }
         )
@@ -1074,9 +1085,8 @@ fn reduce_answer_card_click(
             let answer = queue.current_mut().expect("answer queue changed during click");
             answer.question_index = question_index;
             answer.option_cursor = option_index;
-            let selected_other = answer.questions[question_index].options[option_index]
-                .label
-                .eq_ignore_ascii_case("other");
+            let selected_other =
+                is_free_text_option(&answer.questions[question_index].options[option_index].label);
             let selected = &mut answer.selections[question_index];
             if answer.questions[question_index].multi_select {
                 if !selected.remove(&option_index) {
@@ -1150,9 +1160,37 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // Broadcast is `b` only: the uppercase alias was dead (the hangar router
         // claims bare `B` as the Boards tab) (#450).
         FleetKey::Char('b') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
+        FleetKey::Char('r') => {
+            if let Some(intent) = reconcile_structured_intent(state) {
+                return Some(intent);
+            }
+            return request_action(state, FleetAction::Restart);
+        }
         _ => {}
     }
     None
+}
+
+fn reconcile_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent> {
+    let row = state
+        .selected_key
+        .as_deref()
+        .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
+    let request_fingerprint = row.current_request_fingerprint.clone()?;
+    if !row.provider.eq_ignore_ascii_case("claude")
+        || !row.is_managed()
+        || !row.attention_state.eq_ignore_ascii_case("ASK")
+        || !row.capabilities.contains("structured_answer")
+    {
+        return None;
+    }
+    Some(FleetIntent::Execute {
+        session_key: row.session_key.clone(),
+        expected_version: row.version,
+        action: FleetAction::ReconcileStructured {
+            request_fingerprint,
+        },
+    })
 }
 
 fn begin_structured_answer(state: &mut FleetPaneState) {
@@ -1221,34 +1259,7 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            options: question
-                .get("options")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|option| {
-                    option.as_str().map_or_else(
-                        || {
-                            option.get("label").and_then(serde_json::Value::as_str).map(|label| {
-                                AnswerOption {
-                                    label: label.to_string(),
-                                    description: option
-                                        .get("description")
-                                        .and_then(serde_json::Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                }
-                            })
-                        },
-                        |label| {
-                            Some(AnswerOption {
-                                label: label.to_string(),
-                                description: String::new(),
-                            })
-                        },
-                    )
-                })
-                .collect(),
+            options: answer_options(question),
             multi_select: question
                 .get("multiSelect")
                 .or_else(|| question.get("multi_select"))
@@ -1256,6 +1267,51 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .unwrap_or(false),
         })
         .collect()
+}
+
+fn answer_options(question: &serde_json::Value) -> Vec<AnswerOption> {
+    let mut options: Vec<_> = question
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| {
+            option.as_str().map_or_else(
+                || {
+                    option.get("label").and_then(serde_json::Value::as_str).map(|label| {
+                        AnswerOption {
+                            label: label.to_string(),
+                            description: option
+                                .get("description")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        }
+                    })
+                },
+                |label| {
+                    Some(AnswerOption {
+                        label: label.to_string(),
+                        description: String::new(),
+                    })
+                },
+            )
+        })
+        .collect();
+    if !options.is_empty() && !options.iter().any(|option| is_free_text_option(&option.label)) {
+        options.push(AnswerOption {
+            label: "Type your own answer".to_string(),
+            description: "Enter a custom answer".to_string(),
+        });
+    }
+    options
+}
+
+fn is_free_text_option(label: &str) -> bool {
+    matches!(
+        label.trim().to_ascii_lowercase().as_str(),
+        "other" | "type something" | "type something." | "type your own answer"
+    )
 }
 
 fn request_identity(
@@ -1394,7 +1450,7 @@ fn reduce_answer_key(
             let selected_other = answer.selections[answer.question_index]
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.label.eq_ignore_ascii_case("other"));
+                .any(|option| is_free_text_option(&option.label));
             if selected_other && answer.texts[answer.question_index].trim().is_empty() {
                 answer.editing_text = true;
             } else {
@@ -1481,19 +1537,12 @@ fn submit_answer(
         .zip(&answer.texts)
         .map(|((question, selected), text)| {
             let text = (!text.trim().is_empty()).then(|| text.trim().to_string());
-            let selected_other = selected
+            let selected_options = selected
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.label.eq_ignore_ascii_case("other"));
-            let selected_options = if !question.multi_select && selected_other && text.is_some() {
-                Vec::new()
-            } else {
-                selected
-                    .iter()
-                    .filter_map(|index| question.options.get(*index))
-                    .map(|option| option.label.clone())
-                    .collect()
-            };
+                .filter(|option| !is_free_text_option(&option.label))
+                .map(|option| option.label.clone())
+                .collect();
             ainb_hangar_proto::fleet::FleetQuestionAnswer {
                 question_id: question.id.clone(),
                 selected_options,
@@ -2576,6 +2625,7 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
         && session.capabilities.contains("structured_answer")
     {
         actions.push("Enter Answer");
+        actions.push("r Reconcile");
     }
     if session.attention_state.eq_ignore_ascii_case("APPROVAL")
         && session.capabilities.contains("approvals")
@@ -2597,7 +2647,11 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
     if session.capabilities.contains("stop") {
         actions.push("s Stop");
     }
-    if session.capabilities.contains("restart") {
+    if session.capabilities.contains("restart")
+        && !(session.attention_state.eq_ignore_ascii_case("ASK")
+            && session.is_managed()
+            && session.capabilities.contains("structured_answer"))
+    {
         actions.push("r Restart");
     }
     actions
@@ -2985,7 +3039,7 @@ fn answer_card_hit(
                     }
                     if question_index == answer.question_index
                         && answer.selections[question_index].contains(&option_index)
-                        && option.label.eq_ignore_ascii_case("other")
+                        && is_free_text_option(&option.label)
                     {
                         option_row = option_row.saturating_add(1);
                     }
@@ -3033,7 +3087,7 @@ fn interview_card_height(answer: &AnswerState, question_index: usize, width: u16
                     && answer.selections[question_index]
                         .iter()
                         .filter_map(|index| question.options.get(*index))
-                        .any(|option| option.label.eq_ignore_ascii_case("other")),
+                        .any(|option| is_free_text_option(&option.label)),
             )
     };
     2 + question_text_line_count(question, width.saturating_sub(3)) + body_rows
@@ -3157,7 +3211,7 @@ fn render_interview_question_card(
                 );
                 y = y.saturating_add(1);
             }
-            if active && selected && option.label.eq_ignore_ascii_case("other") {
+            if active && selected && is_free_text_option(&option.label) {
                 if y < bottom.saturating_sub(2) {
                     put_str(
                         buffer,
@@ -3199,7 +3253,7 @@ fn answer_question_complete(answer: &AnswerState, index: usize, question: &Answe
     let selected_other = answer.selections[index]
         .iter()
         .filter_map(|option_index| question.options.get(*option_index))
-        .any(|option| option.label.eq_ignore_ascii_case("other"));
+        .any(|option| is_free_text_option(&option.label));
     !answer.selections[index].is_empty()
         && (!selected_other || !answer.texts[index].trim().is_empty())
 }
@@ -3770,6 +3824,106 @@ mod tests {
         assert_eq!(answers[0].selected_options, ["rg", "ast-grep"]);
         assert_eq!(answers[1].question_id, "ship");
         assert_eq!(answers[1].selected_options, ["Yes"]);
+    }
+
+    #[test]
+    fn claude_choice_list_adds_native_type_something_and_submits_text() {
+        let mut row = session("claude:ask", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("fingerprint-1".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{
+                "id": "region",
+                "question": "Where?",
+                "options": [{"label": "North"}, {"label": "South"}]
+            }]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let FleetMode::Answer(queue) = &state.mode else {
+            panic!("structured interview expected");
+        };
+        assert_eq!(
+            queue.current().unwrap().questions[0].options[2].label,
+            "Type your own answer"
+        );
+        state = apply(&state, FleetEvent::Key(FleetKey::Down)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Down)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = type_text(state, "Inverness");
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+
+        let Some(FleetIntent::Execute {
+            action: FleetAction::StructuredAnswer { answers, .. },
+            ..
+        }) = submitted.intent
+        else {
+            panic!("custom Claude answer must submit");
+        };
+        assert!(answers[0].selected_options.is_empty());
+        assert_eq!(answers[0].text.as_deref(), Some("Inverness"));
+    }
+
+    #[test]
+    fn reconcile_key_targets_only_the_selected_structured_interview() {
+        let mut row = session("claude:ask", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("fingerprint-1".into());
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+
+        assert_eq!(
+            apply(&state, FleetEvent::Key(FleetKey::Char('r'))).intent,
+            Some(FleetIntent::Execute {
+                session_key: "claude:ask".into(),
+                expected_version: 7,
+                action: FleetAction::ReconcileStructured {
+                    request_fingerprint: "fingerprint-1".into(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn reconcile_key_keeps_restart_confirmation_for_non_interview_session() {
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![session(
+            "claude:waiting",
+            "claude",
+            "IDLE",
+            "WAITING",
+            "managed",
+        )]);
+
+        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
+
+        assert!(reduced.intent.is_none());
+        assert!(matches!(
+            reduced.state.mode,
+            FleetMode::Confirm {
+                action: FleetAction::Restart,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reconcile_key_keeps_restart_confirmation_for_codex_interview() {
+        let mut state = FleetPaneState::default();
+        let mut row = session("codex:ask", "codex", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("fingerprint-1".into());
+        state.set_sessions(vec![row]);
+
+        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
+
+        assert!(reduced.intent.is_none());
+        assert!(matches!(
+            reduced.state.mode,
+            FleetMode::Confirm {
+                action: FleetAction::Restart,
+                ..
+            }
+        ));
     }
 
     #[test]
