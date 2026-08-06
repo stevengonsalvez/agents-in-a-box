@@ -314,21 +314,19 @@ private struct FleetNotchFocusChip: View {
     let toggle: () -> Void
 
     var body: some View {
-        if selected {
-            Button(action: toggle) {
-                Text(focus.label)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(FleetNotchPalette.mint)
-            .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
-        } else {
-            Button(action: toggle) {
-                Text(focus.label)
-            }
-            .buttonStyle(.bordered)
-            .tint(.gray)
-            .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+        Button(action: toggle) {
+            Text(focus.label)
+                .font(.subheadline.weight(selected ? .bold : .medium))
+                .foregroundStyle(selected ? .black : Color.white.opacity(0.92))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(selected ? FleetNotchPalette.mint : FleetNotchPalette.control, in: Capsule())
+                .overlay {
+                    Capsule().stroke(selected ? FleetNotchPalette.mint : FleetNotchPalette.muted.opacity(0.35), lineWidth: 1)
+                }
         }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
     }
 }
 
