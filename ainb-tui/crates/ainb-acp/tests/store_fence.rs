@@ -67,3 +67,10 @@ fn this_crate_is_not_one_of_them() {
         "ainb-acp must reach the store only through repo functions"
     );
 }
+
+#[test]
+fn ci_lane_verification_throwaway() {
+    // Deliberate red proving the ainb-acp CI lane executes this crate's
+    // tests; reverted before merge, run link recorded in the PR.
+    panic!("throwaway: ainb-acp lane fires");
+}
