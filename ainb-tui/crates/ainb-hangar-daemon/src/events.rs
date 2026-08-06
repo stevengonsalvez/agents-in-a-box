@@ -85,6 +85,16 @@ pub struct EventBroker {
     /// Committed Fleet revisions. Durable rows in `fleet_event` remain source
     /// of truth; this channel only wakes live subscribers.
     fleet_tx: broadcast::Sender<i64>,
+    /// Committed chat-bus message cursors (`fleet_message.seq`, never the
+    /// ULID). Durable rows are the truth; this channel only wakes forwarders,
+    /// which page to head from their own cursor, so a lagged receiver loses a
+    /// wakeup and nothing else.
+    message_tx: broadcast::Sender<i64>,
+    /// Committed transcript cursors as `(session_key, ingest_order)`. One
+    /// unfiltered stream for every session, so a subscriber filters on its own
+    /// `session_key` BEFORE issuing any query: an unrelated session's chunk
+    /// costs a wakeup and nothing more.
+    transcript_tx: broadcast::Sender<(String, i64)>,
 }
 
 impl Default for EventBroker {
@@ -102,11 +112,15 @@ impl EventBroker {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (transcript_tx, _trx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
             outbox_tx: None,
             attention_tx,
             fleet_tx,
+            message_tx,
+            transcript_tx,
         }
     }
 
@@ -123,6 +137,8 @@ impl EventBroker {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (transcript_tx, _trx) = broadcast::channel(CHANNEL_CAPACITY);
         let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
         (
             Self {
@@ -130,6 +146,8 @@ impl EventBroker {
                 outbox_tx: Some(outbox_tx),
                 attention_tx,
                 fleet_tx,
+                message_tx,
+                transcript_tx,
             },
             outbox_rx,
         )
@@ -143,6 +161,8 @@ impl EventBroker {
             outbox_tx: self.outbox_tx.clone(),
             attention_tx: self.attention_tx.clone(),
             fleet_tx: self.fleet_tx.clone(),
+            message_tx: self.message_tx.clone(),
+            transcript_tx: self.transcript_tx.clone(),
         }
     }
 
@@ -171,6 +191,22 @@ impl EventBroker {
     pub fn subscribe_fleet(&self) -> broadcast::Receiver<i64> {
         self.fleet_tx.subscribe()
     }
+
+    /// Register before reading the chat-bus head, then page durable rows after
+    /// it. Carries the committed `fleet_message.seq` only: the row itself is
+    /// read from the store, so a dropped wakeup costs nothing.
+    #[must_use]
+    pub fn subscribe_message(&self) -> broadcast::Receiver<i64> {
+        self.message_tx.subscribe()
+    }
+
+    /// Register before reading a session's transcript head, then page durable
+    /// rows after it. Carries `(session_key, ingest_order)` for EVERY session;
+    /// the subscriber filters to its own key before querying.
+    #[must_use]
+    pub fn subscribe_transcript(&self) -> broadcast::Receiver<(String, i64)> {
+        self.transcript_tx.subscribe()
+    }
 }
 
 /// A publishing handle onto the broker, threaded through the daemon's mutation
@@ -181,6 +217,8 @@ pub struct EventSink {
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
     attention_tx: broadcast::Sender<HangarEvent>,
     fleet_tx: broadcast::Sender<i64>,
+    message_tx: broadcast::Sender<i64>,
+    transcript_tx: broadcast::Sender<(String, i64)>,
 }
 
 impl EventSink {
@@ -220,6 +258,18 @@ impl EventSink {
     /// Wake live Fleet subscribers after a durable revision commits.
     pub fn emit_fleet_revision(&self, revision: i64) {
         let _ = self.fleet_tx.send(revision);
+    }
+
+    /// Wake live chat-bus subscribers after a `fleet_message` row commits.
+    /// `seq` is the committed cursor, never the ULID.
+    pub fn emit_message_seq(&self, seq: i64) {
+        let _ = self.message_tx.send(seq);
+    }
+
+    /// Wake live transcript subscribers after a `fleet_provider_event` batch
+    /// commits for `session_key`.
+    pub fn emit_transcript_order(&self, session_key: &str, ingest_order: i64) {
+        let _ = self.transcript_tx.send((session_key.to_string(), ingest_order));
     }
 }
 
@@ -380,6 +430,49 @@ mod tests {
             matches!(durable.event, HangarEvent::TaskFinished { .. }),
             "the outbox never carries an attention event"
         );
+    }
+
+    /// The chat-bus and transcript channels are WAKEUPS: they carry the
+    /// committed cursor (never a payload), they are isolated from the workspace
+    /// stream and its durable outbox, and emitting with no subscriber is a
+    /// silent no-op. Durable rows remain the only source of truth.
+    #[tokio::test]
+    async fn message_and_transcript_channels_carry_cursors_and_stay_isolated() {
+        let (broker, mut outbox_rx) = EventBroker::with_outbox();
+        let mut messages = broker.subscribe_message();
+        let mut transcript = broker.subscribe_transcript();
+        let mut workspace = broker.subscribe();
+
+        broker.sink().emit_message_seq(42);
+        broker.sink().emit_transcript_order("acp:one", 7);
+
+        assert_eq!(messages.recv().await.unwrap(), 42, "the cursor is the seq");
+        assert_eq!(
+            transcript.recv().await.unwrap(),
+            ("acp:one".to_string(), 7),
+            "the transcript wakeup names its session"
+        );
+
+        // Neither reaches the workspace broadcast or the durable outbox. A
+        // sentinel proves absence rather than mere pendingness.
+        broker.sink().emit("ws-a", finished("t1"));
+        assert!(matches!(
+            workspace.recv().await.unwrap().event,
+            HangarEvent::TaskFinished { .. }
+        ));
+        assert!(matches!(
+            outbox_rx.recv().await.unwrap().event,
+            HangarEvent::TaskFinished { .. }
+        ));
+    }
+
+    /// A wakeup with no live subscriber is dropped, never an error: the
+    /// durable row already landed.
+    #[test]
+    fn wakeups_without_subscribers_are_noops() {
+        let broker = EventBroker::new();
+        broker.sink().emit_message_seq(1);
+        broker.sink().emit_transcript_order("acp:one", 1);
     }
 
     /// The encoded frame is a Content-Length envelope around a notification

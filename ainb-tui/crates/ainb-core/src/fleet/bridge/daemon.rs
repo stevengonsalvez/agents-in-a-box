@@ -124,6 +124,34 @@ impl FleetSubscription {
     }
 }
 
+/// Live chat-bus connection retained after the subscribe acknowledgement.
+pub struct MessageSubscription {
+    reader: BufReader<OwnedReadHalf>,
+    // Retain the write half so the server does not observe EOF and tear down
+    // this connection's message forwarder after the acknowledgement.
+    _writer: OwnedWriteHalf,
+}
+
+impl MessageSubscription {
+    /// Wait for the next committed message. There is no resync frame on this
+    /// stream: the forwarder pages to head from its own cursor after lag, so a
+    /// caller only ever sees rows, in commit order.
+    pub async fn next_message(
+        &mut self,
+    ) -> Result<ainb_hangar_proto::fleet::FleetMessage, DaemonError> {
+        loop {
+            let frame = read_frame(&mut self.reader).await?;
+            if frame.get("method").and_then(Value::as_str) != Some("fleet/message_event") {
+                continue;
+            }
+            let params: ainb_hangar_proto::fleet::FleetMessageEventParams =
+                serde_json::from_value(frame.get("params").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| DaemonError::Decode(error.to_string()))?;
+            return Ok(params.message);
+        }
+    }
+}
+
 impl DaemonClient {
     /// Resolve the socket + token from the environment. Errors when the home is
     /// unresolvable or the token file is absent (daemon not up) — the caller
@@ -265,6 +293,105 @@ impl DaemonClient {
         let value = serde_json::to_value(params).expect("AtcUnregisterParams serializes");
         let result = self.call(methods::ATC_UNREGISTER, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Send one chat-bus message to explicit recipients.
+    pub async fn message_send(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetMessageSendParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetMessageSendResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetMessageSendParams serializes");
+        let result = self.call(methods::FLEET_MESSAGE_SEND, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Page the chat log by its commit-ordered cursor.
+    pub async fn message_list(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetMessageListParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetMessageListResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetMessageListParams serializes");
+        let result = self.call(methods::FLEET_MESSAGE_LIST, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
+    /// Open a persistent chat-bus subscription and retain its live stream.
+    ///
+    /// Only the acknowledgement is deadlined: the stream itself is unbounded by
+    /// design (`msg follow` runs until the operator stops it).
+    pub async fn open_message_subscription(
+        &self,
+        after_id: Option<String>,
+    ) -> Result<
+        (
+            ainb_hangar_proto::fleet::FleetMessageSubscribeResult,
+            MessageSubscription,
+        ),
+        DaemonError,
+    > {
+        tokio::time::timeout(RPC_TIMEOUT, self.open_message_subscription_inner(after_id))
+            .await
+            .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
+    }
+
+    async fn open_message_subscription_inner(
+        &self,
+        after_id: Option<String>,
+    ) -> Result<
+        (
+            ainb_hangar_proto::fleet::FleetMessageSubscribeResult,
+            MessageSubscription,
+        ),
+        DaemonError,
+    > {
+        let (mut reader, mut writer) = self.dial().await?;
+        let params = match after_id {
+            Some(after_id) => json!({ "after_id": after_id }),
+            None => json!({}),
+        };
+        write_frame(&mut writer, methods::FLEET_MESSAGE_SUBSCRIBE, params, 2).await?;
+        let response = read_response(&mut reader).await?;
+        if let Some(error) = response.error {
+            return Err(DaemonError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let ack = serde_json::from_value(response.result.unwrap_or(Value::Null))
+            .map_err(|error| DaemonError::Decode(error.to_string()))?;
+        Ok((
+            ack,
+            MessageSubscription {
+                reader,
+                _writer: writer,
+            },
+        ))
+    }
+
+    /// Dial the socket and complete the mandatory `auth/hello` first frame.
+    async fn dial(&self) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+        let stream =
+            UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
+                path: self.socket.display().to_string(),
+                source,
+            })?;
+        let (read_half, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        write_frame(
+            &mut writer,
+            methods::AUTH_HELLO,
+            json!({ "token": self.token }),
+            1,
+        )
+        .await?;
+        let hello = read_response(&mut reader).await?;
+        if let Some(error) = hello.error {
+            return Err(DaemonError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        Ok((reader, writer))
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, DaemonError> {

@@ -2018,6 +2018,7 @@ Commands:
   deny          Deny a session's pending permission request (no arg: list waiters)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
+  msg           Chat bus: persisted messages with per-recipient delivery receipts
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
   cost          Per-session / model / day / group spend rollups + budget caps
@@ -2036,6 +2037,8 @@ EXAMPLES:
   ainb fleet standup               Live status of all sessions
   ainb fleet needs                 Sessions blocked on input / errors
   ainb fleet broadcast "git pull" --all     Send a prompt to every session
+  ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts
+  ainb fleet msg follow            Stream committed chat messages as NDJSON
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
   ainb fleet approve <session-id>  Approve that session's pending permission request
@@ -2115,6 +2118,83 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --filter <filter>  Regex against tmux/workspace name
       --cwd <cwd>        Substring against cwd
+  -h, --help             Print help
+```
+
+### `ainb fleet msg`
+
+Chat bus: persisted messages with per-recipient delivery receipts
+
+```console
+$ ainb fleet msg --help
+Chat bus: persisted messages with per-recipient delivery receipts
+
+Usage: ainb fleet msg [OPTIONS] <COMMAND>
+
+Commands:
+  send    Send one message to explicit sessions, with receipts
+  list    Page the chat log, oldest first
+  follow  Stream committed messages as NDJSON until stopped
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet msg send`
+
+Send one message to explicit sessions, with receipts
+
+```console
+$ ainb fleet msg send --help
+Send one message to explicit sessions, with receipts
+
+Usage: ainb fleet msg send [OPTIONS] --target <target>
+
+Options:
+      --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
+      --target <target>          Recipient session_key (repeat for a broadcast)
+      --text <text>              Message body, or `-` to read stdin
+      --scope <scope>            Explicit scope key (default: the recipient's own scope)
+      --request-id <request-id>  Idempotency token; a replay with different content is refused
+  -h, --help                     Print help
+
+Exit 0 means the message was persisted and every leg reached a terminal state, NOT that any recipient received it. Read deliveries[].state (DELIVERED / REJECTED / FAILED / UNKNOWN) for per-recipient outcome.
+```
+
+#### `ainb fleet msg list`
+
+Page the chat log, oldest first
+
+```console
+$ ainb fleet msg list --help
+Page the chat log, oldest first
+
+Usage: ainb fleet msg list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --scope <scope>    Filter to one scope key
+      --origin <origin>  Thread view: only replies to this message id
+      --after <after>    Return rows after this message id
+      --limit <limit>    Page size (clamped to the daemon's maximum) [default: 20]
+  -h, --help             Print help
+```
+
+#### `ainb fleet msg follow`
+
+Stream committed messages as NDJSON until stopped
+
+```console
+$ ainb fleet msg follow --help
+Stream committed messages as NDJSON until stopped
+
+Usage: ainb fleet msg follow [OPTIONS]
+
+Options:
+      --after <after>    Resume after this message id (default: the log head)
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
 ```
 

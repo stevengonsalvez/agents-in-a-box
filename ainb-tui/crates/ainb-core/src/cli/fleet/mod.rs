@@ -17,6 +17,7 @@ pub mod cost;
 pub mod daemon;
 pub mod daemons;
 pub mod enrich_cache;
+pub mod msg;
 pub mod needs;
 pub mod sequence;
 pub mod standup;
@@ -36,6 +37,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         }
         Some(("standup", sub)) => standup::execute(sub, format).await,
         Some(("broadcast", sub)) => broadcast::execute(sub, format).await,
+        Some(("msg", sub)) => msg::execute(sub, format).await,
         Some(("sequence", sub)) => sequence::execute(sub, format).await,
         Some(("needs", sub)) => needs::execute(sub, format).await,
         Some(("cost", sub)) => cost::execute(sub, format).await,
