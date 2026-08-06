@@ -39,8 +39,8 @@ final class FleetRosterPresentationTests: XCTestCase {
             ["ask"]
         )
         XCTAssertEqual(
-            FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .active)).map(\.sessionKey),
-            ["active"]
+            Set(FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters(focus: .active)).map(\.sessionKey)),
+            Set(["active", "ask", "idle", "done"])
         )
     }
 
@@ -72,6 +72,23 @@ final class FleetRosterPresentationTests: XCTestCase {
         )
     }
 
+    func testDefaultFocusShowsEveryNonExitedSession() {
+        let sessions = [
+            session(key: "starting", lifecycle: .starting),
+            session(key: "running", lifecycle: .running),
+            session(key: "idle", lifecycle: .idle),
+            session(key: "ask", lifecycle: .idle, attention: .ask),
+            session(key: "done", lifecycle: .turnComplete),
+            session(key: "unknown", lifecycle: .unknown),
+            session(key: "exited", lifecycle: .exited),
+        ]
+        XCTAssertEqual(FleetRosterFilters().focus, .active)
+        XCTAssertEqual(
+            Set(FleetRosterPresentation.visibleSessions(sessions, search: "", filters: FleetRosterFilters()).map(\.sessionKey)),
+            Set(["starting", "running", "idle", "ask", "done", "unknown"])
+        )
+    }
+
     func testFreshnessUsesDaemonMilliseconds() {
         let value = session(key: "fresh", lifecycle: .idle, observedAt: 1_700_000_000_000)
         XCTAssertEqual(FleetRosterPresentation.freshnessLabel(for: value), "2023-11-14T22:13:20Z")
@@ -90,6 +107,8 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(identity.worktree, "agents-in-a-box--f-minor-bugs--abcd")
         XCTAssertEqual(identity.branch, "f/minor-bugs")
         XCTAssertEqual(identity.accessibilityLabel, "agents-in-a-box, agents-in-a-box--f-minor-bugs--abcd, f/minor-bugs")
+        XCTAssertEqual(identity.contextLabel, "f/minor-bugs · agents-in-a-box--f-minor-bugs--abcd")
+        XCTAssertEqual(identity.displayLabel, "agents-in-a-box · f/minor-bugs · agents-in-a-box--f-minor-bugs--abcd")
     }
 
     func testStatusIconPrefersDegradedSessionOverAttention() {

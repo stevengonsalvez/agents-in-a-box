@@ -19,7 +19,7 @@ enum FleetRosterFocus: String, Codable, CaseIterable, Identifiable {
     func matches(_ session: FleetSession) -> Bool {
         switch self {
         case .all: true
-        case .active: session.lifecycle == .starting || session.lifecycle == .running
+        case .active: session.lifecycle != .exited
         case .needsYou: session.attention != .none
         case .ask: session.attention == .ask
         case .idle: session.lifecycle == .idle
@@ -29,15 +29,15 @@ enum FleetRosterFocus: String, Codable, CaseIterable, Identifiable {
 }
 
 struct FleetRosterFilters: Codable, Equatable {
-    var focus: FleetRosterFocus = .all
+    var focus: FleetRosterFocus = .active
     var attentionOnly = false
     var lifecycle: LifecycleState?
     var provider: FleetProvider?
     var management: ManagementState?
     var transportHealth: TransportHealth?
 
-    static let all = FleetRosterFilters()
-    static let attentionOnly = FleetRosterFilters(attentionOnly: true)
+    static let all = FleetRosterFilters(focus: .all)
+    static let attentionOnly = FleetRosterFilters(focus: .all, attentionOnly: true)
 }
 
 enum FleetRosterSort: String, Codable, CaseIterable, Identifiable {
@@ -59,7 +59,7 @@ struct FleetPresentationPreferences: Codable, Equatable {
     private static let defaultsKey = "ainb.fleet.presentation.v3"
 
     var version = currentVersion
-    var filters = FleetRosterFilters.all
+    var filters = FleetRosterFilters()
     var sort = FleetRosterSort.priority
 
     static func load(defaults: UserDefaults = .standard) -> Self {
@@ -162,6 +162,14 @@ struct FleetSessionIdentity: Equatable {
         [repository, worktree, branch].compactMap { $0 }.joined(separator: ", ")
     }
 
+    var contextLabel: String {
+        [branch, worktree].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var displayLabel: String {
+        contextLabel.isEmpty ? repository : "\(repository) · \(contextLabel)"
+    }
+
     init(session: FleetSession) {
         let path = URL(fileURLWithPath: session.cwd)
         let components = path.pathComponents
@@ -179,7 +187,7 @@ struct FleetSessionIdentity: Equatable {
             branch = Self.branchLabel(labels[1])
         } else {
             repository = candidate.isEmpty || candidate == "/" ? (session.displayName ?? session.sessionKey) : candidate
-            worktree = candidate.isEmpty || candidate == "/" ? nil : candidate
+            worktree = nil
             branch = nil
         }
     }
