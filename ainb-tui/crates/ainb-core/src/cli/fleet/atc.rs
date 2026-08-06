@@ -1127,6 +1127,10 @@ fn hook_core_for_agent(
     let self_inbox =
         (!session_id.is_empty()).then(|| plumbing::Inbox::open_in(&inbox_dir, session_id));
     let has_self_inbox = self_inbox.as_ref().is_some_and(|ib| !ib.is_empty());
+    let is_structured_ask = agent == "claude"
+        && base_event == "PreToolUse"
+        && matcher.as_deref() == Some("AskUserQuestion")
+        && !session_id.is_empty();
 
     // 1. Event log append — the durable record this session's lifecycle is
     //    event-sourced from. Replaces the per-event status/<id>.json write: notifyd
@@ -1139,7 +1143,7 @@ fn hook_core_for_agent(
     //    session ID writes a raw envelope. Broker-mediated structured answers
     //    and approvals remain limited to known Fleet members below.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
-    if !session_id.is_empty() {
+    let append_event = || {
         let event_id = uuid::Uuid::new_v4().to_string();
         let raw_payload_stored = persist_raw_hook_payload(home, &event_id, payload).is_ok();
         let line = build_event_line_for_agent(
@@ -1155,6 +1159,9 @@ fn hook_core_for_agent(
             raw_payload_stored,
         );
         let _ = append_event_line(home, &line);
+    };
+    if !session_id.is_empty() && !is_structured_ask {
+        append_event();
     }
 
     // Self-heal the durable child→parent map. `ainb run` seeds only the live
@@ -1212,11 +1219,7 @@ fn hook_core_for_agent(
     // 4. PreToolUse(AskUserQuestion): block on exact structured answers and
     //    return the full original questions plus Claude's answer map. Labels
     //    never pass through generic text delivery.
-    if agent == "claude"
-        && base_event == "PreToolUse"
-        && matcher.as_deref() == Some("AskUserQuestion")
-        && !session_id.is_empty()
-    {
+    if is_structured_ask {
         let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
         let (tool_input, questions, fingerprint) = match extract_structured_tool_input(payload) {
             Ok(request) => request,
@@ -1230,6 +1233,23 @@ fn hook_core_for_agent(
                 ))));
             }
         };
+        let registered = ainb_plugin_notifyd::broker::client_register_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+        )
+        .unwrap_or(false);
+        if !registered {
+            let resolution = ainb_plugin_notifyd::broker::StructuredResolution::Rejected {
+                reason: "Fleet structured broker unavailable".to_string(),
+            };
+            return Ok(Some(HookEmit::Structured(structured_emit_json(
+                tool_input,
+                &resolution,
+            ))));
+        }
+        append_event();
         let resolution = ainb_plugin_notifyd::broker::client_await_structured(
             &socket,
             session_id,
@@ -2488,6 +2508,11 @@ mod tests {
             original_questions.as_array().unwrap().clone()
         );
         let fingerprint = pending.request_fingerprint.unwrap();
+        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        assert!(
+            events.contains("ask-session"),
+            "Fleet event must appear only after broker registration"
+        );
 
         let stale_socket = paths.approve_socket.clone();
         let stale = tokio::task::spawn_blocking(move || {
@@ -2548,5 +2573,46 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_file(&paths.approve_socket);
+    }
+
+    #[test]
+    fn ask_hook_without_broker_rejects_without_persisting_a_fleet_card() {
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("plain-claude-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_missing_broker",
+            "tool_input": {
+                "questions": [{
+                    "question": "Continue?",
+                    "header": "Continue",
+                    "options": [{"label": "Yes"}]
+                }]
+            }
+        })
+        .to_string();
+
+        let emitted = hook_core(
+            home.path(),
+            "PreToolUse",
+            "missing-broker-session",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            50,
+            &payload,
+            Some("AskUserQuestion"),
+        )
+        .unwrap()
+        .expect("structured hook output");
+        let HookEmit::Structured(line) = emitted else {
+            panic!("AskUserQuestion must emit structured hook output");
+        };
+        assert!(line.contains("Fleet structured broker unavailable"));
+        assert!(
+            !home.path().join("events.jsonl").exists(),
+            "unregistered AskUserQuestion must never create an actionable Fleet card"
+        );
     }
 }
