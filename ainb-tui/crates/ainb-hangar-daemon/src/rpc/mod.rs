@@ -9451,7 +9451,10 @@ mod tests {
             request_fingerprint: "request".to_string(),
             request_identity: None,
         };
-        let mut capabilities = FleetCapabilities { approvals: true, ..FleetCapabilities::default() };
+        let mut capabilities = FleetCapabilities {
+            approvals: true,
+            ..FleetCapabilities::default()
+        };
         assert!(!action_capability(&capabilities, &action));
         capabilities.approval_session = true;
         assert!(action_capability(&capabilities, &action));
