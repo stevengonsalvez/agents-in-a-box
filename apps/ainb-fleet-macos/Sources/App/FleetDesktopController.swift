@@ -219,10 +219,12 @@ private struct FleetNotchView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 7) {
                     ForEach(FleetRosterFocus.allCases) { focus in
-                        Button(focus.label) { presentation.preferences.filters.focus = focus }
-                            .buttonStyle(.bordered)
-                            .tint(presentation.preferences.filters.focus == focus ? FleetNotchPalette.mint : nil)
-                            .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+                        FleetNotchFocusChip(
+                            focus: focus,
+                            selected: presentation.preferences.filters.focus == focus
+                        ) {
+                            toggleFocus(focus)
+                        }
                     }
                 }
             }
@@ -296,6 +298,29 @@ private struct FleetNotchView: View {
         guard !visibleSessions.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
         store.selectedSessionKey = visibleSessions.first?.sessionKey
     }
+
+    private func toggleFocus(_ focus: FleetRosterFocus) {
+        if presentation.preferences.filters.focus == focus, focus != .all {
+            presentation.preferences.filters.focus = .all
+        } else {
+            presentation.preferences.filters.focus = focus
+        }
+    }
+}
+
+private struct FleetNotchFocusChip: View {
+    let focus: FleetRosterFocus
+    let selected: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            Text(focus.label)
+        }
+        .buttonStyle(.bordered)
+        .tint(selected ? FleetNotchPalette.mint : .gray)
+        .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+    }
 }
 
 private struct FleetNotchSessionRow: View {
@@ -312,7 +337,7 @@ private struct FleetNotchSessionRow: View {
                     .foregroundStyle(providerColor)
                     .frame(width: 25)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(session.displayName ?? session.sessionKey)
+                    Text(FleetRosterPresentation.sessionIdentity(for: session).repository)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(metadata)
@@ -348,8 +373,8 @@ private struct FleetNotchSessionRow: View {
     }
 
     private var metadata: String {
-        let repository = URL(fileURLWithPath: session.cwd).lastPathComponent
-        return repository.isEmpty || repository == session.cwd ? session.cwd : "\(repository) · \(session.cwd)"
+        let identity = FleetRosterPresentation.sessionIdentity(for: session)
+        return [identity.worktree, identity.branch].compactMap { $0 }.joined(separator: " · ")
     }
 
     private var activity: String {

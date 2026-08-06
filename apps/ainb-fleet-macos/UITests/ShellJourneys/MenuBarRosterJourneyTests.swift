@@ -47,6 +47,9 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         waitFor(app.buttons["fleet.notch.row.codex:ask"])
         XCTAssertFalse(app.buttons["fleet.notch.row.claude:active"].exists)
         waitFor(app.staticTexts["fleet.notch.detail.codex:ask"])
+
+        app.buttons["fleet.notch.filter.ask"].click()
+        waitFor(app.buttons["fleet.notch.row.claude:active"])
     }
 
     @MainActor

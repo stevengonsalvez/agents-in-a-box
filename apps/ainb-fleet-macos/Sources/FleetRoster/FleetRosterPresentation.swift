@@ -77,6 +77,10 @@ struct FleetPresentationPreferences: Codable, Equatable {
 }
 
 enum FleetRosterPresentation {
+    static func sessionIdentity(for session: FleetSession) -> FleetSessionIdentity {
+        FleetSessionIdentity(session: session)
+    }
+
     static func visibleSessions(
         _ sessions: [FleetSession],
         search: String,
@@ -146,5 +150,43 @@ enum FleetRosterPresentation {
         case .exited: return 2
         case .unknown: return 1
         }
+    }
+}
+
+struct FleetSessionIdentity: Equatable {
+    let repository: String
+    let worktree: String?
+    let branch: String?
+
+    init(session: FleetSession) {
+        let path = URL(fileURLWithPath: session.cwd)
+        let components = path.pathComponents
+        let worktreeIndex = components.lastIndex(of: "worktrees")
+        let candidate = worktreeIndex.flatMap { index -> String? in
+            let remainder = components.dropFirst(index + 1)
+            guard !remainder.isEmpty else { return nil }
+            return remainder.first == "by-name" ? remainder.dropFirst().last : remainder.last
+        } ?? path.lastPathComponent
+        let labels = candidate.split(separator: "--", omittingEmptySubsequences: true).map(String.init)
+
+        if labels.count >= 2 {
+            repository = labels[0]
+            worktree = candidate
+            branch = Self.branchLabel(labels[1])
+        } else {
+            repository = candidate.isEmpty || candidate == "/" ? (session.displayName ?? session.sessionKey) : candidate
+            worktree = candidate.isEmpty || candidate == "/" ? nil : candidate
+            branch = nil
+        }
+    }
+
+    private static func branchLabel(_ value: String) -> String {
+        for prefix in ["f", "feat", "fix", "ops", "chore", "docs"] {
+            let marker = "\(prefix)-"
+            if value.hasPrefix(marker) {
+                return "\(prefix)/\(value.dropFirst(marker.count))"
+            }
+        }
+        return value
     }
 }

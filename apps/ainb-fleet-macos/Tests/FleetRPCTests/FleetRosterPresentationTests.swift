@@ -83,6 +83,14 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(decoded.activeWorkCount, 3)
     }
 
+    func testSessionIdentityUsesWorktreeRepositoryAndBranch() {
+        let value = session(key: "claude:uuid", lifecycle: .idle, cwd: "/Users/stevie/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-minor-bugs--abcd")
+        let identity = FleetRosterPresentation.sessionIdentity(for: value)
+        XCTAssertEqual(identity.repository, "agents-in-a-box")
+        XCTAssertEqual(identity.worktree, "agents-in-a-box--f-minor-bugs--abcd")
+        XCTAssertEqual(identity.branch, "f/minor-bugs")
+    }
+
     func testStatusIconPrefersDegradedSessionOverAttention() {
         let value = session(key: "degraded", lifecycle: .running, attention: .ask, management: .degraded)
         XCTAssertEqual(FleetStatusPresentation.symbol(for: .live(daemonVersion: "test", writeCompatible: true), needsYou: 1, sessions: [value]), "exclamationmark.circle.fill")
@@ -131,7 +139,7 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(event.deepLink.absoluteString, "ainbfleet://session/codex%2Fa%3Fb%23c")
     }
 
-    private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
-        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
+    private func session(key: String, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
+        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
 }
