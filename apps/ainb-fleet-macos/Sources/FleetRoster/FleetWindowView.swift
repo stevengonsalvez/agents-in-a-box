@@ -499,6 +499,8 @@ private struct FleetRosterRow: View {
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
                     .padding(.top, 6)
+                FleetProviderIcon(provider: session.provider, size: 20)
+                    .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(identity.repository)
