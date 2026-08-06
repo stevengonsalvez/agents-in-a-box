@@ -114,13 +114,33 @@ const DELIVERY_COLUMNS: &str = "message_id, session_key, state, fingerprint, det
 pub struct FleetMessageRepo;
 
 impl FleetMessageRepo {
-    /// Insert one message. A replayed `request_id` with a matching
-    /// `request_fingerprint` returns the original row; a mismatched replay is
-    /// rejected (the fleet action/start receipt contract).
+    /// Insert one message carrying no delivery legs (daemon-authored rows: the
+    /// agent replies and markers that answer a prompt rather than address one).
     pub async fn insert_message(
         pool: &SqlitePool,
         message: &NewFleetMessage,
     ) -> Result<FleetMessageRow, FleetMessageError> {
+        Self::insert_message_with_deliveries(pool, message, &[]).await
+    }
+
+    /// Insert one message AND its `PENDING` delivery legs in ONE transaction.
+    ///
+    /// A replayed `request_id` with a matching `request_fingerprint` returns
+    /// the original row; a mismatched replay is rejected (the fleet
+    /// action/start receipt contract).
+    ///
+    /// The legs share the message's transaction deliberately: a replay that
+    /// arrives while the first call is still running must observe a COMPLETE
+    /// leg set. Writing the legs afterwards leaves a window where the replay
+    /// sees a message with no legs and can only answer UNKNOWN for targets that
+    /// are about to resolve DELIVERED, which is exactly the case an idempotency
+    /// token exists to cover (request timeout, then retry).
+    pub async fn insert_message_with_deliveries(
+        pool: &SqlitePool,
+        message: &NewFleetMessage,
+        targets: &[String],
+    ) -> Result<FleetMessageRow, FleetMessageError> {
+        let mut tx = pool.begin().await?;
         let result = sqlx::query(
             "INSERT INTO fleet_message \
              (id, request_id, request_fingerprint, scope_key, origin_message_id, sender, kind, body, created_at) \
@@ -136,14 +156,33 @@ impl FleetMessageRepo {
         .bind(&message.kind)
         .bind(&message.body)
         .bind(message.created_at)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() > 0 {
-            return Self::get_message(pool, &message.id).await?.ok_or_else(|| {
-                FleetMessageError::MessageNotFound {
-                    id: message.id.clone(),
-                }
-            });
+            for session_key in targets {
+                sqlx::query(
+                    "INSERT INTO fleet_message_delivery (message_id, session_key, state) \
+                     VALUES (?, ?, 'PENDING')",
+                )
+                .bind(&message.id)
+                .bind(session_key)
+                .execute(&mut *tx)
+                .await?;
+            }
+            let row = sqlx::query(&format!(
+                "SELECT {MESSAGE_COLUMNS} FROM fleet_message WHERE id = ?"
+            ))
+            .bind(&message.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .as_ref()
+            .map(message_from)
+            .transpose()?
+            .ok_or_else(|| FleetMessageError::MessageNotFound {
+                id: message.id.clone(),
+            })?;
+            tx.commit().await?;
+            return Ok(row);
         }
         // ON CONFLICT(request_id) only fires for a non-NULL token, so the
         // replayed request_id is present by construction here.
@@ -152,7 +191,7 @@ impl FleetMessageRepo {
             "SELECT {MESSAGE_COLUMNS} FROM fleet_message WHERE request_id = ?"
         ))
         .bind(&request_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
         .as_ref()
         .map(message_from)
@@ -160,6 +199,7 @@ impl FleetMessageRepo {
         .ok_or_else(|| FleetMessageError::MessageNotFound {
             id: message.id.clone(),
         })?;
+        tx.rollback().await?;
         if existing.request_fingerprint != message.request_fingerprint {
             return Err(FleetMessageError::RequestFingerprintMismatch { request_id });
         }
@@ -189,6 +229,19 @@ impl FleetMessageRepo {
             .bind(id)
             .fetch_optional(pool)
             .await
+    }
+
+    /// The newest committed row, or `None` on an empty log: the head a
+    /// subscriber acknowledges and starts its cursor from.
+    pub async fn head(pool: &SqlitePool) -> Result<Option<FleetMessageRow>, sqlx::Error> {
+        sqlx::query(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM fleet_message ORDER BY seq DESC LIMIT 1"
+        ))
+        .fetch_optional(pool)
+        .await?
+        .as_ref()
+        .map(message_from)
+        .transpose()
     }
 
     /// Page one scope's messages after a `seq` cursor, oldest first.
@@ -471,6 +524,43 @@ mod tests {
             FleetMessageRepo::insert_message(store.pool(), &forged).await,
             Err(FleetMessageError::RequestFingerprintMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn message_and_its_legs_land_in_one_transaction() {
+        let (_dir, store) = store().await;
+        let mut input = message("msg-1", "broadcast:b-1");
+        input.request_id = Some("req-1".to_string());
+        input.request_fingerprint = Some("fp-1".to_string());
+        let targets = vec!["sess-1".to_string(), "sess-2".to_string()];
+
+        let first =
+            FleetMessageRepo::insert_message_with_deliveries(store.pool(), &input, &targets)
+                .await
+                .unwrap();
+        let legs = FleetMessageRepo::deliveries_for_message(store.pool(), &first.id).await.unwrap();
+        assert_eq!(
+            legs.len(),
+            2,
+            "the legs commit WITH the message, never after"
+        );
+
+        // A replay observes the complete leg set and adds nothing.
+        let mut replay = input.clone();
+        replay.id = "msg-2".to_string();
+        let second =
+            FleetMessageRepo::insert_message_with_deliveries(store.pool(), &replay, &targets)
+                .await
+                .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            FleetMessageRepo::deliveries_for_message(store.pool(), &first.id)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "a replay never duplicates a leg"
+        );
     }
 
     #[tokio::test]

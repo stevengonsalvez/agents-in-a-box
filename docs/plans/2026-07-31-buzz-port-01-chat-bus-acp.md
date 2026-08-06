@@ -566,7 +566,19 @@ Manual:
 - [ ] Kill only the ADAPTER mid-turn (daemon stays up); the scope recovers and accepts the next message with no daemon restart (I16)
 
 ### Checkpoint
-- **`[CHECKPOINT:human-verify]`**: Part 1 exit review. What was built: chat bus (tmux + ACP legs), transcripts, permissions, resume, convergence. How to verify: run the Phase 5 and 6 manual steps; walk the Operational runbook's three questions against a live daemon; confirm part 2's Phase 0 gate reconciles cleanly against the landed contract. Resume: "approved" unlocks part 2 implementation phases.
+- **`[CHECKPOINT:human-verify]`**: Part 1 exit review. What was built: chat bus (tmux + ACP legs), transcripts, permissions, resume, convergence. How to verify: run the Live E2E smoke below, then the Phase 5 and 6 manual steps; walk the Operational runbook's three questions against a live daemon; confirm part 2's Phase 0 gate reconciles cleanly against the landed contract. Resume: "approved" unlocks part 2 implementation phases.
+
+## Live E2E smoke (tmux-status style, added 2026-08-06 per Stevie)
+
+One scripted, repeatable, whole-system validation run against REAL processes, the tmux-verify discipline applied to the chat bus. Lands with Phase 6 and runs at the exit checkpoint (then stays as the release smoke).
+
+- [ ] Script `ainb-tui/scripts/chat-bus-smoke.sh` (or xtask): scratch hangar home + private tmux server (`TMUX_TMPDIR`, `TMUX` removed, exact-name cleanup only), real `ainb-hangar-daemon`, 3 real tmux sessions running the fake-agent harness from `tripwire_cli_run_prompt.rs`
+- [ ] Journey 1, bus on tmux: `ainb fleet msg send --target <3 sessions>` lands verbatim in all 3 panes (capture-pane assertion), deliveries all DELIVERED, `msg list` shows the row, `msg follow` in a side process observed the event
+- [ ] Journey 2, ACP: `ainb fleet acp create` + `msg send` to it; transcript chunks stream via `transcript --follow` BEFORE turn end; timeline gets exactly the final message. Real adapter when creds present, scripted fake adapter otherwise, mode disclosed in output
+- [ ] Journey 3, resume: SIGKILL the daemon mid-turn, restart, same conversation continues (`session/load` path or re-prime marker visible in transcript); no ghost attention rows
+- [ ] Journey 4, convergence: SIGKILL only the adapter process; scope accepts the next message with no daemon restart; delivery terminal with enumerated detail
+- [ ] Each journey asserts the EXACT user-visible outcome (frame truth, not "screen shows something"); failures dump pane captures + daemon log tail
+- [ ] Wired as a CI-optional lane (real tmux, env-gated like the `#[ignore]` adapter tests) and documented in the Operational runbook as the "is the chat bus actually alive" command
 
 ---
 

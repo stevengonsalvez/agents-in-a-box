@@ -43,6 +43,8 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_ACTION_EXECUTE,
     FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
+    FLEET_CAPABILITY_MESSAGE_READ,
+    FLEET_CAPABILITY_MESSAGE_SEND,
     "fleet.protocol.negotiate",
     FLEET_CAPABILITY_RECEIPT_READ,
     "fleet.snapshot.read",
@@ -51,6 +53,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     "fleet.subscription.replay",
     "fleet.subscription.resync",
     FLEET_CAPABILITY_TIMELINE_READ,
+    FLEET_CAPABILITY_TRANSCRIPT_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -809,6 +812,21 @@ pub struct FleetBroadcastResult {
 
 /// Maximum rows one `fleet/message_list` page may return.
 pub const FLEET_MESSAGE_LIST_MAX: u32 = 100;
+/// Maximum recipients one `fleet/message_send` may name.
+///
+/// Every target costs a durable delivery row plus a verified transport submit
+/// that can take seconds, all inside one request. Without a ceiling a single
+/// call can hold the daemon for minutes and write an unbounded leg set; 64 is
+/// far above any real fan-out (`fleet/broadcast` is the tool for more) and far
+/// below a self-inflicted outage.
+pub const FLEET_MESSAGE_TARGETS_MAX: usize = 64;
+/// Maximum `fleet/message_send` body size, in bytes.
+///
+/// The body is persisted verbatim and re-submitted to every recipient, so an
+/// unbounded one is an unbounded write amplified by the target count. 256 KiB
+/// is far past any prompt a human or agent writes and short enough that the
+/// worst case stays bounded.
+pub const FLEET_MESSAGE_BODY_MAX: usize = 256 * 1024;
 /// Maximum chunks one `fleet/transcript_list` page may return.
 pub const FLEET_TRANSCRIPT_LIST_MAX: u32 = 100;
 
@@ -1098,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_capability_consts_are_defined_but_not_yet_advertised() {
+    fn v2_capability_consts_are_advertised_exactly_with_their_dispatch_arms() {
         // Advertisement lands with each capability's dispatch arms (message /
         // transcript in Phase 3, acp.spawn in Phase 5); a daemon built between
         // phases must never advertise methods that answer -32601.
@@ -1106,13 +1124,16 @@ mod tests {
             FLEET_CAPABILITY_MESSAGE_SEND,
             FLEET_CAPABILITY_MESSAGE_READ,
             FLEET_CAPABILITY_TRANSCRIPT_READ,
-            FLEET_CAPABILITY_ACP_SPAWN,
         ] {
             assert!(
-                !FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
-                "{id:?} advertised before its dispatch arms exist"
+                FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
+                "{id:?} has dispatch arms but is not advertised"
             );
         }
+        assert!(
+            !FLEET_PROTOCOL_CAPABILITY_IDS.contains(&FLEET_CAPABILITY_ACP_SPAWN),
+            "fleet.acp.spawn advertised before its dispatch arm exists"
+        );
     }
 
     fn round_trip<T>(value: &T)

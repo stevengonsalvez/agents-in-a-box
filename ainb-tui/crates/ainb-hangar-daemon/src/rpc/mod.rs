@@ -336,6 +336,10 @@ async fn serve_conn(
     // Fleet uses a durable global revision stream, independent from workspace
     // and attention subscriptions. Re-subscribing replaces the prior cursor.
     let mut fleet_forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The chat bus and the ACP transcript are two more durable logs with their
+    // own cursors; a connection may hold either, both, or neither.
+    let mut message_forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    let mut transcript_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
     // this per-connection task (and its fd) forever. The RPC is request/response
@@ -363,6 +367,14 @@ async fn serve_conn(
             });
             let pending_fleet_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::FLEET_SUBSCRIBE).then(|| broker.subscribe_fleet())
+            });
+            let pending_message_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::FLEET_MESSAGE_SUBSCRIBE)
+                    .then(|| broker.subscribe_message())
+            });
+            let pending_transcript_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::FLEET_TRANSCRIPT_SUBSCRIBE)
+                    .then(|| broker.subscribe_transcript())
             });
             let resp = match &req {
                 Ok(req) => dispatch(&pool, req, &health, &events).await,
@@ -443,6 +455,52 @@ async fn serve_conn(
                         head_revision,
                         out_tx.clone(),
                     ));
+                } else if acked && req.method == methods::FLEET_MESSAGE_SUBSCRIBE {
+                    if let Some(old) = message_forwarder.take() {
+                        old.abort();
+                    }
+                    // An explicit after_id wins; otherwise start from the head
+                    // the ack just published, so the client never re-reads the
+                    // log it did not ask for.
+                    let start_id = subscribe_after_id(req).or_else(|| {
+                        resp.result
+                            .as_ref()
+                            .and_then(|value| value.get("head_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string)
+                    });
+                    let rx = pending_message_rx.unwrap_or_else(|| broker.subscribe_message());
+                    message_forwarder = Some(spawn_message_forwarder(
+                        pool.clone(),
+                        rx,
+                        start_id,
+                        out_tx.clone(),
+                    ));
+                } else if acked && req.method == methods::FLEET_TRANSCRIPT_SUBSCRIBE {
+                    if let Some(old) = transcript_forwarder.take() {
+                        old.abort();
+                    }
+                    if let Ok(params) = serde_json::from_value::<
+                        ainb_hangar_proto::fleet::FleetTranscriptSubscribeParams,
+                    >(req.params.clone())
+                    {
+                        let cursor = params.after_order.unwrap_or_else(|| {
+                            resp.result
+                                .as_ref()
+                                .and_then(|value| value.get("head_order"))
+                                .and_then(serde_json::Value::as_i64)
+                                .unwrap_or_default()
+                        });
+                        let rx =
+                            pending_transcript_rx.unwrap_or_else(|| broker.subscribe_transcript());
+                        transcript_forwarder = Some(spawn_transcript_forwarder(
+                            pool.clone(),
+                            rx,
+                            params.session_key,
+                            cursor,
+                            out_tx.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -457,6 +515,12 @@ async fn serve_conn(
         f.abort();
     }
     if let Some(f) = fleet_forwarder {
+        f.abort();
+    }
+    if let Some(f) = message_forwarder {
+        f.abort();
+    }
+    if let Some(f) = transcript_forwarder {
         f.abort();
     }
     drop(out_tx);
@@ -609,6 +673,175 @@ fn spawn_fleet_forwarder(
     })
 }
 
+/// Spawn a gapless chat-bus forwarder.
+///
+/// Same durable-log-plus-wakeup shape as [`spawn_fleet_forwarder`] with ONE
+/// deliberate difference: broadcast lag is NOT a resync. `fleet_message` is an
+/// append-only log with a commit-ordered `seq`, so a lagged receiver has missed
+/// wakeups, never rows; the loop simply pages to head from its own cursor and
+/// keeps streaming. Killing the forwarder (what the fleet stream does) would
+/// throw away a stream that is still perfectly recoverable.
+///
+/// `start_id` is resolved to a cursor ONCE here rather than on the socket
+/// thread: ids are stable, so a row committed between the acknowledgement and
+/// this task starting is still picked up by the first page.
+fn spawn_message_forwarder(
+    pool: SqlitePool,
+    mut rx: broadcast::Receiver<i64>,
+    start_id: Option<String>,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    use ainb_hangar_store::repo::fleet_message::FleetMessageRepo;
+    use tracing::Instrument as _;
+
+    let span = tracing::info_span!("fleet.message.forwarder", cursor = tracing::field::Empty);
+    tokio::spawn(
+        async move {
+            let span = tracing::Span::current();
+            let mut cursor = match start_id.as_deref() {
+                Some(id) => match FleetMessageRepo::seq_for_id(&pool, id).await {
+                    Ok(Some(seq)) => seq,
+                    Ok(None) => {
+                        // The socket thread already rejected an unknown
+                        // after_id, so reaching here means the row went away
+                        // between the acknowledgement and this task. Falling
+                        // back to 0 would REWIND to the head of the log and
+                        // replay the entire history as if it were live.
+                        tracing::warn!(
+                            after_id = %id,
+                            "chat message cursor id resolved to nothing; refusing to rewind to the log head"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "chat message cursor read failed");
+                        return;
+                    }
+                },
+                None => 0,
+            };
+            span.record("cursor", cursor);
+            loop {
+                let rows = match FleetMessageRepo::list_all(&pool, cursor, REPLAY_BATCH).await {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "chat message replay read failed");
+                        return;
+                    }
+                };
+                if !rows.is_empty() {
+                    for row in &rows {
+                        cursor = row.seq;
+                        let params = serde_json::json!({ "message": message_wire(row) });
+                        if out
+                            .send(encode_notification_frame("fleet/message_event", &params))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    span.record("cursor", cursor);
+                    continue;
+                }
+
+                match rx.recv().await {
+                    Ok(_seq) => {}
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        // Page to head from the cursor and continue: no resync
+                        // notification, no exit (graft 3).
+                        tracing::warn!(
+                            missed,
+                            cursor,
+                            "chat message wakeups lagged; paging to head"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
+        .instrument(span),
+    )
+}
+
+/// Spawn a gapless per-session transcript forwarder.
+///
+/// `transcript_tx` is ONE unfiltered stream for every session, so this task
+/// filters each wakeup on its own `session_key` BEFORE issuing any query: an
+/// unrelated session's chunk costs a wakeup and nothing more. Lag pages to head
+/// and continues, exactly as the message forwarder does.
+fn spawn_transcript_forwarder(
+    pool: SqlitePool,
+    mut rx: broadcast::Receiver<(String, i64)>,
+    session_key: String,
+    mut cursor: i64,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+    use tracing::Instrument as _;
+
+    let span = tracing::info_span!(
+        "fleet.transcript.forwarder",
+        session_key = %session_key,
+        cursor = cursor
+    );
+    tokio::spawn(
+        async move {
+            let span = tracing::Span::current();
+            loop {
+                let rows = match FleetProviderEventRepo::list_by_session_after(
+                    &pool,
+                    &session_key,
+                    cursor,
+                    REPLAY_BATCH,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "transcript replay read failed");
+                        return;
+                    }
+                };
+                if !rows.is_empty() {
+                    for row in &rows {
+                        cursor = row.ingest_order;
+                        let params = serde_json::json!({ "chunk": transcript_chunk_wire(row) });
+                        if out
+                            .send(encode_notification_frame("fleet/transcript_event", &params))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    span.record("cursor", cursor);
+                    continue;
+                }
+
+                loop {
+                    match rx.recv().await {
+                        // Filter BEFORE querying: another session's chunk is a
+                        // wakeup this subscriber must not pay a query for.
+                        Ok((woken, _order)) if woken == session_key => break,
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(missed)) => {
+                            tracing::warn!(
+                                missed,
+                                cursor,
+                                "transcript wakeups lagged; paging to head"
+                            );
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        }
+        .instrument(span),
+    )
+}
+
 /// Max events read from the durable log in one catch-up query. A resume cursor
 /// far in the past still bounds each burst; a backlog larger than this is drained
 /// by paging in-loop (see [`replay_events`]), never truncated to a single batch.
@@ -623,6 +856,16 @@ fn subscribe_since_seq(req: &RpcRequest) -> Option<i64> {
     )
     .ok()
     .and_then(|p| p.since_seq)
+}
+
+/// Extract the optional `after_id` resume cursor from a `fleet/message_subscribe`
+/// request. Absent or malformed params → `None` (start at the head).
+fn subscribe_after_id(req: &RpcRequest) -> Option<String> {
+    serde_json::from_value::<ainb_hangar_proto::fleet::FleetMessageSubscribeParams>(
+        req.params.clone(),
+    )
+    .ok()
+    .and_then(|params| params.after_id)
 }
 
 /// Replay a workspace's durable events after `since_seq` onto the connection's
@@ -929,6 +1172,13 @@ async fn handle(
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
+        methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
+        methods::FLEET_MESSAGE_LIST => handle_fleet_message_list(pool, req).await,
+        // Both subscribe acks carry a head cursor; their per-connection
+        // forwarders are registered in `serve_conn` BEFORE that head is read.
+        methods::FLEET_MESSAGE_SUBSCRIBE => handle_fleet_message_subscribe(pool, req).await,
+        methods::FLEET_TRANSCRIPT_LIST => handle_fleet_transcript_list(pool, req).await,
+        methods::FLEET_TRANSCRIPT_SUBSCRIBE => handle_fleet_transcript_subscribe(pool, req).await,
         methods::FLEET_REPROJECT_CLAUDE_INTERVIEW => {
             handle_fleet_reproject_claude_interview(pool, req, events).await
         }
@@ -1140,6 +1390,635 @@ async fn handle_fleet_timeline(
         entries,
         next_after_revision,
     })
+}
+
+/// Refuse a method whose capability this daemon build does not advertise.
+///
+/// `fleet/negotiate` publishes [`FLEET_PROTOCOL_CAPABILITY_IDS`] and clients
+/// pick their surface from that list, so a method whose capability is absent
+/// must answer `-32601` rather than serve behind the catalogue's back. That
+/// list is the ONLY capability state the socket has: negotiate is a stateless
+/// echo (`handle_fleet_negotiate`) and a client declares version ranges, never
+/// capabilities, so there is nothing connection-scoped to gate on.
+///
+/// [`FLEET_PROTOCOL_CAPABILITY_IDS`]: ainb_hangar_proto::fleet::FLEET_PROTOCOL_CAPABILITY_IDS
+fn require_fleet_capability(id: &str) -> Result<(), RpcError> {
+    if ainb_hangar_proto::fleet::FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id) {
+        return Ok(());
+    }
+    Err(RpcError {
+        code: METHOD_NOT_FOUND,
+        message: format!("capability {id} is not advertised by this daemon"),
+        data: None,
+    })
+}
+
+/// Resolve a wire `after_id` to its commit-ordered cursor.
+///
+/// An id that resolves to no row is `invalid_params`, never start-of-log: a
+/// client paging with a stale or fabricated cursor must hear about it instead
+/// of silently receiving the whole log again.
+async fn message_cursor_for(pool: &SqlitePool, after_id: Option<&str>) -> Result<i64, RpcError> {
+    use ainb_hangar_store::repo::fleet_message::FleetMessageRepo;
+
+    let Some(after_id) = after_id else {
+        return Ok(0);
+    };
+    if after_id.trim().is_empty() {
+        return Err(invalid_params("after_id must not be empty"));
+    }
+    FleetMessageRepo::seq_for_id(pool, after_id)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| invalid_params(&format!("after_id {after_id} is not a known message")))
+}
+
+/// Project one persisted message onto the wire.
+fn message_wire(
+    row: &ainb_hangar_store::repo::fleet_message::FleetMessageRow,
+) -> ainb_hangar_proto::fleet::FleetMessage {
+    use ainb_hangar_proto::fleet::{FleetMessage, FleetMessageKind};
+
+    FleetMessage {
+        id: row.id.clone(),
+        scope_key: row.scope_key.clone(),
+        origin_message_id: row.origin_message_id.clone(),
+        sender: row.sender.clone(),
+        kind: match row.kind.as_str() {
+            "agent" => FleetMessageKind::Agent,
+            "marker" => FleetMessageKind::Marker,
+            _ => FleetMessageKind::User,
+        },
+        body: row.body.clone(),
+        created_at: row.created_at,
+    }
+}
+
+/// Project one transcript row onto the wire. A payload that is not valid JSON
+/// is carried as a string rather than dropped: the ledger's `raw_payload` is
+/// exactly what the provider sent.
+fn transcript_chunk_wire(
+    row: &ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRow,
+) -> ainb_hangar_proto::fleet::FleetTranscriptChunk {
+    ainb_hangar_proto::fleet::FleetTranscriptChunk {
+        ingest_order: row.ingest_order,
+        event_id: row.event_id.clone(),
+        session_key: row.session_key.clone().unwrap_or_default(),
+        event_type: row.event_type.clone(),
+        payload: serde_json::from_str(&row.raw_payload)
+            .unwrap_or_else(|_| serde_json::Value::String(row.raw_payload.clone())),
+        observed_at: row.observed_at,
+    }
+}
+
+/// Decode a durable delivery state token back onto the wire vocabulary.
+fn delivery_state_wire(state: &str) -> ainb_hangar_proto::fleet::ActionReceiptStatus {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    match state {
+        "DELIVERED" => ActionReceiptStatus::Delivered,
+        "FAILED" => ActionReceiptStatus::Failed,
+        "REJECTED" => ActionReceiptStatus::Rejected,
+        "UNKNOWN" => ActionReceiptStatus::Unknown,
+        _ => ActionReceiptStatus::Pending,
+    }
+}
+
+/// Map a chat-bus store fault onto the wire.
+fn message_store_err(error: ainb_hangar_store::repo::fleet_message::FleetMessageError) -> RpcError {
+    use ainb_hangar_store::repo::fleet_message::FleetMessageError;
+    match error {
+        FleetMessageError::RequestFingerprintMismatch { .. } => {
+            invalid_params("request_id was reused for a different message")
+        }
+        FleetMessageError::MessageNotFound { id } => {
+            internal(&format!("fleet message {id} disappeared"))
+        }
+        FleetMessageError::Sql(error) => store_err(&error),
+    }
+}
+
+/// The exact receipt-detail prose an action leg emits when it fails safe.
+///
+/// [`delivery_detail`] classifies a leg BY these strings, so they live in one
+/// place and every emitter references the const. Re-typing the literal at an
+/// emit site would silently collapse that leg into the `send_*` catch-all with
+/// every test still green.
+pub(crate) const DETAIL_TMUX_IDENTITY_UNKNOWN: &str = "exact tmux process identity is unavailable";
+/// See [`DETAIL_TMUX_IDENTITY_UNKNOWN`].
+pub(crate) const DETAIL_TMUX_IDENTITY_CHANGED: &str = "tmux process identity changed";
+/// See [`DETAIL_TMUX_IDENTITY_UNKNOWN`].
+pub(crate) const DETAIL_CAPABILITY_UNAVAILABLE: &str =
+    "action unavailable for current session capabilities";
+/// See [`DETAIL_TMUX_IDENTITY_UNKNOWN`].
+pub(crate) const DETAIL_EMPTY_PROMPT: &str = "prompt text must not be empty";
+
+/// The enumerated reason a delivery leg did not land, per the plan's delivery
+/// detail taxonomy. Free text alone is not greppable and cannot be counted, so
+/// the token always leads and any provider text follows it.
+fn delivery_detail(
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+    receipt_detail: Option<&str>,
+) -> Option<String> {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+
+    if status == ActionReceiptStatus::Delivered {
+        return receipt_detail.map(ToString::to_string);
+    }
+    let text = receipt_detail.unwrap_or_default();
+    let token = if text.contains(DETAIL_TMUX_IDENTITY_UNKNOWN) {
+        "tmux_identity_unknown"
+    } else if text.contains(DETAIL_TMUX_IDENTITY_CHANGED) {
+        "tmux_identity_changed"
+    } else if text.contains(DETAIL_CAPABILITY_UNAVAILABLE) {
+        "capability_unavailable"
+    } else if text.contains(DETAIL_EMPTY_PROMPT) {
+        "empty_prompt"
+    } else {
+        match status {
+            ActionReceiptStatus::Rejected => "send_rejected",
+            ActionReceiptStatus::Failed => "send_failed",
+            _ => "send_unknown",
+        }
+    };
+    Some(if text.is_empty() {
+        token.to_string()
+    } else {
+        format!("{token}; {text}")
+    })
+}
+
+/// Persist one chat message and drive each recipient's delivery leg.
+async fn handle_fleet_message_send(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FLEET_CAPABILITY_MESSAGE_SEND, FleetMessageSendParams};
+    use tracing::Instrument as _;
+
+    require_fleet_capability(FLEET_CAPABILITY_MESSAGE_SEND)?;
+    let params: FleetMessageSendParams =
+        parse_params(req, "{ scope_key?, targets, text, request_id }")?;
+    let span = tracing::info_span!(
+        "fleet.message.send",
+        request_id = %params.request_id,
+        scope_key = tracing::field::Empty,
+        target_count = params.targets.len(),
+        message_id = tracing::field::Empty,
+        replay = tracing::field::Empty,
+    );
+    message_send_inner(pool, params, events).instrument(span).await
+}
+
+async fn message_send_inner(
+    pool: &SqlitePool,
+    params: ainb_hangar_proto::fleet::FleetMessageSendParams,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use std::collections::{HashMap, HashSet};
+
+    use ainb_hangar_proto::fleet::{
+        ActionReceiptStatus, FLEET_MESSAGE_BODY_MAX, FLEET_MESSAGE_TARGETS_MAX,
+        FleetMessageDelivery, FleetMessageSendResult,
+    };
+    use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
+
+    if params.text.trim().is_empty() {
+        return Err(invalid_params("text must not be empty"));
+    }
+    // Bounded BEFORE any of the work below: the body is persisted verbatim and
+    // re-submitted once per recipient, so an unbounded one is an unbounded
+    // write multiplied by the target count.
+    if params.text.len() > FLEET_MESSAGE_BODY_MAX {
+        return Err(invalid_params(&format!(
+            "text must be at most {FLEET_MESSAGE_BODY_MAX} bytes, got {}",
+            params.text.len()
+        )));
+    }
+    // The RAW list, not the deduplicated one: the ceiling exists to bound the
+    // work this request can ask for, and deduplicating is already part of it.
+    if params.targets.len() > FLEET_MESSAGE_TARGETS_MAX {
+        return Err(invalid_params(&format!(
+            "targets must name at most {FLEET_MESSAGE_TARGETS_MAX} sessions, got {}",
+            params.targets.len()
+        )));
+    }
+    if params.request_id.trim().is_empty() {
+        return Err(invalid_params("request_id must not be empty"));
+    }
+    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(invalid_params("scope_key must not be empty"));
+    }
+    let mut seen = HashSet::new();
+    let targets: Vec<String> = params
+        .targets
+        .iter()
+        .filter(|key| !key.trim().is_empty())
+        .filter(|key| seen.insert((*key).clone()))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return Err(invalid_params("targets must name at least one session"));
+    }
+
+    // The fingerprint hashes the REQUEST as the client wrote it, so a retry
+    // that omits scope_key (and would mint a fresh broadcast ulid) still
+    // replays instead of being rejected as a different message.
+    let request_fingerprint = stable_fingerprint(&format!(
+        "{}\u{0}{}\u{0}{}",
+        params.scope_key.as_deref().unwrap_or_default(),
+        targets.join("\u{1}"),
+        params.text
+    ));
+    let scope_key = params.scope_key.clone().unwrap_or_else(|| {
+        if targets.len() == 1 {
+            format!("session:{}", targets[0])
+        } else {
+            format!("broadcast:{}", SystemIdGen.new_ulid())
+        }
+    });
+    let minted_id = SystemIdGen.new_ulid();
+    // The message row and its PENDING legs commit TOGETHER, so a replay (or a
+    // concurrent duplicate) can never observe a message whose leg set is still
+    // being written.
+    let row = FleetMessageRepo::insert_message_with_deliveries(
+        pool,
+        &NewFleetMessage {
+            id: minted_id.clone(),
+            request_id: Some(params.request_id.clone()),
+            request_fingerprint: Some(request_fingerprint),
+            scope_key,
+            origin_message_id: None,
+            sender: "operator".to_string(),
+            kind: "user".to_string(),
+            body: params.text.clone(),
+            created_at: SystemClock.now_ms(),
+        },
+        &targets,
+    )
+    .await
+    .map_err(message_store_err)?;
+
+    let span = tracing::Span::current();
+    span.record("scope_key", tracing::field::display(&row.scope_key));
+    span.record("message_id", tracing::field::display(&row.id));
+
+    // A replay never re-delivers: the durable legs ARE the answer, replayed in
+    // the caller's target order so the response is byte-identical to the first.
+    // The legs commit WITH the message and a differing target list is already
+    // a fingerprint mismatch, so a leg is only ever missing on a row an older
+    // daemon wrote in two steps; UNKNOWN is the honest at-most-once answer
+    // there, and a fresh request_id is the way to try again.
+    if row.id != minted_id {
+        span.record("replay", true);
+        let legs: HashMap<String, String> = FleetMessageRepo::deliveries_for_message(pool, &row.id)
+            .await
+            .map_err(|error| store_err(&error))?
+            .into_iter()
+            .map(|leg| (leg.session_key, leg.state))
+            .collect();
+        tracing::info!(message_id = %row.id, "fleet message send replayed");
+        return to_value(&FleetMessageSendResult {
+            message_id: row.id,
+            deliveries: targets
+                .iter()
+                .map(|session_key| FleetMessageDelivery {
+                    session_key: session_key.clone(),
+                    state: legs.get(session_key).map_or(ActionReceiptStatus::Unknown, |state| {
+                        delivery_state_wire(state)
+                    }),
+                })
+                .collect(),
+        });
+    }
+    span.record("replay", false);
+
+    // Wake live subscribers as soon as the durable row exists. The wakeup
+    // carries only the committed seq and forwarders page to head from their own
+    // cursor, so waking here (rather than after the legs run, which can take
+    // seconds of verified tmux submits) never exposes an uncommitted row and
+    // never leaves a committed one invisible until some later send happens to
+    // page past it.
+    events.emit_message_seq(row.seq);
+
+    let mut deliveries = Vec::with_capacity(targets.len());
+    for session_key in &targets {
+        let leg_fingerprint = message_leg_request_id(&row.id, session_key);
+        let (mut status, mut detail) =
+            deliver_message_leg(pool, &leg_fingerprint, session_key, &params.text, events).await;
+        // A store fault while recording the outcome downgrades THIS leg to
+        // UNKNOWN, never the whole request: the earlier legs already submitted
+        // verified prompts, so answering `Err` would invite a retry under a
+        // fresh request_id and deliver to them twice.
+        if status != ActionReceiptStatus::Pending {
+            if let Err(error) = record_leg_outcome(
+                pool,
+                &row.id,
+                session_key,
+                &leg_fingerprint,
+                status,
+                detail.as_deref(),
+            )
+            .await
+            {
+                status = ActionReceiptStatus::Unknown;
+                detail = Some(format!("store_error; {error}"));
+            }
+        }
+        tracing::info!(
+            session_key = %session_key,
+            state = receipt_status_token(status),
+            detail = detail.as_deref().unwrap_or(""),
+            "fleet message delivery leg resolved"
+        );
+        deliveries.push(FleetMessageDelivery {
+            session_key: session_key.clone(),
+            state: status,
+        });
+    }
+
+    to_value(&FleetMessageSendResult {
+        message_id: row.id,
+        deliveries,
+    })
+}
+
+/// Claim and resolve one leg's terminal state. A leg someone else already
+/// claimed is left alone: exactly one resolver writes a terminal row.
+async fn record_leg_outcome(
+    pool: &SqlitePool,
+    message_id: &str,
+    session_key: &str,
+    leg_fingerprint: &str,
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+    detail: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    use ainb_hangar_store::repo::fleet_message::FleetMessageRepo;
+
+    if FleetMessageRepo::claim_delivery(pool, message_id, session_key, leg_fingerprint).await? {
+        FleetMessageRepo::resolve_delivery(
+            pool,
+            message_id,
+            session_key,
+            leg_fingerprint,
+            receipt_status_token(status),
+            detail,
+            SystemClock.now_ms(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The stable per-leg receipt identity: one (message, recipient) pair executes
+/// exactly one Fleet action, so a replayed send re-reads that receipt instead
+/// of submitting a second prompt.
+fn message_leg_request_id(message_id: &str, session_key: &str) -> String {
+    format!(
+        "message:{}",
+        stable_fingerprint(&format!("{message_id}\u{0}{session_key}"))
+    )
+}
+
+/// Run one recipient's leg through the EXISTING `SendPrompt` action path, so a
+/// chat delivery carries the same receipts, capability gate and verified tmux
+/// send an operator action does.
+async fn deliver_message_leg(
+    pool: &SqlitePool,
+    leg_request_id: &str,
+    session_key: &str,
+    text: &str,
+    events: &EventSink,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetActionParams};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    // The bus reads the version it then passes back as `expected_version`, so
+    // it runs optimistic concurrency control against itself: a reducer that
+    // bumped `fleet_session.version` in the gap makes `validate_action_target`
+    // fail for a target that is perfectly healthy. Re-read and retry once
+    // before resolving the leg terminal. The failed attempt writes no receipt
+    // (validation runs before the durable claim), so the retry reuses the same
+    // leg request_id and at-most-once still holds.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let session = match FleetRepo::get_session(pool, session_key).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return (
+                    ActionReceiptStatus::Rejected,
+                    Some("target_unknown".to_string()),
+                );
+            }
+            Err(error) => {
+                return (
+                    ActionReceiptStatus::Failed,
+                    Some(format!("store_error; {error}")),
+                );
+            }
+        };
+        // The plan's delivery taxonomy names `target_not_running` for a target
+        // that EXISTS but has no live session. Its pane is gone, so a verified
+        // send would either fail on a stale tmux identity or type into a dead
+        // shell; either way the honest token is this one and not a transport
+        // symptom that reads like a bug in the bus.
+        if session.lifecycle_state == "EXITED" {
+            return (
+                ActionReceiptStatus::Rejected,
+                Some("target_not_running".to_string()),
+            );
+        }
+        // ACP recipients join the bus in a later phase; until their action arms
+        // exist a chat send must not fall through to the tmux machinery.
+        if session.provider == "acp" {
+            return (
+                ActionReceiptStatus::Rejected,
+                Some("target_not_tmux; ACP recipients are not wired yet".to_string()),
+            );
+        }
+        let sent_version = session.version;
+        let receipt = execute_fleet_action(
+            pool,
+            FleetActionParams {
+                session_key: session_key.to_string(),
+                expected_version: sent_version,
+                request_id: leg_request_id.to_string(),
+                action: ControlAction::SendPrompt {
+                    text: text.to_string(),
+                },
+            },
+            None,
+            events,
+        )
+        .await;
+        match receipt {
+            Ok(receipt) => {
+                return (
+                    receipt.status,
+                    delivery_detail(receipt.status, receipt.detail.as_deref()),
+                );
+            }
+            Err(error) => {
+                // Only a version that MOVED under us earns a retry; anything
+                // else is a real failure and is reported as one.
+                let moved = attempts == 1
+                    && matches!(
+                        FleetRepo::get_session(pool, session_key).await,
+                        Ok(Some(ref current)) if current.version != sent_version
+                    );
+                if moved {
+                    tracing::debug!(
+                        session_key = %session_key,
+                        "fleet message leg retried after a concurrent session version bump"
+                    );
+                    continue;
+                }
+                return (
+                    ActionReceiptStatus::Failed,
+                    Some(format!("action_failed; {}", error.message)),
+                );
+            }
+        }
+    }
+}
+
+/// Page the chat log by its commit-ordered cursor.
+async fn handle_fleet_message_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_MESSAGE_READ, FLEET_MESSAGE_LIST_MAX, FleetMessageListParams,
+        FleetMessageListResult,
+    };
+    use ainb_hangar_store::repo::fleet_message::FleetMessageRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_MESSAGE_READ)?;
+    let params: FleetMessageListParams =
+        parse_params(req, "{ scope_key?, origin_id?, after_id?, limit }")?;
+    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(invalid_params("scope_key must not be empty"));
+    }
+    if params.origin_id.as_deref().is_some_and(|origin| origin.trim().is_empty()) {
+        return Err(invalid_params("origin_id must not be empty"));
+    }
+    // A thread and a scope are different cuts of the same log, and a reply
+    // lives in ITS RECIPIENT's scope rather than the origin's, so the two
+    // filters intersect to almost nothing. Silently letting origin_id win
+    // answers a question the caller did not ask; refusing says which one they
+    // have to pick.
+    if params.origin_id.is_some() && params.scope_key.is_some() {
+        return Err(invalid_params(
+            "origin_id and scope_key are mutually exclusive; replies live in their recipients' scopes",
+        ));
+    }
+    let after_seq = message_cursor_for(pool, params.after_id.as_deref()).await?;
+    let limit = i64::from(params.limit.clamp(1, FLEET_MESSAGE_LIST_MAX));
+    let rows = match (params.origin_id.as_deref(), params.scope_key.as_deref()) {
+        // The both-set case is rejected above, so this arm only ever sees a
+        // thread filter on its own.
+        (Some(origin_id), _) => {
+            FleetMessageRepo::list_by_origin(pool, origin_id, after_seq, limit).await
+        }
+        (None, Some(scope_key)) => {
+            FleetMessageRepo::list_by_scope(pool, scope_key, after_seq, limit).await
+        }
+        (None, None) => FleetMessageRepo::list_all(pool, after_seq, limit).await,
+    }
+    .map_err(|error| store_err(&error))?;
+    let messages: Vec<_> = rows.iter().map(message_wire).collect();
+    to_value(&FleetMessageListResult {
+        next_after_id: messages.last().map(|message| message.id.clone()),
+        messages,
+    })
+}
+
+/// Acknowledge the chat log's head; the live forwarder is wired in `serve_conn`.
+async fn handle_fleet_message_subscribe(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_MESSAGE_READ, FleetMessageSubscribeParams, FleetMessageSubscribeResult,
+    };
+    use ainb_hangar_store::repo::fleet_message::FleetMessageRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_MESSAGE_READ)?;
+    let params: FleetMessageSubscribeParams = parse_params(req, "{ after_id? }")?;
+    // Resolve the cursor for its REJECTION side effect: an unknown after_id is
+    // invalid_params on subscribe exactly as it is on list.
+    let _ = message_cursor_for(pool, params.after_id.as_deref()).await?;
+    let head = FleetMessageRepo::head(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&FleetMessageSubscribeResult {
+        head_id: head.map(|row| row.id),
+    })
+}
+
+/// Page one session's ACP transcript by `ingest_order`.
+async fn handle_fleet_transcript_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_TRANSCRIPT_READ, FLEET_TRANSCRIPT_LIST_MAX, FleetTranscriptListParams,
+        FleetTranscriptListResult,
+    };
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_TRANSCRIPT_READ)?;
+    let params: FleetTranscriptListParams =
+        parse_params(req, "{ session_key, after_order?, limit }")?;
+    if params.session_key.trim().is_empty() {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    let after_order = params.after_order.unwrap_or(0);
+    if after_order < 0 {
+        return Err(invalid_params("after_order must be non-negative"));
+    }
+    let rows = FleetProviderEventRepo::list_by_session_after(
+        pool,
+        &params.session_key,
+        after_order,
+        i64::from(params.limit.clamp(1, FLEET_TRANSCRIPT_LIST_MAX)),
+    )
+    .await
+    .map_err(|error| store_err(&error))?;
+    let chunks: Vec<_> = rows.iter().map(transcript_chunk_wire).collect();
+    to_value(&FleetTranscriptListResult {
+        next_after_order: chunks.last().map(|chunk| chunk.ingest_order),
+        chunks,
+    })
+}
+
+/// Acknowledge one session's transcript head; the forwarder is wired in
+/// `serve_conn`.
+async fn handle_fleet_transcript_subscribe(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_TRANSCRIPT_READ, FleetTranscriptSubscribeParams,
+        FleetTranscriptSubscribeResult,
+    };
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_TRANSCRIPT_READ)?;
+    let params: FleetTranscriptSubscribeParams =
+        parse_params(req, "{ session_key, after_order? }")?;
+    if params.session_key.trim().is_empty() {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    if params.after_order.is_some_and(|order| order < 0) {
+        return Err(invalid_params("after_order must be non-negative"));
+    }
+    let head_order = FleetProviderEventRepo::head_order_for_session(pool, &params.session_key)
+        .await
+        .map_err(|error| store_err(&error))?;
+    to_value(&FleetTranscriptSubscribeResult { head_order })
 }
 
 /// Return a bounded, durable newest-first receipt projection.
@@ -1587,7 +2466,7 @@ async fn execute_fleet_action(
     let (status, detail) = if !action_capability(&capabilities, &params.action) {
         (
             ActionReceiptStatus::Rejected,
-            Some("action unavailable for current session capabilities".to_string()),
+            Some(DETAIL_CAPABILITY_UNAVAILABLE.to_string()),
         )
     } else if let ControlAction::VerifiedPicker {
         request_fingerprint,
@@ -1620,7 +2499,7 @@ async fn execute_fleet_action(
             match &params.action {
                 ControlAction::SendPrompt { text } if text.trim().is_empty() => (
                     ActionReceiptStatus::Rejected,
-                    Some("prompt text must not be empty".to_string()),
+                    Some(DETAIL_EMPTY_PROMPT.to_string()),
                 ),
                 ControlAction::SendPrompt { text } => verified_tmux_send(&session, text).await,
                 ControlAction::StructuredAnswer {
@@ -2395,9 +3274,7 @@ async fn exact_live_tmux_session_name(
         crate::fleet_provider::ProviderError::Stale("exact tmux target is unavailable".to_string())
     })?;
     let fingerprint = session.process_start_fingerprint.as_deref().ok_or_else(|| {
-        crate::fleet_provider::ProviderError::Stale(
-            "exact tmux process identity is unavailable".to_string(),
-        )
+        crate::fleet_provider::ProviderError::Stale(DETAIL_TMUX_IDENTITY_UNKNOWN.to_string())
     })?;
     let discovered = ainb_fleet_core::discover::discover_all_tmux_panes()
         .await
@@ -2407,7 +3284,7 @@ async fn exact_live_tmux_session_name(
             && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
     }) {
         return Err(crate::fleet_provider::ProviderError::Stale(
-            "tmux process identity changed".to_string(),
+            DETAIL_TMUX_IDENTITY_CHANGED.to_string(),
         ));
     }
     target
@@ -2711,7 +3588,7 @@ async fn verified_tmux_send(
     ) else {
         return (
             ActionReceiptStatus::Unknown,
-            Some("exact tmux process identity is unavailable".to_string()),
+            Some(DETAIL_TMUX_IDENTITY_UNKNOWN.to_string()),
         );
     };
     let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
@@ -2725,7 +3602,7 @@ async fn verified_tmux_send(
     if !live {
         return (
             ActionReceiptStatus::Failed,
-            Some("tmux process identity changed".to_string()),
+            Some(DETAIL_TMUX_IDENTITY_CHANGED.to_string()),
         );
     }
     match ainb_fleet_core::send::tmux_send(target, text).await {
@@ -2754,7 +3631,7 @@ async fn verified_tmux_picker(
     ) else {
         return (
             ActionReceiptStatus::Unknown,
-            Some("exact tmux process identity is unavailable".to_string()),
+            Some(DETAIL_TMUX_IDENTITY_UNKNOWN.to_string()),
         );
     };
     let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
@@ -2997,6 +3874,19 @@ fn action_capability(
     }
 }
 
+/// A stable, process-independent digest of `value`, prefixed with the algorithm
+/// that produced it.
+///
+/// FNV-1a 64: NON-CRYPTOGRAPHIC, and deliberately so. Every caller uses this to
+/// decide whether two requests are the SAME request (idempotency replay, action
+/// fingerprints, per-leg receipt identity), never to authenticate or authorise
+/// one. A forged collision buys an attacker the ability to replay a message
+/// they were already able to send under their own `request_id`, so the
+/// preimage resistance a SHA-2 would add has nothing to protect here.
+///
+/// The prefix is the upgrade path: values are persisted in durable receipts, so
+/// the day a stronger digest IS needed, `fnv1a64:` distinguishes old rows from
+/// new ones instead of making them silently incomparable.
 fn stable_fingerprint(value: &str) -> String {
     let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)

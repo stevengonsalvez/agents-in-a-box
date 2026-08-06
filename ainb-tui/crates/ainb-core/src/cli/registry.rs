@@ -2039,6 +2039,77 @@ impl CliCommand for FleetCommand {
                     .help("Regex against tmux/workspace name"),
             )
             .arg(clap::Arg::new("cwd").long("cwd").help("Substring against cwd"));
+        // The chat bus: persisted, receipted messages over the daemon socket
+        // (`fleet/message_*`), as opposed to `broadcast`'s fire-and-forget send.
+        let msg = Command::new("msg")
+            .about("Chat bus: persisted messages with per-recipient delivery receipts")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("send")
+                    .about("Send one message to explicit sessions, with receipts")
+                    .arg(
+                        clap::Arg::new("target")
+                            .long("target")
+                            .required(true)
+                            .action(clap::ArgAction::Append)
+                            .help("Recipient session_key (repeat for a broadcast)"),
+                    )
+                    .arg(
+                        clap::Arg::new("text")
+                            .long("text")
+                            .help("Message body, or `-` to read stdin"),
+                    )
+                    .arg(
+                        clap::Arg::new("scope")
+                            .long("scope")
+                            .help("Explicit scope key (default: the recipient's own scope)"),
+                    )
+                    .arg(
+                        clap::Arg::new("request-id")
+                            .long("request-id")
+                            .help("Idempotency token; a replay with different content is refused"),
+                    )
+                    // Exit 0 is about the LOG, not the recipients: a message
+                    // every leg rejected is still a persisted message with
+                    // durable receipts. Scripts read `deliveries[].state`.
+                    .after_help(
+                        "Exit 0 means the message was persisted and every leg reached a terminal \
+                         state, NOT that any recipient received it. Read deliveries[].state \
+                         (DELIVERED / REJECTED / FAILED / UNKNOWN) for per-recipient outcome.",
+                    ),
+            )
+            .subcommand(
+                Command::new("list")
+                    .about("Page the chat log, oldest first")
+                    .arg(clap::Arg::new("scope").long("scope").help("Filter to one scope key"))
+                    .arg(
+                        clap::Arg::new("origin")
+                            .long("origin")
+                            .help("Thread view: only replies to this message id"),
+                    )
+                    .arg(
+                        clap::Arg::new("after")
+                            .long("after")
+                            .help("Return rows after this message id"),
+                    )
+                    .arg(
+                        clap::Arg::new("limit")
+                            .long("limit")
+                            .value_parser(clap::value_parser!(u32))
+                            .default_value("20")
+                            .help("Page size (clamped to the daemon's maximum)"),
+                    ),
+            )
+            .subcommand(
+                Command::new("follow")
+                    .about("Stream committed messages until stopped; NDJSON under --format json")
+                    .arg(
+                        clap::Arg::new("after")
+                            .long("after")
+                            .help("Resume after this message id (default: the log head)"),
+                    ),
+            );
         let sequence = Command::new("sequence")
             .about("Ordered prompts with ack between steps")
             .arg(
@@ -2154,6 +2225,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(deny)
                 .subcommand(standup)
                 .subcommand(broadcast)
+                .subcommand(msg)
                 .subcommand(sequence)
                 .subcommand(needs)
                 .subcommand(cost)
@@ -2167,6 +2239,8 @@ impl CliCommand for FleetCommand {
                      ainb fleet standup               Live status of all sessions\n  \
                      ainb fleet needs                 Sessions blocked on input / errors\n  \
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
+                     ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts\n  \
+                     ainb fleet msg follow --format json   Stream chat messages as NDJSON\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
                      ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
@@ -2585,7 +2659,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_twelve_subcommands_including_approve_deny() {
+    fn fleet_exposes_thirteen_subcommands_including_approve_deny() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2611,6 +2685,7 @@ mod tests {
                 "daemons",
                 "deny",
                 "enrich-cache",
+                "msg",
                 "needs",
                 "sequence",
                 "standup",
@@ -2619,8 +2694,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            12,
-            "expected 12 fleet subcommands, got {names:?}"
+            13,
+            "expected 13 fleet subcommands, got {names:?}"
         );
     }
 

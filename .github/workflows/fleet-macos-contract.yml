@@ -11,6 +11,13 @@ on:
       - "ainb-tui/crates/ainb-fleet-core/**"
       - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
       - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      # Coupled lane (buzz-port part 1, Phase 4): the store owns the shape
+      # these Swift fixtures assert, so a store-only change must still fire
+      # the contract suite. The WHOLE crate is the filter on purpose: naming
+      # individual repo files drifts silently the moment one is renamed, split,
+      # or a new one joins the contract, and a filter that silently stops
+      # matching looks exactly like a lane that legitimately did not need to run.
+      - "ainb-tui/crates/ainb-hangar-store/**"
       - "ainb-tui/Cargo.lock"
       - ".github/workflows/fleet-macos-contract.yml"
   pull_request:
@@ -23,6 +30,13 @@ on:
       - "ainb-tui/crates/ainb-fleet-core/**"
       - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
       - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      # Coupled lane (buzz-port part 1, Phase 4): the store owns the shape
+      # these Swift fixtures assert, so a store-only change must still fire
+      # the contract suite. The WHOLE crate is the filter on purpose: naming
+      # individual repo files drifts silently the moment one is renamed, split,
+      # or a new one joins the contract, and a filter that silently stops
+      # matching looks exactly like a lane that legitimately did not need to run.
+      - "ainb-tui/crates/ainb-hangar-store/**"
       - "ainb-tui/Cargo.lock"
       - ".github/workflows/fleet-macos-contract.yml"
 

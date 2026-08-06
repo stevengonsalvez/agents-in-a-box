@@ -113,6 +113,38 @@ pub enum FleetProviderEventError {
     Sql(#[from] sqlx::Error),
 }
 
+impl FleetProviderEventError {
+    /// Whether this failure can NEVER clear, however often the same rows are
+    /// retried.
+    ///
+    /// A buffering writer needs the distinction to decide whether to keep a
+    /// rejected batch: restoring a permanently doomed one pins it at the head
+    /// of the buffer forever and nothing behind it ever commits (see
+    /// `ainb-acp`'s `StoreWriter::flush`). The taxonomy lives here because the
+    /// store owns the error, and because `ainb-acp` is fenced off from `sqlx`
+    /// and cannot inspect the underlying database error itself.
+    ///
+    /// Only failures that are a property of the ROWS qualify. Anything
+    /// environmental (lock contention, a closed pool, a full disk, a
+    /// read-only file) is retryable, because an operator can clear it and the
+    /// rows are still good. Erring in that direction costs a retry; erring the
+    /// other way throws away data that would have committed.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            // A committed row already owns this event_id under a different
+            // envelope. The ledger is append-only, so no retry changes that.
+            Self::EventIdCollision { .. } | Self::EventNotFound { .. } => true,
+            // Constraint violations are the batch's own shape: a CHECK the
+            // payload fails, a duplicate key, a parent row that is not there.
+            Self::Sql(sqlx::Error::Database(db)) => {
+                db.is_check_violation() || db.is_unique_violation() || db.is_foreign_key_violation()
+            }
+            Self::Sql(_) => false,
+        }
+    }
+}
+
 /// Typed access to the raw provider-event ledger.
 pub struct FleetProviderEventRepo;
 
@@ -149,6 +181,69 @@ impl FleetProviderEventRepo {
             });
         }
         Ok(row)
+    }
+
+    /// Insert a whole batch of source envelopes in ONE transaction, returning
+    /// the highest `ingest_order` the batch owns.
+    ///
+    /// This exists for the ACP transcript hot path (plan Phase 4 commit
+    /// cadence). Per-row [`Self::append`] means one transaction per chunk, and
+    /// every transaction takes the single `SQLite` write lock shared with the
+    /// fleet event log, the claim loop and the outbox drain (`store.rs:77-90`,
+    /// whose comment warns a contended writer can exhaust its 10 s
+    /// `busy_timeout`). Coalescing bounds the ROW count; only a batched commit
+    /// bounds the COMMIT count.
+    ///
+    /// `ON CONFLICT DO UPDATE SET event_id = excluded.event_id` is a deliberate
+    /// no-op write: it changes no column value (the conflict key equals the
+    /// excluded key) but makes `RETURNING` fire on the replay leg too, so a
+    /// batch containing an already-committed `event_id` still reports that
+    /// row's true `ingest_order` instead of a stale `last_insert_rowid`.
+    ///
+    /// The returned row is then compared against the incoming envelope, so
+    /// BOTH doors into this ledger enforce one contract: an exact replay is a
+    /// no-op, and the same `event_id` carrying a DIFFERENT envelope is
+    /// [`FleetProviderEventError::EventIdCollision`], never a silently
+    /// discarded payload. The whole batch's transaction rolls back with it.
+    pub async fn append_batch(
+        pool: &SqlitePool,
+        events: &[NewFleetProviderEvent],
+    ) -> Result<Option<i64>, FleetProviderEventError> {
+        if events.is_empty() {
+            return Ok(None);
+        }
+        let mut tx = pool.begin().await?;
+        let mut high_water: Option<i64> = None;
+        for event in events {
+            let digest = digest(&event.raw_payload);
+            let stored = sqlx::query(
+                "INSERT INTO fleet_provider_event (event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(event_id) DO UPDATE SET event_id = excluded.event_id \
+                 RETURNING ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision",
+            )
+            .bind(&event.event_id)
+            .bind(&event.provider)
+            .bind(&event.source)
+            .bind(&event.session_key)
+            .bind(&event.provider_session_id)
+            .bind(event.observed_at)
+            .bind(event.received_at)
+            .bind(&event.event_type)
+            .bind(&event.raw_payload)
+            .bind(&digest)
+            .fetch_one(&mut *tx)
+            .await?;
+            let row = row_from(&stored)?;
+            if !matches_event(&row, event, &digest) {
+                return Err(FleetProviderEventError::EventIdCollision {
+                    event_id: event.event_id.clone(),
+                });
+            }
+            let order = row.ingest_order;
+            high_water = Some(high_water.map_or(order, |current: i64| current.max(order)));
+        }
+        tx.commit().await?;
+        Ok(high_water)
     }
 
     /// Link a source envelope to the revision that reduced it. Replays preserve
@@ -213,6 +308,20 @@ impl FleetProviderEventRepo {
         .fetch_all(pool)
         .await?;
         rows.iter().map(row_from).collect()
+    }
+
+    /// Newest committed `ingest_order` for one session, or `None` on an empty
+    /// transcript. The subscribe acknowledgement's head cursor.
+    pub async fn head_order_for_session(
+        pool: &SqlitePool,
+        session_key: &str,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT MAX(ingest_order) FROM fleet_provider_event WHERE session_key = ?",
+        )
+        .bind(session_key)
+        .fetch_one(pool)
+        .await
     }
 
     /// Page one session's rows after an `ingest_order` cursor, oldest first
@@ -331,6 +440,80 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(first.raw_payload, input.raw_payload);
         assert_eq!(first.ingest_order, 1);
+    }
+
+    #[tokio::test]
+    async fn append_batch_commits_once_and_reports_the_high_water_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let batch: Vec<NewFleetProviderEvent> =
+            (0..5).map(|index| event(&format!("acp-{index}"), "{}")).collect();
+
+        let high_water = FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
+
+        assert_eq!(high_water, Some(5));
+        let rows =
+            FleetProviderEventRepo::list_by_session_after(store.pool(), "claude:session-1", 0, 100)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|row| row.raw_blake3.len() == 64));
+    }
+
+    #[tokio::test]
+    async fn append_batch_replay_is_a_no_op_that_still_reports_the_original_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let batch = vec![event("acp-1", "first")];
+
+        let first = FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
+        // The `DO UPDATE` is a no-op assignment, present only so RETURNING
+        // fires on the replay leg.
+        let replay = FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
+
+        assert_eq!(first, replay);
+        let stored = FleetProviderEventRepo::get(store.pool(), "acp-1").await.unwrap().unwrap();
+        assert_eq!(stored.raw_payload, "first");
+    }
+
+    /// Both doors enforce one contract: the batch leg rejects a reused
+    /// `event_id` carrying a different envelope exactly as
+    /// `source_event_id_rejects_different_raw_payload` pins for `append`,
+    /// and the whole batch rolls back with it.
+    #[tokio::test]
+    async fn append_batch_rejects_a_reused_event_id_with_a_different_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        FleetProviderEventRepo::append_batch(store.pool(), &[event("acp-1", "first")])
+            .await
+            .unwrap();
+
+        let collision = FleetProviderEventRepo::append_batch(
+            store.pool(),
+            &[event("acp-2", "fresh"), event("acp-1", "second")],
+        )
+        .await;
+
+        assert!(matches!(
+            collision,
+            Err(FleetProviderEventError::EventIdCollision { .. })
+        ));
+        let stored = FleetProviderEventRepo::get(store.pool(), "acp-1").await.unwrap().unwrap();
+        assert_eq!(stored.raw_payload, "first", "the stored payload is intact");
+        assert!(
+            FleetProviderEventRepo::get(store.pool(), "acp-2").await.unwrap().is_none(),
+            "the batch's other row rolled back with the collision"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_batch_of_nothing_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        assert_eq!(
+            FleetProviderEventRepo::append_batch(store.pool(), &[]).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

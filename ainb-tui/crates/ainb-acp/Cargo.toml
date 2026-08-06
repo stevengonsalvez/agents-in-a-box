@@ -1,0 +1,40 @@
+[package]
+name = "ainb-acp"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP (Agent Client Protocol) client, transcript reducer, store writer, re-prime renderer and per-process circuit breaker. Pure library: it owns no EventBroker and no socket, so the daemon (or a future standalone harness) drives it."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "acp", "agent", "transcript"]
+
+[lib]
+name = "ainb_acp"
+path = "src/lib.rs"
+
+[dependencies]
+# The protocol itself. PINNED to an exact 1.x: adapter drift on npm is this
+# port's top risk, so the Rust side must not move underneath it silently
+# (2.0.0 exists and renegotiates the wire; migrating is a deliberate PR).
+agent-client-protocol = "=1.3.0"
+# Repo functions are the ONE door to the store; this crate never sees `sqlx`
+# (enforced by the store-fence test in `tests/store_fence.rs`).
+ainb-hangar-store = { path = "../ainb-hangar-store" }
+# `IdGen` seam: minted event ids are deterministic under test.
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+tokio = { workspace = true }
+# `compat` bridges tokio's child stdio to the futures AsyncRead/AsyncWrite the
+# upstream `ByteStreams` transport wants.
+tokio-util = { workspace = true, features = ["compat"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Jitter for the SlotCircuit backoff.
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

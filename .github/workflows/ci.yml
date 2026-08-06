@@ -37,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      acp: ${{ steps.filter.outputs.acp }}
     steps:
       - uses: dorny/paths-filter@v3
         if: github.event_name == 'pull_request'
@@ -54,6 +55,17 @@ jobs:
               # would have caught the edit.
               - 'docs/man/**'
               - 'docs/tui/cli.md'
+            # Coupled lane. A store change (a migration especially) can break
+            # the ACP writer without touching one line of ainb-acp, so the
+            # store fires this lane too; so does the daemon, which hosts the
+            # library from Phase 5 on.
+            acp:
+              - 'ainb-tui/crates/ainb-acp/**'
+              - 'ainb-tui/crates/ainb-hangar-store/**'
+              - 'ainb-tui/crates/ainb-hangar-daemon/**'
+              - 'ainb-tui/Cargo.toml'
+              - 'ainb-tui/Cargo.lock'
+              - '.github/workflows/ci.yml'
 
   # ────────────────────────────────────────────────────────────────────────────
   # Format check
@@ -422,6 +434,40 @@ jobs:
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash ../scripts/hangar/run_acceptance_tests.sh
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # ainb-acp: the ACP client/reducer/writer library, its OWN named lane.
+  #
+  # `Test` already runs `--workspace`, so these tests do execute there. This
+  # job exists for ATTRIBUTION, the same reason `Contracts` exists: an ACP
+  # failure gets its own red check instead of being one line among thousands,
+  # and the plan's verify-by-forced-failure step has a lane to point at.
+  #
+  # COUPLING: it also fires on `ainb-hangar-store/**` (the writer goes through
+  # that crate's repo functions and a migration can break it without touching
+  # a single ainb-acp file) and on `ainb-hangar-daemon/**` (Phase 5 hosts this
+  # library in the daemon's pool).
+  #
+  # The real-adapter probes are `#[ignore]`d and NOT run here: the runners
+  # have no `claude-agent-acp` / `codex-acp` and no credentials. Run them by
+  # hand per the header of `crates/ainb-acp/tests/real_adapter.rs`.
+  # ────────────────────────────────────────────────────────────────────────────
+  acp:
+    name: ainb-acp
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.acp != 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run -p ainb-acp --all-features --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
