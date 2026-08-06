@@ -206,6 +206,7 @@ private struct FleetNotchView: View {
                     Button("Claude") { presentation.preferences.filters.provider = .claude }
                     Button("Codex") { presentation.preferences.filters.provider = .codex }
                     Button("Copilot") { presentation.preferences.filters.provider = .copilot }
+                    Button("ACP") { presentation.preferences.filters.provider = .acp }
                     Button("Unknown") { presentation.preferences.filters.provider = .unknown }
                 } label: {
                     Label(providerLabel, systemImage: "slider.horizontal.3")
@@ -281,6 +282,7 @@ private struct FleetNotchView: View {
         case .claude: "Claude"
         case .codex: "Codex"
         case .copilot: "Copilot"
+        case .acp: "ACP"
         case .unknown: "Unknown"
         case nil: "All providers"
         }
@@ -372,6 +374,7 @@ private struct FleetNotchSessionRow: View {
         case .claude: "sparkles"
         case .codex: "brain.head.profile"
         case .copilot: "cursorarrow.rays"
+        case .acp: "point.3.connected.trianglepath.dotted"
         case .unknown: "terminal"
         }
     }
@@ -381,6 +384,7 @@ private struct FleetNotchSessionRow: View {
         case .claude: .orange
         case .codex: .cyan
         case .copilot: .purple
+        case .acp: .mint
         case .unknown: FleetNotchPalette.muted
         }
     }
