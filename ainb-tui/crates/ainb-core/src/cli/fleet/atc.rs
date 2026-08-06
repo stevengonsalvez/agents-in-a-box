@@ -1216,7 +1216,6 @@ fn hook_core_for_agent(
         && base_event == "PreToolUse"
         && matcher.as_deref() == Some("AskUserQuestion")
         && !session_id.is_empty()
-        && is_fleet_member
     {
         let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
         let (tool_input, questions, fingerprint) = match extract_structured_tool_input(payload) {
@@ -1249,11 +1248,14 @@ fn hook_core_for_agent(
     //    answers from the fleet UI (or `ainb fleet ... approve/deny`), then
     //    relays the verdict straight back as a `hookSpecificOutput` permission
     //    decision. Fleet members only — an unrelated host session must NOT wedge
-    //    on our socket. `client_await` re-dials to its deadline, so a notifyd
+    //    on our socket. AskUserQuestion is owned by the structured PreToolUse
+    //    path above, never by this generic permission path. `client_await`
+    //    re-dials to its deadline, so a notifyd
     //    restart mid-wait is survived; a dead socket / no answer deny-falls-back
     //    (never auto-approves).
     if agent == "claude"
         && base_event == "PermissionRequest"
+        && matcher.as_deref() != Some("AskUserQuestion")
         && !session_id.is_empty()
         && is_fleet_member
     {
@@ -2415,7 +2417,8 @@ mod tests {
         use tokio::net::UnixListener;
 
         let home = TempDir::new().unwrap();
-        let cwd = provision_atc(home.path(), "tower");
+        let cwd = home.path().join("plain-claude-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
         let paths = ainb_plugin_notifyd::paths::Paths::under(home.path());
         std::fs::create_dir_all(paths.approve_socket.parent().unwrap()).unwrap();
         let listener = UnixListener::bind(&paths.approve_socket).unwrap();
@@ -2459,7 +2462,7 @@ mod tests {
                 &hook_home,
                 "PreToolUse",
                 "ask-session",
-                hook_cwd.to_str().unwrap(),
+                hook_cwd.to_str().expect("temporary cwd is valid UTF-8"),
                 None,
                 None,
                 50,
