@@ -46,6 +46,8 @@ struct FleetSessionDetailView: View {
                 .fill(statusColor)
                 .frame(width: 12, height: 12)
                 .padding(.top, 8)
+            FleetProviderIcon(provider: session.provider, size: 28)
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 5) {
                 Text(identity.repository)
                     .font(.title2.weight(.bold))
