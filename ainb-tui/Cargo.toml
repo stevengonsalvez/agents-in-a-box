@@ -30,6 +30,7 @@ members = [
     "crates/ainb-hangar-proto",
     "crates/ainb-hangar-sandbox",
     "crates/ainb-hangar-daemon",
+    "crates/ainb-acp",
     "crates/ainb-plugin-hangar",
     "xtask",
 ]

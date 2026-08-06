@@ -11,6 +11,13 @@ on:
       - "ainb-tui/crates/ainb-fleet-core/**"
       - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
       - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      # Coupled lane (buzz-port part 1, Phase 4): the store's migrations own
+      # the shape these Swift fixtures assert, so a store-only change must
+      # still fire the contract suite.
+      - "ainb-tui/crates/ainb-hangar-store/migrations/**"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_message.rs"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_acp_session.rs"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_provider_event.rs"
       - "ainb-tui/Cargo.lock"
       - ".github/workflows/fleet-macos-contract.yml"
   pull_request:
@@ -23,6 +30,13 @@ on:
       - "ainb-tui/crates/ainb-fleet-core/**"
       - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
       - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      # Coupled lane (buzz-port part 1, Phase 4): the store's migrations own
+      # the shape these Swift fixtures assert, so a store-only change must
+      # still fire the contract suite.
+      - "ainb-tui/crates/ainb-hangar-store/migrations/**"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_message.rs"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_acp_session.rs"
+      - "ainb-tui/crates/ainb-hangar-store/src/repo/fleet_provider_event.rs"
       - "ainb-tui/Cargo.lock"
       - ".github/workflows/fleet-macos-contract.yml"
 

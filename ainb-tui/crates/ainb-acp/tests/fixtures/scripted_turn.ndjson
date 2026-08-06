@@ -1,0 +1,8 @@
+{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Let me think."}}
+{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"read src/lib.rs","kind":"read","status":"pending"}
+{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}
+{"sessionUpdate":"plan","entries":[{"content":"read the file","priority":"high","status":"completed"}]}
+{"sessionUpdate":"usage_update","used":1200,"size":200000}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":", world"}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"!"}}
