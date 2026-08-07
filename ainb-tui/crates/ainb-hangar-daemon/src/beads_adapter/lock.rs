@@ -323,7 +323,12 @@ fn read_pid(path: &Path) -> Result<i32, PidfileRead> {
 
 /// Is `pid` backed by a live process? Uses `kill(pid, 0)`: success or `EPERM`
 /// (exists, not ours) → alive; `ESRCH` → dead.
-fn pid_alive(pid: i32) -> bool {
+///
+/// The default holder predicate, and the base every stricter one builds on (see
+/// [`crate::single_instance`], which layers a process-identity check over it so a
+/// recycled PID cannot masquerade as the lock's holder).
+#[must_use]
+pub fn pid_alive(pid: i32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;

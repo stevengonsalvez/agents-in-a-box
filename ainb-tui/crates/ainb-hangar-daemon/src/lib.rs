@@ -242,6 +242,14 @@ pub mod scheduler;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// One daemon per hangar home.
+///
+/// [`single_instance::acquire`] is the first thing [`boot`] does: it takes a
+/// cross-process lock on `<hangar_home>/hangar/daemon.lock` (fail-fast) so a
+/// second daemon declines instead of racing the incumbent's database and
+/// unlinking its socket. Holders are judged by pid liveness AND process
+/// identity, so a recycled pid cannot wedge every future boot.
+pub mod single_instance;
 /// Toolkit-directory skill importer behind `ainb hangar skills sync` (P6.2).
 ///
 /// Walks a `ainb-toolkit/skills/`-shaped tree (`<name>/SKILL.md` + nested
@@ -397,6 +405,34 @@ impl Drop for PidFile {
 /// migration fails) or if the run loop's shutdown handler fails.
 pub async fn boot(once: bool) -> anyhow::Result<()> {
     let dir = hangar_dir()?;
+
+    // FIRST, before the store, the broker, the sweepers and `rpc::bind`. Every
+    // one of those mutates state this daemon must own alone, and `rpc::bind`
+    // unlinks the socket unconditionally — so a duplicate that gets even this
+    // far leaves the incumbent listening on an inode no client can reach.
+    //
+    // A loser exits 0, not non-zero: it did the right thing, and a supervisor
+    // (launchd `KeepAlive`, systemd `Restart=on-failure`) must not restart-loop
+    // a daemon that correctly declined. `--once` takes the lock too — a one-shot
+    // boot against a live home would otherwise steal that daemon's socket.
+    let _ownership = match single_instance::acquire(&dir)? {
+        single_instance::Ownership::Acquired(guard) => guard,
+        single_instance::Ownership::HeldBy(pid) => {
+            tracing::info!(
+                holder = pid,
+                lock = %single_instance::lock_path_in(&dir).display(),
+                "another hangar daemon owns this home; exiting"
+            );
+            return Ok(());
+        }
+        single_instance::Ownership::Contended => {
+            tracing::info!(
+                lock = %single_instance::lock_path_in(&dir).display(),
+                "another hangar daemon is taking this home; exiting"
+            );
+            return Ok(());
+        }
+    };
 
     // Observability tripwire seam (P8.1): when `$AINB_HANGAR_BOOT_TASK_ID` is set
     // the daemon emits exactly one structured boot event carrying that id. The

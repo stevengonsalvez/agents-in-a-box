@@ -219,8 +219,15 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt as _;
 
     // A leftover socket file from a previous (crashed) daemon would make `bind`
-    // fail with AddrInUse even though nothing is listening. Remove it first —
-    // this is safe because only one daemon owns a given hangar home at a time.
+    // fail with AddrInUse even though nothing is listening. Remove it first.
+    //
+    // This is safe because exactly one daemon owns a given hangar home at a
+    // time, and that is now ENFORCED rather than assumed: `boot` holds
+    // `single_instance`'s lock on `<home>/hangar/daemon.lock` before reaching
+    // this call, so the only socket we can unlink here belongs to a daemon whose
+    // lock we already reclaimed as stale. Unlinking does not close a live
+    // listener's fd — it would leave the incumbent accepting on an unreachable
+    // inode — so this line is only correct while that guard holds.
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
