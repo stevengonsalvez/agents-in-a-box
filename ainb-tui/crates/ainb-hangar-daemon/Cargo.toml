@@ -73,6 +73,10 @@ blake3 = { workspace = true }
 # Claude's blocking broker owns exact structured-question and permission
 # delivery. Hangar calls its public wire client and never reads notifyd state.
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd" }
+# Canonical provider-log scanner and model-rate projection behind the public
+# Fleet usage contract. Swift receives only its bounded, safe DTO.
+ainb-plugin-session-reader = { path = "../ainb-plugin-session-reader" }
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 # e38.23 OS-level agent confinement: wraps the provider spawn in a Seatbelt
 # (macOS) / Landlock (Linux) FS sandbox so the agent subprocess can only
 # read/write the task's isolated roots. Gates the non-claude providers (e38.16).

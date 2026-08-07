@@ -45,12 +45,18 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve paths under the ainb base directory: `$AINB_HOME` when set
+    /// Resolve paths under the Hangar base directory: `$AINB_HANGAR_HOME` or
+    /// `$AINB_HOME` when set
     /// (the same override the fleet plumbing honours — the hook, the daemon,
     /// and the TUI/CLI deciders MUST all resolve the approve socket to the
     /// same base or a waiting hook parks on a socket nothing serves),
     /// otherwise `~/.agents-in-a-box/`. Fails if neither can be determined.
     pub fn from_home() -> anyhow::Result<Self> {
+        if let Ok(h) = std::env::var("AINB_HANGAR_HOME") {
+            if !h.is_empty() {
+                return Ok(Self::under(PathBuf::from(h)));
+            }
+        }
         if let Ok(h) = std::env::var("AINB_HOME") {
             if !h.is_empty() {
                 return Ok(Self::under(PathBuf::from(h)));

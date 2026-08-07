@@ -545,6 +545,129 @@ struct FleetTimelineResult: Codable, Equatable {
     private enum CodingKeys: String, CodingKey { case entries, nextAfterRevision = "next_after_revision" }
 }
 
+enum FleetUsagePeriod: String, Codable, CaseIterable, Identifiable {
+    case today
+    case trailing7Days = "trailing_7_days"
+    case trailing30Days = "trailing_30_days"
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .today: "Today"
+        case .trailing7Days: "7 days"
+        case .trailing30Days: "30 days"
+        }
+    }
+}
+
+struct FleetUsageSummaryParams: Codable, Equatable {
+    let period: FleetUsagePeriod
+}
+
+enum FleetUsageSummaryState: String, Codable, Equatable {
+    case scanning, ready, partial, unavailable
+}
+
+struct FleetUsageBucket: Codable, Equatable {
+    let inputTokens: UInt64
+    let cacheCreationTokens: UInt64
+    let cacheReadTokens: UInt64
+    let outputTokens: UInt64
+    let reasoningTokens: UInt64
+    let callCount: UInt64
+    let sessionCount: UInt64
+    let projectCount: UInt64
+    let costUSD: Double?
+
+    var totalTokens: UInt64 {
+        inputTokens + cacheCreationTokens + cacheReadTokens + outputTokens + reasoningTokens
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case cacheCreationTokens = "cache_creation_tokens"
+        case cacheReadTokens = "cache_read_tokens"
+        case outputTokens = "output_tokens"
+        case reasoningTokens = "reasoning_tokens"
+        case callCount = "call_count"
+        case sessionCount = "session_count"
+        case projectCount = "project_count"
+        case costUSD = "cost_usd"
+    }
+}
+
+struct FleetUsageDailyBucket: Codable, Equatable {
+    let date: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageProviderBucket: Codable, Equatable {
+    let provider: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageModelBucket: Codable, Equatable {
+    let model: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageProjectBucket: Codable, Equatable {
+    let project: String
+    let repo: String?
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageSummaryResult: Codable, Equatable {
+    let state: FleetUsageSummaryState
+    let generatedAt: Int64?
+    let startAt: Int64?
+    let endAt: Int64?
+    let totals: FleetUsageBucket?
+    let daily: [FleetUsageDailyBucket]
+    let providers: [FleetUsageProviderBucket]
+    let models: [FleetUsageModelBucket]
+    let projects: [FleetUsageProjectBucket]
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case generatedAt = "generated_at"
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case totals, daily, providers, models, projects, detail
+    }
+}
+
+struct FleetRuntimeStatusParams: Codable, Equatable { init() {} }
+
+struct FleetRuntimeHookStatus: Codable, Equatable {
+    let provider: String
+    let installed: Bool
+    let hookReady: Bool
+    let deliveryReady: Bool
+    let lastEvent: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, installed
+        case hookReady = "hook_ready"
+        case deliveryReady = "delivery_ready"
+        case lastEvent = "last_event"
+    }
+}
+
+struct FleetRuntimeStatusResult: Codable, Equatable {
+    let daemonVersion: String
+    let protocolVersion: UInt32
+    let hooks: [FleetRuntimeHookStatus]
+
+    private enum CodingKeys: String, CodingKey {
+        case daemonVersion = "daemon_version"
+        case protocolVersion = "protocol_version"
+        case hooks
+    }
+}
+
 struct FleetStartParams: Codable, Equatable {
     let requestID: String
     let provider: FleetProvider

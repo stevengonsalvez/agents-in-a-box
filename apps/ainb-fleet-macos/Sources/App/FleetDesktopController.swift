@@ -19,14 +19,36 @@ final class FleetPresentationStore: ObservableObject {
     }
 }
 
+enum FleetNotchRoute: String, CaseIterable, Identifiable {
+    case sessions, needsYou, interviews, usage, settings
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .sessions: "Sessions"
+        case .needsYou: "Needs you"
+        case .interviews: "Interviews"
+        case .usage: "Usage"
+        case .settings: "Settings"
+        }
+    }
+}
+
 @MainActor
-final class FleetDesktopController: NSObject, NSWindowDelegate {
+final class FleetNotchNavigation: ObservableObject {
+    @Published var isExpanded = false
+    @Published var route: FleetNotchRoute = .sessions
+}
+
+@MainActor
+final class FleetDesktopController: NSObject {
     static var shared: FleetDesktopController?
 
     private let store: FleetStore
     private let presentation: FleetPresentationStore
-    private var notchPanel: NSPanel?
-    private var fleetWindow: NSWindow?
+    private let navigation = FleetNotchNavigation()
+    private var notchPanel: NSWindow?
 
     init(store: FleetStore, presentation: FleetPresentationStore) {
         self.store = store
@@ -37,59 +59,46 @@ final class FleetDesktopController: NSObject, NSWindowDelegate {
     func launch() {
         if notchPanel == nil {
             let size = NSSize(width: 320, height: 38)
-            let panel = NSPanel(
-                contentRect: NSRect(origin: .zero, size: size),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false
-            )
+            let panel: NSWindow
+            if FleetAppConfiguration.isUITest {
+                panel = NSWindow(
+                    contentRect: NSRect(origin: .zero, size: size),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+            } else {
+                panel = NSPanel(
+                    contentRect: NSRect(origin: .zero, size: size),
+                    styleMask: [.borderless, .nonactivatingPanel],
+                    backing: .buffered,
+                    defer: false
+                )
+            }
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.hasShadow = false
-            panel.level = .statusBar
+            panel.level = FleetAppConfiguration.isUITest ? .floating : .statusBar
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            panel.contentView = NSHostingView(rootView: FleetNotchView(
+            let contentView = NSHostingView(rootView: FleetNotchView(
                 store: store,
                 presentation: presentation,
-                setExpanded: { [weak self] in self?.setNotchExpanded($0) },
-                openFleet: { [weak self] in
-                    self?.setNotchExpanded(false)
-                    self?.showFleet()
-                }
+                navigation: navigation,
+                setExpanded: { [weak self] in self?.setNotchExpanded($0) }
             ))
+            panel.contentView = contentView
             notchPanel = panel
         }
         positionNotch()
         notchPanel?.orderFrontRegardless()
-    }
-
-    func showFleet() {
-        NSApp.setActivationPolicy(.regular)
-        if fleetWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Fleet"
-            window.minSize = NSSize(width: 620, height: 520)
-            window.level = .floating
-            window.delegate = self
-            window.contentView = NSHostingView(rootView: FleetWindowView(store: store, presentation: presentation.binding))
-            window.center()
-            window.setFrameAutosaveName("AINBFleetWindow")
-            fleetWindow = window
+        if FleetAppConfiguration.isUITest {
+            notchPanel?.makeKey()
         }
-        fleetWindow?.makeKeyAndOrderFront(nil)
-        fleetWindow?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func setNotchExpanded(_ expanded: Bool) {
         guard let panel = notchPanel else { return }
-        panel.setContentSize(NSSize(width: expanded ? 640 : 320, height: expanded ? 620 : 38))
-        positionNotch()
+        panel.setFrame(FleetNotchGeometry.frame(expanded: expanded, on: notchScreen(for: panel)), display: true)
     }
 
     func open(_ url: URL) {
@@ -100,41 +109,39 @@ final class FleetDesktopController: NSObject, NSWindowDelegate {
               !key.isEmpty else { return }
         store.refresh()
         store.selectedSessionKey = key
-        showFleet()
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard let closingWindow = notification.object as? NSWindow,
-              closingWindow === fleetWindow else { return }
-        fleetWindow = nil
-        NSApp.setActivationPolicy(.accessory)
+        navigation.route = .needsYou
+        navigation.isExpanded = true
+        setNotchExpanded(true)
     }
 
     private func positionNotch() {
-        guard let panel = notchPanel,
-              let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-        else { return }
-        let frame = screen.frame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - panel.frame.height))
+        guard let panel = notchPanel else { return }
+        panel.setFrame(FleetNotchGeometry.frame(expanded: navigation.isExpanded, on: notchScreen(for: panel)), display: true)
+    }
+
+    private func notchScreen(for panel: NSWindow) -> NSScreen? {
+        panel.screen ?? NSScreen.main ?? NSScreen.screens.first
     }
 }
 
+@MainActor
 final class FleetAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(FleetAppConfiguration.isUITest ? .regular : .accessory)
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
-        Task { @MainActor in
-            urls.forEach { FleetDesktopController.shared?.open($0) }
-        }
+        urls.forEach { FleetDesktopController.shared?.open($0) }
     }
 }
 
 private struct FleetNotchView: View {
     @ObservedObject var store: FleetStore
     @ObservedObject var presentation: FleetPresentationStore
+    @ObservedObject var navigation: FleetNotchNavigation
     let setExpanded: (Bool) -> Void
-    let openFleet: () -> Void
-    @State private var isExpanded = false
     @State private var search = ""
-    @State private var interviewPresented = false
+    @State private var usagePeriod: FleetUsagePeriod = .trailing7Days
 
     private var visibleSessions: [FleetSession] {
         FleetRosterPresentation.visibleSessions(
@@ -146,8 +153,8 @@ private struct FleetNotchView: View {
     }
 
     private var selectedSession: FleetSession? {
-        guard let key = store.selectedSessionKey else { return visibleSessions.first }
-        return visibleSessions.first(where: { $0.sessionKey == key }) ?? visibleSessions.first
+        guard let key = store.selectedSessionKey else { return routedSessions.first }
+        return routedSessions.first(where: { $0.sessionKey == key }) ?? routedSessions.first
     }
 
     var body: some View {
@@ -156,22 +163,23 @@ private struct FleetNotchView: View {
                 header
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
             .accessibilityIdentifier("fleet.notch")
             .accessibilityLabel(FleetStatusPresentation.label(active: store.activeCount, needsYou: store.needsYouCount, state: store.connectionState, sessions: store.sessions))
-            .accessibilityHint(isExpanded ? "Collapse Fleet controls" : "Expand Fleet controls")
+            .accessibilityHint(navigation.isExpanded ? "Collapse Fleet controls" : "Expand Fleet controls")
 
-            if isExpanded {
+            if navigation.isExpanded {
                 expandedContent
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .frame(width: isExpanded ? 640 : 320, alignment: .top)
+        .frame(width: notchSize.width, height: notchSize.height, alignment: .top)
         .background(FleetNotchPalette.canvas, in: FleetNotchShape())
-        .onChange(of: isExpanded) { _, value in setExpanded(value) }
+        .onChange(of: navigation.isExpanded) { _, value in setExpanded(value) }
         .onChange(of: visibleSessions.map(\.sessionKey)) { _, _ in selectFirstVisibleSession() }
         .onChange(of: presentation.preferences.filters) { _, _ in selectFirstVisibleSession() }
+        .onChange(of: navigation.route) { _, _ in selectFirstVisibleSession() }
         .onAppear(perform: selectFirstVisibleSession)
-        .sheet(isPresented: $interviewPresented) { FleetAnswerQueue(store: store) }
     }
 
     private var header: some View {
@@ -184,7 +192,7 @@ private struct FleetNotchView: View {
             Spacer()
             Text(store.connectionState.isLive ? "\(store.activeCount) active · \(store.needsYouCount) needs you" : "Offline")
                 .foregroundStyle(FleetNotchPalette.muted)
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: navigation.isExpanded ? "chevron.up" : "chevron.down")
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(FleetNotchPalette.muted)
         }
@@ -194,43 +202,102 @@ private struct FleetNotchView: View {
         .contentShape(Rectangle())
     }
 
+    private var notchSize: CGSize {
+        FleetNotchGeometry.size(expanded: navigation.isExpanded, on: NSScreen.main)
+    }
+
     private var expandedContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                TextField("Search sessions", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("fleet.notch.search")
-                Menu {
-                    Button("All providers") { presentation.preferences.filters.provider = nil }
-                    Divider()
-                    Button("Claude") { presentation.preferences.filters.provider = .claude }
-                    Button("Codex") { presentation.preferences.filters.provider = .codex }
-                    Button("Copilot") { presentation.preferences.filters.provider = .copilot }
-                    Button("ACP") { presentation.preferences.filters.provider = .acp }
-                    Button("Unknown") { presentation.preferences.filters.provider = .unknown }
-                } label: {
-                    Label(providerLabel, systemImage: "slider.horizontal.3")
-                }
-                .accessibilityIdentifier("fleet.notch.provider-filter")
-                Button(action: toggleExpanded) { Image(systemName: "xmark") }
-                    .accessibilityLabel("Close Fleet controls")
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(FleetRosterFocus.allCases) { focus in
-                        FleetNotchFocusChip(
-                            focus: focus,
-                            selected: presentation.preferences.filters.focus == focus
-                        ) {
-                            toggleFocus(focus)
+            VStack(spacing: 14) {
+                HStack(spacing: 8) {
+                    TextField("Search sessions", text: $search)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("fleet.notch.search")
+                    Menu {
+                        Button("All providers") { presentation.preferences.filters.provider = nil }
+                        Divider()
+                        Button("Claude") { presentation.preferences.filters.provider = .claude }
+                        Button("Codex") { presentation.preferences.filters.provider = .codex }
+                        Button("Copilot") { presentation.preferences.filters.provider = .copilot }
+                        Button("ACP") { presentation.preferences.filters.provider = .acp }
+                        Button("Unknown") { presentation.preferences.filters.provider = .unknown }
+                    } label: {
+                        Label(providerLabel, systemImage: "slider.horizontal.3")
+                    }
+                    .accessibilityIdentifier("fleet.notch.provider-filter")
+                    Menu {
+                        ForEach(FleetRosterFocus.allCases) { focus in
+                            Button(focus.label) { presentation.preferences.filters.focus = focus }
                         }
+                    } label: {
+                        Label(presentation.preferences.filters.focus.label, systemImage: "line.3.horizontal.decrease.circle")
+                    }
+                    .accessibilityIdentifier("fleet.notch.focus-filter")
+                    Button(action: toggleExpanded) { Image(systemName: "xmark") }
+                        .accessibilityLabel("Close Fleet controls")
+                }
+
+                Picker("Fleet view", selection: $navigation.route) {
+                    ForEach(FleetNotchRoute.allCases) { route in
+                        Text(route.title).tag(route)
                     }
                 }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("fleet.notch.route")
             }
+            .fixedSize(horizontal: false, vertical: true)
+
+            routeContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .padding(16)
+        .frame(height: 682, alignment: .top)
+    }
+
+    @ViewBuilder private var routeContent: some View {
+        if case .readIncompatible = store.connectionState {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(store.connectionState.message)
+                    .font(.headline)
+                Text("Update Fleet or install a compatible daemon before using controls.")
+                    .font(.caption)
+                    .foregroundStyle(FleetNotchPalette.muted)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(16)
+            .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else {
+            switch navigation.route {
+            case .sessions, .needsYou:
+                rosterContent
+            case .interviews:
+                FleetAnswerQueue(store: store) { navigation.route = .needsYou }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .usage:
+                FleetUsageView(store: store, period: $usagePeriod)
+            case .settings:
+                FleetRuntimeSettingsView(store: store, presentation: presentation.binding)
+            }
+        }
+    }
+
+    private var routedSessions: [FleetSession] {
+        if navigation.route == .needsYou {
+            return FleetRosterPresentation.visibleSessions(
+                store.sessions,
+                search: search,
+                filters: .attentionOnly,
+                sort: presentation.preferences.sort
+            )
+        }
+        return visibleSessions
+    }
+
+    private var rosterContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
 
             HStack {
-                Text("\(visibleSessions.count) of \(store.sessions.count) sessions")
+                Text("\(routedSessions.count) of \(store.sessions.count) sessions")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(FleetNotchPalette.muted)
                 Spacer()
@@ -241,7 +308,7 @@ private struct FleetNotchView: View {
 
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    ForEach(visibleSessions, id: \.sessionKey) { session in
+                    ForEach(routedSessions, id: \.sessionKey) { session in
                         FleetNotchSessionRow(
                             session: session,
                             selected: selectedSession?.sessionKey == session.sessionKey,
@@ -252,7 +319,7 @@ private struct FleetNotchView: View {
                     }
                     if let selectedSession {
                         FleetNotchDetail(store: store, session: selectedSession) {
-                            interviewPresented = true
+                            navigation.route = .interviews
                         }
                             .padding(.top, 4)
                     } else {
@@ -264,19 +331,7 @@ private struct FleetNotchView: View {
                     }
                 }
             }
-
-            HStack {
-                Button("Show all \(store.sessions.count) sessions", action: openFleet)
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("fleet.notch.show-all")
-                Spacer()
-                Button("Expand to Fleet", action: openFleet)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("fleet.notch.expand-fleet")
-            }
         }
-        .padding(16)
-        .frame(height: 582, alignment: .top)
     }
 
     private var providerLabel: String {
@@ -291,42 +346,32 @@ private struct FleetNotchView: View {
     }
 
     private func toggleExpanded() {
-        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+        withAnimation(.easeInOut(duration: 0.16)) { navigation.isExpanded.toggle() }
     }
 
     private func selectFirstVisibleSession() {
-        guard !visibleSessions.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
-        store.selectedSessionKey = visibleSessions.first?.sessionKey
+        guard !routedSessions.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
+        store.selectedSessionKey = routedSessions.first?.sessionKey
     }
 
-    private func toggleFocus(_ focus: FleetRosterFocus) {
-        if presentation.preferences.filters.focus == focus, focus != .all {
-            presentation.preferences.filters.focus = .all
-        } else {
-            presentation.preferences.filters.focus = focus
-        }
-    }
 }
 
-private struct FleetNotchFocusChip: View {
-    let focus: FleetRosterFocus
-    let selected: Bool
-    let toggle: () -> Void
+private enum FleetNotchGeometry {
+    static func size(expanded: Bool, on screen: NSScreen?) -> CGSize {
+        let requested = CGSize(width: expanded ? 920 : 320, height: expanded ? 720 : 38)
+        let available = screen?.frame.size ?? requested
+        return CGSize(width: min(requested.width, available.width), height: min(requested.height, available.height))
+    }
 
-    var body: some View {
-        Button(action: toggle) {
-            Text(focus.label)
-                .font(.subheadline.weight(selected ? .bold : .medium))
-                .foregroundStyle(selected ? .black : Color.white.opacity(0.92))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(selected ? FleetNotchPalette.mint : FleetNotchPalette.control, in: Capsule())
-                .overlay {
-                    Capsule().stroke(selected ? FleetNotchPalette.mint : FleetNotchPalette.muted.opacity(0.35), lineWidth: 1)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+    static func frame(expanded: Bool, on screen: NSScreen?) -> NSRect {
+        guard let screen else { return NSRect(origin: .zero, size: size(expanded: expanded, on: nil)) }
+        let size = size(expanded: expanded, on: screen)
+        return NSRect(
+            x: screen.frame.midX - size.width / 2,
+            y: screen.frame.maxY - size.height,
+            width: size.width,
+            height: size.height
+        )
     }
 }
 
@@ -428,7 +473,7 @@ private struct FleetNotchDetail: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!store.canDecideApproval(.allowOnce, on: session))
                     if session.provider == .codex && session.capabilities.approvalSession {
-                        Button("Bypass session") { store.decideApproval(.bypassSession, on: session) }
+                        Button("Always allow this session") { store.decideApproval(.bypassSession, on: session) }
                             .disabled(!store.canDecideApproval(.bypassSession, on: session))
                     }
                 }
@@ -456,6 +501,154 @@ private struct FleetNotchDetail: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityIdentifier("fleet.notch.detail.\(session.sessionKey)")
+    }
+}
+
+private struct FleetUsageView: View {
+    @ObservedObject var store: FleetStore
+    @Binding var period: FleetUsagePeriod
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Picker("Usage period", selection: $period) {
+                    ForEach(FleetUsagePeriod.allCases) { option in Text(option.label).tag(option) }
+                }
+                .pickerStyle(.segmented)
+                Spacer()
+                Button("Refresh") { store.refreshUsage(period: period) }
+                    .disabled(!store.canReadUsage)
+            }
+
+            if !store.canReadUsage {
+                VStack(spacing: 8) {
+                    Image(systemName: "chart.bar.xaxis").font(.title2)
+                    Text("Usage unavailable").font(.headline)
+                    Text("This daemon does not advertise fleet.usage.read.").font(.caption)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let summary = store.usageSummary {
+                usage(summary)
+            } else {
+                ProgressView("Reading canonical provider usage…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear { store.refreshUsage(period: period) }
+        .onChange(of: period) { _, value in store.refreshUsage(period: value) }
+        .accessibilityIdentifier("fleet.notch.usage")
+    }
+
+    @ViewBuilder private func usage(_ summary: FleetUsageSummaryResult) -> some View {
+        if let total = summary.totals {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(total.costUSD.map(currency) ?? tokens(total.totalTokens))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                    Text(total.costUSD == nil ? "Tokens, price unavailable" : "Canonical provider cost")
+                        .font(.caption)
+                        .foregroundStyle(FleetNotchPalette.muted)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("\(total.callCount) calls")
+                    Text("\(total.sessionCount) sessions")
+                    Text("\(total.projectCount) projects")
+                }
+                .font(.caption)
+                .foregroundStyle(FleetNotchPalette.muted)
+            }
+            .padding(16)
+            .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !summary.daily.isEmpty { section("Daily", rows: summary.daily.map { "\($0.date)  \(value($0.bucket))" }) }
+                    if !summary.providers.isEmpty { section("Providers", rows: summary.providers.map { "\($0.provider.capitalized)  \(value($0.bucket))" }) }
+                    if !summary.models.isEmpty { section("Models", rows: summary.models.map { "\($0.model)  \(value($0.bucket))" }) }
+                    if !summary.projects.isEmpty { section("Projects", rows: summary.projects.map { "\($0.repo ?? $0.project)  \(value($0.bucket))" }) }
+                }
+            }
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: "chart.bar.xaxis").font(.title2)
+                Text("Usage \(summary.state.rawValue)").font(.headline)
+                Text(summary.detail ?? "Daemon returned no usable usage projection.").font(.caption)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func section(_ title: String, rows: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline)
+            ForEach(rows, id: \.self) { row in
+                Text(row).font(.caption).foregroundStyle(FleetNotchPalette.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func value(_ bucket: FleetUsageBucket) -> String {
+        bucket.costUSD.map(currency) ?? tokens(bucket.totalTokens)
+    }
+
+    private func currency(_ value: Double) -> String { String(format: "$%.2f", value) }
+    private func tokens(_ value: UInt64) -> String { value.formatted(.number.notation(.compactName)) + " tokens" }
+}
+
+private struct FleetRuntimeSettingsView: View {
+    @ObservedObject var store: FleetStore
+    @Binding var presentation: FleetPresentationPreferences
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Runtime").font(.headline)
+                    Spacer()
+                    Button("Refresh") { store.refreshRuntime() }.disabled(!store.canReadRuntime)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Setup or repair")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Install or repair Fleet runtime in Terminal, then refresh this view.")
+                        .font(.caption)
+                        .foregroundStyle(FleetNotchPalette.muted)
+                        .textSelection(.enabled)
+                }
+                .padding(10)
+                .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                if let runtime = store.runtimeStatus {
+                    Text("Daemon \(runtime.daemonVersion) · protocol \(runtime.protocolVersion)")
+                        .font(.caption).foregroundStyle(FleetNotchPalette.muted)
+                    ForEach(runtime.hooks, id: \.provider) { hook in
+                        HStack {
+                            Text(hook.provider.capitalized).fontWeight(.semibold)
+                            Spacer()
+                            Text(hook.installed && hook.hookReady ? "Installed" : "Setup required")
+                                .foregroundStyle(hook.installed && hook.hookReady ? .mint : .orange)
+                            Text(hook.deliveryReady ? "Live" : "Waiting")
+                                .foregroundStyle(FleetNotchPalette.muted)
+                        }
+                        .font(.caption)
+                        .padding(10)
+                        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                } else {
+                    Text(store.connectionState.isLive ? "Runtime status unavailable." : store.connectionState.message)
+                        .font(.caption).foregroundStyle(FleetNotchPalette.muted)
+                }
+                Divider()
+                FleetSettingsView(presentation: $presentation)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 2)
+        }
+        .onAppear(perform: store.refreshRuntime)
+        .accessibilityIdentifier("fleet.notch.settings")
     }
 }
 

@@ -2005,11 +2005,11 @@ Options:
 
 ## `ainb fleet`
 
-Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge
+Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / daemon / daemons / atc / bridge
 
 ```console
 $ ainb fleet --help
-Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge
+Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / daemon / daemons / atc / bridge
 
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
@@ -2026,6 +2026,7 @@ Commands:
   cost          Per-session / model / day / group spend rollups + budget caps
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
+  runtime       Install the standalone Fleet daemon and provider hooks
   atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
   bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
@@ -2340,6 +2341,40 @@ $ ainb fleet daemons --help
 Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
 
 Usage: ainb fleet daemons [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet runtime`
+
+Install the standalone Fleet daemon and provider hooks
+
+```console
+$ ainb fleet runtime --help
+Install the standalone Fleet daemon and provider hooks
+
+Usage: ainb fleet runtime [OPTIONS] <COMMAND>
+
+Commands:
+  install  Idempotently start Hangar and install supported provider hooks
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet runtime install`
+
+Idempotently start Hangar and install supported provider hooks
+
+```console
+$ ainb fleet runtime install --help
+Idempotently start Hangar and install supported provider hooks
+
+Usage: ainb fleet runtime install [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]

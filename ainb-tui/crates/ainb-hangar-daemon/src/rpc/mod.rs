@@ -1175,6 +1175,8 @@ async fn handle(
         methods::FLEET_ACP_SESSION_CREATE => {
             handle_fleet_acp_session_create(pool, req, events).await
         }
+        methods::FLEET_RUNTIME_STATUS => handle_fleet_runtime_status(req, health).await,
+        methods::FLEET_USAGE_SUMMARY => handle_fleet_usage_summary(req).await,
         methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
         methods::FLEET_MESSAGE_LIST => handle_fleet_message_list(pool, req).await,
         // Both subscribe acks carry a head cursor; their per-connection
@@ -1392,6 +1394,64 @@ async fn handle_fleet_timeline(
     to_value(&FleetTimelineResult {
         entries,
         next_after_revision,
+    })
+}
+
+/// Return a bounded daemon-owned usage projection without exposing provider
+/// histories, filesystem paths, or any TUI implementation detail.
+async fn handle_fleet_usage_summary(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FLEET_CAPABILITY_USAGE_READ, FleetUsageSummaryParams};
+
+    require_fleet_capability(FLEET_CAPABILITY_USAGE_READ)?;
+    let params: FleetUsageSummaryParams = parse_params(req, "{ period? }")?;
+    let summary =
+        tokio::task::spawn_blocking(move || crate::fleet_usage::scan_summary(params.period))
+            .await
+            .map_err(|error| RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("usage summary worker failed: {error}"),
+                data: None,
+            })?;
+    to_value(&summary)
+}
+
+/// Return supported provider-hook health without leaking runtime files or
+/// asking the macOS client to inspect installation state directly.
+async fn handle_fleet_runtime_status(
+    req: &RpcRequest,
+    health: &DaemonHealth,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_RUNTIME_READ, FLEET_PROTOCOL_VERSION, FleetRuntimeHookStatus,
+        FleetRuntimeStatusParams, FleetRuntimeStatusResult,
+    };
+
+    require_fleet_capability(FLEET_CAPABILITY_RUNTIME_READ)?;
+    let _: FleetRuntimeStatusParams = parse_params(req, "{}")?;
+    let paths = ainb_plugin_notifyd::Paths::from_home().map_err(|error| RpcError {
+        code: INTERNAL_ERROR,
+        message: format!("runtime status unavailable: {error}"),
+        data: None,
+    })?;
+    let hooks = ainb_plugin_notifyd::status(&paths)
+        .map_err(|error| RpcError {
+            code: INTERNAL_ERROR,
+            message: format!("runtime status unavailable: {error}"),
+            data: None,
+        })?
+        .into_iter()
+        .map(|row| FleetRuntimeHookStatus {
+            provider: row.agent,
+            installed: row.installed,
+            hook_ready: row.hook_script_ok,
+            delivery_ready: row.socket_ok,
+            last_event: (!row.last_event.is_empty()).then_some(row.last_event),
+        })
+        .collect();
+    to_value(&FleetRuntimeStatusResult {
+        daemon_version: health.version.clone(),
+        protocol_version: FLEET_PROTOCOL_VERSION,
+        hooks,
     })
 }
 

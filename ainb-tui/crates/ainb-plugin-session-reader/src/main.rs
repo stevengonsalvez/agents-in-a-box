@@ -12,16 +12,9 @@
 #![forbid(unsafe_code)]
 
 use ainb_plugin_sdk::{SdkError, Server};
-
-#[cfg(not(target_arch = "wasm32"))]
-mod cache;
-mod config;
-mod fnv;
-mod parsers;
-mod plugin;
-mod scanner;
+use ainb_plugin_session_reader::plugin::SessionReader;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), SdkError> {
-    Server::new(plugin::SessionReader::new()).run_stdio().await
+    Server::new(SessionReader::new()).run_stdio().await
 }

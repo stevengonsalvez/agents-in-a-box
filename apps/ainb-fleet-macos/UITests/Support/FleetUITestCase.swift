@@ -21,9 +21,8 @@ class FleetUITestCase: XCTestCase {
             app.terminate()
         }
         app.launchEnvironment["AINB_HANGAR_HOME"] = fixture.home.path
-        if arguments.contains("--fleet-test-open-window") {
-            app.launchEnvironment["AINB_FLEET_TEST_OPEN_WINDOW"] = "1"
-        }
+        app.launchEnvironment["AINB_FLEET_TEST_ISOLATE_DEFAULTS"] = "1"
+        app.launchEnvironment["AINB_FLEET_UI_TEST_MODE"] = "1"
         if arguments.contains("--fleet-test-read-range=3...3") {
             app.launchEnvironment["AINB_FLEET_TEST_READ_RANGE"] = "3...3"
         }
@@ -32,19 +31,16 @@ class FleetUITestCase: XCTestCase {
     }
 
     @MainActor
-    func launchFleetWindow(
+    func launchExpandedNotch(
         arguments: [String] = [],
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        launchApp(arguments: ["--fleet-test-open-window"] + arguments)
-        let fleetWindow = app.windows["Fleet"]
-        XCTAssertTrue(
-            fleetWindow.waitForExistence(timeout: 8),
-            "Fleet window missing after normal app launch. \(app.debugDescription)",
-            file: file,
-            line: line
-        )
+        launchApp(arguments: arguments)
+        let notch = app.buttons["fleet.notch"]
+        XCTAssertTrue(notch.waitForExistence(timeout: 8), "Fleet notch missing. \(app.debugDescription)", file: file, line: line)
+        notch.click()
+        XCTAssertTrue(app.textFields["fleet.notch.search"].waitForExistence(timeout: 8), "Fleet notch did not expand. \(app.debugDescription)", file: file, line: line)
     }
 
     @MainActor
@@ -60,13 +56,13 @@ class FleetUITestCase: XCTestCase {
     @MainActor
     func fleetRow(_ sessionKey: String) -> XCUIElement {
         app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "fleet.row.\(sessionKey)"))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "fleet.notch.row.\(sessionKey)"))
             .firstMatch
     }
 
     @MainActor
     func fleetDetail(_ sessionKey: String) -> XCUIElement {
-        app.staticTexts["fleet.detail.\(sessionKey)"]
+        app.staticTexts["fleet.notch.detail.\(sessionKey)"]
     }
 
     @MainActor

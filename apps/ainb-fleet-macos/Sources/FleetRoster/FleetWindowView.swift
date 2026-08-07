@@ -208,6 +208,7 @@ struct FleetWindowView: View {
 
 struct FleetAnswerQueue: View {
     @ObservedObject var store: FleetStore
+    var onDone: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var selectedSessionKey: String?
     @State private var selectedQuestionIndex = 0
@@ -236,7 +237,13 @@ struct FleetAnswerQueue: View {
                         .foregroundStyle(FleetPalette.muted)
                 }
                 Spacer()
-                Button("Done", action: dismiss.callAsFunction)
+                Button("Done") {
+                    if let onDone {
+                        onDone()
+                    } else {
+                        dismiss()
+                    }
+                }
             }
 
             ScrollView(.horizontal, showsIndicators: false) {

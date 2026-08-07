@@ -97,6 +97,8 @@ pub mod execenv;
 pub mod fleet;
 /// Claude and Codex provider transports for authoritative Fleet control.
 pub mod fleet_provider;
+/// Bounded canonical Usage projection for the public Fleet RPC.
+pub mod fleet_usage;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
 /// transitions.
 ///
@@ -455,11 +457,10 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // hangar home so the T2 store boundary holds (no cross-read of notifyd's
     // rusqlite). The handle is dropped (process exit tears the task down,
     // mirroring the inbox aggregator); a failed ingest is logged, never fatal.
-    // The event-log path is home-based (matching the hook appender) independent
-    // of `$AINB_HANGAR_HOME`; the cursor rides the resolved hangar dir.
-    if let Some(events_jsonl) =
-        dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("events.jsonl"))
+    // Hook and daemon use the same resolved runtime root, including isolated
+    // `$AINB_HANGAR_HOME` test and paid-runtime installs.
     {
+        let events_jsonl = dir.join("events.jsonl");
         let cursor = dir.join("hangar").join("attention_ingest.offset");
         let _attention_ingest = crate::attention_ingest::AttentionIngest::new(
             store.pool().clone(),

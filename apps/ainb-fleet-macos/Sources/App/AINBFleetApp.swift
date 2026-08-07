@@ -1,39 +1,16 @@
+import Foundation
 import SwiftUI
 
-@main
-struct AINBFleetApp: App {
-    @StateObject private var store: FleetStore
-    @StateObject private var presentation: FleetPresentationStore
-    @NSApplicationDelegateAdaptor(FleetAppDelegate.self) private var appDelegate
-    private let desktop: FleetDesktopController
-
-    init() {
-        let defaults = Self.presentationDefaults
-        let fleetStore = FleetStore(readVersions: Self.testReadVersions)
-        let presentationStore = FleetPresentationStore(defaults: defaults)
-        _store = StateObject(wrappedValue: fleetStore)
-        _presentation = StateObject(wrappedValue: presentationStore)
-        let desktopController = FleetDesktopController(store: fleetStore, presentation: presentationStore)
-        desktop = desktopController
-        FleetDesktopController.shared = desktopController
-        Task { @MainActor in
-            fleetStore.start()
-            desktopController.launch()
-            #if DEBUG
-            if Self.testLaunchesFleetWindow {
-                desktopController.showFleet()
-            }
-            #endif
-        }
+enum FleetAppConfiguration {
+    static var isUITest: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["AINB_FLEET_UI_TEST_MODE"] == "1"
+        #else
+        false
+        #endif
     }
 
-    var body: some Scene {
-        Settings {
-            FleetSettingsView(presentation: presentation.binding)
-        }
-    }
-
-    private static var testReadVersions: FleetProtocolRange {
+    static var readVersions: FleetProtocolRange {
         #if DEBUG
         // 3...3 excludes the daemon's v2, simulating a read-incompatible client
         // for the protocol-compatibility UI journey.
@@ -45,9 +22,9 @@ struct AINBFleetApp: App {
         return FleetProtocolRange(min: 1, max: 2)
     }
 
-    private static var presentationDefaults: UserDefaults {
+    static var presentationDefaults: UserDefaults {
         #if DEBUG
-        guard testLaunchesFleetWindow else { return .standard }
+        guard ProcessInfo.processInfo.environment["AINB_FLEET_TEST_ISOLATE_DEFAULTS"] == "1" else { return .standard }
         let suite = "dev.ainb.fleet.xcui"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -57,10 +34,33 @@ struct AINBFleetApp: App {
         #endif
     }
 
-    #if DEBUG
-    private static var testLaunchesFleetWindow: Bool {
-        CommandLine.arguments.contains("--fleet-test-open-window")
-            || ProcessInfo.processInfo.environment["AINB_FLEET_TEST_OPEN_WINDOW"] == "1"
+}
+
+@main
+struct AINBFleetApp: App {
+    @StateObject private var store: FleetStore
+    @StateObject private var presentation: FleetPresentationStore
+    @NSApplicationDelegateAdaptor(FleetAppDelegate.self) private var appDelegate
+    private let desktop: FleetDesktopController
+
+    init() {
+        let store = FleetStore(readVersions: FleetAppConfiguration.readVersions)
+        let presentation = FleetPresentationStore(defaults: FleetAppConfiguration.presentationDefaults)
+        let desktop = FleetDesktopController(store: store, presentation: presentation)
+        _store = StateObject(wrappedValue: store)
+        _presentation = StateObject(wrappedValue: presentation)
+        self.desktop = desktop
+        FleetDesktopController.shared = desktop
+        Task { @MainActor in
+            store.start()
+            desktop.launch()
+            if FleetAppConfiguration.isUITest {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
-    #endif
+
+    var body: some Scene {
+        Settings { EmptyView() }
+    }
 }

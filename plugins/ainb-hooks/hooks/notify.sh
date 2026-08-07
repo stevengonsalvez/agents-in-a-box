@@ -119,7 +119,8 @@ if [ -z "${AINB_ENVELOPE}" ]; then
 fi
 
 # ----- 5. Delivery ------------------------------------------------------------
-AINB_DIR="${HOME}/.agents-in-a-box"
+AINB_DIR="${AINB_HANGAR_HOME:-${AINB_HOME:-${HOME}/.agents-in-a-box}}"
+export AINB_HOME="${AINB_DIR}"
 AINB_SOCK="${AINB_DIR}/notify.sock"
 AINB_FALLBACK="${AINB_DIR}/notify.fallback.jsonl"
 AINB_SPAWN_LOCK="${AINB_DIR}/notify.spawn.lock"
