@@ -2083,7 +2083,12 @@ mod tests {
         // An ATC-managed session appends one event line.
         // Stamp a transcript_path + the PreToolUse matcher into the payload to
         // assert they land in the canonical line.
-        let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"AskUserQuestion"}"#;
+        //
+        // Deliberately a NON-structured matcher: PreToolUse(AskUserQuestion) is
+        // fenced onto the structured-ask path, which appends only once the
+        // broker registers, and is covered by its own fail-open tests. This test
+        // is about the canonical line shape, not about that fence.
+        let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"Bash"}"#;
         hook_core(
             home.path(),
             "PreToolUse",
@@ -2093,7 +2098,7 @@ mod tests {
             None,
             7,
             payload,
-            Some("AskUserQuestion"),
+            Some("Bash"),
         )
         .unwrap();
         let lines = read_event_lines(home.path());
@@ -2101,7 +2106,7 @@ mod tests {
         let l = &lines[0];
         assert_eq!(l["session_id"], "atc-sid");
         assert_eq!(l["event_type"], "PreToolUse");
-        assert_eq!(l["matcher"], "AskUserQuestion");
+        assert_eq!(l["matcher"], "Bash");
         assert_eq!(l["transcript_path"], "/t/atc.jsonl");
         assert_eq!(l["agent"], "claude");
         assert_eq!(l["ts"], 7);
