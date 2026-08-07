@@ -174,14 +174,33 @@ fn overlay_codex(window: &mut LiveWindow, cache: &crate::cli::codex_statusline::
     window.codex_plan_type = cache.plan_type.clone();
 }
 
-/// Tier 1: read the statusline cache if fresh.
+/// Tier 1: read the statusline cache if fresh and it actually carries a
+/// window.
+///
+/// The windowless check is not redundant with freshness. The statusline
+/// writer rebuilds the whole cache on every render, so a payload that
+/// arrives without `rate_limits` (a headless/ACP session, or one that
+/// renders before its first API response) writes both windows as `null`
+/// with a current `updated_at`. Treating that as a hit would shadow
+/// Tier 2 and blank the entire `claude …` cluster for a full
+/// [`CACHE_MAX_AGE_SECS`] — 24h since the TTL widened. A cache with no
+/// windows carries no quota information, so it is a miss.
 fn current_tier1() -> Option<LiveWindow> {
     let path = cache_path()?;
     let cache = read_cache(&path)?;
     if !cache_is_fresh(&cache) {
         return None;
     }
+    if !cache_has_window(&cache) {
+        return None;
+    }
     Some(window_from_cache(cache))
+}
+
+/// Whether the cache carries any quota window at all. See
+/// [`current_tier1`] for why a windowless cache must not count as a hit.
+fn cache_has_window(cache: &LiveCache) -> bool {
+    cache.five_hour.is_some() || cache.seven_day.is_some()
 }
 
 fn cache_is_fresh(cache: &LiveCache) -> bool {
@@ -515,6 +534,42 @@ mod tests {
             model: None,
         };
         assert!(cache_is_fresh(&cache));
+    }
+
+    #[test]
+    fn windowless_cache_is_not_a_tier1_hit() {
+        // A statusline payload without `rate_limits` writes both windows as
+        // `null` with a current timestamp. Fresh, but carrying no quota —
+        // it must not shadow Tier 2, or the whole `claude …` cluster blanks
+        // for the full 24h TTL.
+        let mut cache = LiveCache {
+            version: crate::cli::statusline::CACHE_SCHEMA_VERSION,
+            updated_at: Utc::now().to_rfc3339(),
+            five_hour: None,
+            seven_day: None,
+            today_cost_usd: Some(1.23),
+            context_pct: Some(9),
+            model: Some("Opus 5".into()),
+        };
+        assert!(cache_is_fresh(&cache), "fixture must be fresh");
+        assert!(
+            !cache_has_window(&cache),
+            "no rate_limits → not a Tier 1 hit"
+        );
+
+        // Either window alone is enough to count.
+        cache.seven_day = Some(crate::cli::statusline::RateWindow {
+            pct: 86,
+            resets_at: None,
+        });
+        assert!(cache_has_window(&cache), "weekly alone still counts");
+
+        cache.seven_day = None;
+        cache.five_hour = Some(crate::cli::statusline::RateWindow {
+            pct: 2,
+            resets_at: None,
+        });
+        assert!(cache_has_window(&cache), "5h alone still counts");
     }
 
     #[test]
