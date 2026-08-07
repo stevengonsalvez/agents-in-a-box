@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -62,5 +63,11 @@ struct AINBFleetApp: App {
 
     var body: some Scene {
         Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appTermination) {
+                    Button("Quit Fleet") { NSApp.terminate(nil) }
+                        .keyboardShortcut("q", modifiers: .command)
+                }
+            }
     }
 }

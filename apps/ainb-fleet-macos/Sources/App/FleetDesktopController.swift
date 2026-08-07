@@ -234,8 +234,11 @@ private struct FleetNotchView: View {
                         Label(presentation.preferences.filters.focus.label, systemImage: "line.3.horizontal.decrease.circle")
                     }
                     .accessibilityIdentifier("fleet.notch.focus-filter")
-                    Button(action: toggleExpanded) { Image(systemName: "xmark") }
-                        .accessibilityLabel("Close Fleet controls")
+                    Button(action: quit) {
+                        Label("Quit", systemImage: "xmark")
+                    }
+                    .accessibilityIdentifier("fleet.notch.quit")
+                    .accessibilityLabel("Quit Fleet")
                 }
 
                 Picker("Fleet view", selection: $navigation.route) {
@@ -350,11 +353,19 @@ private struct FleetNotchView: View {
         withAnimation(.easeInOut(duration: 0.16)) { navigation.isExpanded.toggle() }
     }
 
+    private func quit() {
+        NSApp.terminate(nil)
+    }
+
     private func selectFirstVisibleSession() {
         guard !routedSessions.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
         store.selectedSessionKey = routedSessions.first?.sessionKey
     }
 
+}
+
+private final class FleetNotchPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 private enum FleetNotchGeometry {
