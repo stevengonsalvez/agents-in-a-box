@@ -1,4 +1,4 @@
-// ABOUTME: The `ainb` binary a scheduler unit runs — how it is chosen when the
+// ABOUTME: The `ainb` binary a scheduler unit runs: how it is chosen when the
 // unit is written, and how it is checked when status is reported.
 //
 // Shared by every fleet feature that installs a launchd plist or a systemd user
@@ -20,27 +20,61 @@ use std::path::PathBuf;
 /// The shell that performs the `PATH` lookup on behalf of the scheduler.
 pub const SHELL: &str = "/bin/sh";
 
+/// Directories a unit can always fall back on, whatever the installing shell
+/// happened to have on `PATH`.
+const STANDARD_BIN_DIRS: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+
 /// Resolve the `ainb` binary to write into a unit's command.
 ///
 /// Deliberately NOT `current_exe()`: that freezes an absolute path into the
-/// unit forever, so a later `brew upgrade` (or cargo → homebrew move) leaves
+/// unit forever, so a later `brew upgrade` (or cargo to homebrew move) leaves
 /// the scheduler running a path that no longer exists. Bare `ainb` is
 /// re-resolved at every launch. `$AINB_BIN` stays as the explicit override for
 /// installs that are not on `PATH`.
+///
+/// A relative `$AINB_BIN` is made absolute against the installing process's
+/// cwd, because the unit will NOT run with that cwd: both schedulers launch
+/// from `/`, so `./target/release/ainb` written verbatim can never be found.
 #[must_use]
 pub fn ainb_bin_from(override_var: Option<&str>) -> String {
     match override_var {
-        Some(b) if !b.is_empty() => b.to_string(),
+        Some(b) if !b.is_empty() => absolutize_explicit_path(b),
         _ => "ainb".to_string(),
     }
 }
 
+/// Leave a bare name alone (the shell resolves it on `PATH`); anchor an
+/// explicit but relative path to the cwd so it still means the same file once
+/// the scheduler runs it from `/`.
+fn absolutize_explicit_path(bin: &str) -> String {
+    if !bin.contains('/') {
+        return bin.to_string();
+    }
+    let path = std::path::Path::new(bin);
+    if path.is_absolute() {
+        return bin.to_string();
+    }
+    std::path::absolute(path).map_or_else(|_| bin.to_string(), |p| p.display().to_string())
+}
+
 /// The `PATH` to write into a unit, and therefore the one the shell resolves a
 /// bare program against at launch time.
+///
+/// The installing shell's `PATH` alone is not enough. It can carry entries that
+/// vanish (direnv, nix, a `target/debug` used for one `cargo run`), and if the
+/// unit inherits only those, the bridge dies the moment they go away: the #608
+/// failure shape again, moved from the binary path to the `PATH`. So the
+/// standard install directories are always appended as a floor.
 #[must_use]
 pub fn unit_path_env() -> String {
-    std::env::var("PATH")
-        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".into())
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut out: Vec<&str> = Vec::new();
+    for dir in current.split(':').chain(STANDARD_BIN_DIRS.split(':')) {
+        if !dir.is_empty() && !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out.join(":")
 }
 
 /// Wrap a command as `/bin/sh -c "exec <command>"`.
@@ -48,15 +82,15 @@ pub fn unit_path_env() -> String {
 /// `argv[0]` of the resulting unit is the SHELL, not `ainb`, and that is the
 /// point. Neither scheduler does the `PATH` lookup a naive reading suggests:
 /// launchd resolves `ProgramArguments[0]` against its own job environment and
-/// ignores the plist's `EnvironmentVariables` PATH entirely — a bare name there
-/// fails to spawn before the process ever starts — and systemd resolves a
+/// ignores the plist's `EnvironmentVariables` PATH entirely (a bare name there
+/// fails to spawn before the process ever starts), and systemd resolves a
 /// non-absolute `ExecStart` against a fixed compile-time list that excludes
 /// `~/.cargo/bin` and `~/.local/bin`. Going through `/bin/sh -c` moves the
 /// lookup somewhere that DOES honour the unit's `PATH`, and does it at every
 /// launch rather than freezing it at install time.
 ///
 /// `exec` so the shell replaces itself with `ainb` rather than lingering as a
-/// parent — which also keeps launchd's `KeepAlive` watching the real process.
+/// parent, which also keeps launchd's `KeepAlive` watching the real process.
 #[must_use]
 pub fn shell_wrapped_argv(bin: &str, args: &[&str]) -> Vec<String> {
     let command = std::iter::once(bin)
@@ -105,6 +139,22 @@ impl ProgramHealth {
     }
 }
 
+/// Health of the program the unit file at `unit` would run.
+///
+/// The single place that turns "a unit path" into a verdict, so the ATC timer
+/// and the phone bridge cannot drift into reporting different health for the
+/// same class of broken unit.
+#[must_use]
+pub fn unit_program_health_at(unit: &std::path::Path) -> ProgramHealth {
+    if !unit.exists() {
+        return ProgramHealth::NoUnit;
+    }
+    match std::fs::read_to_string(unit) {
+        Ok(text) => unit_program_health(&text),
+        Err(e) => ProgramHealth::Unreadable(format!("cannot read {}: {e}", unit.display())),
+    }
+}
+
 /// Health of the program a unit's text describes.
 #[must_use]
 pub fn unit_program_health(text: &str) -> ProgramHealth {
@@ -130,7 +180,7 @@ fn unit_argv(text: &str) -> Option<Vec<String>> {
 /// The binary whose availability actually decides whether the unit can run.
 ///
 /// Units are written as `/bin/sh -c "exec ainb …"`, so `argv[0]` is the shell
-/// and always resolves — reporting on it would certify every broken unit as
+/// and always resolves, so reporting on it would certify every broken unit as
 /// healthy. Look through the wrapper to the command it runs. Units written
 /// before the wrapper existed (a direct absolute path) still report on that
 /// path, which is what makes an already-installed stale unit detectable.
@@ -172,6 +222,13 @@ fn program_resolves_in(program: &str, search_path: Option<&str>) -> bool {
         return false;
     }
     if program.contains('/') {
+        // A relative path is judged against the CALLER's cwd by `which`, but
+        // the scheduler launches from `/`, so it can never mean the same file.
+        // Report it unresolvable rather than letting the verdict depend on
+        // which directory the operator happened to run `status` from.
+        if !std::path::Path::new(program).is_absolute() {
+            return false;
+        }
         return which::which(program).is_ok();
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
@@ -226,25 +283,34 @@ fn xml_unescape(s: &str) -> String {
 }
 
 /// Inverse of [`shell_quote`]: split a command line into argv.
+///
+/// Both quote styles are honoured. We only ever emit `'`, but an installed
+/// unit may predate that: earlier bridge code wrapped whitespace arguments in
+/// `"`, and systemd honours `"` in `ExecStart` too. Misparsing one of those
+/// makes `status` report a running service as MISSING.
 fn shell_split(s: &str) -> Vec<String> {
     let mut argv = Vec::new();
     let mut current = String::new();
     let mut has_token = false;
-    let mut in_quotes = false;
+    let mut quote: Option<char> = None;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
-            '\'' => {
-                in_quotes = !in_quotes;
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(c);
                 has_token = true;
             }
-            '\\' if !in_quotes => {
+            c if quote == Some(c) => {
+                quote = None;
+                has_token = true;
+            }
+            '\\' if quote.is_none() => {
                 if let Some(escaped) = chars.next() {
                     current.push(escaped);
                     has_token = true;
                 }
             }
-            c if c.is_whitespace() && !in_quotes => {
+            c if c.is_whitespace() && quote.is_none() => {
                 if has_token {
                     argv.push(std::mem::take(&mut current));
                     has_token = false;
@@ -328,7 +394,7 @@ mod tests {
     }
 
     /// Units written before the wrapper existed must still be judged on the
-    /// right binary — that is what makes an already-installed stale unit
+    /// right binary. That is what makes an already-installed stale unit
     /// detectable rather than silently unrecognised.
     #[test]
     fn program_from_argv_understands_legacy_direct_units() {
@@ -417,8 +483,8 @@ mod tests {
         let _ = std::fs::remove_file(&not_executable);
     }
 
-    /// A bare program must be judged against the PATH the UNIT carries — the
-    /// one the shell will use — not against whatever `$PATH` the operator
+    /// A bare program must be judged against the PATH the UNIT carries (the
+    /// one the shell will use), not against whatever `$PATH` the operator
     /// happens to be running the status command with.
     #[test]
     fn bare_program_resolves_against_the_units_own_path() {
@@ -441,7 +507,7 @@ mod tests {
         );
     }
 
-    /// An unparseable unit must not be reported as healthy — that is the same
+    /// An unparseable unit must not be reported as healthy. That is the same
     /// false positive the whole check exists to remove.
     #[test]
     fn an_unrecognised_unit_is_unknown_not_healthy() {
@@ -469,6 +535,98 @@ mod tests {
             ProgramHealth::Missing("/gone/ainb".into()).problem().as_deref(),
             Some("program MISSING (/gone/ainb)")
         );
+    }
+
+    /// The scheduler launches from `/`, so a relative `$AINB_BIN` written
+    /// verbatim can never be found. Anchor it at install time instead.
+    #[test]
+    fn a_relative_binary_override_is_made_absolute() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let resolved = ainb_bin_from(Some("./target/release/ainb"));
+        assert!(
+            std::path::Path::new(&resolved).is_absolute(),
+            "relative override left relative: {resolved}"
+        );
+        assert!(resolved.starts_with(&cwd.display().to_string()));
+        assert!(resolved.ends_with("target/release/ainb"));
+        // A bare name is NOT a path; the shell resolves it on PATH.
+        assert_eq!(ainb_bin_from(Some("ainb")), "ainb");
+        assert_eq!(ainb_bin_from(Some("/opt/custom/ainb")), "/opt/custom/ainb");
+    }
+
+    /// A relative program in an already-installed unit must read as broken
+    /// regardless of where `status` is run from, because the scheduler runs
+    /// the unit from `/` and can never resolve it.
+    #[test]
+    fn a_relative_program_never_reports_healthy() {
+        // `target/debug/ainb` may well exist relative to the test's cwd; the
+        // point is that this must not make it count as resolvable.
+        assert!(!program_resolves_in("target/debug/ainb", None));
+        assert!(!program_resolves_in("./ainb", Some("/bin:/usr/bin")));
+        // The absolute form is still judged on its merits.
+        assert!(program_resolves_in("/bin/sh", None));
+    }
+
+    /// The unit's PATH must not be only what the installing shell happened to
+    /// have: a direnv/nix/`target/debug` entry that later vanishes would
+    /// strand the unit, which is #608 one level up.
+    #[test]
+    fn unit_path_always_includes_the_standard_dirs() {
+        let path = unit_path_env();
+        for dir in STANDARD_BIN_DIRS.split(':') {
+            assert!(
+                path.split(':').any(|d| d == dir),
+                "unit PATH is missing the {dir} floor: {path}"
+            );
+        }
+        // No duplicates, so the entry order stays meaningful.
+        let dirs: Vec<&str> = path.split(':').collect();
+        let mut unique = dirs.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(dirs.len(), unique.len(), "duplicate PATH entries: {path}");
+    }
+
+    /// Units written before this change double-quoted whitespace arguments,
+    /// and systemd honours `"` too. Misparsing one reports a running service
+    /// as MISSING and sends the operator to reinstall it for nothing.
+    #[test]
+    fn shell_split_handles_legacy_double_quoted_units() {
+        assert_eq!(
+            systemd_exec_start_argv(
+                "[Service]\nExecStart=\"/opt/my apps/ainb\" fleet bridge run\n"
+            ),
+            Some(vec![
+                "/opt/my apps/ainb".into(),
+                "fleet".into(),
+                "bridge".into(),
+                "run".into()
+            ])
+        );
+        assert_eq!(
+            program_from_argv(
+                &unit_argv("[Service]\nExecStart=\"/opt/my apps/ainb\" fleet bridge run\n")
+                    .expect("argv")
+            )
+            .as_deref(),
+            Some("/opt/my apps/ainb")
+        );
+    }
+
+    #[test]
+    fn unit_program_health_at_separates_absent_from_unreadable() {
+        let dir = std::env::temp_dir();
+        let absent = dir.join("ainb-unit-program-test-absent.plist");
+        let _ = std::fs::remove_file(&absent);
+        assert_eq!(unit_program_health_at(&absent), ProgramHealth::NoUnit);
+
+        let junk = dir.join("ainb-unit-program-test-junk.plist");
+        std::fs::write(&junk, b"not a unit").expect("write fixture");
+        assert!(matches!(
+            unit_program_health_at(&junk),
+            ProgramHealth::Unreadable(_)
+        ));
+        let _ = std::fs::remove_file(&junk);
     }
 
     #[test]

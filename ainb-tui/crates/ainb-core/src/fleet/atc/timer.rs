@@ -244,13 +244,7 @@ pub fn installed_program_health(name: &str) -> ProgramHealth {
     let Ok(unit) = unit else {
         return ProgramHealth::Unreadable("cannot resolve unit path".into());
     };
-    if !unit.exists() {
-        return ProgramHealth::NoUnit;
-    }
-    match std::fs::read_to_string(&unit) {
-        Ok(text) => unit_program::unit_program_health(&text),
-        Err(e) => ProgramHealth::Unreadable(format!("cannot read {}: {e}", unit.display())),
-    }
+    unit_program::unit_program_health_at(&unit)
 }
 
 fn install_launchd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
