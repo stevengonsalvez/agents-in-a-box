@@ -358,7 +358,7 @@ pub fn scan(roots: &ProviderRoots) -> UsageData {
 /// Gemini and Cursor parsers are stubs that don't read files; they're
 /// invoked without the cache.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn scan_with_cache(
+pub(crate) fn scan_with_cache(
     roots: &ProviderRoots,
     cache: &mut Option<crate::cache::UsageCache>,
 ) -> UsageData {
@@ -381,7 +381,7 @@ pub fn scan_with_cache(
 /// honest; their file counts are usually small enough that the
 /// under-count is invisible.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn scan_with_cache_and_progress(
+pub(crate) fn scan_with_cache_and_progress(
     roots: &ProviderRoots,
     cache: &mut Option<crate::cache::UsageCache>,
     reporter: &mut ProgressReporter,
