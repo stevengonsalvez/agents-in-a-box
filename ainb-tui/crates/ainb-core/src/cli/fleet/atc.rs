@@ -407,6 +407,11 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     }
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta)?)?;
     let timer_installed = timer::is_installed(&name);
+    // A unit file existing is NOT the same as a working timer: if the binary it
+    // points at has moved (cargo → homebrew), launchd exits 78 EX_CONFIG and
+    // parks the job forever while `installed: true` keeps claiming health.
+    let timer_program = timer::installed_program(&name);
+    let timer_program_missing = timer::installed_missing_program(&name);
     let session_running = tmux_session_exists(&meta.tmux_session()).await;
 
     // Heartbeat staleness (M-A1): the heartbeat stamps `last_heartbeat_ms` every
@@ -435,6 +440,8 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
         "heartbeat_interval_min": meta.heartbeat_interval_min,
         "idle_pause_min": meta.idle_pause_min,
         "timer_installed": timer_installed,
+        "timer_program": timer_program,
+        "timer_program_missing": timer_program_missing,
         "session_running": session_running,
         "tmux_session": meta.tmux_session(),
         "last_heartbeat_ms": last_heartbeat_ms,
@@ -449,8 +456,11 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             "  session:   {} (running: {session_running})",
             meta.tmux_session()
         );
+        let program_note = timer_program_missing
+            .as_ref()
+            .map_or_else(String::new, |path| format!(", program MISSING ({path})"));
         println!(
-            "  heartbeat: {} (timer installed: {timer_installed}, every {}m)",
+            "  heartbeat: {} (timer installed: {timer_installed}{program_note}, every {}m)",
             if meta.heartbeat_enabled {
                 "enabled"
             } else {
@@ -458,6 +468,12 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             },
             meta.heartbeat_interval_min
         );
+        if timer_program_missing.is_some() {
+            println!(
+                "             ↳ the timer can never fire — re-run `ainb fleet atc setup {}` to repoint it",
+                meta.name
+            );
+        }
         match heartbeat_age_ms {
             Some(age) => {
                 let mins = age / 60_000;

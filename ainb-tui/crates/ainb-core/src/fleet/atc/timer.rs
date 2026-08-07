@@ -22,20 +22,23 @@ fn unit_stem(name: &str) -> String {
     format!("com.agentsinabox.atc.{name}")
 }
 
-/// Resolve the `ainb` binary path for the timer command. Prefers `AINB_BIN`,
-/// then the current executable, then bare `ainb` on `$PATH`.
+/// Resolve the `ainb` binary for the timer command.
+///
+/// Deliberately NOT `current_exe()`: that freezes an absolute path (e.g.
+/// `~/.cargo/bin/ainb`) into the unit forever, so a later `brew install ainb`
+/// leaves launchd exec'ing a path that no longer exists — exit 78 `EX_CONFIG`,
+/// penalty box, heartbeat silently dead. Bare `ainb` re-resolves at every
+/// firing against the `PATH` the unit already carries. `$AINB_BIN` stays as the
+/// explicit override for installs that are not on `PATH`.
 fn ainb_bin() -> String {
-    if let Ok(b) = std::env::var("AINB_BIN") {
-        if !b.is_empty() {
-            return b;
-        }
+    ainb_bin_from(std::env::var("AINB_BIN").ok().as_deref())
+}
+
+fn ainb_bin_from(override_var: Option<&str>) -> String {
+    match override_var {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => "ainb".to_string(),
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(s) = exe.to_str() {
-            return s.to_string();
-        }
-    }
-    "ainb".to_string()
 }
 
 /// The heartbeat command argv the timer runs.
@@ -203,6 +206,76 @@ pub fn is_installed(name: &str) -> bool {
     }
 }
 
+/// The `argv[0]` of the installed unit for `name`, when a unit exists.
+///
+/// launchd reads `ProgramArguments[0]` from the plist; systemd reads the first
+/// token of `ExecStart` in the service unit.
+pub fn installed_program(name: &str) -> Option<String> {
+    let unit = if cfg!(target_os = "macos") {
+        launchd_plist_path(name)
+    } else {
+        systemd_service_path(name)
+    }
+    .ok()?;
+    unit_program(&std::fs::read_to_string(unit).ok()?)
+}
+
+/// `Some(program)` when the installed unit points at a program that does not
+/// resolve — i.e. the timer is installed but can never fire. `None` when there
+/// is no unit, or the program resolves fine.
+pub fn installed_missing_program(name: &str) -> Option<String> {
+    missing_program(&installed_program(name)?)
+}
+
+/// Extract `argv[0]` from a unit's text — launchd plist XML or a systemd
+/// service unit. Returns `None` when the shape is not recognised.
+#[must_use]
+pub fn unit_program(text: &str) -> Option<String> {
+    plist_program(text).or_else(|| systemd_exec_start_program(text))
+}
+
+/// `Some(program)` when `program` does not resolve to an executable file.
+#[must_use]
+pub fn missing_program(program: &str) -> Option<String> {
+    if program_resolves(program) {
+        None
+    } else {
+        Some(program.to_string())
+    }
+}
+
+/// Whether a unit's `argv[0]` resolves: a path is stat'd, a bare name is looked
+/// up on `$PATH`.
+#[must_use]
+pub fn program_resolves(program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    if program.contains('/') {
+        // ponytail: exists() not an executable-bit check — a present-but-unrunnable
+        // binary is a different failure than the one this guards (the file moved).
+        std::path::Path::new(program).exists()
+    } else {
+        which::which(program).is_ok()
+    }
+}
+
+/// First `<string>` inside the `ProgramArguments` array of a launchd plist.
+fn plist_program(xml: &str) -> Option<String> {
+    let after_key = xml.split_once("<key>ProgramArguments</key>")?.1;
+    let array = after_key.split_once("<array>")?.1;
+    let first = array.split_once("<string>")?.1;
+    let (value, _) = first.split_once("</string>")?;
+    let value = xml_unescape(value.trim());
+    (!value.is_empty()).then_some(value)
+}
+
+/// First token of the `ExecStart=` line of a systemd service unit.
+fn systemd_exec_start_program(unit: &str) -> Option<String> {
+    let line = unit.lines().map(str::trim).find_map(|l| l.strip_prefix("ExecStart="))?;
+    shell_unquote_first_token(line.trim())
+}
+
 fn install_launchd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
     let plist = launchd_plist_path(&meta.name)?;
     if let Some(parent) = plist.parent() {
@@ -286,6 +359,22 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+/// Inverse of `shell_quote` for the leading token only — enough to recover
+/// `argv[0]` from an `ExecStart=` line we wrote ourselves.
+fn shell_unquote_first_token(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if let Some(rest) = s.strip_prefix('\'') {
+        let (quoted, _) = rest.split_once('\'')?;
+        return Some(quoted.to_string());
+    }
+    let token = s.split_whitespace().next()?;
+    (!token.is_empty()).then(|| token.to_string())
+}
+
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
@@ -357,5 +446,98 @@ mod tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("plain"), "plain");
         assert_eq!(shell_quote("/usr/bin/ainb"), "/usr/bin/ainb");
+    }
+
+    #[test]
+    fn ainb_bin_is_bare_unless_explicitly_overridden() {
+        assert_eq!(ainb_bin_from(None), "ainb");
+        assert_eq!(ainb_bin_from(Some("")), "ainb");
+        assert_eq!(ainb_bin_from(Some("/opt/custom/ainb")), "/opt/custom/ainb");
+    }
+
+    /// Regression for the 32-day silent outage: `current_exe()` must never be
+    /// frozen into a unit. A cargo-installed `ainb` that later moves to homebrew
+    /// left launchd exec'ing a path that no longer existed (exit 78 `EX_CONFIG`).
+    #[test]
+    fn units_do_not_pin_the_current_executable_path() {
+        let meta = AtcMeta::new("tower");
+        let exe = std::env::current_exe().expect("current_exe");
+        let exe = exe.display().to_string();
+        let plist = build_plist(&meta);
+        let service = build_systemd_service(&meta);
+        assert!(!plist.contains(&exe), "plist pinned current_exe: {plist}");
+        assert!(
+            !service.contains(&exe),
+            "systemd service pinned current_exe: {service}"
+        );
+        // Sanity: absent an explicit $AINB_BIN override, the emitted argv[0]
+        // carries no directory component at all, so there is no cargo/homebrew
+        // prefix that can go stale.
+        if std::env::var("AINB_BIN").unwrap_or_default().is_empty() {
+            for unit in [&plist, &service] {
+                let program = unit_program(unit).expect("argv[0]");
+                assert!(
+                    !program.contains('/'),
+                    "argv[0] should be bare, got {program}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unit_program_reads_argv0_from_both_unit_flavours() {
+        let meta = AtcMeta::new("tower");
+        let expected = ainb_bin();
+        assert_eq!(
+            unit_program(&build_plist(&meta)).as_deref(),
+            Some(&*expected)
+        );
+        assert_eq!(
+            unit_program(&build_systemd_service(&meta)).as_deref(),
+            Some(&*expected)
+        );
+        assert_eq!(unit_program("not a unit at all"), None);
+    }
+
+    #[test]
+    fn unit_program_survives_quoting_and_escaping() {
+        assert_eq!(
+            plist_program("<key>ProgramArguments</key>\n<array>\n<string>/a&amp;b/ainb</string>"),
+            Some("/a&b/ainb".into())
+        );
+        assert_eq!(
+            systemd_exec_start_program("[Service]\nExecStart='/a b/ainb' fleet atc heartbeat x\n"),
+            Some("/a b/ainb".into())
+        );
+    }
+
+    #[test]
+    fn program_resolution_distinguishes_present_from_moved() {
+        assert!(program_resolves("/bin/sh"));
+        assert!(!program_resolves("/nonexistent/cargo/bin/ainb"));
+        assert!(!program_resolves(""));
+        // Bare names go through $PATH.
+        assert!(program_resolves("sh"));
+        assert!(!program_resolves("ainb-definitely-not-a-real-binary"));
+    }
+
+    /// The status-line decision: a unit whose program has moved is flagged,
+    /// a healthy one is not.
+    #[test]
+    fn status_flags_a_unit_whose_program_is_missing() {
+        let meta = AtcMeta::new("tower");
+        let base = build_plist(&meta);
+        let argv0 = format!("<string>{}</string>", unit_program(&base).expect("argv[0]"));
+
+        let stale = base.replace(&argv0, "<string>/Users/nobody/.cargo/bin/ainb</string>");
+        let program = unit_program(&stale).expect("argv[0]");
+        assert_eq!(
+            missing_program(&program),
+            Some("/Users/nobody/.cargo/bin/ainb".into())
+        );
+
+        let healthy = base.replace(&argv0, "<string>sh</string>");
+        let program = unit_program(&healthy).expect("argv[0]");
+        assert_eq!(missing_program(&program), None);
     }
 }
