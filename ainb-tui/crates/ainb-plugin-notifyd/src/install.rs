@@ -185,6 +185,26 @@ pub fn canonical_hook_script(paths: &Paths) -> PathBuf {
     paths.base.join("hooks").join("notify.sh")
 }
 
+/// Where the installer records the exact `ainb` binary that extracted the
+/// hook. Hook processes do not inherit a developer shell's `AINB_BIN`, so
+/// resolving `ainb` from PATH can silently select an older Homebrew build.
+pub fn canonical_hook_bin(paths: &Paths) -> PathBuf {
+    paths.base.join("hooks").join("ainb-bin")
+}
+
+/// Record the executable running the installer for later hook invocations.
+pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
+    let bin = std::env::current_exe().context("resolving installing ainb binary")?;
+    let dest = canonical_hook_bin(paths);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    write_atomic(&dest, &format!("{}\n", bin.display()))
+        .with_context(|| format!("writing {}", dest.display()))?;
+    Ok(dest)
+}
+
 /// Extract the embedded `notify.sh` to its canonical location with
 /// executable permissions. Idempotent — overwrites any existing
 /// version of the script (so re-running install always picks up the
@@ -278,12 +298,28 @@ fn register_claude_plugin() -> ClaudeRegister {
             .args(["plugin", "marketplace", "add", CLAUDE_MARKETPLACE_SOURCE])
             .output();
     }
-    // Install (idempotent: an already-installed plugin counts as success).
-    match Command::new("claude").args(["plugin", "install", CLAUDE_PLUGIN_REF]).output() {
-        Ok(o) if o.status.success() => ClaudeRegister::Registered,
+    // Install, then update. `install` is idempotent but does not refresh an
+    // existing cached marketplace plugin, leaving hook code behind `ainb`.
+    let installed = match Command::new("claude").args(["plugin", "install", CLAUDE_PLUGIN_REF]).output() {
+        Ok(o) if o.status.success() => true,
         Ok(o) => {
             let msg = first_line(&o.stderr, &o.stdout);
             if msg.to_lowercase().contains("already") {
+                true
+            } else {
+                return ClaudeRegister::Failed(msg);
+            }
+        }
+        Err(e) => return ClaudeRegister::Failed(e.to_string()),
+    };
+    if !installed {
+        return ClaudeRegister::Failed("plugin install did not complete".into());
+    }
+    match Command::new("claude").args(["plugin", "update", CLAUDE_PLUGIN_REF]).output() {
+        Ok(o) if o.status.success() => ClaudeRegister::Registered,
+        Ok(o) => {
+            let msg = first_line(&o.stderr, &o.stdout);
+            if msg.to_lowercase().contains("already") || msg.to_lowercase().contains("latest") {
                 ClaudeRegister::Registered
             } else {
                 ClaudeRegister::Failed(msg)
@@ -322,6 +358,7 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
         .ensure_base()
         .with_context(|| format!("creating {}", paths.base.display()))?;
     let hook_script = extract_hook_script(paths)?;
+    extract_hook_bin(paths)?;
     let stall_guard = extract_stall_guard(paths)?;
 
     let mut record = InstallRecord::load(paths)?;
@@ -851,6 +888,17 @@ mod tests {
         );
         let content = std::fs::read_to_string(&dest).unwrap();
         assert!(content.contains("ainb-hooks"));
+    }
+
+    #[test]
+    fn extract_hook_bin_records_installing_binary() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let dest = extract_hook_bin(&p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest).unwrap().trim(),
+            std::env::current_exe().unwrap().display().to_string()
+        );
     }
 
     #[test]
