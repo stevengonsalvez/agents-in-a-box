@@ -345,6 +345,31 @@ impl FleetProviderEventRepo {
         rows.iter().map(row_from).collect()
     }
 
+    /// The rows [`Self::delete_acp_before`] would remove, oldest first.
+    ///
+    /// The export half of export-then-delete, and deliberately the SAME
+    /// predicate as the delete: an export built from a different filter would
+    /// silently omit rows the delete then destroys.
+    pub async fn list_acp_before(
+        pool: &SqlitePool,
+        session_key: &str,
+        before_ingest_order: i64,
+        limit: i64,
+    ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event \
+             WHERE session_key = ? AND ingest_order < ? AND source = 'acp' \
+             ORDER BY ingest_order ASC LIMIT ?",
+        )
+        .bind(session_key)
+        .bind(before_ingest_order)
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(row_from).collect()
+    }
+
     /// The operator export-then-delete leg: remove one session's ACP
     /// transcript rows below `before_ingest_order`, returning the count.
     ///

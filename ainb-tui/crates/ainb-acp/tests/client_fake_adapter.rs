@@ -267,3 +267,97 @@ fn permission_sink() -> tokio::sync::mpsc::UnboundedSender<ainb_acp::client::Per
     std::mem::forget(rx);
     tx
 }
+
+/// The gate re-run's unknown-session taxonomy, both shapes, decided in ONE
+/// place. A client that only understood claude's typed `-32002` would treat
+/// codex's opaque `-32603` as a spawn failure and never rebuild the context.
+#[tokio::test]
+async fn both_adapters_unknown_session_shapes_mean_rebuild() {
+    for shape in ["claude", "codex"] {
+        let (adapter, _rx) =
+            spawn("default", env(&[("FAKE_ACP_LOAD_UNKNOWN_SESSION", shape)])).await;
+        let adapter = adapter.expect("spawn");
+        let error = adapter
+            .load_session("fake-session-1", Path::new("/tmp"))
+            .await
+            .expect_err("an unknown session must fail the load");
+        assert!(
+            error.load_means_rebuild(),
+            "{shape} shape must be classified as rebuild: {error:?}"
+        );
+    }
+}
+
+/// ...and the SAFE direction for anything else. A generic `-32603` is a spawn
+/// failure, because rebuilding on it would throw away the adapter-side history
+/// the load existed to recover.
+#[tokio::test]
+async fn an_unclassified_internal_error_is_not_a_rebuild() {
+    let (adapter, _rx) = spawn(
+        "default",
+        env(&[("FAKE_ACP_LOAD_UNKNOWN_SESSION", "opaque")]),
+    )
+    .await;
+    let adapter = adapter.expect("spawn");
+    let error = adapter
+        .load_session("fake-session-1", Path::new("/tmp"))
+        .await
+        .expect_err("the load failed");
+    assert!(!error.load_means_rebuild(), "{error:?}");
+}
+
+/// A missing `loadSession` capability is the OTHER rebuild case: the adapter
+/// cannot resume at all, so re-prime is the only path (R5: the design must not
+/// DEPEND on session/load).
+#[tokio::test]
+async fn a_missing_load_capability_means_rebuild() {
+    let (adapter, _rx) = spawn("default", env(&[("FAKE_ACP_NO_LOAD", "1")])).await;
+    let adapter = adapter.expect("spawn");
+    let error = adapter
+        .load_session("fake-session-1", Path::new("/tmp"))
+        .await
+        .expect_err("no capability, no load");
+    assert!(error.load_means_rebuild(), "{error:?}");
+}
+
+/// Static adapter config is re-applied after EVERY load, in the same step as
+/// the mode. The spike proved config does not survive a load; without this the
+/// resumed session runs on a model nobody chose and nothing says so.
+#[tokio::test]
+async fn static_config_options_are_applied_at_new_and_re_applied_after_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("rpc.log");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let config = fake_config(
+        "default",
+        env(&[("FAKE_ACP_RPC_LOG", log.to_str().expect("utf8 path"))]),
+    )
+    .config_options(vec![
+        ("model".to_string(), "pinned-model".to_string()),
+        ("reasoning".to_string(), "high".to_string()),
+    ]);
+    let adapter = AdapterProcess::spawn(&config, tx, permission_sink()).await.expect("spawn");
+
+    let session = adapter.new_session(Path::new("/tmp")).await.expect("session/new");
+    adapter.load_session(&session, Path::new("/tmp")).await.expect("session/load");
+
+    let lines: Vec<String> = std::fs::read_to_string(&log)
+        .expect("rpc log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let applied: Vec<&String> = lines.iter().filter(|line| line.starts_with("config:")).collect();
+    assert_eq!(
+        applied.len(),
+        4,
+        "two options at session/new and the SAME two after session/load: {lines:?}"
+    );
+    assert!(
+        applied.iter().filter(|line| line.ends_with("model=pinned-model")).count() == 2,
+        "{lines:?}"
+    );
+    assert!(
+        applied.iter().filter(|line| line.ends_with("reasoning=high")).count() == 2,
+        "{lines:?}"
+    );
+}

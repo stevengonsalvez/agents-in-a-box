@@ -106,6 +106,27 @@ pub const DELIVERY_SPAWN_FAILED: &str = "spawn_failed";
 pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
 /// The recipient exists but its session row is gone or dead.
 pub const DELIVERY_SESSION_GONE: &str = "session_gone";
+/// The pinned permission mode could not be proven for the session (I13).
+///
+/// Terminal, never requeued: retrying an adapter that will not hold the mode
+/// just drives the same session in the wrong permission regime a second time.
+pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
+
+/// The resume path fingerprint carried on the next delivery's receipt detail
+/// and in the `acp.context_rebuilt` marker: the adapter still had the session.
+pub const RESUME_LOADED: &str = "loaded";
+/// See [`RESUME_LOADED`]: the context was rebuilt from persisted history.
+pub const RESUME_REPRIMED: &str = "reprimed";
+/// Neither of the above: there was nothing to resume.
+///
+/// A session that never had an adapter id and had no history to re-prime did
+/// not LOSE anything, so it writes no `acp.context_rebuilt` marker and leaves
+/// the receipt detail NULL. Fingerprinting it as `reprimed` would raise the
+/// same flag on every healthy first turn in the fleet as on a genuine context
+/// loss, which is exactly the signal the marker exists to carry.
+///
+/// Internal: it names the absence of a resume, so it never reaches the wire.
+const RESUME_FRESH: &str = "fresh";
 
 /// The `fleet_session.provider` token every ACP session carries.
 pub const ACP_PROVIDER_TOKEN: &str = "acp";
@@ -1014,6 +1035,8 @@ impl AcpPool {
             stats: Arc::clone(&stats),
             prompts: prompt_rx,
             control: control_rx,
+            pending_prelude: None,
+            resume_path: None,
         };
         tokio::spawn(actor.run());
         SessionHandle {
@@ -1265,6 +1288,12 @@ pub async fn converge_dirty_session(
 struct OpenTurn {
     message_id: String,
     started: Instant,
+    /// Which resume path built the context this turn runs on
+    /// ([`RESUME_LOADED`] / [`RESUME_REPRIMED`]), or `None` when the session was
+    /// already attached. Carried onto the delivery receipt, so "did this reply
+    /// come from a session that still had its history, or from one we rebuilt"
+    /// is answerable from the receipt alone (B retained).
+    resume: Option<&'static str>,
     /// The turn's OWN `acp.turn` span, carried so `finish_turn` can record the
     /// outcome on it. `Span::current()` is useless there: the turn's reply
     /// arrives on a later pass of the actor's select loop, long after
@@ -1306,6 +1335,14 @@ struct SessionActor {
     stats: Arc<SessionStats>,
     prompts: mpsc::Receiver<PromptJob>,
     control: mpsc::UnboundedReceiver<Control>,
+    /// The re-prime prelude the NEXT prompt must carry, set by a rebuild.
+    ///
+    /// Prepended to the prompt text rather than sent as a prompt of its own: a
+    /// standalone prelude would be a turn, and a turn is a delivery, a
+    /// transcript span and a timeline reply for a message no operator sent.
+    pending_prelude: Option<String>,
+    /// The resume path the next turn's receipt reports.
+    resume_path: Option<&'static str>,
 }
 
 /// What one turn's `session/prompt` came back with.
@@ -1486,7 +1523,7 @@ impl SessionActor {
         );
         let _entered = span.enter();
 
-        let process = match self.attach_with_one_requeue().await {
+        let process = match self.attach_with_one_requeue(&job.message_id).await {
             Ok(process) => process,
             Err(refusal) => {
                 self.resolve(&job.message_id, "FAILED", refusal).await;
@@ -1497,12 +1534,38 @@ impl SessionActor {
             self.resolve(&job.message_id, "FAILED", DELIVERY_SPAWN_FAILED).await;
             return;
         };
+        // I13 as a STANDING guarantee, not a spawn-time snapshot. `ensure_session`
+        // early-returns for a session that is already attached and alive, so
+        // without this check an adapter that flips a live session to
+        // `bypassPermissions` mid conversation would keep receiving prompts in
+        // that regime forever and nothing would report it.
+        if process.process.mode_violated(&acp_session_id) {
+            tracing::error!(
+                session_key = %self.session_key,
+                observed = ?process.process.observed_mode(&acp_session_id),
+                "refusing to prompt a live session that changed permission regime"
+            );
+            self.resolve(&job.message_id, "FAILED", DELIVERY_MODE_UNPROVEN).await;
+            return;
+        }
 
         // The per-PROCESS in-flight ceiling bounds how many of this provider's
         // sessions interleave; different scopes still run concurrently.
         let Ok(permit) = Arc::clone(&process.in_flight).acquire_owned().await else {
             self.resolve(&job.message_id, "FAILED", DELIVERY_ADAPTER_EXIT).await;
             return;
+        };
+
+        // A rebuilt session gets its context back on the SAME prompt: one turn,
+        // one delivery, one reply.
+        //
+        // Taken AFTER the permit: an adapter that exits between the attach and
+        // the permit fails the leg above WITHOUT prompting, and consuming the
+        // prelude first would burn the rebuilt context on a turn that never
+        // happened.
+        let text = match self.pending_prelude.take() {
+            Some(prelude) => format!("{prelude}\n\n{}", job.text),
+            None => job.text.clone(),
         };
         process.in_flight_used.fetch_add(1, Ordering::Relaxed);
 
@@ -1541,6 +1604,7 @@ impl SessionActor {
             message_id: job.message_id.clone(),
             started: Instant::now(),
             span: span.clone(),
+            resume: self.resume_path.take(),
         });
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = Some(Instant::now());
@@ -1548,7 +1612,6 @@ impl SessionActor {
 
         let adapter = Arc::clone(&process.process);
         let used = Arc::clone(&process.in_flight_used);
-        let text = job.text.clone();
         tokio::spawn(async move {
             let result = adapter.prompt(&acp_session_id, &text).await;
             used.fetch_sub(1, Ordering::Relaxed);
@@ -1622,6 +1685,14 @@ impl SessionActor {
                 Some(format!("{DELIVERY_ADAPTER_EXIT}; {error}")),
             ),
         };
+        // The receipt carries WHICH resume path built this turn's context (B
+        // retained): "why did the agent not remember" is otherwise unanswerable
+        // from the delivery row alone.
+        let detail = match (turn.resume, detail) {
+            (Some(path), Some(detail)) => Some(format!("{detail}; resume={path}")),
+            (Some(path), None) => Some(format!("resume={path}")),
+            (None, detail) => detail,
+        };
         turn.span.record("outcome", state);
         if let Ok(Some(high_water)) = self
             .writer
@@ -1683,11 +1754,25 @@ impl SessionActor {
     /// `session/prompt` is issued by construction, so a retry here cannot
     /// double-deliver. An open breaker is terminal: retrying it is the
     /// crash-loop the breaker exists to stop.
-    async fn attach_with_one_requeue(&mut self) -> Result<Arc<ProviderProcess>, &'static str> {
+    async fn attach_with_one_requeue(
+        &mut self,
+        message_id: &str,
+    ) -> Result<Arc<ProviderProcess>, &'static str> {
         for attempt in 0..2 {
-            match self.ensure_session().await {
+            match self.ensure_session(message_id).await {
                 Ok(process) => return Ok(process),
                 Err(EnsureFailure::BreakerOpen) => return Err(DELIVERY_BREAKER_OPEN),
+                // I13 is terminal: an adapter that will not hold the pinned mode
+                // holds it no better on a retry, and retrying would drive the
+                // session a second time in a permission regime nobody chose.
+                Err(EnsureFailure::ModeUnproven(error)) => {
+                    tracing::error!(
+                        session_key = %self.session_key,
+                        %error,
+                        "refusing to prompt a session whose permission mode is unproven"
+                    );
+                    return Err(DELIVERY_MODE_UNPROVEN);
+                }
                 Err(EnsureFailure::NeverSent(error)) => {
                     tracing::warn!(
                         session_key = %self.session_key,
@@ -1704,7 +1789,31 @@ impl SessionActor {
 
     /// Attach to (or build) the adapter-side session, WITHOUT ever issuing the
     /// prompt. Every failure here is provably pre-write.
-    async fn ensure_session(&mut self) -> Result<Arc<ProviderProcess>, EnsureFailure> {
+    ///
+    /// This is the plan's Phase 6 RESUME routine (R5), and it deliberately does
+    /// not DEPEND on `session/load`:
+    ///
+    /// ```text
+    ///   stored acp_session_id?  ──no──▶ session/new ─▶ re-prime prelude
+    ///        │yes                             (reprimed, or fresh when there
+    ///        │                                 was no id and no history)
+    ///   adapter advertises loadSession? ──no──▶ ─────────────┘
+    ///        │yes
+    ///   route + replay seam live, THEN session/load
+    ///        ├─ ok ────────────────────▶ path = loaded
+    ///        ├─ unknown session ───────▶ rebuild ──────────┘
+    ///        ├─ mode unproven ─────────▶ SPAWN FAILS (I13)
+    ///        └─ anything else ─────────▶ spawn failure, one legal requeue
+    /// ```
+    ///
+    /// `message_id` is the prompt this attach is for: the re-prime corpus
+    /// excludes it, because it is about to be sent as the prompt itself and a
+    /// body quoted inside the fenced context AND asked as the question reads as
+    /// the operator saying it twice.
+    async fn ensure_session(
+        &mut self,
+        message_id: &str,
+    ) -> Result<Arc<ProviderProcess>, EnsureFailure> {
         if let Some(process) = self.process.clone() {
             if process.process.is_alive() && self.acp_session_id.is_some() {
                 return Ok(process);
@@ -1731,32 +1840,41 @@ impl SessionActor {
         // process warm for everyone else.
         self.pool.evict_if_at_cap(&process, &self.session_key).await;
 
-        let (update_tx, update_rx) = mpsc::unbounded_channel();
-        let (permission_tx, permission_rx) = mpsc::unbounded_channel();
-        let acp_session_id = process
-            .process
-            .new_session(std::path::Path::new(&self.cwd))
-            .await
-            .map_err(|error| EnsureFailure::NeverSent(error.to_string()))?;
+        // PROBED per spawn, never persisted (B-defect 5): `can_load` on disk
+        // would outlive the adapter version that justified it.
+        let stored = stored_acp_session_id(self.pool.store.pool(), &self.session_key).await;
+        // Kept, because "the adapter forgot our session" and "we never had one"
+        // are the same code path and must NOT be the same receipt.
+        let had_stored = stored.is_some();
+        let mut path = None;
+        if let Some(stored) = stored.filter(|_| process.process.supports_load()) {
+            if self.try_load(&process, &stored).await? {
+                path = Some(RESUME_LOADED);
+            }
+        }
+        if path.is_none() {
+            self.rebuild(&process, message_id).await?;
+            // A rebuild is only a RESUME when something was actually resumed:
+            // an id that was lost, or history the prelude carries back in.
+            path = Some(if had_stored || self.pending_prelude.is_some() {
+                RESUME_REPRIMED
+            } else {
+                RESUME_FRESH
+            });
+        }
+        let Some(acp_session_id) = self.acp_session_id.clone() else {
+            return Err(EnsureFailure::NeverSent(
+                "the adapter session vanished during attach".to_string(),
+            ));
+        };
         if !process.process.is_alive() {
             return Err(EnsureFailure::NeverSent(
                 "adapter transport closed before the prompt was issued".to_string(),
             ));
         }
-        if let Ok(mut routes) = process.routes.lock() {
-            routes.insert(
-                acp_session_id.clone(),
-                SessionRoute {
-                    session_key: self.session_key.clone(),
-                    updates: update_tx,
-                    permissions: permission_tx,
-                },
-            );
-        }
-        self.updates = Some(update_rx);
-        self.permissions = Some(permission_rx);
-        self.reducer = TranscriptReducer::new(acp_session_id.clone());
-        self.writer.set_acp_session_id(Some(acp_session_id.clone()));
+
+        // I5: the STABLE `session_key` keeps its receipts, its scope and its
+        // transcript; only the adapter's mutable id is written here.
         let _ = FleetAcpSessionRepo::set_acp_session_id(
             self.pool.store.pool(),
             &self.session_key,
@@ -1771,9 +1889,145 @@ impl SessionActor {
             )
             .await;
         }
-        self.acp_session_id = Some(acp_session_id);
-        self.process = Some(Arc::clone(&process));
+        // A fresh session rebuilt nothing, so it fingerprints nothing: no
+        // marker, and a receipt whose detail stays NULL.
+        if let Some(path) = path.filter(|path| *path != RESUME_FRESH) {
+            self.record_context_rebuilt(path, &acp_session_id).await;
+            self.resume_path = Some(path);
+        }
         Ok(process)
+    }
+
+    /// Attempt `session/load`. `Ok(true)` means the session was resumed;
+    /// `Ok(false)` means the adapter has never heard of it and the caller must
+    /// rebuild. An error is a spawn failure.
+    async fn try_load(
+        &mut self,
+        process: &Arc<ProviderProcess>,
+        acp_session_id: &str,
+    ) -> Result<bool, EnsureFailure> {
+        // HANDLER LIVE FIRST. `session/load` replays the whole conversation as
+        // `session/update` notifications AHEAD of its own reply, so the route
+        // exists before the request is issued. The plan calls a handler
+        // registered after the call the port's single most likely bug.
+        self.attach_channels(process, acp_session_id);
+        // ...and the replay must write NOTHING. Those rows are already in the
+        // transcript from the turns that produced them, and rebuilding
+        // `final_message` from an old turn's text would put a stale reply on the
+        // chat timeline as if it had just arrived ("no client-side transcript
+        // replay for session/load resume").
+        self.reducer.set_replaying(true);
+        let loaded = process
+            .process
+            .load_session(acp_session_id, std::path::Path::new(&self.cwd))
+            .await;
+        // Drained with the seam STILL ON: the notifications sit in the actor's
+        // channel until something reads them, and turning the flag off first
+        // would classify the whole replay normally on the next select pass.
+        self.quiesce().await;
+        self.reducer.set_replaying(false);
+
+        match loaded {
+            Ok(()) => Ok(true),
+            // I13, and the correction the gate re-run of 2026-08-06 forced: a
+            // loaded session whose mode we cannot prove fails the SPAWN. It is
+            // not a rebuild case, because the adapter answered and the session
+            // exists; it is the permission regime that is wrong.
+            Err(error @ AcpError::ModeMismatch { .. }) => {
+                self.detach();
+                Err(EnsureFailure::ModeUnproven(error.to_string()))
+            }
+            Err(error) if error.load_means_rebuild() => {
+                tracing::info!(
+                    session_key = %self.session_key,
+                    provider = %self.provider,
+                    %acp_session_id,
+                    %error,
+                    "the adapter no longer knows this session; rebuilding its context"
+                );
+                self.detach();
+                Ok(false)
+            }
+            Err(error) => {
+                self.detach();
+                Err(EnsureFailure::NeverSent(error.to_string()))
+            }
+        }
+    }
+
+    /// `session/new` under the SAME `session_key` (I5), plus the re-prime
+    /// prelude the next prompt carries.
+    async fn rebuild(
+        &mut self,
+        process: &Arc<ProviderProcess>,
+        message_id: &str,
+    ) -> Result<(), EnsureFailure> {
+        let acp_session_id =
+            process.process.new_session(std::path::Path::new(&self.cwd)).await.map_err(
+                |error| match error {
+                    error @ AcpError::ModeMismatch { .. } => {
+                        EnsureFailure::ModeUnproven(error.to_string())
+                    }
+                    other => EnsureFailure::NeverSent(other.to_string()),
+                },
+            )?;
+        self.attach_channels(process, &acp_session_id);
+        let pool = self.pool.store.pool().clone();
+        self.pending_prelude = render_resume_prelude(&pool, &self.session_key, message_id).await;
+        Ok(())
+    }
+
+    /// Register this session's demux route and rebind everything keyed on the
+    /// adapter's id. Called BEFORE `session/load` on purpose (see
+    /// [`SessionActor::try_load`]).
+    fn attach_channels(&mut self, process: &Arc<ProviderProcess>, acp_session_id: &str) {
+        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        let (permission_tx, permission_rx) = mpsc::unbounded_channel();
+        if let Ok(mut routes) = process.routes.lock() {
+            routes.insert(
+                acp_session_id.to_string(),
+                SessionRoute {
+                    session_key: self.session_key.clone(),
+                    updates: update_tx,
+                    permissions: permission_tx,
+                },
+            );
+        }
+        self.updates = Some(update_rx);
+        self.permissions = Some(permission_rx);
+        self.reducer = TranscriptReducer::new(acp_session_id.to_string());
+        self.writer.set_acp_session_id(Some(acp_session_id.to_string()));
+        // Set NOW, not at the end of the attach, so `detach` can unwind a
+        // half-built attach (a load that failed) instead of leaking the route.
+        self.acp_session_id = Some(acp_session_id.to_string());
+        self.process = Some(Arc::clone(process));
+    }
+
+    /// The `acp.context_rebuilt {mode}` marker both paths write.
+    ///
+    /// A transcript reader can then tell a session that kept its own history
+    /// from one the daemon reconstructed, which is the difference between "the
+    /// agent forgot" and "the agent was never told".
+    async fn record_context_rebuilt(&mut self, path: &'static str, acp_session_id: &str) {
+        match self
+            .writer
+            .lifecycle(
+                Lifecycle::ContextRebuilt,
+                serde_json::json!({
+                    "mode": path,
+                    "acpSessionId": acp_session_id,
+                }),
+            )
+            .await
+        {
+            Ok(Some(high_water)) => self.wake(&high_water),
+            Ok(None) => {}
+            Err(error) => tracing::error!(
+                session_key = %self.session_key,
+                %error,
+                "could not write the context_rebuilt marker"
+            ),
+        }
     }
 
     /// Forget the adapter-side session without touching the store: the stable
@@ -1788,6 +2042,11 @@ impl SessionActor {
         self.acp_session_id = None;
         self.updates = None;
         self.permissions = None;
+        // The prelude belongs to the adapter session that was just torn down.
+        // Left behind, a rebuild that then failed its liveness check would leak
+        // it onto a later successfully LOADED session, duplicating context on a
+        // session that lost none and contradicting its own `resume=loaded`.
+        self.pending_prelude = None;
     }
 
     async fn close_adapter_session(&mut self) {
@@ -2112,6 +2371,10 @@ impl SessionActor {
 enum EnsureFailure {
     /// The provider's breaker is open: terminal, no retry.
     BreakerOpen,
+    /// The pinned permission mode could not be proven (I13): terminal, no
+    /// retry. Distinct from [`EnsureFailure::NeverSent`] because a retry would
+    /// re-attach a session whose permission regime is not the configured one.
+    ModeUnproven(String),
     /// The prompt provably never reached the adapter: ONE requeue is legal.
     NeverSent(String),
 }
@@ -2197,6 +2460,69 @@ async fn leg_is_pending(pool: &SqlitePool, session_key: &str, message_id: &str) 
             true
         }
     }
+}
+
+/// The adapter id the store remembers for this stable `session_key`.
+///
+/// A free function for the same reason [`resolve_leg`] is: an `&SessionActor`
+/// held across an await would make the actor's future require `Sync`, and it
+/// owns parked `Responder`s that are `Send` only.
+async fn stored_acp_session_id(pool: &SqlitePool, session_key: &str) -> Option<String> {
+    match FleetAcpSessionRepo::get(pool, session_key).await {
+        Ok(row) => row.and_then(|row| row.acp_session_id),
+        Err(error) => {
+            tracing::warn!(
+                %session_key,
+                %error,
+                "could not read the stored adapter session id; rebuilding instead of loading"
+            );
+            None
+        }
+    }
+}
+
+/// Render the resume prelude from the DELIVERY JOIN corpus.
+///
+/// The corpus is `list_for_session`, not a raw scope filter, so a prompt that
+/// reached this session as one recipient of a BROADCAST is in the rebuilt
+/// context too. `None` when there is nothing to replay: a session that has
+/// never spoken gets its prompt unadorned rather than an empty fence that only
+/// tells the agent to distrust a context it does not have.
+///
+/// Free for the same `Sync` reason as [`resolve_leg`], and PUBLIC so the
+/// plan's "byte-identical prelude for a fixed corpus" is assertable against the
+/// real delivery-join query rather than against a hand-built row list.
+pub async fn render_resume_prelude(
+    pool: &SqlitePool,
+    session_key: &str,
+    exclude_message_id: &str,
+) -> Option<String> {
+    let rows = FleetMessageRepo::list_for_session(
+        pool,
+        session_key,
+        // One extra: the in-flight prompt is in the corpus and is dropped
+        // below, so asking for exactly N could yield N-1 usable rows.
+        i64::try_from(ainb_acp::reprime::REPRIME_ROWS + 1).unwrap_or(i64::MAX),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(
+            %session_key,
+            %error,
+            "could not read the re-prime corpus; rebuilding with no prior context"
+        );
+        Vec::new()
+    });
+    let corpus: Vec<ainb_acp::reprime::CorpusRow> = rows
+        .into_iter()
+        .filter(|row| row.id != exclude_message_id)
+        .map(|row| ainb_acp::reprime::CorpusRow {
+            sender: row.sender,
+            kind: row.kind,
+            body: row.body,
+        })
+        .collect();
+    (!corpus.is_empty()).then(|| ainb_acp::reprime::render_prelude(&corpus))
 }
 
 /// Claim and resolve ONE delivery leg terminal.

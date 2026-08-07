@@ -37,6 +37,13 @@ pub const FLEET_CAPABILITY_MESSAGE_READ: &str = "fleet.message.read";
 pub const FLEET_CAPABILITY_TRANSCRIPT_READ: &str = "fleet.transcript.read";
 /// Negotiated capability required for daemon-owned ACP session creation.
 pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
+/// Negotiated capability required for the operator export-then-delete of ACP
+/// transcript rows.
+///
+/// DELIBERATELY separate from [`FLEET_CAPABILITY_TRANSCRIPT_READ`]: this is the
+/// only destructive verb on the chat-bus surface, and a reader that can page a
+/// transcript must not thereby be able to delete one.
+pub const FLEET_CAPABILITY_TRANSCRIPT_PRUNE: &str = "fleet.transcript.prune";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
 ///
@@ -58,6 +65,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     "fleet.subscription.replay",
     "fleet.subscription.resync",
     FLEET_CAPABILITY_TIMELINE_READ,
+    FLEET_CAPABILITY_TRANSCRIPT_PRUNE,
     FLEET_CAPABILITY_TRANSCRIPT_READ,
     FLEET_CAPABILITY_RUNTIME_READ,
     FLEET_CAPABILITY_USAGE_READ,
@@ -1218,6 +1226,46 @@ pub struct FleetTranscriptSubscribeParams {
 pub struct FleetTranscriptSubscribeResult {
     /// Newest committed `ingest_order` for the session, or `null` when empty.
     pub head_order: Option<i64>,
+}
+
+/// Maximum chunks one `fleet/transcript_prune` may export in a single call.
+///
+/// The export is materialised in the daemon's memory before it is written, so
+/// an unbounded one is the same self-inflicted memory incident an unbounded
+/// page would be. A prune that hits this ceiling reports it and deletes
+/// nothing, so the operator narrows `--before` rather than losing rows they
+/// never saw exported.
+pub const FLEET_TRANSCRIPT_PRUNE_MAX: u32 = 50_000;
+
+/// Parameters for `fleet/transcript_prune`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptPruneParams {
+    /// Exact stable session identity.
+    pub session_key: String,
+    /// Delete rows with `ingest_order` strictly below this watermark.
+    pub before_order: i64,
+    /// Where the daemon writes the JSONL export before deleting anything.
+    ///
+    /// `None` is only accepted with [`Self::no_export`] set: deleting a
+    /// transcript with no export is a real operator choice, but never a
+    /// default and never implicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_path: Option<String>,
+    /// Explicit acknowledgement that the rows are to be deleted unexported.
+    #[serde(default)]
+    pub no_export: bool,
+}
+
+/// Result for `fleet/transcript_prune`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptPruneResult {
+    /// Rows written to the export, `0` under `no_export`.
+    pub exported: u32,
+    /// Rows deleted.
+    pub deleted: u32,
+    /// Absolute path the export was written to, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_path: Option<String>,
 }
 
 /// Payload of the `fleet/transcript_event` notification.
