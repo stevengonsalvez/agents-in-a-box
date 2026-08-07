@@ -18,6 +18,10 @@ ignored = ["ainb-plugin-sdk-rust"]
 name = "ainb-plugin-session-reader"
 path = "src/main.rs"
 
+[lib]
+name = "ainb_plugin_session_reader"
+path = "src/lib.rs"
+
 [dependencies]
 ainb-model-rates = { path = "../ainb-model-rates" }
 ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }

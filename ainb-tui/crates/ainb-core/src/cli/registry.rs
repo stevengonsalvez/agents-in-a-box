@@ -2176,6 +2176,14 @@ impl CliCommand for FleetCommand {
             "Unified runtime health of every long-running daemon \
              (phone bridge / notifyd / ATC / fleet daemon)",
         );
+        let runtime = Command::new("runtime")
+            .about("Install the standalone Fleet daemon and provider hooks")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("install")
+                    .about("Idempotently start Hangar and install supported provider hooks"),
+            );
         // approve/deny share one arg shape: with a session-id they deliver the
         // decision to the waiting PermissionRequest hook via the approve
         // broker; without one they list the sessions currently blocked.
@@ -2217,7 +2225,7 @@ impl CliCommand for FleetCommand {
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge",
+                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / daemon / daemons / atc / bridge",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -2231,6 +2239,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(cost)
                 .subcommand(daemon)
                 .subcommand(daemons)
+                .subcommand(runtime)
                 .subcommand(atc)
                 .subcommand(bridge)
                 .subcommand(enrich_cache)
@@ -2659,7 +2668,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_thirteen_subcommands_including_approve_deny() {
+    fn fleet_exposes_fourteen_subcommands_including_runtime() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2687,6 +2696,7 @@ mod tests {
                 "enrich-cache",
                 "msg",
                 "needs",
+                "runtime",
                 "sequence",
                 "standup",
             ],
@@ -2694,8 +2704,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            13,
-            "expected 13 fleet subcommands, got {names:?}"
+            14,
+            "expected 14 fleet subcommands, got {names:?}"
         );
     }
 

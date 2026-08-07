@@ -410,6 +410,13 @@ pub const FLEET_RECEIPT_GET: &str = "fleet/receipt_get";
 pub const FLEET_START: &str = "fleet/start";
 /// Read bounded, payload-free Fleet revision timeline entries.
 pub const FLEET_TIMELINE: &str = "fleet/timeline";
+/// Read a bounded daemon-owned Fleet usage summary.
+///
+/// Params: [`crate::fleet::FleetUsageSummaryParams`]; result:
+/// [`crate::fleet::FleetUsageSummaryResult`]. Gated by `fleet.usage.read`.
+pub const FLEET_USAGE_SUMMARY: &str = "fleet/usage_summary";
+/// Read bounded daemon and provider-hook runtime health.
+pub const FLEET_RUNTIME_STATUS: &str = "fleet/runtime_status";
 /// Rebuild one stale Claude interview through the live daemon broker.
 pub const FLEET_REPROJECT_CLAUDE_INTERVIEW: &str = "fleet/reproject_claude_interview";
 /// Create a daemon-owned ACP session pair without spawning an adapter process.
@@ -1700,6 +1707,8 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_RECEIPT_GET,
     FLEET_START,
     FLEET_TIMELINE,
+    FLEET_USAGE_SUMMARY,
+    FLEET_RUNTIME_STATUS,
     FLEET_REPROJECT_CLAUDE_INTERVIEW,
     // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
     // tail, append-only wire.
@@ -1989,6 +1998,8 @@ mod tests {
             FLEET_RECEIPT_GET,
             FLEET_START,
             FLEET_TIMELINE,
+            FLEET_USAGE_SUMMARY,
+            FLEET_RUNTIME_STATUS,
             FLEET_REPROJECT_CLAUDE_INTERVIEW,
             HANGAR_DISPATCH_ATTEMPTS_LIST,
             HANGAR_ISSUE_TIMELINE,

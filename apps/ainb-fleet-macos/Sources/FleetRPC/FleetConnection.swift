@@ -172,6 +172,16 @@ actor FleetConnection {
         return try await request("fleet/timeline", params: params, result: FleetTimelineResult.self)
     }
 
+    func usageSummary(_ params: FleetUsageSummaryParams) async throws -> FleetUsageSummaryResult {
+        try requireReadCapability("fleet.usage.read")
+        return try await request("fleet/usage_summary", params: params, result: FleetUsageSummaryResult.self)
+    }
+
+    func runtimeStatus() async throws -> FleetRuntimeStatusResult {
+        try requireReadCapability("fleet.runtime.read")
+        return try await request("fleet/runtime_status", params: FleetRuntimeStatusParams(), result: FleetRuntimeStatusResult.self)
+    }
+
     func incoming() -> AsyncStream<FleetIncoming> {
         AsyncStream { continuation in
             let id = UUID()

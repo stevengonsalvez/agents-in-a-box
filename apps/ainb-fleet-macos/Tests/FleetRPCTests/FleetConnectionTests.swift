@@ -89,7 +89,7 @@ final class FleetConnectionTests: XCTestCase {
         )
     }
 
-    func testOldCatalogueRefusesReceiptReadsAndStart() {
+    func testOldCatalogueRefusesNewReadCapabilitiesAndStart() {
         let oldCatalogue = FleetNegotiateResult(
             daemonVersion: "fixture-daemon-0.9.0",
             protocolVersion: 1,
@@ -103,6 +103,12 @@ final class FleetConnectionTests: XCTestCase {
         }
         XCTAssertThrowsError(try FleetConnection.validateCapability("fleet.start.execute", in: oldCatalogue)) {
             XCTAssertEqual($0 as? FleetConnectionError, .missingNegotiatedCapability("fleet.start.execute"))
+        }
+        XCTAssertThrowsError(try FleetConnection.validateCapability("fleet.runtime.read", in: oldCatalogue)) {
+            XCTAssertEqual($0 as? FleetConnectionError, .missingNegotiatedCapability("fleet.runtime.read"))
+        }
+        XCTAssertThrowsError(try FleetConnection.validateCapability("fleet.usage.read", in: oldCatalogue)) {
+            XCTAssertEqual($0 as? FleetConnectionError, .missingNegotiatedCapability("fleet.usage.read"))
         }
     }
 
@@ -168,6 +174,74 @@ final class FleetConnectionTests: XCTestCase {
         } catch let error as FleetConnectionError {
             XCTAssertEqual(error, .missingNegotiatedCapability("fleet.start.execute"))
         }
+        await fulfillment(of: [serverDone], timeout: 1)
+        try serverResult.throwIfRecorded()
+    }
+
+    func testUsageAndRuntimeReadOnlyRPCsRoundTripAfterNegotiation() async throws {
+        var descriptors = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+        let serverDescriptor = descriptors[1]
+        defer { Darwin.close(serverDescriptor) }
+        let serverDone = expectation(description: "usage and runtime RPC server finished")
+        let serverResult = SocketServerResult()
+
+        DispatchQueue.global().async {
+            defer { serverDone.fulfill() }
+            do {
+                let authentication = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: authentication, result: [:])
+                let negotiation = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: negotiation, result: [
+                    "daemon_version": "fixture-daemon",
+                    "protocol_version": 2,
+                    "read_compatible": true,
+                    "write_compatible": false,
+                    "capability_ids": ["fleet.runtime.read", "fleet.usage.read"],
+                ])
+                let runtime = try Self.readRequest(from: serverDescriptor)
+                XCTAssertEqual(runtime["method"] as? String, "fleet/runtime_status")
+                try Self.writeResponse(to: serverDescriptor, request: runtime, result: [
+                    "daemon_version": "fixture-daemon",
+                    "protocol_version": 2,
+                    "hooks": [[
+                        "provider": "codex", "installed": true, "hook_ready": true,
+                        "delivery_ready": false, "last_event": NSNull(),
+                    ]],
+                ])
+                let usage = try Self.readRequest(from: serverDescriptor)
+                XCTAssertEqual(usage["method"] as? String, "fleet/usage_summary")
+                XCTAssertEqual((usage["params"] as? [String: Any])?["period"] as? String, "trailing_7_days")
+                try Self.writeResponse(to: serverDescriptor, request: usage, result: [
+                    "state": "ready", "generated_at": 1, "start_at": 0, "end_at": 1,
+                    "totals": [
+                        "input_tokens": 100, "cache_creation_tokens": 0, "cache_read_tokens": 0,
+                        "output_tokens": 23, "reasoning_tokens": 0, "call_count": 1,
+                        "session_count": 1, "project_count": 1, "cost_usd": NSNull(),
+                    ],
+                    "daily": [], "providers": [], "models": [], "projects": [], "detail": NSNull(),
+                ])
+            } catch {
+                serverResult.record(error)
+            }
+        }
+
+        let connection = FleetConnection(
+            location: HangarLocation(environment: ["AINB_HANGAR_HOME": "/unused"]),
+            injectedDescriptor: descriptors[0]
+        )
+        try await connection.connect()
+        defer { Task { await connection.close() } }
+        try await connection.authenticate(token: "mdt_test")
+        _ = try await connection.negotiate()
+        let runtime = try await connection.runtimeStatus()
+        let usage = try await connection.usageSummary(FleetUsageSummaryParams(period: .trailing7Days))
+
+        XCTAssertEqual(runtime.hooks.map(\.provider), ["codex"])
+        XCTAssertEqual(runtime.hooks.first?.deliveryReady, false)
+        XCTAssertEqual(usage.state, .ready)
+        XCTAssertEqual(usage.totals?.totalTokens, 123)
+        XCTAssertNil(usage.totals?.costUSD)
         await fulfillment(of: [serverDone], timeout: 1)
         try serverResult.throwIfRecorded()
     }

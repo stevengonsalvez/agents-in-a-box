@@ -4,7 +4,7 @@ final class OfflineAndReconnectJourneyTests: FleetUITestCase {
     @MainActor
     func testRealFixtureDisconnectShowsRetryWithoutLaunchingDaemon() throws {
         try fixture.seed(eventID: "alpha-running", sessionID: "alpha", eventType: "UserPromptSubmit", observedAt: 1_700_000_000_001)
-        launchFleetWindow()
+        launchExpandedNotch()
         waitFor(fleetRow("claude:alpha"))
 
         fixture.stop(removeHome: false)

@@ -71,7 +71,7 @@ enum FleetApprovalDecision: Equatable {
         switch self {
         case .allowOnce: "Allow once"
         case .deny: "Deny"
-        case .bypassSession: "Bypass session"
+        case .bypassSession: "Always allow this session"
         }
     }
 
@@ -95,6 +95,8 @@ final class FleetStore: ObservableObject {
     @Published private(set) var atcInstances: [AtcInstance] = []
     @Published private(set) var atcSchedulerOwnership: AtcSchedulerOwnership?
     @Published private(set) var timeline: [FleetTimelineEntry] = []
+    @Published private(set) var usageSummary: FleetUsageSummaryResult?
+    @Published private(set) var runtimeStatus: FleetRuntimeStatusResult?
     @Published private(set) var pendingIntentID: String?
     @Published private(set) var controlNotice: String?
     @Published private(set) var lastStart: FleetStartResult?
@@ -161,6 +163,14 @@ final class FleetStore: ObservableObject {
 
     var canReadTimeline: Bool {
         connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.timeline.read") == true
+    }
+
+    var canReadUsage: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.usage.read") == true
+    }
+
+    var canReadRuntime: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.runtime.read") == true
     }
 
     var canStart: Bool {
@@ -488,6 +498,42 @@ final class FleetStore: ObservableObject {
         }
     }
 
+    /// Usage is requested only from the Usage route or its explicit refresh
+    /// control. It can scan local provider histories, so connection bootstrap
+    /// must remain fast and side-effect free.
+    func refreshUsage(period: FleetUsagePeriod = .trailing7Days) {
+        guard canReadUsage, let connection else {
+            usageSummary = nil
+            controlNotice = "Usage is unavailable for this daemon."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                usageSummary = try await connection.usageSummary(FleetUsageSummaryParams(period: period))
+            } catch {
+                usageSummary = nil
+                controlNotice = "Usage refresh refused: \(String(describing: error))"
+            }
+        }
+    }
+
+    func refreshRuntime() {
+        guard canReadRuntime, let connection else {
+            runtimeStatus = nil
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                runtimeStatus = try await connection.runtimeStatus()
+            } catch {
+                runtimeStatus = nil
+                controlNotice = "Runtime status refused: \(String(describing: error))"
+            }
+        }
+    }
+
     private func beginConnection() {
         connectionGeneration &+= 1
         let generation = connectionGeneration
@@ -554,6 +600,11 @@ final class FleetStore: ObservableObject {
                 } catch {}
             } else {
                 timeline = []
+            }
+            if result.capabilityIDs.contains("fleet.runtime.read") {
+                runtimeStatus = try? await newConnection.runtimeStatus()
+            } else {
+                runtimeStatus = nil
             }
             connectionState = .live(daemonVersion: result.daemonVersion, writeCompatible: result.writeCompatible)
             established = true

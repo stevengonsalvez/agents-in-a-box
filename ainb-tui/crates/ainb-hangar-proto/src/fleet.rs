@@ -25,6 +25,10 @@ pub const FLEET_CAPABILITY_START_EXECUTE: &str = "fleet.start.execute";
 pub const FLEET_CAPABILITY_ATC_READ: &str = "fleet.atc.read";
 /// Negotiated capability for the payload-free Fleet revision timeline.
 pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
+/// Negotiated capability for bounded daemon-owned usage summaries.
+pub const FLEET_CAPABILITY_USAGE_READ: &str = "fleet.usage.read";
+/// Negotiated capability for runtime and provider-hook health.
+pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
 /// Negotiated capability required for chat-bus message sends.
 pub const FLEET_CAPABILITY_MESSAGE_SEND: &str = "fleet.message.send";
 /// Negotiated capability required for chat-bus message list and subscribe.
@@ -54,6 +58,8 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     "fleet.subscription.resync",
     FLEET_CAPABILITY_TIMELINE_READ,
     FLEET_CAPABILITY_TRANSCRIPT_READ,
+    FLEET_CAPABILITY_RUNTIME_READ,
+    FLEET_CAPABILITY_USAGE_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -503,6 +509,189 @@ pub struct FleetTimelineResult {
     pub entries: Vec<FleetTimelineEntry>,
     /// Cursor for the next page, or `null` when this page is empty.
     pub next_after_revision: Option<i64>,
+}
+
+/// Bounded reporting period accepted by `fleet/usage_summary`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetUsagePeriod {
+    /// Current UTC calendar day.
+    Today,
+    /// Seven completed-or-current UTC calendar days.
+    #[serde(rename = "trailing_7_days")]
+    #[default]
+    Trailing7Days,
+    /// Thirty completed-or-current UTC calendar days.
+    #[serde(rename = "trailing_30_days")]
+    Trailing30Days,
+}
+
+/// Parameters for `fleet/usage_summary`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetUsageSummaryParams {
+    /// Bounded period the daemon aggregates.
+    #[serde(default)]
+    pub period: FleetUsagePeriod,
+}
+
+/// Maximum daily buckets the daemon may return for one usage summary.
+pub const FLEET_USAGE_MAX_DAILY_BUCKETS: usize = 30;
+/// Maximum provider, model, or project buckets per usage-summary breakdown.
+pub const FLEET_USAGE_MAX_BREAKDOWN_BUCKETS: usize = 10;
+/// Maximum UTF-8 bytes in a safe usage-summary detail message.
+pub const FLEET_USAGE_DETAIL_MAX_BYTES: usize = 1_024;
+
+/// Availability of the daemon-owned usage projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetUsageSummaryState {
+    /// The daemon is building a summary; no durable totals are ready yet.
+    Scanning,
+    /// Complete summary for every configured usage source.
+    Ready,
+    /// Summary is useful but one or more sources could not be fully read.
+    Partial,
+    /// The daemon cannot provide a summary for this request.
+    Unavailable,
+}
+
+/// Aggregated token and optional canonical USD cost values.
+///
+/// `cost_usd` is `None` when no canonical model rate covers every included
+/// call. Clients must show tokens instead of synthesising a zero cost.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageBucket {
+    /// Input tokens.
+    pub input_tokens: u64,
+    /// Prompt-cache creation tokens.
+    pub cache_creation_tokens: u64,
+    /// Prompt-cache read tokens.
+    pub cache_read_tokens: u64,
+    /// Output tokens.
+    pub output_tokens: u64,
+    /// Reasoning tokens.
+    pub reasoning_tokens: u64,
+    /// Number of source calls contributing to this aggregate.
+    pub call_count: u64,
+    /// Number of distinct source sessions contributing to this aggregate.
+    pub session_count: u64,
+    /// Number of distinct projects contributing to this aggregate.
+    pub project_count: u64,
+    /// Canonical USD cost when fully priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// One daily usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageDailyBucket {
+    /// ISO-8601 UTC calendar date (`YYYY-MM-DD`).
+    pub date: String,
+    /// Daily aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One provider usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageProviderBucket {
+    /// Canonical provider token from the usage producer.
+    pub provider: String,
+    /// Provider aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One model usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageModelBucket {
+    /// Exact model identifier from the usage producer.
+    pub model: String,
+    /// Model aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One project usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageProjectBucket {
+    /// Human-readable project aggregation key.
+    pub project: String,
+    /// Resolved upstream repository when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Project aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// Bounded result for `fleet/usage_summary`.
+///
+/// Timestamps are epoch milliseconds. A non-`Ready` response may omit every
+/// projection field and use `detail` to explain the unavailable or partial
+/// source state without exposing local paths, credentials, or raw transcripts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageSummaryResult {
+    /// Current summary availability.
+    pub state: FleetUsageSummaryState,
+    /// Time the daemon generated this summary, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<i64>,
+    /// Inclusive summary window start, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<i64>,
+    /// Exclusive summary window end, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<i64>,
+    /// Aggregate for the requested period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<FleetUsageBucket>,
+    /// Daily buckets, chronologically ordered and capped by
+    /// [`FLEET_USAGE_MAX_DAILY_BUCKETS`].
+    #[serde(default)]
+    pub daily: Vec<FleetUsageDailyBucket>,
+    /// Provider aggregates, producer-defined descending order and capped by
+    /// [`FLEET_USAGE_MAX_BREAKDOWN_BUCKETS`].
+    #[serde(default)]
+    pub providers: Vec<FleetUsageProviderBucket>,
+    /// Top model aggregates, capped by [`FLEET_USAGE_MAX_BREAKDOWN_BUCKETS`].
+    #[serde(default)]
+    pub models: Vec<FleetUsageModelBucket>,
+    /// Top project aggregates, capped by [`FLEET_USAGE_MAX_BREAKDOWN_BUCKETS`].
+    #[serde(default)]
+    pub projects: Vec<FleetUsageProjectBucket>,
+    /// Safe daemon status detail for partial or unavailable summaries, capped
+    /// by [`FLEET_USAGE_DETAIL_MAX_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Parameters for `fleet/runtime_status`. Kept extensible for additive
+/// runtime probes without exposing daemon implementation state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetRuntimeStatusParams {}
+
+/// Health of one supported provider hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetRuntimeHookStatus {
+    /// Stable provider identifier.
+    pub provider: String,
+    /// The supported installer recorded this provider as installed.
+    pub installed: bool,
+    /// The installed hook program is present and executable.
+    pub hook_ready: bool,
+    /// Hook delivery socket is currently accepting connections.
+    pub delivery_ready: bool,
+    /// The daemon has observed a recent provider event, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event: Option<String>,
+}
+
+/// Bounded runtime health returned only by the public Fleet RPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetRuntimeStatusResult {
+    /// Daemon version serving this connection.
+    pub daemon_version: String,
+    /// Fleet protocol version serving this connection.
+    pub protocol_version: u32,
+    /// Supported provider hook states. No filesystem paths are exposed.
+    pub hooks: Vec<FleetRuntimeHookStatus>,
 }
 
 /// Initial result for a replay-safe Fleet subscription.
@@ -1130,6 +1319,8 @@ mod tests {
             FLEET_CAPABILITY_MESSAGE_SEND,
             FLEET_CAPABILITY_MESSAGE_READ,
             FLEET_CAPABILITY_TRANSCRIPT_READ,
+            FLEET_CAPABILITY_USAGE_READ,
+            FLEET_CAPABILITY_RUNTIME_READ,
         ] {
             assert!(
                 FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
@@ -1235,6 +1426,66 @@ mod tests {
         round_trip(&FleetTranscriptSubscribeResult { head_order: None });
         round_trip(&FleetTranscriptEventParams {
             chunk: sample_chunk(),
+        });
+    }
+
+    #[test]
+    fn usage_summary_wire_contract_round_trips_with_optional_costs() {
+        assert_eq!(
+            serde_json::to_value(FleetUsagePeriod::Trailing7Days).unwrap(),
+            "trailing_7_days"
+        );
+        assert_eq!(
+            serde_json::to_value(FleetUsageSummaryState::Partial).unwrap(),
+            "partial"
+        );
+        round_trip(&FleetUsageSummaryParams {
+            period: FleetUsagePeriod::Trailing30Days,
+        });
+        round_trip(&FleetUsageSummaryResult {
+            state: FleetUsageSummaryState::Partial,
+            generated_at: Some(1_700_000_000_000),
+            start_at: Some(1_699_395_200_000),
+            end_at: Some(1_700_000_000_000),
+            totals: Some(FleetUsageBucket {
+                input_tokens: 100,
+                cache_creation_tokens: 20,
+                cache_read_tokens: 30,
+                output_tokens: 40,
+                reasoning_tokens: 50,
+                call_count: 2,
+                session_count: 1,
+                project_count: 1,
+                cost_usd: None,
+            }),
+            daily: vec![FleetUsageDailyBucket {
+                date: "2026-08-06".to_string(),
+                bucket: FleetUsageBucket {
+                    input_tokens: 100,
+                    cache_creation_tokens: 20,
+                    cache_read_tokens: 30,
+                    output_tokens: 40,
+                    reasoning_tokens: 50,
+                    call_count: 2,
+                    session_count: 1,
+                    project_count: 1,
+                    cost_usd: Some(1.25),
+                },
+            }],
+            providers: vec![FleetUsageProviderBucket {
+                provider: "claude".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            models: vec![FleetUsageModelBucket {
+                model: "claude-sonnet-4-5".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            projects: vec![FleetUsageProjectBucket {
+                project: "owner/repo".to_string(),
+                repo: Some("owner/repo".to_string()),
+                bucket: FleetUsageBucket::default(),
+            }],
+            detail: Some("copilot shutdown metrics unavailable".to_string()),
         });
     }
 
