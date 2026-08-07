@@ -8461,16 +8461,21 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     } else {
         format!("{} {}", bin.display(), args.join(" "))
     };
-    let mut child = std::process::Command::new(&bin)
+    let mut command = std::process::Command::new(&bin);
+    command
         .args(&args)
         // The child must not inherit this process's controlling terminal's
         // stdio; the daemon writes its own rolling JSONL log under the hangar
         // home, so discard the std streams.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawn daemon `{launched}`"))?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().with_context(|| format!("spawn daemon `{launched}`"))?;
 
     // A daemon that dies instantly (unbootable db, broken binary) used to look
     // identical to a clean start — the TUI's `[s]` action reported success and
@@ -8550,7 +8555,7 @@ fn run_daemon_restart() -> Result<()> {
 /// comes up authenticated, then `start`s the daemon. Idempotent: a second
 /// `setup` reuses the existing token + db and is a no-op start if the daemon is
 /// already up.
-async fn run_daemon_setup() -> Result<()> {
+pub(crate) async fn run_daemon_setup() -> Result<()> {
     // Ensure the database + migrations, and resolve the home the token lives in.
     let store = Store::open_default().await.context("open hangar database")?;
     let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
