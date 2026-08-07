@@ -101,6 +101,27 @@ fn span_text() -> String {
     String::from_utf8_lossy(&span_log().0.lock().expect("span log")).into_owned()
 }
 
+/// Wait for `needle` to reach the span buffer, or fail with the whole buffer.
+///
+/// Spans are written on CLOSE, and the writer runs off the asserting task, so
+/// the arrival is asynchronous. The assertion itself is unchanged: the exact
+/// string must appear, this only stops a loaded runner from failing a surface
+/// that is present.
+async fn await_span(needle: &str, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let spans = span_text();
+        if spans.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: {needle:?} never reached the span buffer: {spans}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // ------------------------------------------------------------------ harness
 
 fn fake_adapter() -> PathBuf {
@@ -1324,20 +1345,22 @@ async fn daemon_health_reports_the_acp_pool_and_the_spans_carry_their_fields() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // The spans the runbook's log half reads.
-    let spans = span_text();
-    assert!(
-        spans.contains("acp.spawn"),
-        "the spawn path is traced: {spans}"
-    );
-    assert!(
-        spans.contains("0.0.0-fixture"),
-        "and records the provider version it observed: {spans}"
-    );
-    assert!(
-        spans.contains(r#"outcome="DELIVERED""#),
-        "the turn span records its own outcome; `Span::current()` in finish_turn recorded nothing: {spans}"
-    );
+    // The spans the runbook's log half reads. A span only reaches the buffer on
+    // CLOSE, and a span held by a task outlives the call that opened it, so poll
+    // to a deadline rather than sampling once: reading the buffer immediately
+    // passes on a fast machine and fails on a loaded CI runner for no reason
+    // that has anything to do with the surface under test.
+    await_span("acp.spawn", "the spawn path is traced").await;
+    await_span(
+        "0.0.0-fixture",
+        "the spawn span records the provider version it observed",
+    )
+    .await;
+    await_span(
+        r#"outcome="DELIVERED""#,
+        "the turn span records its own outcome (Span::current() in finish_turn recorded nothing)",
+    )
+    .await;
 
     harness.finish().await;
 }
