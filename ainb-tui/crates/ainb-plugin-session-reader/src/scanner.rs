@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration as StdDuration, Instant};
+use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
 use ainb_plugin_types_sessions::{
     BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, ScanProgressEvent,
@@ -230,6 +230,9 @@ pub(crate) struct ScanCtx<'a> {
     /// partition entirely — every file is "recent" (the legacy full
     /// scan, byte-for-byte).
     pub(crate) watermark_nanos: Option<u64>,
+    /// Files older than this timestamp are outside a caller's requested
+    /// reporting window and are never read or parsed.
+    pub(crate) minimum_mtime_nanos: Option<u64>,
     pub(crate) stable_policy: StablePolicy,
     /// `(path, mtime_nanos, size)` of every stable file seen.
     pub(crate) stable_present: Vec<(String, u64, u64)>,
@@ -255,6 +258,26 @@ impl<'a> ScanCtx<'a> {
         Self {
             cache,
             watermark_nanos: None,
+            minimum_mtime_nanos: None,
+            stable_policy: StablePolicy::Skip,
+            stable_present: Vec::new(),
+            recent_present: Vec::new(),
+            stable_calls: Vec::new(),
+            stat_failures: 0,
+            counters: ScanCounters::default(),
+        }
+    }
+
+    /// Bounded full scan: preserve normal parsing rules while avoiding reads
+    /// for sessions whose files have not changed in the requested window.
+    pub(crate) fn full_since(
+        cache: &'a mut Option<crate::cache::UsageCache>,
+        minimum_mtime_nanos: u64,
+    ) -> Self {
+        Self {
+            cache,
+            watermark_nanos: None,
+            minimum_mtime_nanos: Some(minimum_mtime_nanos),
             stable_policy: StablePolicy::Skip,
             stable_present: Vec::new(),
             recent_present: Vec::new(),
@@ -273,6 +296,7 @@ impl<'a> ScanCtx<'a> {
         Self {
             cache,
             watermark_nanos: Some(watermark_nanos),
+            minimum_mtime_nanos: None,
             stable_policy,
             stable_present: Vec::new(),
             recent_present: Vec::new(),
@@ -349,6 +373,21 @@ pub fn scan(roots: &ProviderRoots) -> UsageData {
         }
         aggregate(all_calls)
     }
+}
+
+/// Scan provider files touched since `since`, then aggregate their canonical
+/// calls. Active sessions remain included because their JSONL files are
+/// appended as they receive events.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_since(roots: &ProviderRoots, since: SystemTime) -> UsageData {
+    let minimum_mtime_nanos = since
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let mut cache = None;
+    let mut reporter = ProgressReporter::noop();
+    let mut ctx = ScanCtx::full_since(&mut cache, minimum_mtime_nanos);
+    aggregate(walk_providers(roots, &mut ctx, &mut reporter))
 }
 
 /// Cache-aware scan. Pass `Some(cache)` to short-circuit per-file parses
@@ -1909,6 +1948,29 @@ mod tests {
     /// `now` so a watermark captured between writes cleanly splits them.
     fn tick() {
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn scan_since_reads_only_files_touched_in_requested_window() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-old",
+            "old.jsonl",
+            &[claude_line("2026-05-01T10:00:00Z", "old", 100, 200)],
+        );
+        tick();
+        let cutoff = now_nanos();
+        tick();
+        fx.write_file(
+            "proj-new",
+            "new.jsonl",
+            &[claude_line("2026-06-01T10:00:00Z", "new", 10, 20)],
+        );
+
+        let since = UNIX_EPOCH + StdDuration::from_nanos(cutoff);
+        let usage = scan_since(&fx.roots, since);
+        assert_eq!(usage.calls.len(), 1);
+        assert_eq!(usage.calls[0].session_id, "new");
     }
 
     #[test]
