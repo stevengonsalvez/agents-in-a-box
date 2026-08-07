@@ -1224,15 +1224,7 @@ fn hook_core_for_agent(
         let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
         let (tool_input, questions, fingerprint) = match extract_structured_tool_input(payload) {
             Ok(request) => request,
-            Err(error) => {
-                let resolution = ainb_plugin_notifyd::broker::StructuredResolution::Rejected {
-                    reason: error.to_string(),
-                };
-                return Ok(Some(HookEmit::Structured(structured_emit_json(
-                    serde_json::Value::Null,
-                    &resolution,
-                ))));
-            }
+            Err(_) => return Ok(None),
         };
         let registered = ainb_plugin_notifyd::broker::client_register_structured(
             &socket,
@@ -1242,13 +1234,9 @@ fn hook_core_for_agent(
         )
         .unwrap_or(false);
         if !registered {
-            let resolution = ainb_plugin_notifyd::broker::StructuredResolution::Rejected {
-                reason: "Fleet structured broker unavailable".to_string(),
-            };
-            return Ok(Some(HookEmit::Structured(structured_emit_json(
-                tool_input,
-                &resolution,
-            ))));
+            // Fleet is an optional control surface. A broker outage must not
+            // reject Claude's native AskUserQuestion tool invocation.
+            return Ok(None);
         }
         append_event();
         let resolution = ainb_plugin_notifyd::broker::client_await_structured(
@@ -2577,7 +2565,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_hook_without_broker_rejects_without_persisting_a_fleet_card() {
+    fn ask_hook_without_broker_fails_open_without_persisting_a_fleet_card() {
         let home = TempDir::new().unwrap();
         let cwd = home.path().join("plain-claude-worktree");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -2605,15 +2593,39 @@ mod tests {
             &payload,
             Some("AskUserQuestion"),
         )
-        .unwrap()
-        .expect("structured hook output");
-        let HookEmit::Structured(line) = emitted else {
-            panic!("AskUserQuestion must emit structured hook output");
-        };
-        assert!(line.contains("Fleet structured broker unavailable"));
+        .unwrap();
+        assert!(
+            emitted.is_none(),
+            "unavailable Fleet broker must leave Claude's native interview unblocked"
+        );
         assert!(
             !home.path().join("events.jsonl").exists(),
             "unregistered AskUserQuestion must never create an actionable Fleet card"
+        );
+    }
+
+    #[test]
+    fn ask_hook_with_unreadable_payload_fails_open() {
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("plain-claude-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let emitted = hook_core(
+            home.path(),
+            "PreToolUse",
+            "malformed-payload-session",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            50,
+            "not-json",
+            Some("AskUserQuestion"),
+        )
+        .unwrap();
+
+        assert!(
+            emitted.is_none(),
+            "Fleet hook parse failures must leave Claude's native tool unblocked"
         );
     }
 }
