@@ -422,6 +422,9 @@ pub enum FleetAction {
         request_fingerprint: String,
         request_identity: Option<ainb_hangar_proto::fleet::FleetRequestIdentity>,
     },
+    ReleaseStructured {
+        request_fingerprint: String,
+    },
     ReconcileStructured {
         request_fingerprint: String,
     },
@@ -470,6 +473,11 @@ impl FleetAction {
                 request_fingerprint,
                 request_identity,
             },
+            Self::ReleaseStructured {
+                request_fingerprint,
+            } => ControlAction::ReleaseStructured {
+                request_fingerprint,
+            },
             Self::ReconcileStructured {
                 request_fingerprint,
             } => ControlAction::ReconcileStructured {
@@ -511,6 +519,7 @@ impl FleetAction {
         match self {
             Self::StructuredAnswer { .. } => capabilities.contains("structured_answer"),
             Self::DismissStructured { .. } => capabilities.contains("structured_dismiss"),
+            Self::ReleaseStructured { .. } => capabilities.contains("structured_answer"),
             Self::ReconcileStructured { .. } => capabilities.contains("structured_answer"),
             Self::Approve { .. } | Self::Deny { .. } => capabilities.contains("approvals"),
             Self::SendText { .. } => {
@@ -531,6 +540,7 @@ impl FleetAction {
         match self {
             Self::StructuredAnswer { .. } => "structured_answer",
             Self::DismissStructured { .. } => "structured_dismiss",
+            Self::ReleaseStructured { .. } => "structured_answer",
             Self::ReconcileStructured { .. } => "structured_answer",
             Self::Approve { .. } | Self::Deny { .. } => "approvals",
             Self::SendText { .. } => "send_prompt or tmux_text",
@@ -550,6 +560,7 @@ impl FleetAction {
             self,
             Self::StructuredAnswer { .. }
                 | Self::DismissStructured { .. }
+                | Self::ReleaseStructured { .. }
                 | Self::ReconcileStructured { .. }
                 | Self::Approve { .. }
                 | Self::Deny { .. }
@@ -1144,6 +1155,19 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // navigated away instead of attaching.
         FleetKey::Char('a') => return attach_intent(state, true),
         FleetKey::Enter => begin_structured_answer(state),
+        FleetKey::Char('c') => {
+            let native_picker = state
+                .selected_key
+                .as_deref()
+                .and_then(|key| state.roster.iter().find(|row| row.session_key == key))
+                .is_some_and(native_claude_picker);
+            if let Some(intent) = release_structured_intent(state) {
+                return Some(intent);
+            }
+            if !native_picker {
+                return request_action(state, FleetAction::Continue);
+            }
+        }
         FleetKey::Char('t') => {
             state.mode = FleetMode::Start(StartState {
                 provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
@@ -1193,11 +1217,47 @@ fn reconcile_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent
     })
 }
 
+/// Hand the selected Claude interview back to Claude's own terminal picker.
+fn release_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent> {
+    let row = state
+        .selected_key
+        .as_deref()
+        .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
+    if native_claude_picker(row) {
+        state.feedback = Some("Claude native picker route is unavailable".into());
+        return None;
+    }
+    if !row.provider.eq_ignore_ascii_case("claude")
+        || !row.is_managed()
+        || !row.attention_state.eq_ignore_ascii_case("ASK")
+        || !row.capabilities.contains("structured_answer")
+    {
+        return None;
+    }
+    let request_fingerprint = row.current_request_fingerprint.clone()?;
+    Some(FleetIntent::Execute {
+        session_key: row.session_key.clone(),
+        expected_version: row.version,
+        action: FleetAction::ReleaseStructured {
+            request_fingerprint,
+        },
+    })
+}
+
 fn begin_structured_answer(state: &mut FleetPaneState) {
     let Some(selected_key) = state.selected_key.clone() else {
         state.feedback = Some("no Fleet session selected".into());
         return;
     };
+    if state
+        .roster
+        .iter()
+        .find(|row| row.session_key == selected_key)
+        .is_some_and(native_claude_picker)
+    {
+        state.feedback = Some("Claude picker active, answer in the Claude session".into());
+        return;
+    }
     let answers: Vec<_> = state.roster.iter().filter_map(answer_state_from_row).collect();
     if answers.is_empty() {
         state.feedback = Some("no actionable structured interviews".into());
@@ -1208,6 +1268,14 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         return;
     };
     state.mode = FleetMode::Answer(AnswerQueue { answers, active });
+}
+
+fn native_claude_picker(row: &FleetSessionRow) -> bool {
+    row.current_request
+        .as_ref()
+        .and_then(|request| request.get("fleet_delivery"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|route| route == "native_claude")
 }
 
 fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
@@ -2490,6 +2558,19 @@ fn render_detail(
     if session.is_actionable() {
         put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
+        if native_claude_picker(session) {
+            put_str(buffer, left, y, "CLAUDE PICKER ACTIVE", VIOLET, right);
+            y = y.saturating_add(1);
+            put_str(
+                buffer,
+                left,
+                y,
+                "Answer in Claude. Fleet mirrors state after submit.",
+                MUTED,
+                right,
+            );
+            y = y.saturating_add(2);
+        }
         if let Some(question_count) = session.structured_question_count() {
             put_str(
                 buffer,
@@ -2627,7 +2708,12 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
         && session.is_managed()
         && session.capabilities.contains("structured_answer")
     {
-        actions.push("Enter Answer");
+        if native_claude_picker(session) {
+            actions.push("→ Open Claude");
+        } else {
+            actions.push("Enter Answer");
+            actions.push("c Open in Claude");
+        }
         actions.push("r Reconcile");
     }
     if session.attention_state.eq_ignore_ascii_case("APPROVAL")
@@ -4626,6 +4712,60 @@ mod tests {
         assert!(rendered.contains("Enter Answer"));
         assert!(!rendered.contains("CONNECTION"));
         assert!(!rendered.contains("REPOSITORY / BRANCH"));
+    }
+
+    #[test]
+    fn claude_interview_can_switch_to_native_picker_once() {
+        let mut row = session("claude:native", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("native-fp".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('c')));
+        assert_eq!(
+            reduced.intent,
+            Some(FleetIntent::Execute {
+                session_key: "claude:native".into(),
+                expected_version: 7,
+                action: FleetAction::ReleaseStructured {
+                    request_fingerprint: "native-fp".into(),
+                },
+            })
+        );
+
+        let mut native = session("claude:native", "claude", "IDLE", "ASK", "managed");
+        native.current_request_fingerprint = Some("native-fp".into());
+        native.current_request = Some(serde_json::json!({
+            "fleet_delivery": "native_claude",
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let mut native_state = FleetPaneState::default();
+        native_state.set_sessions(vec![native]);
+        let native_reduced = apply(&native_state, FleetEvent::Key(FleetKey::Char('c')));
+        assert!(native_reduced.intent.is_none());
+        assert_eq!(
+            native_reduced.state.feedback.as_deref(),
+            Some("Claude native picker route is unavailable")
+        );
+
+        let mut ordinary_state = FleetPaneState::default();
+        ordinary_state.set_sessions(vec![session(
+            "codex:run",
+            "codex",
+            "IDLE",
+            "INPUT",
+            "managed",
+        )]);
+        let ordinary_reduced = apply(&ordinary_state, FleetEvent::Key(FleetKey::Char('c')));
+        assert!(matches!(
+            ordinary_reduced.intent,
+            Some(FleetIntent::Execute {
+                action: FleetAction::Continue,
+                ..
+            })
+        ));
     }
 
     #[test]

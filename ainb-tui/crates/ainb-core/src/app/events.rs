@@ -3037,7 +3037,7 @@ impl EventHandler {
             KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
-            KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Continue)),
+            KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c'))),
             KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
             KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
             KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
@@ -3315,6 +3315,7 @@ impl EventHandler {
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
                     FleetAction::DismissStructured { .. } => "rejected interview",
+                    FleetAction::ReleaseStructured { .. } => "opened Claude picker",
                     FleetAction::ReconcileStructured { .. } => "reconciled interview",
                     FleetAction::Approve { .. } => "approved request",
                     FleetAction::Deny { .. } => "denied request",
@@ -8829,6 +8830,10 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r')))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('c')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c')))
         ));
         assert!(matches!(
             route(&mut state, KeyCode::F(5)),

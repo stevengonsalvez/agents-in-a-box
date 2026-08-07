@@ -311,6 +311,11 @@ struct FleetAnswerQueue: View {
 
             Text(question.header).font(.title3.weight(.semibold))
             Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
+            if deck.nativePicker {
+                Text("Claude picker active. Answer in the attached Claude session, then Fleet refreshes the same interview state.")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(FleetPalette.mint)
+            }
 
             if question.options.isEmpty {
                 TextField("Type answer", text: textBinding(deck: deck, question: question), axis: .vertical)
@@ -348,9 +353,16 @@ struct FleetAnswerQueue: View {
                 if deck.session.provider == .claude && deck.session.capabilities.structuredDismiss {
                     Button("Reject interview", role: .destructive) { rejectConfirmation = true }
                 }
+                if deck.session.provider == .claude && !deck.nativePicker {
+                    Button("Open in Claude") {
+                        store.selectedSessionKey = deck.session.sessionKey
+                        store.openStructuredInterviewInClaude(on: deck.session)
+                    }
+                    .disabled(store.pendingIntentID != nil)
+                }
                 Button("Submit all answers") { submit(deck) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!complete(deck) || store.pendingIntentID != nil)
+                    .disabled(deck.nativePicker || !complete(deck) || store.pendingIntentID != nil)
             }
 
             if let notice = store.controlNotice {
@@ -436,6 +448,7 @@ struct FleetAnswerQueue: View {
 private struct FleetInterviewDeck {
     let session: FleetSession
     let questions: [FleetInterviewQuestion]
+    let nativePicker: Bool
 
     init?(session: FleetSession) {
         guard session.attention == .ask,
@@ -458,6 +471,7 @@ private struct FleetInterviewDeck {
         guard !questions.isEmpty else { return nil }
         self.session = session
         self.questions = questions
+        self.nativePicker = request.value("fleet_delivery")?.stringValue == "native_claude"
     }
 
     static func priority(_ session: FleetSession) -> (Int, Int64) {

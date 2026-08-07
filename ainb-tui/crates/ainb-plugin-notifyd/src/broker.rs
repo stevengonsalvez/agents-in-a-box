@@ -114,6 +114,9 @@ pub enum StructuredResolution {
         /// Human-readable safe failure reason.
         reason: String,
     },
+    /// Release the intercepted request so Claude can render its native picker.
+    /// No answer is fabricated. The hook must return no override for this state.
+    ReleasedToNative,
 }
 
 impl StructuredResolution {
@@ -640,6 +643,42 @@ impl BrokerState {
             false => StructuredAnswerAck::unmatched(),
         }
     }
+
+    /// Release only the exact current request to Claude's native picker.
+    fn release_structured(
+        &self,
+        session_id: &str,
+        request_fingerprint: &str,
+    ) -> StructuredAnswerAck {
+        let released = {
+            let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(pending) = map.get(session_id) else {
+                return StructuredAnswerAck::unmatched();
+            };
+            let PendingKind::Structured {
+                request_fingerprint: current,
+                ..
+            } = &pending.kind
+            else {
+                return StructuredAnswerAck::stale();
+            };
+            if current != request_fingerprint {
+                return StructuredAnswerAck::stale();
+            }
+            match &pending.kind {
+                PendingKind::Structured { tx, .. } => {
+                    tx.send_replace(Some(StructuredResolution::ReleasedToNative));
+                    true
+                }
+                _ => false,
+            }
+        };
+        if released {
+            StructuredAnswerAck::matched()
+        } else {
+            StructuredAnswerAck::unmatched()
+        }
+    }
 }
 
 impl Default for BrokerState {
@@ -698,6 +737,12 @@ enum Request {
         session_id: String,
         request_fingerprint: String,
         reason: String,
+    },
+    /// Release an exact intercepted request to Claude's native picker.
+    #[serde(rename = "release_structured")]
+    ReleaseStructured {
+        session_id: String,
+        request_fingerprint: String,
     },
     /// Dump the pending session ids.
     List,
@@ -836,6 +881,13 @@ async fn handle_connection(stream: UnixStream, state: BrokerState) -> Result<()>
             reason,
         } => {
             let ack = state.dismiss_structured(&session_id, &request_fingerprint, reason);
+            write_line(reader.get_mut(), &ack).await?;
+        }
+        Request::ReleaseStructured {
+            session_id,
+            request_fingerprint,
+        } => {
+            let ack = state.release_structured(&session_id, &request_fingerprint);
             write_line(reader.get_mut(), &ack).await?;
         }
         Request::List => {
@@ -1069,6 +1121,26 @@ pub fn client_dismiss_structured(
             "session_id": session_id,
             "request_fingerprint": request_fingerprint,
             "reason": reason,
+        }),
+    )?;
+    serde_json::from_value(response)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Release an intercepted interview so Claude renders its own picker. This is
+/// an exact-fingerprint transition, therefore a late route change cannot wake
+/// a newer interview in the same session.
+pub fn client_release_structured(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: &str,
+) -> std::io::Result<StructuredAnswerAck> {
+    let response = client_round_trip(
+        sock,
+        &serde_json::json!({
+            "op": "release_structured",
+            "session_id": session_id,
+            "request_fingerprint": request_fingerprint,
         }),
     )?;
     serde_json::from_value(response)
@@ -1434,6 +1506,46 @@ mod tests {
                 reason: "operator rejected".into()
             }
         );
+
+        handle.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn structured_release_yields_only_the_exact_pending_request_to_native() {
+        let (sock, _state, handle) = spawn_broker(Duration::from_secs(30)).await;
+        let request = serde_json::json!({
+            "op": "await_structured",
+            "session_id": "ask-native",
+            "request_fingerprint": "fnv1a64:current",
+            "questions": [{"question": "Continue?", "options": ["Yes"]}],
+        });
+        let waiter_sock = sock.clone();
+        let waiter = tokio::spawn(async move {
+            round_trip(&waiter_sock, &serde_json::to_string(&request).unwrap()).await
+        });
+        wait_for_pending(&sock, "ask-native").await;
+
+        let stale_socket = sock.clone();
+        let stale = tokio::task::spawn_blocking(move || {
+            client_release_structured(&stale_socket, "ask-native", "fnv1a64:stale")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(stale.stale);
+        let accepted_socket = sock.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            client_release_structured(&accepted_socket, "ask-native", "fnv1a64:current")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(accepted.matched);
+
+        let resolution: StructuredResolution =
+            serde_json::from_str(waiter.await.unwrap().trim()).unwrap();
+        assert_eq!(resolution, StructuredResolution::ReleasedToNative);
 
         handle.abort();
         let _ = std::fs::remove_file(&sock);
