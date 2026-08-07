@@ -175,7 +175,8 @@ impl BdLock {
                         return Err(last_holder.map_or(LockHeld::Contended, LockHeld::By));
                     }
                     match self.reclaim(&holder_is_live) {
-                        Reclaim::Now => continue,
+                        // Retry immediately: the path is free right now.
+                        Reclaim::Now => {}
                         Reclaim::Backoff => std::thread::sleep(POLL_INTERVAL),
                         Reclaim::HeldBy(pid) => {
                             last_holder = Some(pid);
@@ -299,7 +300,9 @@ impl Drop for BdLockGuard {
     /// the steal path is careful to avoid, reintroduced on the way out. Removing
     /// only while the file still names us keeps the invariant symmetric.
     fn drop(&mut self) {
-        if read_pid(&self.path) == Ok(std::process::id() as i32) {
+        if read_pid(&self.path)
+            == i32::try_from(std::process::id()).map_err(|_| PidfileRead::Unreadable)
+        {
             let _ = std::fs::remove_file(&self.path);
         }
     }

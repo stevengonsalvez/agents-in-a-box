@@ -7871,17 +7871,6 @@ fn daemon_version_skew(running: Option<&str>, mine: &str) -> Option<String> {
     }
 }
 
-/// Resolve the daemon's ownership lock: `<hangar_home>/hangar/daemon.lock`.
-///
-/// This, not `daemon.pid`, is the authoritative record of who owns the home: the
-/// daemon publishes it atomically as the first statement of `boot` and holds it
-/// for its whole life, whereas the pid file is a last-write-wins note written at
-/// the end of boot.
-fn daemon_lock_path() -> Result<std::path::PathBuf> {
-    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
-    Ok(ainb_hangar_daemon::single_instance::lock_path_in(&home))
-}
-
 /// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
 fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -7889,6 +7878,10 @@ fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
 }
 
 /// The pid of the daemon that currently owns this hangar home, if any.
+///
+/// Ownership lives in `<hangar_home>/hangar/daemon.lock`, which the daemon
+/// publishes atomically as the first statement of `boot` and holds for its whole
+/// life — unlike `daemon.pid`, a last-write-wins note written at the end of boot.
 ///
 /// The ownership lock answers first. The pid file is consulted only as a
 /// fallback, for the upgrade window in which a daemon built before the lock
