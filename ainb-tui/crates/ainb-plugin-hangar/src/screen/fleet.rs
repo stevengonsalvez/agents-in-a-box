@@ -2090,7 +2090,7 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = format!("  ACTION QUEUE  ·  {} sessions", visible.len());
+        let header = format!("  ACTION QUEUE  ·  {} sessions  ·  F5 refresh", visible.len());
         put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
         put_str(

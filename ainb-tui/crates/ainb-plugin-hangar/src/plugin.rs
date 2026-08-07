@@ -4031,6 +4031,14 @@ impl HangarPlugin {
         // before we mutate `self.screens` and `self.app` below.
         let app = self.app_state().clone();
 
+        // Fleet's stream can lag a missed provider hook. Keep a direct snapshot
+        // pull on an unambiguous key so the operator can reconcile immediately.
+        if matches!(app.screen, Screen::Fleet) && key.code == (KeyCode::F { n: 5 }) {
+            self.fleet_fetch_pending = true;
+            self.conn.on_event();
+            return;
+        }
+
         // e38.29: while the issue list is capturing free text (the `/` filter or
         // the `c` create-title input), every key — including the global
         // tab-switch chars (`1`/`K`/`,`/`q`/…) — is typed text, NOT a nav key.
@@ -8151,6 +8159,21 @@ mod tests {
         assert!(
             plugin.fleet_fetch_pending,
             "key reduction never consumes refresh work"
+        );
+    }
+
+    #[test]
+    fn fleet_f5_arms_direct_snapshot_refresh() {
+        let mut plugin = connected_plugin_with_issue();
+        plugin.on_key(&char_press('F'));
+        assert!(matches!(plugin.app_state().screen, Screen::Fleet));
+
+        plugin.fleet_fetch_pending = false;
+        plugin.on_key(&key_press(KeyCode::F { n: 5 }));
+
+        assert!(
+            plugin.fleet_fetch_pending,
+            "F5 must request a direct Fleet snapshot"
         );
     }
 
