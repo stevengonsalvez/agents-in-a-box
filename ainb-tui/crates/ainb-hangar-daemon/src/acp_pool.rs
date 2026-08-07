@@ -1088,7 +1088,9 @@ impl AcpPool {
     /// that actor's own incarnation.
     async fn retire_actor(&self, session_key: &str, generation: u64) {
         let mut sessions = self.sessions.lock().await;
-        retire_if_current(&mut sessions, session_key, generation, |handle| handle.generation);
+        retire_if_current(&mut sessions, session_key, generation, |handle| {
+            handle.generation
+        });
     }
 
     const fn pool_writer_config(&self) -> WriterConfig {
@@ -2775,7 +2777,10 @@ fn retire_if_current<H>(
     generation: u64,
     generation_of: impl Fn(&H) -> u64,
 ) {
-    if sessions.get(session_key).is_some_and(|handle| generation_of(handle) == generation) {
+    if sessions
+        .get(session_key)
+        .is_some_and(|handle| generation_of(handle) == generation)
+    {
         sessions.remove(session_key);
     }
 }
@@ -2851,7 +2856,10 @@ mod tests {
 
         // The owner retires: the entry goes.
         retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
-        assert!(sessions.get("acp:1").is_none(), "the owning actor clears its own entry");
+        assert!(
+            sessions.get("acp:1").is_none(),
+            "the owning actor clears its own entry"
+        );
 
         // Retiring twice, or against a session nobody registered, is a no-op.
         retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
