@@ -33,7 +33,7 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
     }
 
     @MainActor
-    func testNotchFilterSelectsOnlyVisibleSessions() throws {
+    func testNeedsYouRouteSelectsOnlyAttentionSessions() throws {
         try fixture.seed(eventID: "active", sessionID: "active", eventType: "UserPromptSubmit", observedAt: 1_700_000_000_001)
         try fixture.seed(eventID: "ask", provider: "codex", sessionID: "ask", eventType: "AskUserQuestion", observedAt: 1_700_000_000_002)
         launchApp()
@@ -41,17 +41,10 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         let notch = app.buttons["fleet.notch"]
         waitFor(notch)
         notch.click()
-        app.buttons["fleet.notch.filter.all"].click()
-        waitFor(app.buttons["fleet.notch.row.claude:active"])
-        waitFor(app.buttons["fleet.notch.row.codex:ask"])
-
-        app.buttons["fleet.notch.filter.ask"].click()
+        app.segmentedControls["fleet.notch.route"].buttons["Needs you"].click()
         waitFor(app.buttons["fleet.notch.row.codex:ask"])
         XCTAssertFalse(app.buttons["fleet.notch.row.claude:active"].exists)
         waitFor(app.staticTexts["fleet.notch.detail.codex:ask"])
-
-        app.buttons["fleet.notch.filter.ask"].click()
-        waitFor(app.buttons["fleet.notch.row.claude:active"])
     }
 
     @MainActor
