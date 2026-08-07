@@ -812,6 +812,11 @@ pub enum ControlAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_identity: Option<FleetRequestIdentity>,
     },
+    /// Yield an intercepted Claude interview to its native terminal picker.
+    ReleaseStructured {
+        /// Provider request fingerprint verified against current state.
+        request_fingerprint: String,
+    },
     /// Reconcile one Claude interview against its live broker waiter.
     ReconcileStructured {
         /// Provider request fingerprint verified against current state.
@@ -889,6 +894,7 @@ impl ControlAction {
         match self {
             Self::StructuredAnswer { .. } => "structured_answer",
             Self::DismissStructured { .. } => "dismiss_structured",
+            Self::ReleaseStructured { .. } => "release_structured",
             Self::ReconcileStructured { .. } => "reconcile_structured",
             Self::Approve { .. } => "approve",
             Self::ApproveForSession { .. } => "approve_for_session",
