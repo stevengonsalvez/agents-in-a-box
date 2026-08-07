@@ -380,8 +380,24 @@ impl PidFile {
 }
 
 impl Drop for PidFile {
+    /// Compare-and-delete: remove the file only while it still names US.
+    ///
+    /// A blind unlink here deletes whoever's registration is CURRENT, which is
+    /// not necessarily ours — `register` is a last-write-wins `fs::write`, so any
+    /// other daemon that started later owns the file's contents. An exiting
+    /// daemon then wiped the LIVE daemon's registration, the next
+    /// `ensure_hangar_daemon` read "nothing running", and spawned another. That
+    /// ratchet is what turned a one-shot race into a pile of 69.
+    ///
+    /// [`crate::single_instance`] now stops the duplicates at the source; this
+    /// keeps the pid file honest for the readers that still consult it, and
+    /// covers the upgrade window where a pre-lock daemon is still running.
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        let ours = std::process::id().to_string();
+        if std::fs::read_to_string(&path).is_ok_and(|recorded| recorded.trim() == ours) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -736,8 +752,11 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     if once {
         return Ok(());
     }
-    // Self-register this pid so EVERY running daemon is discoverable, not just
-    // one started via `ainb hangar daemon start`.
+    // Self-register this pid so EVERY running daemon is DISCOVERABLE, not just
+    // one started via `ainb hangar daemon start`. Discovery only — the exclusion
+    // that actually stops a duplicate is `single_instance`'s lock, taken at the
+    // top of this function. This file is what `status` prints and what a
+    // pre-lock CLI still reads.
     //
     // `ensure_hangar_daemon` (the TUI's autostart) decides "is a daemon already
     // up?" purely from `<hangar_home>/hangar/daemon.pid`. Only the CLI `start`
@@ -746,7 +765,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // was invisible: the TUI spawned a SECOND daemon, `rpc::bind` unlinked the
     // live socket out from under the first, and two claim loops + two sweepers
     // then raced one SQLite home while the TUI talked to the newcomer's empty
-    // in-memory state. Writing the pid here closes that hole at the source.
+    // in-memory state.
+    //
+    // Writing the pid here made those daemons visible; it did NOT close the hole,
+    // because it happens at the END of boot and nothing checked it under
+    // exclusion. The lock at the top of `boot` is the actual fix — this line is
+    // now bookkeeping for humans and for `status`.
     let _pid_file = PidFile::register(&dir);
     let mut cfg = DaemonConfig::from_env();
     // The claim loop MUST key off the runtime id that is actually registered (and
@@ -758,4 +782,66 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
     cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
     run(store.pool().clone(), cfg, stats, broker.sink()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PidFile, pid_path_in};
+
+    /// The happy path: a clean exit takes our own registration with it, so the
+    /// next `ensure_hangar_daemon` does not read a dead pid.
+    #[test]
+    fn drop_removes_our_own_registration() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+
+        let pid_file = PidFile::register(home.path());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("registered"),
+            std::process::id().to_string()
+        );
+
+        drop(pid_file);
+        assert!(!path.exists(), "our own registration should be removed");
+    }
+
+    /// The ratchet regression. `register` is last-write-wins, so a daemon that
+    /// started later owns the file's contents. When the EARLIER daemon exits, a
+    /// blind unlink deletes the LIVE daemon's registration — the next autostart
+    /// then reads "nothing running" and spawns yet another. That is how one
+    /// machine reached 69 daemons instead of settling at two.
+    #[test]
+    fn drop_keeps_a_registration_another_daemon_overwrote() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+
+        let ours = PidFile::register(home.path());
+        // A later daemon self-registers over the top of ours.
+        std::fs::write(&path, "424242").expect("overwrite with a newer daemon's pid");
+
+        drop(ours);
+
+        assert!(
+            path.exists(),
+            "an exiting daemon must not delete the live daemon's registration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still registered").trim(),
+            "424242"
+        );
+    }
+
+    /// An unwritable home yields an unregistered handle, and dropping it must not
+    /// touch anything.
+    #[test]
+    fn dropping_an_unregistered_handle_is_a_no_op() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "424242").expect("seed someone else's registration");
+
+        drop(PidFile(None));
+
+        assert!(path.exists(), "a no-op handle must not remove anything");
+    }
 }
