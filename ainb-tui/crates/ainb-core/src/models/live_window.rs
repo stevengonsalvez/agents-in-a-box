@@ -23,11 +23,15 @@ use crate::models::usage::ProviderCall;
 
 /// Maximum age of the Tier 1 cache before we consider it stale and fall
 /// back to Tier 2. The Claude statusline cache is only rewritten while a
-/// Claude Code session is actively prompting (each render); 10 minutes
-/// keeps the last-known windows visible across a normal "tabbed away"
-/// gap instead of blinking out after a short idle. Matches the Codex
-/// cache TTL ([`CODEX_CACHE_MAX_AGE_SECS`]).
-pub const CACHE_MAX_AGE_SECS: u64 = 600;
+/// Claude Code session is actively prompting (each render), so a short
+/// TTL blanks the whole `claude …` cluster during any normal idle gap —
+/// overnight, a long meeting, a stretch of Codex-only work. 24 hours
+/// keeps the last-known windows on the bar instead, and still drops them
+/// once the data is old enough to be meaningless (the 5h window has
+/// reset several times over by then). Deliberately far longer than the
+/// Codex TTL ([`CODEX_CACHE_MAX_AGE_SECS`]) — Codex is refreshed by the
+/// TUI's own poller, Claude has no in-TUI driver.
+pub const CACHE_MAX_AGE_SECS: u64 = 86_400;
 
 /// Default token cap for the Pro 5-hour window when Tier 2 has to
 /// estimate burn percentage. Override via `AINB_TOKEN_LIMIT`.
@@ -514,14 +518,15 @@ mod tests {
     }
 
     #[test]
-    fn cache_stays_fresh_for_ten_minutes() {
-        // A 5-minute-old cache is fresh — keeps the Claude windows visible
-        // across a normal "tabbed away" gap (would have been stale under the
-        // old 120s window). Guards the 10-minute TTL against accidental revert.
-        assert!(CACHE_MAX_AGE_SECS >= 600, "TTL kept at >= 10 minutes");
+    fn cache_stays_fresh_for_a_day() {
+        // A 12-hour-old cache is still fresh — the statusline only writes
+        // while a Claude session is actively prompting, so anything shorter
+        // blanks the `claude …` cluster across an overnight or Codex-only
+        // gap. Guards the 24-hour TTL against accidental revert.
+        assert!(CACHE_MAX_AGE_SECS >= 86_400, "TTL kept at >= 24 hours");
         let cache = LiveCache {
             version: crate::cli::statusline::CACHE_SCHEMA_VERSION,
-            updated_at: (Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            updated_at: (Utc::now() - chrono::Duration::hours(12)).to_rfc3339(),
             five_hour: None,
             seven_day: None,
             today_cost_usd: None,
@@ -530,7 +535,7 @@ mod tests {
         };
         assert!(
             cache_is_fresh(&cache),
-            "5-minute-old cache must still be fresh"
+            "12-hour-old cache must still be fresh"
         );
     }
 
