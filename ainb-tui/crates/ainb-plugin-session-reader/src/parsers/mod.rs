@@ -77,6 +77,12 @@ where
         ctx.stat_failures = ctx.stat_failures.saturating_add(1);
     }
 
+    if let (Some(minimum), Some((mtime, _))) = (ctx.minimum_mtime_nanos, stat) {
+        if mtime < minimum {
+            return Vec::new();
+        }
+    }
+
     if let (Some(watermark), Some((mtime, size))) = (ctx.watermark_nanos, stat) {
         if mtime < watermark {
             ctx.stable_present.push((path_str.clone(), mtime, size));
