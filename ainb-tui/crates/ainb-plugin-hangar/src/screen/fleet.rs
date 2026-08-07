@@ -3050,7 +3050,11 @@ fn answer_card_hit(
             }
             return Some(AnswerCardHit::Question(question_index));
         }
-        top = card_bottom.saturating_add(2);
+        // Cards render back-to-back with no blank row between them (the render
+        // loop advances to `bottom + 1`). Advancing by 2 here invented a gap, so
+        // every card below the first mapped clicks one row lower than it drew —
+        // clicking a visible option did nothing, and the row under it selected.
+        top = card_bottom.saturating_add(1);
     }
     None
 }
@@ -3060,7 +3064,9 @@ fn interview_card_view_start(answer: &AnswerState, width: u16, available_height:
     let mut used = interview_card_height(answer, first, width);
     while first > 0 {
         let candidate = first - 1;
-        let candidate_height = interview_card_height(answer, candidate, width).saturating_add(1);
+        // No inter-card gap — see `answer_card_hit`. Reserving one here made a
+        // prior completed card drop out of view a row before it had to.
+        let candidate_height = interview_card_height(answer, candidate, width);
         if used.saturating_add(candidate_height) > available_height {
             break;
         }
@@ -5031,11 +5037,14 @@ mod tests {
             },
         )
         .state;
+        // Q2's first option row. Every question carries an appended
+        // "Type your own answer" option (plus its description line), so each
+        // card is two rows taller than the option list alone implies.
         state = apply(
             &state,
             FleetEvent::AnswerCardClick {
                 column: 10,
-                row: 15,
+                row: 16,
                 area_width: 120,
                 area_height: 30,
             },
