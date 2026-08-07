@@ -242,6 +242,13 @@ pub mod scheduler;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// The daemon's shutdown seam: which signal stopped it, and how far to tear
+/// down.
+///
+/// [`shutdown::Watch`] answers SIGINT and SIGTERM (the hangar daemon was this
+/// workspace's only daemon that ignored the latter, so the supported `daemon
+/// stop` killed it on the OS default disposition and none of its teardown ran).
+pub mod shutdown;
 /// One daemon per hangar home.
 ///
 /// [`single_instance::acquire`] is the first thing [`boot`] does: it takes a

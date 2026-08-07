@@ -470,8 +470,10 @@ pub async fn run(
 
     let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
         tracing::info!(claim = false, "claim loop disabled; sweepers only");
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("ainb-hangar-daemon shutting down");
+        // Same seam as the claim loop below: a sweepers-only daemon must answer
+        // `daemon stop` too, and it holds the same ownership lock to release.
+        let cause = crate::shutdown::Watch::new().recv().await;
+        tracing::info!(signal = cause.as_str(), "ainb-hangar-daemon shutting down");
         return Ok(());
     };
 
@@ -519,16 +521,25 @@ pub async fn run(
     // a54 shutdown reap: the set of live interactive tmux sessions, so `Ctrl-C`
     // can kill each by exact name instead of orphaning a detached pane.
     let interactive = InteractiveSessions::default();
+    // Installed ONCE, outside the loop: re-registering a SIGTERM handler on every
+    // tick would churn a process-wide resource for no reason.
+    let mut shutdown = crate::shutdown::Watch::new();
 
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("ainb-hangar-daemon shutting down");
+            cause = shutdown.recv() => {
+                tracing::info!(signal = cause.as_str(), "ainb-hangar-daemon shutting down");
                 // Reap every in-flight interactive tmux session by exact name so
                 // no detached pane orphans (aborting its `wait` future below does
                 // NOT kill a detached session).
-                reap_interactive_sessions(&interactive).await;
+                //
+                // SIGINT only. SIGTERM is `daemon stop`/`restart` — which runs on
+                // every upgrade — and those panes are the operator's attached
+                // work, re-adopted by the next boot's tmux reconciler.
+                if cause.reaps_interactive_sessions() {
+                    reap_interactive_sessions(&interactive).await;
+                }
                 // Then abort + drain every in-flight run. Each headless provider
                 // was spawned with `kill_on_drop(true)`, so dropping its aborted
                 // future SIGKILLs the child instead of leaving it reparented to

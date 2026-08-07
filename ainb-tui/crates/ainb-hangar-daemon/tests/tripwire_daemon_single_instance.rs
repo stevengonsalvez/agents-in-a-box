@@ -181,6 +181,50 @@ fn once_mode_declines_a_home_another_daemon_owns() {
     );
 }
 
+/// `hangar daemon stop` sends SIGTERM. Until this fix the daemon had no handler
+/// for it, so it died on the OS default disposition: no teardown ran and the
+/// ownership lock was never released. Now it must exit AND release, so the very
+/// next `start` — as `daemon restart` does — takes the home cleanly.
+#[test]
+fn sigterm_stops_the_daemon_and_releases_the_home() {
+    let home = tempfile::tempdir().expect("tempdir home");
+    let mut outgoing = DaemonProcess::spawn(home.path(), &[CODEX_OFF]);
+    let holder = wait_for_lock(home.path());
+    // Wait for a fully booted daemon: signalling mid-boot would prove nothing
+    // about the run loop's handler.
+    wait_for_socket(home.path());
+
+    let signalled = Command::new("kill")
+        .args(["-TERM", &holder.to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(signalled.success(), "kill -TERM {holder} failed");
+
+    // `wait_for_exit`, not `pid_alive`: this test is the daemon's parent, so an
+    // exited-but-unreaped daemon is a zombie and answers `kill(pid, 0)` like a
+    // live process.
+    assert!(
+        outgoing.wait_for_exit(Duration::from_secs(20)),
+        "the daemon must exit on SIGTERM"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || (!lock_path(home.path())
+            .exists())
+        .then_some(()))
+        .is_some(),
+        "a graceful stop must release the ownership lock, or the next start would \
+         have to steal it"
+    );
+    drop(outgoing);
+
+    // The successor takes the home with no stealing involved.
+    let successor = DaemonProcess::spawn(home.path(), &[CODEX_OFF]);
+    assert_eq!(
+        wait_for_lock(home.path()),
+        i32::try_from(successor.pid()).expect("pid fits i32")
+    );
+}
+
 /// A SIGKILLed daemon runs no destructor, so it leaves the lock file behind
 /// naming a dead pid. That must not lock the home out forever — the next boot
 /// steals it (atomically, `rename`, winner-take-all) and takes over.
