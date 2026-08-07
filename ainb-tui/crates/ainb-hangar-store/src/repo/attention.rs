@@ -373,6 +373,35 @@ impl AttentionRepo {
         .await?;
         rows.iter().map(|r| r.try_get("id")).collect()
     }
+
+    /// The ids of every still-`open` `approval` row a session raised, oldest
+    /// first.
+    ///
+    /// The ACP pool's convergence uses this: a permission whose adapter died has
+    /// no responder left to answer it, so its row must be closed rather than
+    /// left for an operator to click forever. The twin of
+    /// [`AttentionRepo::open_ask_ids_for_session`], and here for the same
+    /// reason: the two `kind` tokens are a store detail, and a caller writing
+    /// the SQL by hand is one schema change away from silently matching
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn open_approval_ids_for_session(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id FROM attention \
+             WHERE session_id = ? AND kind = 'approval' AND state = 'open' \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(|r| r.try_get("id")).collect()
+    }
 }
 
 /// Map one raw `attention` row into an [`AttentionRow`].

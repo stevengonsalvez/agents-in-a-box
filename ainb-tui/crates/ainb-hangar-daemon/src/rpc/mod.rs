@@ -1849,7 +1849,18 @@ async fn deliver_message_leg(
         // claim/resolve receipt path. Returning a terminal state here would
         // mean answering "delivered" for a turn that has not started.
         if session.provider == crate::acp_pool::ACP_PROVIDER_TOKEN {
-            return acp_delivery_leg(message_id, session_key, text).await;
+            let (status, detail) = acp_delivery_leg(message_id, session_key, text).await;
+            record_acp_leg_receipt(
+                pool,
+                leg_request_id,
+                message_id,
+                &session,
+                text,
+                status,
+                detail.as_deref(),
+            )
+            .await;
+            return (status, detail);
         }
         let sent_version = session.version;
         let receipt = execute_fleet_action(
@@ -1894,6 +1905,70 @@ async fn deliver_message_leg(
                 );
             }
         }
+    }
+}
+
+/// Write the ACP leg's action receipt, which its `execute_fleet_action` bypass
+/// would otherwise skip entirely.
+///
+/// A tmux leg gets its receipt from `execute_fleet_action`. The ACP leg
+/// deliberately never goes through that function, so without this one
+/// `fleet/message_send` answered `fleet/receipt_get` for a tmux recipient and
+/// `null` for an ACP one, and the asymmetry was invisible until an operator
+/// queried the leg id and got nothing back.
+///
+/// TERMINAL, exactly like the operator `SendPrompt` arm and for the same
+/// reason: nothing reopens an action receipt once its handler returns, so a
+/// PENDING one would be flipped to `UNKNOWN` by the first reader while the turn
+/// was still running perfectly well. The turn's real outcome lives in the
+/// DELIVERY leg, and the detail names the message so the follow-up is obvious.
+async fn record_acp_leg_receipt(
+    pool: &SqlitePool,
+    leg_request_id: &str,
+    message_id: &str,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    text: &str,
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+    detail: Option<&str>,
+) {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
+    use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+    let action = ControlAction::SendPrompt {
+        text: text.to_string(),
+    };
+    let Ok(action_json) = serde_json::to_string(&action) else {
+        return;
+    };
+    let (status, detail) = if status == ActionReceiptStatus::Pending {
+        (
+            ActionReceiptStatus::Delivered,
+            Some(format!("acp_queued; message {message_id}")),
+        )
+    } else {
+        (status, detail.map(str::to_string))
+    };
+    let now = SystemClock.now_ms();
+    let receipt = NewActionReceipt {
+        request_id: leg_request_id.to_string(),
+        session_key: session.session_key.clone(),
+        action_kind: action.kind().to_string(),
+        action_fingerprint: stable_fingerprint(&action_json),
+        expected_version: session.version,
+        idempotency_key: None,
+        status: receipt_status_token(status).to_string(),
+        detail,
+        session_version: Some(session.version),
+        created_at: now,
+        updated_at: now,
+    };
+    if let Err(error) = FleetRepo::upsert_action_receipt(pool, &receipt).await {
+        tracing::error!(
+            session_key = %session.session_key,
+            %message_id,
+            %error,
+            "could not record the acp delivery leg's action receipt"
+        );
     }
 }
 
@@ -2416,10 +2491,30 @@ async fn execute_fleet_action(
         pool,
         &params.session_key,
         params.expected_version,
-        request_fingerprint,
+        // Applied BELOW instead, because ACP sessions are exempt from it.
+        None,
     )
     .await
     .map_err(fleet_repo_err)?;
+    // The fingerprint gate is a STALENESS check for providers whose session row
+    // carries the one request they are blocked on. An ACP session can be blocked
+    // on SEVERAL at once (an adapter running parallel tool calls raises a
+    // `session/request_permission` per call) and the row has room for exactly
+    // one, so enforcing equality here would make every ask but the newest
+    // permanently unanswerable and hold its adapter until the turn deadline.
+    // The pool's parked map is the authority there: a fingerprint that is
+    // already answered, or was never raised, comes back `NotWaiting`.
+    if session.provider != crate::acp_pool::ACP_PROVIDER_TOKEN
+        && request_fingerprint.is_some_and(|expected| {
+            session.current_request_fingerprint.as_deref() != Some(expected)
+        })
+    {
+        return Err(fleet_repo_err(
+            ainb_hangar_store::repo::fleet::FleetRepoError::RequestFingerprintMismatch {
+                session_key: params.session_key.clone(),
+            },
+        ));
+    }
     let capabilities: ainb_hangar_proto::fleet::FleetCapabilities =
         serde_json::from_str(&session.capabilities).unwrap_or_default();
 
@@ -4075,16 +4170,26 @@ async fn handle_fleet_acp_session_create(
     .map_err(|error| internal(&format!("acp session create: {error}")))?;
     // The scope was ALREADY held by a live session, so this create replayed onto
     // it instead of minting the key above. Idempotent only while the caller
-    // asked for the same adapter: answering a `codex-acp` create with a live
+    // asked for the same SESSION: answering a `codex-acp` create with a live
     // `claude-agent-acp` key would silently hand back a session that prompts a
-    // DIFFERENT agent than the caller believes it is driving, and every later
-    // `message_send` to that key would misroute in silence. Graft 4 rejects the
-    // same class of replay on `fleet_message`; this is its ACP twin.
-    if row.session_key != session_key && row.provider != params.provider {
-        return Err(invalid_params(&format!(
-            "scope_key {:?} is already held by a {} session; stop it before creating a {} one",
-            row.scope_key, row.provider, params.provider
-        )));
+    // DIFFERENT agent than the caller believes it is driving, and answering a
+    // create for `~/work/api` with a session rooted at `~/work/web` would run
+    // every later prompt against a different repository. Both misroute in
+    // silence for the whole life of the scope. Graft 4 rejects the same class
+    // of replay on `fleet_message`; this is its ACP twin.
+    if row.session_key != session_key {
+        let mismatch = if row.provider == params.provider {
+            (row.cwd != params.cwd).then(|| ("cwd", row.cwd.clone(), params.cwd.clone()))
+        } else {
+            Some(("provider", row.provider.clone(), params.provider.clone()))
+        };
+        if let Some((field, held, asked)) = mismatch {
+            return Err(invalid_params(&format!(
+                "scope_key {:?} is already held by a session whose {field} is {held:?}, \
+                 not {asked:?}; stop it before creating a different one",
+                row.scope_key
+            )));
+        }
     }
     if let Some(revision) = revision {
         events.emit_fleet_revision(revision);

@@ -29,6 +29,9 @@
 //! | `FAKE_ACP_SESSION_PREFIX` | prefix for minted adapter session ids (default `fake-session`) |
 //! | `FAKE_ACP_HANG_SESSIONS` | comma list of adapter session ids (or `*`) whose prompt NEVER answers |
 //! | `FAKE_ACP_PERMISSION_SESSIONS` | comma list of adapter session ids (or `*`) that raise one `session/request_permission` per turn |
+//! | `FAKE_ACP_PERMISSION_COUNT` | raise N CONCURRENT permissions per turn instead of one (default 1) |
+//! | `FAKE_ACP_PERMISSION_NO_ALLOW` | offer only reject-flavoured options, so `Approve` has nothing to select |
+//! | `FAKE_ACP_DIE_AFTER_CHUNKS` | emit the turn's updates, then exit WITHOUT replying to `session/prompt` |
 //! | `FAKE_ACP_FAIL_TURN_SESSIONS` | comma list (or `*`) whose prompt answers `stopReason: refusal` |
 //! | `FAKE_ACP_HANG_PROMPTS` | comma list (or `*`) of prompt TEXTS whose turn never answers |
 //! | `FAKE_ACP_ECHO_PROMPT` | append the prompt text to the final agent message |
@@ -107,6 +110,20 @@ fn main() {
             continue;
         }
         handle(&out, &sessions, method, id, &message["params"]);
+    }
+    // stdin is closed: nobody will answer an outstanding
+    // `session/request_permission` and nobody will read another chunk. Wake
+    // every thread that is deliberately blocked forever rather than joining
+    // threads that can never finish on their own. A fixture that outlives its
+    // test holds the harness's stdout pipe open, and the run then hangs with no
+    // output instead of reporting the failure that stranded it, which is
+    // exactly the run where the evidence matters. The client is gone either
+    // way, so cutting these turns short costs nothing.
+    if let Ok(mut map) = pending.lock() {
+        map.clear();
+    }
+    for thread in &threads {
+        thread.thread().unpark();
     }
     for thread in threads {
         let _ = thread.join();
@@ -251,9 +268,29 @@ fn prompt(out: &SharedOut, pending: &Pending, id: &serde_json::Value, params: &s
     }
 
     if selected("FAKE_ACP_PERMISSION_SESSIONS", &session_id) {
-        request_permission(out, pending, &session_id);
+        // CONCURRENT by construction: every ask blocks its own thread, so all N
+        // are outstanding at once. A client that can only answer the newest
+        // deadlocks here on the older ones instead of quietly passing.
+        let asks = count("FAKE_ACP_PERMISSION_COUNT").max(1);
+        let threads: Vec<_> = (0..asks)
+            .map(|_| {
+                let out = Arc::clone(out);
+                let pending = Arc::clone(pending);
+                let session_id = session_id.clone();
+                std::thread::spawn(move || request_permission(&out, &pending, &session_id))
+            })
+            .collect();
+        for thread in threads {
+            let _ = thread.join();
+        }
     }
     emit_turn(out, &session_id, params);
+    // Die with the turn's updates already on the wire and no reply behind them:
+    // the client must commit what it read before it observes the exit.
+    if flag("FAKE_ACP_DIE_AFTER_CHUNKS") {
+        record(&format!("die_after_chunks:{session_id}"));
+        std::process::exit(1);
+    }
     flip_mode(out, &session_id);
     let stop = if selected("FAKE_ACP_FAIL_TURN_SESSIONS", &session_id) {
         "refusal"
@@ -272,6 +309,18 @@ fn request_permission(out: &SharedOut, pending: &Pending, session_id: &str) {
     if let Ok(mut map) = pending.lock() {
         map.insert(serde_json::json!(request_id).to_string(), tx);
     }
+    // A real adapter is free to offer no allow-flavoured option at all, and a
+    // client that treats "the first option" as approval would then approve by
+    // selecting a REJECT.
+    let mut options = vec![serde_json::json!(
+        {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}
+    )];
+    if !flag("FAKE_ACP_PERMISSION_NO_ALLOW") {
+        options.insert(
+            0,
+            serde_json::json!({"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}),
+        );
+    }
     write_line(
         out,
         &serde_json::json!({
@@ -281,10 +330,7 @@ fn request_permission(out: &SharedOut, pending: &Pending, session_id: &str) {
             "params": {
                 "sessionId": session_id,
                 "toolCall": {"toolCallId": "tool-1", "title": "rm -rf /tmp/fixture"},
-                "options": [
-                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
-                ],
+                "options": options,
             },
         }),
     );

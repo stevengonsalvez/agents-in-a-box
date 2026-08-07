@@ -32,6 +32,46 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
+// ------------------------------------------------------------- acp pool slot
+
+/// Serialises the process-wide ACP pool slot across this binary's tests, and
+/// clears it on the way out.
+///
+/// `acp_pool::install` publishes a PROCESS-GLOBAL handle: a test that installs
+/// one while another is running routes that other test's prompts into a pool
+/// whose store tempdir may already be gone. `rpc_acp.rs` holds the same
+/// discipline for the same reason.
+static POOL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The installed pool's lifetime. Uninstalling on DROP rather than at the end
+/// of the test body is what makes it panic-safe: a failing assertion unwinds
+/// straight past a trailing `uninstall().await` and leaves a stale pool
+/// installed for whatever test runs next, which then fails somewhere unrelated.
+struct InstalledPool {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for InstalledPool {
+    fn drop(&mut self) {
+        // Deliberately not asserted: this may be running under an unwinding
+        // panic, and a panic in Drop aborts the whole test binary.
+        let _ = ainb_hangar_daemon::acp_pool::try_uninstall();
+    }
+}
+
+/// Publish a pool over `store` for the rest of this test.
+async fn install_acp_pool(store: &Store) -> InstalledPool {
+    let guard = POOL_LOCK.lock().await;
+    let broker = EventBroker::new();
+    ainb_hangar_daemon::acp_pool::install(ainb_hangar_daemon::acp_pool::AcpPool::new(
+        store.clone(),
+        broker.sink(),
+        ainb_hangar_daemon::acp_pool::PoolConfig::default(),
+    ))
+    .await;
+    InstalledPool { _guard: guard }
+}
+
 // ---------------------------------------------------------------- tracing tap
 
 /// One captured span or event: its name plus every field set on it.
@@ -961,13 +1001,15 @@ async fn acp_session_create_writes_the_row_pair_and_is_idempotent_per_scope() {
     assert_eq!(acp_provider, "claude-agent-acp", "the CONCRETE adapter");
     assert_eq!(acp_state, "IDLE", "no process is spawned at create");
 
-    // Idempotent per live scope, backed by the partial unique index.
+    // Idempotent per live scope, backed by the partial unique index. The SAME
+    // session means the same adapter AND the same root: see the two refusals
+    // below.
     let second = client
         .call(
             methods::FLEET_ACP_SESSION_CREATE,
             serde_json::json!({
                 "provider": "claude-agent-acp",
-                "cwd": "/elsewhere",
+                "cwd": "/work",
                 "scope_key": "session:shared",
             }),
         )
@@ -982,6 +1024,45 @@ async fn acp_session_create_writes_the_row_pair_and_is_idempotent_per_scope() {
         .await
         .unwrap();
     assert_eq!(rows, 1, "and writes no second row");
+
+    // A replay that names a DIFFERENT adapter, or a different working
+    // directory, is not the same session. Handing back the live key would run
+    // every later prompt against an agent (or a repository) the caller never
+    // asked for, and nothing downstream could tell.
+    for (field, params) in [
+        (
+            "provider",
+            serde_json::json!({
+                "provider": "codex-acp",
+                "cwd": "/work",
+                "scope_key": "session:shared",
+            }),
+        ),
+        (
+            "cwd",
+            serde_json::json!({
+                "provider": "claude-agent-acp",
+                "cwd": "/elsewhere",
+                "scope_key": "session:shared",
+            }),
+        ),
+    ] {
+        let refused = client.call(methods::FLEET_ACP_SESSION_CREATE, params).await;
+        assert_eq!(
+            refused["error"]["code"], -32602,
+            "a {field} mismatch on a live scope is invalid_params: {refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(field),
+            "the refusal must name the mismatched field: {message}"
+        );
+    }
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fleet_acp_session")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "and neither refusal wrote a row");
 }
 
 /// An operator `fleet/action SendPrompt` the pool REFUSES must not leak a
@@ -1002,13 +1083,7 @@ async fn a_refused_operator_prompt_resolves_its_delivery_leg() {
     let (socket, store, _sink) = start_server(dir.path()).await;
     // The pool must exist for the ACP action arm to run at all; it never spawns
     // anything here because the refusal happens at the session-row read.
-    let broker = EventBroker::new();
-    ainb_hangar_daemon::acp_pool::install(ainb_hangar_daemon::acp_pool::AcpPool::new(
-        store.clone(),
-        broker.sink(),
-        ainb_hangar_daemon::acp_pool::PoolConfig::default(),
-    ))
-    .await;
+    let _pool = install_acp_pool(&store).await;
 
     sqlx::query(
         "INSERT INTO fleet_session \
@@ -1055,8 +1130,6 @@ async fn a_refused_operator_prompt_resolves_its_delivery_leg() {
         Some("session_gone"),
         "carrying the enumerated reason: {leg:?}"
     );
-
-    ainb_hangar_daemon::acp_pool::uninstall().await;
 }
 
 /// The transcript readers answer on an empty transcript (rows arrive with the

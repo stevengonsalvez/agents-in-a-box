@@ -50,6 +50,10 @@
 //!   its responder here and raises an attention row; the answer arrives through
 //!   `fleet/action` and reaches the adapter's pending JSON-RPC id. A permission
 //!   whose adapter dies is resolved by convergence, never left as a ghost row.
+//!   EVERY parked ask is answerable, not just the newest: an adapter running
+//!   parallel tool calls blocks on several at once, and `parked` (not
+//!   `fleet_session.current_request_fingerprint`, which has room for one) is
+//!   what says which are live.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -105,6 +109,10 @@ pub const DELIVERY_SESSION_GONE: &str = "session_gone";
 
 /// The `fleet_session.provider` token every ACP session carries.
 pub const ACP_PROVIDER_TOKEN: &str = "acp";
+
+/// How long a provider supervisor waits for silence on its update channel after
+/// the transport closes, before it declares the adapter done talking.
+const EXIT_QUIESCE: Duration = Duration::from_millis(50);
 
 // --------------------------------------------------------------------- config
 
@@ -906,40 +914,36 @@ impl AcpPool {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(notification) = updates.recv() => {
-                        let id = notification.session_id.to_string();
-                        let route = entry.routes.lock().ok().and_then(|r| r.get(&id).cloned());
-                        // NEVER cross-attributed. A chunk we cannot place
-                        // belongs to nobody, and guessing would put one tenant's
-                        // output in another tenant's transcript.
-                        let Some(route) = route else {
-                            tracing::warn!(
-                                provider = %entry.provider,
-                                acp_session_id = %id,
-                                "dropped a session/update for an unknown acp session id"
-                            );
-                            continue;
-                        };
-                        let _ = route.updates.send(notification);
-                    }
-                    Some(permission) = permissions.recv() => {
-                        let id = permission.session_id();
-                        let route = entry.routes.lock().ok().and_then(|r| r.get(&id).cloned());
-                        let Some(route) = route else {
-                            tracing::warn!(
-                                provider = %entry.provider,
-                                acp_session_id = %id,
-                                "cancelling a permission for an unknown acp session id"
-                            );
-                            // Answer rather than drop on the floor: the adapter
-                            // is BLOCKED on this request.
-                            let _ = permission.answer_cancelled();
-                            continue;
-                        };
-                        let _ = route.permissions.send(permission);
-                    }
+                    // BIASED, notifications first: an adapter that writes its
+                    // last chunks and exits closes the transport in the same
+                    // breath, and an unbiased select picks a ready arm at
+                    // RANDOM. Losing that race drops committed-by-the-adapter
+                    // output on the floor. A recv that returns `None` disables
+                    // its own arm, so the exit arm is still reached.
+                    biased;
+                    Some(notification) = updates.recv() => forward_update(&entry, notification),
+                    Some(permission) = permissions.recv() => forward_permission(&entry, permission),
                     () = entry.process.wait_closed() => break,
                     else => break,
+                }
+            }
+            // The closed signal and the notification handlers RACE: the handler
+            // that hands us a `session/update` runs as its own future, so a
+            // chunk the adapter wrote before it died can be dispatched after
+            // `wait_closed()` has already resolved. Quiesce on a short silence
+            // rather than trusting that ordering. It is the same shape
+            // `SessionActor::quiesce` uses for the turn-reply race, and it is
+            // there for the same reason: the transcript is the only place this
+            // output exists.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match tokio::time::timeout(EXIT_QUIESCE, updates.recv()).await {
+                    Ok(Some(notification)) => forward_update(&entry, notification),
+                    // Silence, or a closed channel: the adapter is done talking.
+                    Ok(None) | Err(_) => break,
+                }
+                if Instant::now() >= deadline {
+                    break;
                 }
             }
             let hosted: Vec<String> = entry
@@ -1052,6 +1056,20 @@ pub async fn install(pool: Arc<AcpPool>) {
 /// Drop the process-wide pool (shutdown, and test isolation).
 pub async fn uninstall() {
     *active_slot().write().await = None;
+}
+
+/// Drop the process-wide pool WITHOUT awaiting.
+///
+/// For a test drop-guard, which runs while a failing assertion unwinds and
+/// therefore cannot await: leaving a pool installed there would route the NEXT
+/// test's prompts into a dead one. Answers `false` only if someone holds the
+/// slot, which nothing does outside [`install`] and [`uninstall`].
+#[must_use]
+pub fn try_uninstall() -> bool {
+    active_slot().try_write().is_ok_and(|mut slot| {
+        *slot = None;
+        true
+    })
 }
 
 /// The process-wide pool, when one is running.
@@ -1208,13 +1226,7 @@ pub async fn converge_dirty_session(
             AttentionRepo::mark_answered_if_open(pool, &id, "hangar-converge", cause.detail(), now)
                 .await;
     }
-    let open_approvals: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM attention WHERE session_id = ? AND kind = 'approval' AND state = 'open'",
-    )
-    .bind(session_key)
-    .fetch_all(pool)
-    .await?;
-    for id in open_approvals {
+    for id in AttentionRepo::open_approval_ids_for_session(pool, session_key).await? {
         let _ =
             AttentionRepo::mark_answered_if_open(pool, &id, "hangar-converge", cause.detail(), now)
                 .await;
@@ -1389,9 +1401,14 @@ impl SessionActor {
             }
             Control::Evict => {
                 self.close_adapter_session().await;
+                // The DB row is set EVICTED by `evict_if_at_cap`; without this
+                // the health pane keeps rendering the victim as IDLE and the
+                // two disagree about the same session.
+                self.set_state("EVICTED");
                 false
             }
             Control::ProcessExited => {
+                self.drain_updates().await;
                 self.detach();
                 self.converge(ConvergeCause::AdapterExit).await;
                 false
@@ -1777,7 +1794,37 @@ impl SessionActor {
         if let (Some(process), Some(id)) = (self.process.clone(), self.acp_session_id.clone()) {
             let _ = process.process.close_session(&id).await;
         }
+        self.drain_updates().await;
         self.detach();
+    }
+
+    /// Commit everything the adapter wrote before it went away.
+    ///
+    /// The demux channel is unbounded and the actor's select is CONTROL-biased,
+    /// so an eviction or a process exit is handled with the adapter's last
+    /// chunks still queued on it. [`SessionActor::detach`] drops that receiver,
+    /// so whatever is not drained here is output the adapter genuinely produced
+    /// and the transcript would never show. The reducer is flushed for the same
+    /// reason: a re-attach builds a fresh one, and only `finish_turn` (which a
+    /// dead turn never reaches) would otherwise commit the pending text.
+    async fn drain_updates(&mut self) {
+        while let Some(notification) =
+            self.updates.as_mut().and_then(|updates| updates.try_recv().ok())
+        {
+            self.ingest(&notification).await;
+        }
+        if let Some(chunk) = self.reducer.flush() {
+            match self.writer.push(&chunk).await {
+                Ok(Some(high_water)) => self.wake(&high_water),
+                Ok(None) => {}
+                Err(error) => tracing::error!(
+                    session_key = %self.session_key,
+                    %error,
+                    "the adapter's last transcript chunk failed to commit"
+                ),
+            }
+        }
+        self.pump().await;
     }
 
     /// Answer every prompt still sitting in the FIFO, terminal, with `detail`.
@@ -1907,6 +1954,17 @@ impl SessionActor {
         fingerprint: &str,
         decision: PermissionDecision,
     ) -> PermissionAnswer {
+        let chosen = match self.parked.get(fingerprint) {
+            Some(parked) => choose_option(&parked.request.request.options, &decision),
+            None => return PermissionAnswer::NotWaiting,
+        };
+        // Refused with the responder STILL PARKED. Taking it out of the map
+        // would spend the adapter's one reply slot on an answer we are not
+        // sending: the adapter would stay blocked and its attention row would
+        // outlive every path that could close it but convergence.
+        if chosen.is_none() && decision != PermissionDecision::Deny {
+            return PermissionAnswer::UnknownOption;
+        }
         let Some(parked) = self.parked.remove(fingerprint) else {
             return PermissionAnswer::NotWaiting;
         };
@@ -1916,25 +1974,11 @@ impl SessionActor {
             u32::try_from(self.parked.len()).unwrap_or(u32::MAX),
             Ordering::Relaxed,
         );
-        let options = permission.request.options.clone();
-        let chosen = match &decision {
-            PermissionDecision::Option(id) => Some(id.clone()),
-            PermissionDecision::Approve => options
-                .iter()
-                .find(|option| format!("{:?}", option.kind).to_lowercase().contains("allow"))
-                .or_else(|| options.first())
-                .map(|option| option.option_id.to_string()),
-            PermissionDecision::Deny => options
-                .iter()
-                .find(|option| format!("{:?}", option.kind).to_lowercase().contains("reject"))
-                .map(|option| option.option_id.to_string()),
-        };
         let result = match chosen {
             Some(option_id) => permission.answer_selected(&option_id).map(|()| option_id),
-            None if decision == PermissionDecision::Deny => {
-                permission.answer_cancelled().map(|()| "cancelled".to_string())
-            }
-            None => return PermissionAnswer::UnknownOption,
+            // Deny against an adapter that offered no reject option:
+            // `Cancelled` IS the refusal ACP defines for that case.
+            None => permission.answer_cancelled().map(|()| "cancelled".to_string()),
         };
         match result {
             Ok(option) => {
@@ -1952,13 +1996,20 @@ impl SessionActor {
         }
     }
 
-    /// Close one answered ask and, when nothing else is waiting, put the Fleet
-    /// session back to NONE.
+    /// Close one answered ask and re-point the Fleet session at whatever is
+    /// still waiting, or back to NONE when nothing is.
     ///
     /// Without this an ANSWERED permission stays `open` in the attention list
     /// and the snapshot keeps rendering `attention_state = APPROVAL` with a
     /// stale `current_request_fingerprint` forever: only a crash, a deadline or
     /// an Interrupt (all of which run convergence) would ever clear it.
+    ///
+    /// A session can be waiting on SEVERAL asks at once (an adapter that runs
+    /// parallel tool calls raises one `session/request_permission` each) and
+    /// the row carries exactly ONE fingerprint. Leaving it on the ask just
+    /// answered would advertise a decision the operator has already made; the
+    /// oldest ask still parked is the honest value. Which permissions are LIVE
+    /// is answered by [`SessionActor::parked`], never by this single slot.
     // `&mut self` is LOAD-BEARING, not accidental: this future is spawned, so it
     // must be `Send`, and a shared `&SessionActor` held across an await would
     // additionally require `SessionActor: Sync`. It never can be — it parks
@@ -1984,12 +2035,15 @@ impl SessionActor {
                 "could not close the answered acp permission attention row"
             );
         }
-        // Only when this was the LAST ask: a second parked permission owns the
-        // session's fingerprint now, and clearing it would make that one
-        // unanswerable through the staleness machinery.
-        if !self.parked.is_empty() {
-            return;
-        }
+        // Raise order, so a reader sees the ask that has been waiting longest:
+        // the attention id is a ULID, which sorts by mint time.
+        let (attention_state, next_fingerprint) = self
+            .parked
+            .iter()
+            .min_by(|left, right| left.1.attention_id.cmp(&right.1.attention_id))
+            .map_or(("NONE", None), |(fingerprint, _)| {
+                ("APPROVAL", Some(fingerprint.clone()))
+            });
         let event = NewFleetEvent {
             event_id: format!(
                 "acp-permission-answered:{}:{attention_id}",
@@ -2002,8 +2056,8 @@ impl SessionActor {
             payload: serde_json::json!({ "attentionId": attention_id, "answer": answer })
                 .to_string(),
             patch: FleetSessionPatch {
-                attention_state: Some("NONE".to_string()),
-                current_request_fingerprint: Some(None),
+                attention_state: Some(attention_state.to_string()),
+                current_request_fingerprint: Some(next_fingerprint),
                 ..FleetSessionPatch::default()
             },
         };
@@ -2208,6 +2262,76 @@ const fn turn_succeeded(response: &PromptResponse) -> bool {
         response.stop_reason,
         StopReason::EndTurn | StopReason::MaxTokens | StopReason::MaxTurnRequests
     )
+}
+
+/// Hand one `session/update` to the session that owns its ACP session id.
+///
+/// NEVER cross-attributed: a chunk we cannot place belongs to nobody, and
+/// guessing would put one tenant's output in another tenant's transcript.
+fn forward_update(entry: &ProviderProcess, notification: SessionNotification) {
+    let id = notification.session_id.to_string();
+    let route = entry.routes.lock().ok().and_then(|routes| routes.get(&id).cloned());
+    let Some(route) = route else {
+        tracing::warn!(
+            provider = %entry.provider,
+            acp_session_id = %id,
+            "dropped a session/update for an unknown acp session id"
+        );
+        return;
+    };
+    let _ = route.updates.send(notification);
+}
+
+/// Hand one `session/request_permission` to the session that owns its ACP
+/// session id, or answer it here so the adapter is not left blocked.
+fn forward_permission(entry: &ProviderProcess, permission: PermissionRequest) {
+    let id = permission.session_id();
+    let route = entry.routes.lock().ok().and_then(|routes| routes.get(&id).cloned());
+    let Some(route) = route else {
+        tracing::warn!(
+            provider = %entry.provider,
+            acp_session_id = %id,
+            "cancelling a permission for an unknown acp session id"
+        );
+        // Answer rather than drop on the floor: the adapter is BLOCKED on this
+        // request.
+        let _ = permission.answer_cancelled();
+        return;
+    };
+    let _ = route.permissions.send(permission);
+}
+
+/// The option id an operator's decision names, or `None` when the adapter
+/// offered nothing that answers it.
+///
+/// Matched on the KIND enum, never on a debug rendering: a substring test for
+/// `"allow"` reads `AllowOnce` and a hypothetical `DisallowAlways` the same
+/// way. There is deliberately NO positional fallback: `options.first()` made
+/// `Approve` select whatever came first, which on an adapter offering only
+/// reject-flavoured options is a REJECT answered as an approval, and on an
+/// adapter offering a kind this build has never heard of is a coin toss on a
+/// destructive tool call. An option this function cannot classify is not
+/// selected, and the caller refuses instead.
+fn choose_option(
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+    decision: &PermissionDecision,
+) -> Option<String> {
+    use agent_client_protocol::schema::v1::PermissionOptionKind;
+
+    options
+        .iter()
+        .find(|option| match decision {
+            PermissionDecision::Option(id) => option.option_id.to_string() == *id,
+            PermissionDecision::Approve => matches!(
+                option.kind,
+                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+            ),
+            PermissionDecision::Deny => matches!(
+                option.kind,
+                PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+            ),
+        })
+        .map(|option| option.option_id.to_string())
 }
 
 /// The stable identity of one permission ask.

@@ -18,8 +18,11 @@
 //!   DURING the turn: the first `acp.message` precedes `acp.turn_completed`.
 //! * **R8** a permission round trips: attention row with option ids and the
 //!   pending JSON-RPC id, `fleet/action` Approve, a REAL outcome on the wire,
-//!   a stale fingerprint refused, and an adapter death mid-permission closing
-//!   the row instead of leaving a ghost.
+//!   a fingerprint nothing raised refused, TWO concurrent asks both answerable,
+//!   and an adapter death mid-permission closing the rows instead of leaving
+//!   ghosts.
+//! * **Receipts** an ACP chat leg leaves the same `fleet/receipt_get`-visible
+//!   action receipt a tmux leg does, despite bypassing `execute_fleet_action`.
 //!
 //! The pool handle is process-wide (`acp_pool::install`), so every test here
 //! holds [`POOL_LOCK`] for its whole body: two tests installing two pools
@@ -787,8 +790,12 @@ async fn a_permission_round_trips_through_fleet_action() {
     );
     let fingerprint = payload["requestFingerprint"].as_str().expect("fingerprint").to_string();
 
-    // A STALE fingerprint is refused by the staleness machinery, so an operator
-    // answering a screen that has moved on cannot approve the current ask.
+    // A fingerprint no ask carries is refused, so an operator answering a screen
+    // that has moved on cannot approve the current ask. The refusal comes from
+    // the POOL's parked map, not from the session row's single fingerprint slot:
+    // an ACP session can be blocked on SEVERAL asks at once and the row can name
+    // only one of them, which is why the row-equality gate is off for ACP (see
+    // `two_parked_permissions_are_both_answerable_over_the_wire`).
     let stale = client
         .call(
             methods::FLEET_ACTION,
@@ -803,9 +810,17 @@ async fn a_permission_round_trips_through_fleet_action() {
             }),
         )
         .await;
+    assert!(stale["error"].is_null(), "{stale}");
     assert_eq!(
-        stale["error"]["code"], -32602,
-        "a stale fingerprint must be refused: {stale}"
+        stale["result"]["receipt"]["status"], "FAILED",
+        "a fingerprint nothing raised must be refused: {stale}"
+    );
+    assert!(
+        stale["result"]["receipt"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no longer waiting"),
+        "and say why: {stale}"
     );
     let (still_open,): (String,) = sqlx::query_as("SELECT state FROM attention WHERE id = ?")
         .bind(&attention_id)
@@ -871,6 +886,196 @@ async fn a_permission_round_trips_through_fleet_action() {
     .expect("fleet row");
     assert_eq!(attention_state, "NONE");
     assert_eq!(current, None);
+
+    harness.finish().await;
+}
+
+/// R8 with TWO asks outstanding, over the wire: `fleet/action` answers the
+/// OLDER one and the adapter is genuinely unblocked.
+///
+/// This is the leg the pool-level twin cannot prove. `fleet/action` used to
+/// validate the answer's fingerprint against
+/// `fleet_session.current_request_fingerprint`, which `raise_permission`
+/// overwrites per ask. With two parked, that made every ask but the newest
+/// unanswerable BEFORE the pool was ever consulted: `invalid_params` for the
+/// older fingerprint, `NotWaiting` for the newer one once it was spent, and an
+/// adapter blocked until the 30 minute turn deadline either way.
+///
+/// DISCLOSURE: the concurrency comes from the fixture's
+/// `FAKE_ACP_PERMISSION_COUNT`; a real adapter gets there with parallel tool
+/// calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_parked_permissions_are_both_answerable_over_the_wire() {
+    let harness = Harness::start(
+        &[
+            ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+            ("FAKE_ACP_PERMISSION_COUNT", "2"),
+            ("FAKE_ACP_CHUNKS", "1"),
+        ],
+        |_| {},
+    )
+    .await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "rm -rf /tmp/fixture",
+                "request_id": "req-acp-two-permissions",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent}");
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+
+    // Both asks, in raise order: the attention id is a ULID.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let asks: Vec<(String, String)> = loop {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, payload FROM attention \
+             WHERE session_id = ? AND state = 'open' ORDER BY id ASC",
+        )
+        .bind(&session_key)
+        .fetch_all(harness.store.pool())
+        .await
+        .expect("attention query");
+        if rows.len() == 2 {
+            break rows
+                .into_iter()
+                .map(|(id, payload)| {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload).expect("payload json");
+                    let fingerprint =
+                        payload["requestFingerprint"].as_str().expect("fingerprint").to_string();
+                    (id, fingerprint)
+                })
+                .collect();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the adapter never raised two concurrent permissions"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    // OLDEST first: the fingerprint the session row is NOT carrying, and the
+    // exact answer the old gate refused as stale.
+    for (index, (attention_id, fingerprint)) in asks.iter().enumerate() {
+        let approved = client
+            .call(
+                methods::FLEET_ACTION,
+                serde_json::json!({
+                    "session_key": session_key,
+                    "expected_version": harness.version(&session_key).await,
+                    "request_id": format!("req-acp-two-answer-{index}"),
+                    "action": { "action": "approve", "request_fingerprint": fingerprint },
+                }),
+            )
+            .await;
+        assert!(approved["error"].is_null(), "ask {index}: {approved}");
+        assert_eq!(
+            approved["result"]["receipt"]["status"], "DELIVERED",
+            "ask {index} must reach its adapter request: {approved}"
+        );
+        let (state,): (String,) = sqlx::query_as("SELECT state FROM attention WHERE id = ?")
+            .bind(attention_id)
+            .fetch_one(harness.store.pool())
+            .await
+            .expect("attention row");
+        assert_eq!(state, "answered", "ask {index} did not close");
+    }
+
+    harness.await_delivered(&message_id, &session_key).await;
+    let text = harness.transcript_text(&session_key).await;
+    assert_eq!(
+        text.matches("permission:selected:allow-once").count(),
+        2,
+        "both blocked adapter requests observed a real selection: {text}"
+    );
+    assert!(
+        !text.contains("permission:cancelled"),
+        "and neither timed out into a cancellation: {text}"
+    );
+    let (attention_state, current): (String, Option<String>) = sqlx::query_as(
+        "SELECT attention_state, current_request_fingerprint FROM fleet_session \
+         WHERE session_key = ?",
+    )
+    .bind(&session_key)
+    .fetch_one(harness.store.pool())
+    .await
+    .expect("fleet row");
+    assert_eq!(attention_state, "NONE");
+    assert_eq!(current, None);
+
+    harness.finish().await;
+}
+
+/// A chat delivery to an ACP recipient leaves the SAME action receipt a tmux
+/// recipient's leg leaves, so `fleet/receipt_get` on the leg's request id
+/// answers for both.
+///
+/// The ACP leg deliberately bypasses `execute_fleet_action` (its prompt stays
+/// PENDING until turn end), and it used to bypass the receipt with it: one
+/// `fleet/message_send` produced a receipt for a tmux target and nothing at all
+/// for an ACP one, which is only discoverable by querying and getting `null`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_acp_chat_leg_writes_its_action_receipt() {
+    let harness = Harness::start(&[("FAKE_ACP_CHUNKS", "1")], |_| {}).await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "hello",
+                "request_id": "req-acp-leg-receipt",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent}");
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+    harness.await_delivered(&message_id, &session_key).await;
+
+    // The leg's request id is minted inside the daemon, so read it back rather
+    // than reimplementing the fingerprint here.
+    let (request_id, status, detail): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT request_id, status, detail FROM fleet_action_receipt WHERE session_key = ?",
+    )
+    .bind(&session_key)
+    .fetch_one(harness.store.pool())
+    .await
+    .expect("the acp leg wrote exactly one action receipt");
+    assert!(
+        request_id.starts_with("message:"),
+        "the receipt belongs to the delivery leg: {request_id}"
+    );
+    assert_eq!(
+        status, "DELIVERED",
+        "TERMINAL, like the operator SendPrompt arm: nothing reopens an action \
+         receipt, so a PENDING one would be read as UNKNOWN mid-turn"
+    );
+    assert_eq!(
+        detail.as_deref(),
+        Some(format!("acp_queued; message {message_id}").as_str()),
+        "and it names where the real outcome lives"
+    );
+
+    let fetched = client
+        .call(
+            methods::FLEET_RECEIPT_GET,
+            serde_json::json!({ "request_id": request_id }),
+        )
+        .await;
+    assert!(fetched["error"].is_null(), "{fetched}");
+    assert_eq!(
+        fetched["result"]["receipt"]["status"], "DELIVERED",
+        "fleet/receipt_get answers for an ACP leg, not just a tmux one: {fetched}"
+    );
 
     harness.finish().await;
 }

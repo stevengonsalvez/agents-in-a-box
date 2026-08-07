@@ -22,7 +22,12 @@
 //! * **I16 deadline** a per-session deadline cancels only the overdue session,
 //!   and a cancel naming a turn that already ended is a no-op.
 //! * **R8 round trip** an ANSWERED permission unblocks the adapter AND closes
-//!   its attention row and the session's approval state.
+//!   its attention row and the session's approval state. TWO parked at once are
+//!   both answerable in either order, an `Approve` with no allow option to take
+//!   refuses rather than picking one, and a dead adapter closes every one of
+//!   them.
+//! * **Exit is not data loss** an adapter that writes its last chunks and exits
+//!   in the same breath still has every one of them in the transcript.
 //! * **I6** a prompt that provably never reached the adapter is requeued and
 //!   then fails; one that did is UNKNOWN with no second turn.
 //! * **I11** broadcast replies land in each recipient's OWN scope, threaded to
@@ -263,6 +268,56 @@ async fn await_rpc_line(path: &std::path::Path, needle: &str) -> Vec<String> {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// Poll until `session_key` has exactly `count` OPEN approval rows, and return
+/// them as `(attention_id, requestFingerprint)` in RAISE order.
+///
+/// The attention id is a ULID, so id order IS raise order, which is what lets a
+/// test say "answer the OLDER ask" without guessing.
+async fn await_open_permissions(
+    store: &Store,
+    session_key: &str,
+    count: usize,
+) -> Vec<(String, String)> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, payload FROM attention \
+             WHERE session_id = ? AND kind = 'approval' AND state = 'open' ORDER BY id ASC",
+        )
+        .bind(session_key)
+        .fetch_all(store.pool())
+        .await
+        .expect("attention query");
+        if rows.len() == count {
+            return rows
+                .into_iter()
+                .map(|(id, payload)| {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload).expect("payload json");
+                    let fingerprint =
+                        payload["requestFingerprint"].as_str().expect("fingerprint").to_string();
+                    (id, fingerprint)
+                })
+                .collect();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{session_key} never had {count} open permissions (it has {})",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// One attention row's `(state, answered_by)`.
+async fn attention_row(store: &Store, attention_id: &str) -> (String, Option<String>) {
+    sqlx::query_as("SELECT state, answered_by FROM attention WHERE id = ?")
+        .bind(attention_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("attention row")
 }
 
 async fn transcript(store: &Store, session_key: &str) -> Vec<(String, String)> {
@@ -957,6 +1012,254 @@ async fn an_answered_permission_closes_its_attention_row() {
     assert_eq!(fleet.current_request_fingerprint, None);
 }
 
+/// TWO permissions parked on ONE session are BOTH answerable, in either order,
+/// and answering one leaves the other open.
+///
+/// The regression this pins: `raise_permission` overwrites the session row's
+/// single `current_request_fingerprint` per ask, and the answer path refused
+/// any fingerprint that was not the current one. With two asks outstanding only
+/// the NEWEST could ever be answered: the older adapter request stayed blocked
+/// until the 30 minute turn deadline, with an attention row an operator could
+/// click forever. The parked map is the authority for liveness now, and the row
+/// is re-pointed at the oldest ask that is still waiting.
+///
+/// DISCLOSURE: the two concurrent asks come from the fixture's
+/// `FAKE_ACP_PERMISSION_COUNT`; a real adapter raises them by running parallel
+/// tool calls in one turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_parked_permissions_are_both_answerable_newest_first() {
+    use ainb_hangar_daemon::acp_pool::{PermissionAnswer, PermissionDecision};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+        ("FAKE_ACP_PERMISSION_COUNT", "2"),
+        ("FAKE_ACP_CHUNKS", "1"),
+    ])
+    .await;
+    let session = seed_session(&store, "acp:two-permissions").await;
+    let message_id = seed_message(&store, &session.session_key, "rm").await;
+    pool.submit_prompt(&session.session_key, &message_id, "rm").await;
+
+    let asks = await_open_permissions(&store, &session.session_key, 2).await;
+    let (older_id, older_fingerprint) = asks[0].clone();
+    let (newer_id, newer_fingerprint) = asks[1].clone();
+    assert_ne!(
+        older_fingerprint, newer_fingerprint,
+        "two asks must have two identities"
+    );
+
+    // NEWEST first: the only order the old fingerprint gate survived.
+    assert_eq!(
+        pool.answer_permission(
+            &session.session_key,
+            &newer_fingerprint,
+            PermissionDecision::Approve
+        )
+        .await,
+        PermissionAnswer::Delivered("allow-once".to_string())
+    );
+    assert_eq!(attention_row(&store, &newer_id).await.0, "answered");
+    assert_eq!(
+        attention_row(&store, &older_id).await.0,
+        "open",
+        "answering one ask must not close the other"
+    );
+    let waiting = FleetRepo::get_session(store.pool(), &session.session_key)
+        .await
+        .expect("fleet session")
+        .expect("row");
+    assert_eq!(
+        waiting.attention_state, "APPROVAL",
+        "one ask is still waiting, so the session is still awaiting approval"
+    );
+    assert_eq!(
+        waiting.current_request_fingerprint.as_deref(),
+        Some(older_fingerprint.as_str()),
+        "the row must point at the ask that is genuinely open, not the answered one"
+    );
+
+    // ... and the OLDER one is answerable too, which is the whole finding.
+    assert_eq!(
+        pool.answer_permission(
+            &session.session_key,
+            &older_fingerprint,
+            PermissionDecision::Approve
+        )
+        .await,
+        PermissionAnswer::Delivered("allow-once".to_string())
+    );
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    assert_eq!(
+        state, "DELIVERED",
+        "the turn only ends once BOTH adapter requests are unblocked: {detail:?}"
+    );
+
+    // The adapter genuinely observed two answers, not one.
+    let text: String = transcript(&store, &session.session_key)
+        .await
+        .iter()
+        .map(|(_, payload)| payload.as_str())
+        .collect();
+    assert_eq!(
+        text.matches("permission:selected:allow-once").count(),
+        2,
+        "both blocked adapter requests were answered: {text}"
+    );
+    assert_eq!(attention_row(&store, &older_id).await.0, "answered");
+    let settled = FleetRepo::get_session(store.pool(), &session.session_key)
+        .await
+        .expect("fleet session")
+        .expect("row");
+    assert_eq!(settled.attention_state, "NONE");
+    assert_eq!(settled.current_request_fingerprint, None);
+}
+
+/// An adapter that dies with TWO permissions parked closes both rows, with no
+/// ghost left behind for either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_death_closes_every_parked_permission() {
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+        ("FAKE_ACP_PERMISSION_COUNT", "2"),
+        ("FAKE_ACP_CHUNKS", "1"),
+    ])
+    .await;
+    let session = seed_session(&store, "acp:permission-crash").await;
+    let message_id = seed_message(&store, &session.session_key, "rm").await;
+    pool.submit_prompt(&session.session_key, &message_id, "rm").await;
+
+    let asks = await_open_permissions(&store, &session.session_key, 2).await;
+    assert!(pool.kill_provider(ainb_acp::config::CLAUDE_ADAPTER).await);
+
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    assert!(
+        state == "UNKNOWN" || state == "FAILED",
+        "the killed turn resolved {state} ({detail:?})"
+    );
+    for (attention_id, _) in &asks {
+        let (row_state, answered_by) = attention_row(&store, attention_id).await;
+        assert_eq!(
+            row_state, "answered",
+            "{attention_id} survived its dead adapter as a ghost row"
+        );
+        assert_eq!(answered_by.as_deref(), Some("hangar-converge"));
+    }
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM attention WHERE session_id = ? AND state = 'open'",
+    )
+    .bind(&session.session_key)
+    .fetch_one(store.pool())
+    .await
+    .expect("open count");
+    assert_eq!(open, 0, "nothing is left waiting on a dead adapter");
+    let fleet = FleetRepo::get_session(store.pool(), &session.session_key)
+        .await
+        .expect("fleet session")
+        .expect("row");
+    assert_eq!(fleet.attention_state, "NONE");
+    assert_eq!(fleet.current_request_fingerprint, None);
+}
+
+/// `Approve` never falls back to "whatever option came first".
+///
+/// The regression: the option was picked by substring-matching a `Debug`
+/// rendering, with `options.first()` as a fallback. Against an adapter that
+/// offers no allow-flavoured option at all, that made Approve SELECT THE
+/// REJECT and report it as an approval. It refuses now, and refuses without
+/// spending the adapter's one reply slot, so the same ask is still answerable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approve_refuses_when_the_adapter_offered_no_allow_option() {
+    use ainb_hangar_daemon::acp_pool::{PermissionAnswer, PermissionDecision};
+
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+        ("FAKE_ACP_PERMISSION_NO_ALLOW", "1"),
+        ("FAKE_ACP_CHUNKS", "1"),
+    ])
+    .await;
+    let session = seed_session(&store, "acp:no-allow").await;
+    let message_id = seed_message(&store, &session.session_key, "rm").await;
+    pool.submit_prompt(&session.session_key, &message_id, "rm").await;
+
+    let asks = await_open_permissions(&store, &session.session_key, 1).await;
+    let (attention_id, fingerprint) = asks[0].clone();
+    assert_eq!(
+        pool.answer_permission(
+            &session.session_key,
+            &fingerprint,
+            PermissionDecision::Approve
+        )
+        .await,
+        PermissionAnswer::UnknownOption,
+        "there is nothing to approve WITH; selecting the reject would be a lie"
+    );
+    assert_eq!(
+        attention_row(&store, &attention_id).await.0,
+        "open",
+        "a refused answer must leave the ask answerable, not orphan its responder"
+    );
+
+    // Still answerable, and the adapter sees the decision the operator made.
+    assert_eq!(
+        pool.answer_permission(&session.session_key, &fingerprint, PermissionDecision::Deny)
+            .await,
+        PermissionAnswer::Delivered("reject-once".to_string())
+    );
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+    let text: String = transcript(&store, &session.session_key)
+        .await
+        .iter()
+        .map(|(_, payload)| payload.as_str())
+        .collect();
+    assert!(
+        text.contains("permission:selected:reject-once"),
+        "the adapter was unblocked with the REJECT the operator chose: {text}"
+    );
+}
+
+/// An adapter that writes its last chunks and exits in the same breath still
+/// has every one of them in the transcript.
+///
+/// Two ways they used to be dropped: the supervisor's `select!` was unbiased,
+/// so `wait_closed()` could win over a `session/update` already sitting in the
+/// channel; and the actor's process-exit arm dropped the receiver (and the
+/// reducer's pending text) without draining either. Both are data the adapter
+/// genuinely produced, and the transcript is the only place it exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_that_exits_after_its_chunks_still_commits_them() {
+    const CHUNKS: usize = 40;
+
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_CHUNKS", "40"),
+        ("FAKE_ACP_DIE_AFTER_CHUNKS", "1"),
+    ])
+    .await;
+    let session = seed_session(&store, "acp:burst-exit").await;
+    let message_id = seed_message(&store, &session.session_key, "burst").await;
+    pool.submit_prompt(&session.session_key, &message_id, "burst").await;
+
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    assert!(
+        state == "UNKNOWN" || state == "FAILED",
+        "a prompt whose adapter died has no honest terminal state but this: {state} ({detail:?})"
+    );
+    let text: String = transcript(&store, &session.session_key)
+        .await
+        .iter()
+        .map(|(_, payload)| payload.as_str())
+        .collect();
+    for index in 0..CHUNKS {
+        assert!(
+            text.contains(&format!("chunk-{index} ")),
+            "chunk {index} was written by the adapter and never reached the transcript"
+        );
+    }
+}
+
 /// I6, the pre-write half: a prompt that never reached the adapter is retried
 /// ONCE and then fails, with no turn ever opened.
 ///
@@ -1271,6 +1574,15 @@ async fn the_lru_evicts_a_session_and_keeps_the_process_warm() {
     assert_eq!(health.processes.len(), 1, "the process stays warm");
     assert_eq!(health.processes[0].state, "running");
     assert_eq!(health.evicted_total, 1);
+    // The health pane must not keep rendering the victim as a live IDLE tenant
+    // while the store says EVICTED: an operator reading the two disagrees about
+    // which sessions this process is actually hosting.
+    let victim = health
+        .sessions
+        .iter()
+        .find(|row| row.session_key == first.session_key)
+        .expect("the evicted session is still a known session");
+    assert_eq!(victim.state, "EVICTED");
 
     // The wire evidence: the victim left through `session/close`, not through a
     // dead process, and only the victim did.
