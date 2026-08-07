@@ -38,6 +38,20 @@ dev *args:
     "$AINB" hangar daemon status
     exec "$AINB" {{args}}
 
+# This mirrors `just dev`: Fleet must connect to the freshly-built Hangar
+# daemon, not an older installed binary, so runtime install restarts it first.
+# Build and open the native macOS Fleet app.
+fleet:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p ainb --bin ainb -p ainb-hangar-daemon
+    AINB="$(pwd)/target/debug/ainb"
+    export AINB_BIN="$AINB"
+    "$AINB" fleet runtime install
+    BUILD_DIR="${TMPDIR:-/tmp}/ainb-fleet-derived-data"
+    xcodebuild -project ../apps/ainb-fleet-macos/AINBFleet.xcodeproj -scheme AINBFleet -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath "$BUILD_DIR" build
+    open "$BUILD_DIR/Build/Products/Debug/AINBFleet.app"
+
 # Run tests
 test:
     cargo test
