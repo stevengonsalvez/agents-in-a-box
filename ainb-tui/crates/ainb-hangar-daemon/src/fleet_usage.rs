@@ -4,6 +4,7 @@
 //! public RPC receives only aggregates, never paths, transcripts, or calls.
 
 use std::collections::HashMap;
+use std::time::{Duration as StdDuration, SystemTime};
 
 use ainb_hangar_proto::fleet::{
     FLEET_USAGE_MAX_BREAKDOWN_BUCKETS, FLEET_USAGE_MAX_DAILY_BUCKETS, FleetUsageBucket,
@@ -41,7 +42,11 @@ pub fn scan_summary(period: FleetUsagePeriod) -> FleetUsageSummaryResult {
             detail: Some("provider history roots are unavailable".to_string()),
         };
     }
-    summary_from_usage(scanner::scan(&roots), period, Utc::now())
+    let now = Utc::now();
+    let (start, _) = window(period, now);
+    let since = SystemTime::UNIX_EPOCH
+        + StdDuration::from_millis(u64::try_from(start.timestamp_millis()).unwrap_or_default());
+    summary_from_usage(scanner::scan_since(&roots, since), period, now)
 }
 
 fn summary_from_usage(
