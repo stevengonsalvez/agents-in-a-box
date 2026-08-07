@@ -4755,7 +4755,7 @@ mod tests {
             "codex:run",
             "codex",
             "IDLE",
-            "NONE",
+            "INPUT",
             "managed",
         )]);
         let ordinary_reduced = apply(&ordinary_state, FleetEvent::Key(FleetKey::Char('c')));
