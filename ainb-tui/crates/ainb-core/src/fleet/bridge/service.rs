@@ -12,25 +12,33 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::fleet::unit_program;
+
 const LABEL: &str = "com.agentsinabox.phone-bridge";
 const SYSTEMD_UNIT: &str = "ainb-phone-bridge.service";
 
 /// Resolved paths used to build the service definition.
 #[derive(Debug, Clone)]
 pub struct ServicePaths {
-    /// Absolute path to the running `ainb` binary (ProgramArguments[0]).
-    pub ainb_bin: PathBuf,
+    /// The `ainb` binary to exec (ProgramArguments[0] / first ExecStart token).
+    /// Bare `ainb` unless `$AINB_BIN` overrides it — see [`resolve_paths`].
+    pub ainb_bin: String,
     /// `~/.agents-in-a-box/phone-bridge.log`.
     pub log_path: PathBuf,
     /// Optional config override to propagate into the unit env.
     pub config_override: Option<String>,
 }
 
-/// Resolve the service paths from the current process. The binary is the
-/// canonical absolute path to the running `ainb` so the service runs the exact
-/// binary the operator installed from.
+/// Resolve the service paths from the current process.
+///
+/// The binary is deliberately NOT `current_exe()`: that freezes a
+/// version-scoped absolute path (`/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb`,
+/// `~/.cargo/bin/ainb`) into the unit, and the next `brew upgrade ainb` deletes
+/// it — launchd then exits 78 `EX_CONFIG` and parks the bridge in the penalty
+/// box forever. Bare `ainb` re-resolves at every launch against the `PATH` the
+/// unit carries; `$AINB_BIN` remains the explicit override. See issue #608.
 pub fn resolve_paths() -> Result<ServicePaths> {
-    let ainb_bin = std::env::current_exe().context("resolving the current ainb binary path")?;
+    let ainb_bin = unit_program::ainb_bin_from(std::env::var("AINB_BIN").ok().as_deref());
     let mut log_path = dirs::home_dir().context("no home directory")?;
     log_path.push(".agents-in-a-box");
     log_path.push("phone-bridge.log");
@@ -45,7 +53,7 @@ pub fn resolve_paths() -> Result<ServicePaths> {
 /// ProgramArguments / ExecStart argv: `<ainb> fleet bridge run`. No token, ever.
 fn daemon_argv(paths: &ServicePaths) -> Vec<String> {
     vec![
-        paths.ainb_bin.to_string_lossy().into_owned(),
+        paths.ainb_bin.clone(),
         "fleet".to_string(),
         "bridge".to_string(),
         "run".to_string(),
@@ -66,8 +74,7 @@ fn launchd_plist_path() -> Result<PathBuf> {
 /// (token never present, argv correct, env scoped).
 #[must_use]
 pub fn build_plist(paths: &ServicePaths) -> String {
-    let path_env = std::env::var("PATH")
-        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".to_string());
+    let path_env = unit_program::unit_path_env();
     let home = dirs::home_dir().unwrap_or_default();
     let argv = daemon_argv(paths)
         .into_iter()
@@ -187,6 +194,13 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
         .as_ref()
         .map(|c| format!("Environment=AINB_CONFIG_PATH={c}\n"))
         .unwrap_or_default();
+    // The unit carries its own PATH, exactly as the plist does. Without it a
+    // bare `ainb` would be resolved against systemd's fixed compile-time search
+    // path (/usr/local/bin:/usr/bin:/bin), which misses `~/.cargo/bin` and
+    // `~/.local/bin` — a $PATH supplied via Environment= is what systemd (250+)
+    // searches instead. On older systemd, an install outside the fixed list
+    // needs the explicit $AINB_BIN override; `bridge status` now says so out
+    // loud rather than reporting a unit that can never start as healthy.
     format!(
         "[Unit]\n\
          Description=ainb phone bridge (Telegram + Slack)\n\
@@ -195,6 +209,7 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=\"PATH={path}\"\n\
          {config_env}\
          ExecStart={exec_start}\n\
          Restart=always\n\
@@ -205,6 +220,7 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
          [Install]\n\
          WantedBy=default.target\n",
         log = paths.log_path.display(),
+        path = unit_program::unit_path_env(),
     )
 }
 
@@ -264,30 +280,30 @@ pub fn uninstall() -> Result<Option<PathBuf>> {
 }
 
 /// Human-readable install status for the current platform.
+///
+/// A unit file existing is NOT the same as a working bridge: if the binary it
+/// points at has moved (a `brew upgrade` deleting the old Cellar directory),
+/// launchd exits 78 `EX_CONFIG` and parks the job forever while `installed`
+/// keeps claiming health. So the program is resolved too — see issue #608.
 pub fn status() -> Result<String> {
-    if cfg!(target_os = "macos") {
-        let p = launchd_plist_path()?;
-        Ok(format!(
-            "launchd: {} ({})",
-            if p.exists() {
-                "installed"
-            } else {
-                "not installed"
-            },
-            p.display()
-        ))
+    let (kind, unit) = if cfg!(target_os = "macos") {
+        ("launchd", launchd_plist_path()?)
     } else {
-        let p = systemd_unit_path()?;
-        Ok(format!(
-            "systemd: {} ({})",
-            if p.exists() {
-                "installed"
-            } else {
-                "not installed"
-            },
-            p.display()
-        ))
+        ("systemd", systemd_unit_path()?)
+    };
+    if !unit.exists() {
+        return Ok(format!("{kind}: not installed ({})", unit.display()));
     }
+    let note = std::fs::read_to_string(&unit)
+        .ok()
+        .and_then(|text| unit_program::missing_program(&text))
+        .map_or_else(String::new, |program| {
+            format!(
+                ", program MISSING ({program})\n  \
+                 ↳ the bridge can never start — re-run `ainb fleet bridge install` to repoint it"
+            )
+        });
+    Ok(format!("{kind}: installed ({}){note}", unit.display()))
 }
 
 #[cfg(test)]
@@ -296,7 +312,7 @@ mod tests {
 
     fn paths() -> ServicePaths {
         ServicePaths {
-            ainb_bin: PathBuf::from("/usr/local/bin/ainb"),
+            ainb_bin: "ainb".to_string(),
             log_path: PathBuf::from("/home/u/.agents-in-a-box/phone-bridge.log"),
             config_override: None,
         }
@@ -305,7 +321,7 @@ mod tests {
     #[test]
     fn plist_argv_is_fleet_bridge_run_and_carries_no_token() {
         let xml = build_plist(&paths());
-        assert!(xml.contains("<string>/usr/local/bin/ainb</string>"));
+        assert!(xml.contains("<string>ainb</string>"));
         assert!(xml.contains("<string>fleet</string>"));
         assert!(xml.contains("<string>bridge</string>"));
         assert!(xml.contains("<string>run</string>"));
@@ -337,7 +353,7 @@ mod tests {
     #[test]
     fn systemd_exec_start_is_fleet_bridge_run() {
         let unit = build_systemd_unit(&paths());
-        assert!(unit.contains("ExecStart=/usr/local/bin/ainb fleet bridge run"));
+        assert!(unit.contains("ExecStart=ainb fleet bridge run"));
         assert!(unit.contains("Restart=always"));
         assert!(!unit.to_lowercase().contains("token"));
     }
@@ -348,5 +364,87 @@ mod tests {
         p.config_override = Some("/custom/config.toml".to_string());
         let unit = build_systemd_unit(&p);
         assert!(unit.contains("Environment=AINB_CONFIG_PATH=/custom/config.toml"));
+    }
+
+    /// Regression for issue #608: `ainb fleet bridge install` on a homebrew
+    /// install pinned `/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb` — a
+    /// VERSION directory that the next `brew upgrade` deletes. Nothing derived
+    /// from `current_exe()` may reach a unit.
+    #[test]
+    fn units_do_not_pin_an_absolute_binary_path() {
+        let resolved = resolve_paths().expect("resolve_paths");
+        let plist = build_plist(&resolved);
+        let unit = build_systemd_unit(&resolved);
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let exe = exe.display().to_string();
+        assert!(!plist.contains(&exe), "plist pinned current_exe: {plist}");
+        assert!(
+            !unit.contains(&exe),
+            "systemd unit pinned current_exe: {unit}"
+        );
+
+        // Absent an explicit $AINB_BIN override, argv[0] carries no directory
+        // component at all, so there is no Cellar/cargo prefix to go stale.
+        if std::env::var("AINB_BIN").unwrap_or_default().is_empty() {
+            for text in [&plist, &unit] {
+                let program = unit_program::unit_program(text).expect("argv[0]");
+                assert_eq!(program, "ainb", "argv[0] should be bare, got {program}");
+            }
+        }
+    }
+
+    /// A bare argv[0] is only exec'able if the unit tells the scheduler where
+    /// to look; systemd otherwise searches a fixed compile-time path.
+    #[test]
+    fn units_carry_the_path_their_bare_argv0_needs() {
+        let expected = unit_program::unit_path_env();
+        let unit = build_systemd_unit(&paths());
+        assert!(
+            unit.contains(&format!("Environment=\"PATH={expected}\"")),
+            "systemd unit carries no PATH: {unit}"
+        );
+        assert_eq!(
+            unit_program::unit_search_path(&unit).as_deref(),
+            Some(&*expected)
+        );
+        assert_eq!(
+            unit_program::unit_search_path(&build_plist(&paths())).as_deref(),
+            Some(&*expected)
+        );
+    }
+
+    /// The decision `status()` makes: a unit whose program has moved is
+    /// flagged, a resolvable one is not. Run over whole units in both flavours
+    /// so the bare case is judged against the unit's own PATH.
+    #[test]
+    fn status_flags_a_unit_whose_program_is_missing() {
+        let plist = build_plist(&paths());
+        let unit = build_systemd_unit(&paths());
+        // Substitute argv[0] where it actually sits — bare `ainb` is too short
+        // to replace safely across a whole unit (the log path contains it).
+        let repoint = |text: &str, to: &str| {
+            text.replace("<string>ainb</string>", &format!("<string>{to}</string>"))
+                .replace("ExecStart=ainb ", &format!("ExecStart={to} "))
+        };
+
+        for base in [&plist, &unit] {
+            let stale = repoint(
+                base,
+                "/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb",
+            );
+            assert_eq!(
+                unit_program::missing_program(&stale),
+                Some("/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb".into()),
+                "moved binary not flagged: {stale}"
+            );
+
+            let healthy = repoint(base, "sh");
+            assert_eq!(
+                unit_program::missing_program(&healthy),
+                None,
+                "resolvable binary wrongly flagged: {healthy}"
+            );
+        }
     }
 }
