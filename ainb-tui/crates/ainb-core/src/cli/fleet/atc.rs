@@ -997,6 +997,7 @@ fn structured_emit_json(
                 "permissionDecisionReason": reason,
             }
         }),
+        StructuredResolution::ReleasedToNative => return String::new(),
     };
     hook_output.to_string()
 }
@@ -1246,6 +1247,14 @@ fn hook_core_for_agent(
             &questions,
             ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
         );
+        if matches!(
+            resolution,
+            ainb_plugin_notifyd::broker::StructuredResolution::ReleasedToNative
+        ) {
+            // Fleet explicitly yielded ownership. Returning no hook output lets
+            // Claude render its own AskUserQuestion picker unchanged.
+            return Ok(None);
+        }
         return Ok(Some(HookEmit::Structured(structured_emit_json(
             tool_input,
             &resolution,
