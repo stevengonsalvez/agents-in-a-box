@@ -132,6 +132,18 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                     "next_after_order": 4,
                 },
             }),
+            // The daemon enforces the export rule too; the fixture answers what
+            // it would, so the CLI's job (refuse LOCALLY, before a round trip)
+            // is distinguishable from the daemon's.
+            "fleet/transcript_prune" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "exported": if request["params"]["no_export"] == json!(true) { 0 } else { 7 },
+                    "deleted": 7,
+                    "export_path": request["params"]["export_path"],
+                },
+            }),
             "fleet/transcript_subscribe" => {
                 write_frame(
                     &mut writer,
@@ -785,4 +797,163 @@ async fn the_phase_five_verbs_exit_two_when_the_daemon_is_missing() {
         assert_eq!(error["error"]["retryable"], true);
         assert!(output.stdout.is_empty(), "nothing may reach stdout");
     }
+}
+
+// ------------------------------------------ Phase 6: `fleet transcript prune`
+
+/// The retention verb's refusal is LOCAL: no `--export`, no `--no-export`, no
+/// socket round trip and no deletion. This is the only chat-bus verb that
+/// destroys data, so the operator hears about it before the daemon does.
+#[tokio::test]
+async fn prune_refuses_without_an_export_and_never_reaches_the_daemon() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "transcript",
+            "prune",
+            "--session",
+            "acp:01J0FIXTURE",
+            "--before",
+            "100",
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr_error(&output);
+            assert_eq!(error["error"]["kind"], "bad_input");
+            assert_eq!(error["error"]["retryable"], false);
+            assert!(
+                error["error"]["message"].as_str().expect("message").contains("--no-export"),
+                "the refusal names the flag that overrides it: {error}"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "nothing on stdout: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        },
+    )
+    .await;
+}
+
+/// Happy path: exit 0, the daemon's result verbatim on stdout, and the export
+/// path resolved ABSOLUTE (the daemon writes the file, and its cwd is not the
+/// operator's).
+#[tokio::test]
+async fn prune_with_an_export_prints_json_and_exits_zero() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "transcript",
+            "prune",
+            "--session",
+            "acp:01J0FIXTURE",
+            "--before",
+            "100",
+            "--export",
+            "out.jsonl",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value =
+                serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+            assert_eq!(parsed["exported"], 7);
+            assert_eq!(parsed["deleted"], 7);
+            let path = parsed["export_path"].as_str().expect("export path");
+            assert!(path.starts_with('/'), "resolved absolute: {path}");
+            assert!(path.ends_with("/out.jsonl"), "{path}");
+        },
+    )
+    .await;
+}
+
+/// `--no-export` is the deliberate override, and naming both is a local
+/// bad-input refusal rather than a silent precedence rule.
+#[tokio::test]
+async fn prune_accepts_an_explicit_no_export_and_refuses_both_at_once() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "transcript",
+            "prune",
+            "--session",
+            "acp:01J0FIXTURE",
+            "--before",
+            "100",
+            "--no-export",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(parsed["exported"], 0);
+            assert_eq!(parsed["deleted"], 7);
+        },
+    )
+    .await;
+
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "fleet",
+            "transcript",
+            "prune",
+            "--session",
+            "acp:01J0FIXTURE",
+            "--before",
+            "100",
+            "--export",
+            "out.jsonl",
+            "--no-export",
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(stderr_error(&output)["error"]["kind"], "bad_input");
+        },
+    )
+    .await;
+}
+
+/// The positional read form still works with `prune` present as a subcommand:
+/// clap must not swallow a session key that happens to sit where a subcommand
+/// name would.
+#[tokio::test]
+async fn transcript_still_reads_by_positional_session_key() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &["--format", "json", "fleet", "transcript", "acp:01J0FIXTURE"],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(parsed["chunks"][0]["ingest_order"], 4);
+        },
+    )
+    .await;
 }

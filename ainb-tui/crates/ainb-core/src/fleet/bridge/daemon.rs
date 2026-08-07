@@ -354,6 +354,17 @@ impl DaemonClient {
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
+    /// Export, then delete, one session's ACP transcript rows below a
+    /// watermark (the operator retention leg).
+    pub async fn transcript_prune(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetTranscriptPruneParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetTranscriptPruneResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetTranscriptPruneParams serializes");
+        let result = self.call(methods::FLEET_TRANSCRIPT_PRUNE, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
     /// Open a persistent transcript subscription and retain its live stream.
     ///
     /// Only the acknowledgement is deadlined; the stream runs until the caller

@@ -2251,16 +2251,42 @@ $ ainb fleet transcript --help
 Page or follow one session's full execution transcript
 
 Usage: ainb fleet transcript [OPTIONS] <session_key>
+       ainb fleet transcript <COMMAND>
+
+Commands:
+  prune  Export then delete this session's ACP transcript rows below a watermark
+  help   Print this message or the help of the given subcommand(s)
 
 Arguments:
   <session_key>  The session whose transcript to read
 
 Options:
-      --after <after>    Return chunks after this ingest_order
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --after <after>    Return chunks after this ingest_order
       --limit <limit>    Page size (clamped to the daemon's maximum) [default: 50]
       --follow           Stream chunks until stopped; NDJSON under --format json. They arrive DURING the turn, not after it
   -h, --help             Print help
+```
+
+#### `ainb fleet transcript prune`
+
+Export then delete this session's ACP transcript rows below a watermark
+
+```console
+$ ainb fleet transcript prune --help
+Export then delete this session's ACP transcript rows below a watermark
+
+Usage: ainb fleet transcript prune [OPTIONS] --session <session> --before <before>
+
+Options:
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --session <session>  The session whose transcript to prune
+      --before <before>    Delete rows with ingest_order strictly below this
+      --export <export>    Write the deleted rows here as JSONL first (required)
+      --no-export          Delete WITHOUT an export; there is no undo
+  -h, --help               Print help
+
+Refuses without --export unless --no-export is explicit. Only source='acp' rows are eligible; nothing else in the provider-event ledger is ever touched.
 ```
 
 ### `ainb fleet sequence`
