@@ -41,6 +41,13 @@ fn ainb_bin_from(override_var: Option<&str>) -> String {
     }
 }
 
+/// The `PATH` written into the unit, and therefore the one a bare `argv[0]` is
+/// resolved against at firing time.
+fn unit_path_env() -> String {
+    std::env::var("PATH")
+        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".into())
+}
+
 /// The heartbeat command argv the timer runs.
 fn heartbeat_argv(name: &str) -> Vec<String> {
     vec![
@@ -68,8 +75,7 @@ pub fn launchd_plist_path(name: &str) -> Result<PathBuf> {
 pub fn build_plist(meta: &AtcMeta) -> String {
     let label = unit_stem(&meta.name);
     let argv = heartbeat_argv(&meta.name);
-    let path = std::env::var("PATH")
-        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".into());
+    let path = unit_path_env();
     let home = dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_default();
     let log = home_log_path(&meta.name);
 
@@ -139,14 +145,23 @@ pub fn build_systemd_service(meta: &AtcMeta) -> String {
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
+    // The unit carries its own PATH, exactly as the plist does. Without it a
+    // bare `ainb` would be resolved against systemd's fixed compile-time search
+    // path (/usr/local/bin:/usr/bin:/bin), which misses `~/.cargo/bin` and
+    // `~/.local/bin` — a $PATH supplied via Environment= is what systemd (250+)
+    // searches instead. On older systemd, an install outside the fixed list
+    // needs the explicit $AINB_BIN override; `atc status` now says so out loud
+    // rather than reporting a timer that can never fire as healthy.
     format!(
         "[Unit]\n\
 Description=ATC heartbeat for fleet instance {name}\n\
 \n\
 [Service]\n\
 Type=oneshot\n\
+Environment=\"PATH={path}\"\n\
 ExecStart={argv}\n",
         name = meta.name,
+        path = unit_path_env(),
     )
 }
 
@@ -211,61 +226,85 @@ pub fn is_installed(name: &str) -> bool {
 /// launchd reads `ProgramArguments[0]` from the plist; systemd reads the first
 /// token of `ExecStart` in the service unit.
 pub fn installed_program(name: &str) -> Option<String> {
-    let unit = if cfg!(target_os = "macos") {
-        launchd_plist_path(name)
-    } else {
-        systemd_service_path(name)
-    }
-    .ok()?;
-    unit_program(&std::fs::read_to_string(unit).ok()?)
+    unit_program(&installed_unit_text(name)?)
 }
 
 /// `Some(program)` when the installed unit points at a program that does not
 /// resolve — i.e. the timer is installed but can never fire. `None` when there
 /// is no unit, or the program resolves fine.
 pub fn installed_missing_program(name: &str) -> Option<String> {
-    missing_program(&installed_program(name)?)
+    let text = installed_unit_text(name)?;
+    missing_program(&text)
+}
+
+/// Text of the unit the scheduler actually execs for `name`.
+fn installed_unit_text(name: &str) -> Option<String> {
+    let unit = if cfg!(target_os = "macos") {
+        launchd_plist_path(name)
+    } else {
+        systemd_service_path(name)
+    }
+    .ok()?;
+    std::fs::read_to_string(unit).ok()
 }
 
 /// Extract `argv[0]` from a unit's text — launchd plist XML or a systemd
 /// service unit. Returns `None` when the shape is not recognised.
-#[must_use]
-pub fn unit_program(text: &str) -> Option<String> {
+fn unit_program(text: &str) -> Option<String> {
     plist_program(text).or_else(|| systemd_exec_start_program(text))
 }
 
-/// `Some(program)` when `program` does not resolve to an executable file.
-#[must_use]
-pub fn missing_program(program: &str) -> Option<String> {
-    if program_resolves(program) {
-        None
-    } else {
-        Some(program.to_string())
-    }
+/// The `PATH` the unit itself carries, which is what the scheduler resolves a
+/// bare `argv[0]` against — NOT the `PATH` of whoever is running `atc status`.
+fn unit_search_path(text: &str) -> Option<String> {
+    plist_string_after_key(text, "PATH").or_else(|| systemd_environment_path(text))
 }
 
-/// Whether a unit's `argv[0]` resolves: a path is stat'd, a bare name is looked
-/// up on `$PATH`.
-#[must_use]
-pub fn program_resolves(program: &str) -> bool {
+/// `Some(program)` when the unit's `argv[0]` does not resolve to an executable
+/// under the unit's own `PATH` — i.e. the timer is installed but can never fire.
+fn missing_program(unit_text: &str) -> Option<String> {
+    let program = unit_program(unit_text)?;
+    let search_path = unit_search_path(unit_text);
+    (!program_resolves_in(&program, search_path.as_deref())).then_some(program)
+}
+
+/// Whether a unit's `argv[0]` resolves to something executable. An explicit
+/// path is checked directly; a bare name is looked up under `search_path` (the
+/// unit's own `PATH`), falling back to the caller's `$PATH` when the unit
+/// carries none.
+///
+/// `which` rather than `Path::exists()` on purpose: `exists()` is true for a
+/// directory or a non-executable file, either of which would let a bogus
+/// `$AINB_BIN` report healthy while the scheduler cannot exec it.
+fn program_resolves_in(program: &str, search_path: Option<&str>) -> bool {
     if program.is_empty() {
         return false;
     }
     if program.contains('/') {
-        // ponytail: exists() not an executable-bit check — a present-but-unrunnable
-        // binary is a different failure than the one this guards (the file moved).
-        std::path::Path::new(program).exists()
-    } else {
-        which::which(program).is_ok()
+        return which::which(program).is_ok();
     }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    search_path.map_or_else(
+        || which::which(program).is_ok(),
+        |path| which::which_in(program, Some(path), cwd).is_ok(),
+    )
 }
 
 /// First `<string>` inside the `ProgramArguments` array of a launchd plist.
 fn plist_program(xml: &str) -> Option<String> {
     let after_key = xml.split_once("<key>ProgramArguments</key>")?.1;
     let array = after_key.split_once("<array>")?.1;
-    let first = array.split_once("<string>")?.1;
-    let (value, _) = first.split_once("</string>")?;
+    first_plist_string(array)
+}
+
+/// The `<string>` value following `<key>{key}</key>` in a launchd plist.
+fn plist_string_after_key(xml: &str, key: &str) -> Option<String> {
+    first_plist_string(xml.split_once(&format!("<key>{key}</key>"))?.1)
+}
+
+fn first_plist_string(xml: &str) -> Option<String> {
+    let open = xml.split_once("<string>")?.1;
+    let (value, _) = open.split_once("</string>")?;
     let value = xml_unescape(value.trim());
     (!value.is_empty()).then_some(value)
 }
@@ -274,6 +313,15 @@ fn plist_program(xml: &str) -> Option<String> {
 fn systemd_exec_start_program(unit: &str) -> Option<String> {
     let line = unit.lines().map(str::trim).find_map(|l| l.strip_prefix("ExecStart="))?;
     shell_unquote_first_token(line.trim())
+}
+
+/// The `PATH` assignment of a systemd service unit's `Environment=` lines.
+fn systemd_environment_path(unit: &str) -> Option<String> {
+    let value = unit.lines().map(str::trim).find_map(|line| {
+        let assignment = line.strip_prefix("Environment=")?.trim().trim_matches('"');
+        assignment.strip_prefix("PATH=").map(str::to_string)
+    })?;
+    (!value.is_empty()).then_some(value)
 }
 
 fn install_launchd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
@@ -513,31 +561,109 @@ mod tests {
 
     #[test]
     fn program_resolution_distinguishes_present_from_moved() {
-        assert!(program_resolves("/bin/sh"));
-        assert!(!program_resolves("/nonexistent/cargo/bin/ainb"));
-        assert!(!program_resolves(""));
-        // Bare names go through $PATH.
-        assert!(program_resolves("sh"));
-        assert!(!program_resolves("ainb-definitely-not-a-real-binary"));
+        assert!(program_resolves_in("/bin/sh", None));
+        assert!(!program_resolves_in("/nonexistent/cargo/bin/ainb", None));
+        assert!(!program_resolves_in("", None));
+        assert!(program_resolves_in("sh", None));
+        assert!(!program_resolves_in(
+            "ainb-definitely-not-a-real-binary",
+            None
+        ));
+    }
+
+    /// `exists()` would call a directory or a non-executable file healthy; the
+    /// scheduler cannot exec either, so neither may pass.
+    #[test]
+    fn program_resolution_requires_something_executable() {
+        let dir = std::env::temp_dir();
+        assert!(
+            dir.exists(),
+            "temp dir should exist for the premise to hold"
+        );
+        assert!(!program_resolves_in(&dir.display().to_string(), None));
+
+        let not_executable = dir.join("ainb-timer-test-not-executable");
+        std::fs::write(&not_executable, b"#!/bin/sh\n").expect("write fixture");
+        assert!(!program_resolves_in(
+            &not_executable.display().to_string(),
+            None
+        ));
+        let _ = std::fs::remove_file(&not_executable);
+    }
+
+    /// A bare `argv[0]` must be judged against the PATH the UNIT carries — the
+    /// one the scheduler will use — not against whatever `$PATH` the operator
+    /// happens to be running `atc status` with.
+    #[test]
+    fn bare_program_resolves_against_the_units_own_path() {
+        assert!(program_resolves_in("sh", Some("/bin:/usr/bin")));
+        assert!(!program_resolves_in("sh", Some("/nonexistent/bin")));
+    }
+
+    #[test]
+    fn units_carry_the_path_their_bare_argv0_needs() {
+        let meta = AtcMeta::new("tower");
+        let expected = unit_path_env();
+        let service = build_systemd_service(&meta);
+        // systemd resolves a bare ExecStart against a fixed compile-time list
+        // unless the unit supplies $PATH itself, so the unit must supply it.
+        assert!(
+            service.contains(&format!("Environment=\"PATH={expected}\"")),
+            "systemd service carries no PATH: {service}"
+        );
+        assert_eq!(unit_search_path(&service).as_deref(), Some(&*expected));
+        assert_eq!(
+            unit_search_path(&build_plist(&meta)).as_deref(),
+            Some(&*expected)
+        );
+        assert_eq!(unit_search_path("not a unit at all"), None);
     }
 
     /// The status-line decision: a unit whose program has moved is flagged,
-    /// a healthy one is not.
+    /// a healthy one is not. Runs over whole units, in both flavours, so the
+    /// unit's own PATH is what the bare case is judged against.
     #[test]
     fn status_flags_a_unit_whose_program_is_missing() {
         let meta = AtcMeta::new("tower");
-        let base = build_plist(&meta);
-        let argv0 = format!("<string>{}</string>", unit_program(&base).expect("argv[0]"));
+        let plist = build_plist(&meta);
+        let service = build_systemd_service(&meta);
+        let argv0 = unit_program(&plist).expect("argv[0]");
+        // Substitute argv[0] where it actually sits — a bare name is too short
+        // to replace safely across a whole unit (the PATH could contain it).
+        let repoint = |unit: &str, to: &str| {
+            unit.replace(
+                &format!("<string>{argv0}</string>"),
+                &format!("<string>{to}</string>"),
+            )
+            .replace(&format!("ExecStart={argv0} "), &format!("ExecStart={to} "))
+        };
 
-        let stale = base.replace(&argv0, "<string>/Users/nobody/.cargo/bin/ainb</string>");
-        let program = unit_program(&stale).expect("argv[0]");
-        assert_eq!(
-            missing_program(&program),
-            Some("/Users/nobody/.cargo/bin/ainb".into())
-        );
+        for base in [&plist, &service] {
+            let stale = repoint(base, "/Users/nobody/.cargo/bin/ainb");
+            assert_eq!(
+                missing_program(&stale),
+                Some("/Users/nobody/.cargo/bin/ainb".into()),
+                "moved binary not flagged: {stale}"
+            );
 
-        let healthy = base.replace(&argv0, "<string>sh</string>");
-        let program = unit_program(&healthy).expect("argv[0]");
-        assert_eq!(missing_program(&program), None);
+            let healthy = repoint(base, "sh");
+            assert_eq!(
+                missing_program(&healthy),
+                None,
+                "resolvable binary wrongly flagged: {healthy}"
+            );
+        }
+    }
+
+    /// The systemd regression the bare-argv0 change could have introduced: a
+    /// unit whose PATH cannot reach the binary must be flagged, not assumed
+    /// healthy because the operator's own shell happens to resolve it.
+    #[test]
+    fn a_unit_whose_path_cannot_reach_the_binary_is_flagged() {
+        let unit = "[Service]\nType=oneshot\nEnvironment=\"PATH=/nonexistent/bin\"\nExecStart=sh fleet atc heartbeat tower\n";
+        assert_eq!(missing_program(unit), Some("sh".into()));
+
+        let reachable = "[Service]\nType=oneshot\nEnvironment=\"PATH=/bin:/usr/bin\"\nExecStart=sh fleet atc heartbeat tower\n";
+        assert_eq!(missing_program(reachable), None);
     }
 }
