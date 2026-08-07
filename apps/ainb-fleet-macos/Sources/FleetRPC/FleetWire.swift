@@ -412,6 +412,7 @@ extension FleetRequestIdentity {
 enum ControlAction: Codable, Equatable {
     case structuredAnswer(requestFingerprint: String, requestIdentity: FleetRequestIdentity?, answers: [FleetQuestionAnswer])
     case dismissStructured(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
+    case releaseStructured(requestFingerprint: String)
     case approve(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
     case approveForSession(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
     case deny(requestFingerprint: String, requestIdentity: FleetRequestIdentity?)
@@ -422,13 +423,14 @@ enum ControlAction: Codable, Equatable {
     case restart, stop, kill, archive
 
     private enum CodingKeys: String, CodingKey { case action, requestFingerprint = "request_fingerprint", requestIdentity = "request_identity", answers, key, text, provider, cwd, prompt }
-    private enum Tag: String, Codable { case structuredAnswer = "structured_answer", dismissStructured = "dismiss_structured", approve, approveForSession = "approve_for_session", deny, verifiedPicker = "verified_picker", sendPrompt = "send_prompt", `continue`, retry, interrupt, start, restart, stop, kill, archive }
+    private enum Tag: String, Codable { case structuredAnswer = "structured_answer", dismissStructured = "dismiss_structured", releaseStructured = "release_structured", approve, approveForSession = "approve_for_session", deny, verifiedPicker = "verified_picker", sendPrompt = "send_prompt", `continue`, retry, interrupt, start, restart, stop, kill, archive }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Tag.self, forKey: .action) {
         case .structuredAnswer: self = .structuredAnswer(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity), answers: try c.decode([FleetQuestionAnswer].self, forKey: .answers))
         case .dismissStructured: self = .dismissStructured(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
+        case .releaseStructured: self = .releaseStructured(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint))
         case .approve: self = .approve(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
         case .approveForSession: self = .approveForSession(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
         case .deny: self = .deny(requestFingerprint: try c.decode(String.self, forKey: .requestFingerprint), requestIdentity: try c.decodeIfPresent(FleetRequestIdentity.self, forKey: .requestIdentity))
@@ -452,6 +454,8 @@ enum ControlAction: Codable, Equatable {
             try c.encode(Tag.structuredAnswer, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity); try c.encode(answers, forKey: .answers)
         case let .dismissStructured(fingerprint, identity):
             try c.encode(Tag.dismissStructured, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity)
+        case let .releaseStructured(fingerprint):
+            try c.encode(Tag.releaseStructured, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint)
         case let .approve(fingerprint, identity):
             try c.encode(Tag.approve, forKey: .action); try c.encode(fingerprint, forKey: .requestFingerprint); try c.encodeIfPresent(identity, forKey: .requestIdentity)
         case let .approveForSession(fingerprint, identity):
