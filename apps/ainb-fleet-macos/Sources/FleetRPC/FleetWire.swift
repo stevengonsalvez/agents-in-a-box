@@ -639,6 +639,51 @@ struct FleetUsageSummaryResult: Codable, Equatable {
     }
 }
 
+struct FleetQuotaSummaryParams: Codable, Equatable { init() {} }
+
+struct FleetQuotaWindow: Codable, Equatable {
+    let usedPercent: UInt8
+    let resetsAt: Int64?
+    let estimated: Bool
+
+    var remainingPercent: UInt8 { 100 - min(usedPercent, 100) }
+
+    private enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case resetsAt = "resets_at"
+        case estimated
+    }
+}
+
+struct FleetQuotaProvider: Codable, Equatable {
+    let provider: String
+    let fiveHour: FleetQuotaWindow?
+    let sevenDay: FleetQuotaWindow?
+    let planType: String?
+    let updatedAt: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case fiveHour = "five_hour"
+        case sevenDay = "seven_day"
+        case planType = "plan_type"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct FleetQuotaSummaryResult: Codable, Equatable {
+    let state: FleetUsageSummaryState
+    let generatedAt: Int64?
+    let providers: [FleetQuotaProvider]
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case generatedAt = "generated_at"
+        case providers, detail
+    }
+}
+
 struct FleetRuntimeStatusParams: Codable, Equatable { init() {} }
 
 struct FleetRuntimeHookStatus: Codable, Equatable {
