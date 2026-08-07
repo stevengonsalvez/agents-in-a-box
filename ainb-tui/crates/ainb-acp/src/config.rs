@@ -42,6 +42,18 @@ pub struct AdapterConfig {
     /// Literal name/value pairs to set on the child, applied after the
     /// passthroughs so config always wins over the ambient value.
     pub extra_env: Vec<(String, String)>,
+    /// `session/set_config_option` settings (model, reasoning effort, ...) as
+    /// `(configId, valueId)` pairs.
+    ///
+    /// Applied at `session/new` AND re-applied after every `session/load`,
+    /// because the spike proved adapter config does not survive a load. Both
+    /// call sites read THIS list, which is what makes the re-application exact
+    /// rather than approximate: there is no per-session config to diverge from
+    /// (see "What we're NOT doing" in the plan).
+    ///
+    /// Empty by default: part 1 ships no configured model or reasoning value,
+    /// only the mechanism that keeps one from being silently lost on resume.
+    pub config_options: Vec<(String, String)>,
 }
 
 impl AdapterConfig {
@@ -56,6 +68,7 @@ impl AdapterConfig {
             permission_mode: permission_mode.into(),
             env_passthrough: Vec::new(),
             extra_env: Vec::new(),
+            config_options: Vec::new(),
         }
     }
 
@@ -77,6 +90,13 @@ impl AdapterConfig {
     #[must_use]
     pub fn extra_env(mut self, pairs: Vec<(String, String)>) -> Self {
         self.extra_env = pairs;
+        self
+    }
+
+    /// Set these `session/set_config_option` settings on every session.
+    #[must_use]
+    pub fn config_options(mut self, options: Vec<(String, String)>) -> Self {
+        self.config_options = options;
         self
     }
 

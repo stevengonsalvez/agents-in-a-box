@@ -39,6 +39,23 @@ pub const FLEET_CAPABILITY_MESSAGE_READ: &str = "fleet.message.read";
 pub const FLEET_CAPABILITY_TRANSCRIPT_READ: &str = "fleet.transcript.read";
 /// Negotiated capability required for daemon-owned ACP session creation.
 pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
+/// Negotiated capability required for the operator export-then-delete of ACP
+/// transcript rows.
+///
+/// Separate from [`FLEET_CAPABILITY_TRANSCRIPT_READ`] so the catalogue names the
+/// destructive verb on its own: a build can ship the transcript read surface
+/// without advertising the delete, and a client can tell the two apart.
+///
+/// ADVISORY, not an authorisation boundary (review 2026-08-07). Capabilities are
+/// declared by the DAEMON and echoed by `fleet/negotiate`; a client declares
+/// version ranges and never capabilities, and negotiate holds no
+/// connection-scoped state, so the daemon-side check can only answer "does this
+/// build advertise it", never "may this caller use it". Anyone who can call
+/// `fleet/transcript_list` on a socket can call `fleet/transcript_prune` on it.
+/// The real boundary is the socket itself: same-uid peer credentials plus the
+/// bearer token (`rpc/auth.rs`). Splitting this into an enforced permission
+/// needs per-connection granted capabilities, which is a v3 surface change.
+pub const FLEET_CAPABILITY_TRANSCRIPT_PRUNE: &str = "fleet.transcript.prune";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
 ///
@@ -61,6 +78,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     "fleet.subscription.replay",
     "fleet.subscription.resync",
     FLEET_CAPABILITY_TIMELINE_READ,
+    FLEET_CAPABILITY_TRANSCRIPT_PRUNE,
     FLEET_CAPABILITY_TRANSCRIPT_READ,
     FLEET_CAPABILITY_RUNTIME_READ,
     FLEET_CAPABILITY_USAGE_READ,
@@ -1282,6 +1300,46 @@ pub struct FleetTranscriptSubscribeParams {
 pub struct FleetTranscriptSubscribeResult {
     /// Newest committed `ingest_order` for the session, or `null` when empty.
     pub head_order: Option<i64>,
+}
+
+/// Maximum chunks one `fleet/transcript_prune` may export in a single call.
+///
+/// The export is materialised in the daemon's memory before it is written, so
+/// an unbounded one is the same self-inflicted memory incident an unbounded
+/// page would be. A prune that hits this ceiling reports it and deletes
+/// nothing, so the operator narrows `--before` rather than losing rows they
+/// never saw exported.
+pub const FLEET_TRANSCRIPT_PRUNE_MAX: u32 = 50_000;
+
+/// Parameters for `fleet/transcript_prune`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptPruneParams {
+    /// Exact stable session identity.
+    pub session_key: String,
+    /// Delete rows with `ingest_order` strictly below this watermark.
+    pub before_order: i64,
+    /// Where the daemon writes the JSONL export before deleting anything.
+    ///
+    /// `None` is only accepted with [`Self::no_export`] set: deleting a
+    /// transcript with no export is a real operator choice, but never a
+    /// default and never implicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_path: Option<String>,
+    /// Explicit acknowledgement that the rows are to be deleted unexported.
+    #[serde(default)]
+    pub no_export: bool,
+}
+
+/// Result for `fleet/transcript_prune`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTranscriptPruneResult {
+    /// Rows written to the export, `0` under `no_export`.
+    pub exported: u32,
+    /// Rows deleted.
+    pub deleted: u32,
+    /// Absolute path the export was written to, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_path: Option<String>,
 }
 
 /// Payload of the `fleet/transcript_event` notification.

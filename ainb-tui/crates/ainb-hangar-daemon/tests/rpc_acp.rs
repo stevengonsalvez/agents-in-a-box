@@ -1364,3 +1364,304 @@ async fn daemon_health_reports_the_acp_pool_and_the_spans_carry_their_fields() {
 
     harness.finish().await;
 }
+
+// ------------------------------------------- Phase 6: retention over the wire
+
+/// `fleet/transcript_prune` is export-THEN-delete, in that order, and it
+/// refuses to delete at all without an export unless `no_export` is explicit.
+/// This is the one destructive verb on the chat-bus surface and the daemon has
+/// no undo, so the refusal is the contract, not friction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transcript_prune_exports_before_it_deletes_and_refuses_a_bare_delete() {
+    let harness = Harness::start(&[("FAKE_ACP_CHUNKS", "4")], |_| {}).await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "hello",
+                "request_id": "req-prune",
+            }),
+        )
+        .await;
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+    harness.await_delivered(&message_id, &session_key).await;
+
+    let before = client
+        .call(
+            methods::FLEET_TRANSCRIPT_LIST,
+            serde_json::json!({ "session_key": session_key, "limit": 100 }),
+        )
+        .await;
+    let chunks = before["result"]["chunks"].as_array().expect("chunks").clone();
+    assert!(
+        chunks.len() > 2,
+        "a real transcript to prune: {}",
+        chunks.len()
+    );
+    // Keep the tail: prune everything below the LAST chunk's order.
+    let watermark = chunks.last().expect("a chunk")["ingest_order"].as_i64().expect("ingest_order");
+
+    // No export path and no explicit no_export: refused, and nothing deleted.
+    let refused = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({ "session_key": session_key, "before_order": watermark }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert!(
+        refused["error"]["message"].as_str().expect("message").contains("no_export"),
+        "the refusal names the flag that overrides it: {refused}"
+    );
+    assert_eq!(
+        client
+            .call(
+                methods::FLEET_TRANSCRIPT_LIST,
+                serde_json::json!({ "session_key": session_key, "limit": 100 }),
+            )
+            .await["result"]["chunks"]
+            .as_array()
+            .expect("chunks")
+            .len(),
+        chunks.len(),
+        "a refused prune deletes nothing"
+    );
+
+    let export = harness.dir.join("transcript.jsonl");
+    let pruned = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({
+                "session_key": session_key,
+                "before_order": watermark,
+                "export_path": export.to_string_lossy(),
+            }),
+        )
+        .await;
+    assert!(pruned["error"].is_null(), "{pruned}");
+    let exported = pruned["result"]["exported"].as_u64().expect("exported");
+    let deleted = pruned["result"]["deleted"].as_u64().expect("deleted");
+    assert_eq!(
+        exported, deleted,
+        "every deleted row is in the export, and no row is exported that is not deleted"
+    );
+    assert_eq!(deleted as usize, chunks.len() - 1, "the tail row survives");
+
+    // The export is REAL and re-readable, one JSON chunk per line.
+    let jsonl = std::fs::read_to_string(&export).expect("the export file exists");
+    let lines: Vec<&str> = jsonl.lines().collect();
+    assert_eq!(lines.len(), exported as usize);
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("one chunk per line");
+    assert_eq!(first["session_key"], session_key);
+    assert_eq!(first["ingest_order"], chunks[0]["ingest_order"]);
+
+    // After the delete this file is the ONLY copy, so it carries the whole
+    // durable row and not the read-API projection: the read shape drops
+    // `provider`, `source`, `provider_session_id`, `received_at`, `raw_blake3`
+    // and `projection_revision`, and a row missing those cannot be put back.
+    for field in [
+        "ingest_order",
+        "event_id",
+        "provider",
+        "source",
+        "session_key",
+        "provider_session_id",
+        "observed_at",
+        "received_at",
+        "event_type",
+        "raw_payload",
+        "raw_blake3",
+        "projection_revision",
+    ] {
+        assert!(
+            first.get(field).is_some(),
+            "the export dropped {field}, so the row cannot be reconstructed: {first}"
+        );
+    }
+    let payload = first["raw_payload"].as_str().expect("the exact stored payload string");
+    assert_eq!(
+        blake3::hash(payload.as_bytes()).to_hex().to_string(),
+        first["raw_blake3"].as_str().expect("the stored digest"),
+        "the exported payload re-digests to the exported digest, so the export round-trips"
+    );
+
+    let after = client
+        .call(
+            methods::FLEET_TRANSCRIPT_LIST,
+            serde_json::json!({ "session_key": session_key, "limit": 100 }),
+        )
+        .await;
+    let remaining = after["result"]["chunks"].as_array().expect("chunks");
+    assert_eq!(remaining.len(), 1, "only the tail is left: {after}");
+    assert_eq!(remaining[0]["ingest_order"], watermark);
+
+    harness.finish().await;
+}
+
+/// `no_export` is the deliberate way to say "delete unexported", and it is
+/// mutually exclusive with an export path rather than quietly winning.
+///
+/// It also carries the prune's two BLAST RADIUS claims, which otherwise rest
+/// entirely on reading the repo's SQL: a `source <> 'acp'` row under the SAME
+/// session key survives (so the projection sources' `projection_revision IS
+/// NULL` recovery contract is genuinely untouchable from here), and an `acp`
+/// row under a DIFFERENT session key survives. Both sit below the watermark, so
+/// only the predicates keep them alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transcript_prune_honours_an_explicit_no_export_and_refuses_both_at_once() {
+    use ainb_hangar_store::repo::fleet_provider_event::{
+        FleetProviderEventRepo, NewFleetProviderEvent,
+    };
+
+    let harness = Harness::start(&[("FAKE_ACP_CHUNKS", "2")], |_| {}).await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "hello",
+                "request_id": "req-prune-2",
+            }),
+        )
+        .await;
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+    harness.await_delivered(&message_id, &session_key).await;
+
+    // Two rows the prune must NOT reach, both below the watermark.
+    for (event_id, source, owner) in [
+        ("guard-hook", "claude_hook", session_key.as_str()),
+        ("guard-acp-elsewhere", "acp", "acp:someone-else"),
+    ] {
+        FleetProviderEventRepo::append(
+            harness.store.pool(),
+            &NewFleetProviderEvent {
+                event_id: event_id.to_string(),
+                provider: "claude".to_string(),
+                source: source.to_string(),
+                session_key: Some(owner.to_string()),
+                provider_session_id: None,
+                observed_at: 1,
+                received_at: 1,
+                event_type: "guard".to_string(),
+                raw_payload: format!("{{\"guard\":\"{event_id}\"}}"),
+            },
+        )
+        .await
+        .expect("seed a row the prune must not touch");
+    }
+
+    // A relative export path is refused by the DAEMON, not just by the CLI:
+    // any other socket client would otherwise get its export written relative
+    // to the daemon's cwd while the delete proceeded normally.
+    let relative = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({
+                "session_key": session_key,
+                "before_order": 1_000_000,
+                "export_path": "out.jsonl",
+            }),
+        )
+        .await;
+    assert_eq!(relative["error"]["code"], -32602, "{relative}");
+    assert!(
+        relative["error"]["message"].as_str().expect("message").contains("absolute"),
+        "the refusal names the rule: {relative}"
+    );
+
+    // An export path that already EXISTS is refused, and nothing is deleted:
+    // `--export ~/.agents-in-a-box/hangar.db` must not truncate the store and
+    // then prune anyway.
+    let occupied = harness.dir.join("occupied.jsonl");
+    std::fs::write(&occupied, "do not clobber me\n").expect("seed an existing file");
+    let clobber = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({
+                "session_key": session_key,
+                "before_order": 1_000_000,
+                "export_path": occupied.to_string_lossy(),
+            }),
+        )
+        .await;
+    assert_eq!(clobber["error"]["code"], -32602, "{clobber}");
+    assert_eq!(
+        std::fs::read_to_string(&occupied).expect("the file survives"),
+        "do not clobber me\n",
+        "a refused export never touched the operator's file"
+    );
+    assert!(
+        !client
+            .call(
+                methods::FLEET_TRANSCRIPT_LIST,
+                serde_json::json!({ "session_key": session_key, "limit": 100 }),
+            )
+            .await["result"]["chunks"]
+            .as_array()
+            .expect("chunks")
+            .is_empty(),
+        "and it deleted nothing: {clobber}"
+    );
+
+    let both = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({
+                "session_key": session_key,
+                "before_order": 1_000_000,
+                "export_path": harness.dir.join("x.jsonl").to_string_lossy(),
+                "no_export": true,
+            }),
+        )
+        .await;
+    assert_eq!(both["error"]["code"], -32602, "{both}");
+
+    let pruned = client
+        .call(
+            methods::FLEET_TRANSCRIPT_PRUNE,
+            serde_json::json!({
+                "session_key": session_key,
+                "before_order": 1_000_000,
+                "no_export": true,
+            }),
+        )
+        .await;
+    assert!(pruned["error"].is_null(), "{pruned}");
+    assert_eq!(pruned["result"]["exported"], 0);
+    assert!(pruned["result"]["deleted"].as_u64().expect("deleted") > 0);
+    assert!(
+        pruned["result"]["export_path"].is_null(),
+        "nothing was written: {pruned}"
+    );
+    let after = client
+        .call(
+            methods::FLEET_TRANSCRIPT_LIST,
+            serde_json::json!({ "session_key": session_key, "limit": 100 }),
+        )
+        .await;
+    let remaining = after["result"]["chunks"].as_array().expect("chunks");
+    assert_eq!(
+        remaining.iter().map(|chunk| &chunk["event_id"]).collect::<Vec<_>>(),
+        vec!["guard-hook"],
+        "every ACP row is gone as asked, and the non-acp row under the SAME \
+         session key is all that is left: {after}"
+    );
+
+    for event_id in ["guard-hook", "guard-acp-elsewhere"] {
+        assert!(
+            FleetProviderEventRepo::get(harness.store.pool(), event_id)
+                .await
+                .expect("query")
+                .is_some(),
+            "{event_id} is outside the prune's blast radius and must survive"
+        );
+    }
+
+    harness.finish().await;
+}

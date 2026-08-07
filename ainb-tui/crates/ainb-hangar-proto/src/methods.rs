@@ -461,6 +461,17 @@ pub const FLEET_TRANSCRIPT_LIST: &str = "fleet/transcript_list";
 /// ([`crate::fleet::FleetTranscriptEventParams`]). Gated by
 /// `fleet.transcript.read`.
 pub const FLEET_TRANSCRIPT_SUBSCRIBE: &str = "fleet/transcript_subscribe";
+/// Export-then-delete one session's ACP transcript rows below a watermark.
+///
+/// The Retention section's operator-invoked leg, and deliberately NOT a timer:
+/// `fleet_provider_event` documents retention as "an explicit operator-invoked
+/// export-then-delete, NOT an automatic sweep". Only `source='acp'` rows are
+/// eligible; the pending-recovery contract's rows are never touched.
+///
+/// Params: [`crate::fleet::FleetTranscriptPruneParams`]; result:
+/// [`crate::fleet::FleetTranscriptPruneResult`]. Gated by
+/// `fleet.transcript.prune`.
+pub const FLEET_TRANSCRIPT_PRUNE: &str = "fleet/transcript_prune";
 
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
@@ -1740,6 +1751,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_MESSAGE_SUBSCRIBE,
     FLEET_TRANSCRIPT_LIST,
     FLEET_TRANSCRIPT_SUBSCRIBE,
+    FLEET_TRANSCRIPT_PRUNE,
 ];
 
 #[cfg(test)]
@@ -2025,6 +2037,7 @@ mod tests {
             FLEET_MESSAGE_SUBSCRIBE,
             FLEET_TRANSCRIPT_LIST,
             FLEET_TRANSCRIPT_SUBSCRIBE,
+            FLEET_TRANSCRIPT_PRUNE,
         ];
         for m in declared {
             assert!(

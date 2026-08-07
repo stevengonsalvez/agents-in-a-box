@@ -1185,6 +1185,7 @@ async fn handle(
         methods::FLEET_MESSAGE_SUBSCRIBE => handle_fleet_message_subscribe(pool, req).await,
         methods::FLEET_TRANSCRIPT_LIST => handle_fleet_transcript_list(pool, req).await,
         methods::FLEET_TRANSCRIPT_SUBSCRIBE => handle_fleet_transcript_subscribe(pool, req).await,
+        methods::FLEET_TRANSCRIPT_PRUNE => handle_fleet_transcript_prune(pool, req).await,
         methods::FLEET_REPROJECT_CLAUDE_INTERVIEW => {
             handle_fleet_reproject_claude_interview(pool, req, events).await
         }
@@ -2169,6 +2170,278 @@ async fn handle_fleet_transcript_subscribe(
         .await
         .map_err(|error| store_err(&error))?;
     to_value(&FleetTranscriptSubscribeResult { head_order })
+}
+
+/// Export, then delete, one session's ACP transcript rows below a watermark.
+///
+/// The Retention section's operator leg, in exactly that order: the rows are
+/// serialised to `export_path` and the file (plus its parent directory entry)
+/// is `fsync`ed BEFORE a single row is deleted, so neither a failed export nor
+/// a machine that dies mid-prune can destroy a transcript nobody has a copy of.
+/// `--no-export` is the deliberate way to say "delete unexported", never the
+/// default.
+///
+/// The delete runs against the watermark the export ACTUALLY reached, not the
+/// one the operator asked for. The two diverge the moment a live turn commits a
+/// row after the last page was read, and re-running the operator's predicate
+/// would delete exactly the rows that never made it into the only copy. The
+/// reported `deleted` can therefore never exceed `exported`.
+///
+/// The export is PAGED for the same reason it is bounded: `FLEET_TRANSCRIPT_PRUNE_MAX`
+/// caps rows, nothing caps a row's payload, so materialising the whole result
+/// (and then a whole JSONL rendering of it) would size the daemon's peak memory
+/// off operator input.
+///
+/// Each line is the FULL durable row, not the read-API chunk shape: after the
+/// delete the file is the only copy, so it has to carry `provider`, `source`,
+/// `provider_session_id`, `received_at`, `raw_blake3` and `projection_revision`
+/// as well, with `raw_payload` kept as the exact stored string the digest was
+/// taken over.
+///
+/// The export path must be ABSOLUTE and must NOT already exist. This is the one
+/// destructive verb on the chat-bus surface and it has no undo, so it will not
+/// truncate a file the operator already had (`--export ~/.agents-in-a-box/hangar.db`
+/// would otherwise destroy the store AND delete the rows), and it will not
+/// resolve a relative path against the DAEMON's working directory for a client
+/// that is not the CLI.
+///
+/// Only `source='acp'` rows are eligible, enforced by the repo statement, so
+/// the `projection_revision IS NULL` pending-recovery contract on the other
+/// sources is untouchable from here.
+async fn handle_fleet_transcript_prune(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_TRANSCRIPT_PRUNE, FleetTranscriptPruneParams, FleetTranscriptPruneResult,
+    };
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_TRANSCRIPT_PRUNE)?;
+    let params: FleetTranscriptPruneParams = parse_params(
+        req,
+        "{ session_key, before_order, export_path?, no_export? }",
+    )?;
+    if params.session_key.trim().is_empty() {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    if params.before_order <= 0 {
+        return Err(invalid_params("before_order must be positive"));
+    }
+    let export_path = match (params.export_path.as_deref(), params.no_export) {
+        (Some(path), false) if !path.trim().is_empty() => {
+            // The guard lives HERE, not in the CLI: any other `hangar.sock`
+            // client would otherwise get its export written relative to the
+            // DAEMON's cwd while the delete proceeded normally.
+            if !std::path::Path::new(path).is_absolute() {
+                return Err(invalid_params("export_path must be absolute"));
+            }
+            Some(path.to_string())
+        }
+        (Some(_), true) => {
+            return Err(invalid_params(
+                "export_path and no_export are mutually exclusive",
+            ));
+        }
+        (_, true) => None,
+        // The refusal the plan asks for by name: no export path, no explicit
+        // no_export, no deletion.
+        (_, false) => {
+            return Err(invalid_params(
+                "export_path is required; pass no_export to delete without an export",
+            ));
+        }
+    };
+
+    // `create_new`, never `fs::write`: a plain write TRUNCATES whatever is
+    // already there and the prune then deletes anyway, so one mistyped path
+    // costs the operator both the file and the transcript.
+    let mut sink = match &export_path {
+        Some(path) => Some(
+            std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(
+                |error| match error.kind() {
+                    std::io::ErrorKind::AlreadyExists => invalid_params(&format!(
+                        "{path} already exists; choose an export path that does not"
+                    )),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+                        invalid_params(&format!("could not create {path}: {error}"))
+                    }
+                    _ => internal(&format!("could not create {path}: {error}")),
+                },
+            )?,
+        ),
+        None => None,
+    };
+
+    let scanned = export_acp_transcript(
+        pool,
+        &params.session_key,
+        params.before_order,
+        sink.as_mut(),
+        export_path.as_deref(),
+    )
+    .await;
+    let scanned = match scanned {
+        Ok(scanned) => scanned,
+        Err(error) => {
+            // A half-written export is worse than none: `create_new` would
+            // refuse the retry, so the operator would have to clean up by hand
+            // before they could try again.
+            if let Some(path) = &export_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
+
+    let exported = if export_path.is_some() {
+        scanned.rows
+    } else {
+        0
+    };
+    // THE watermark: one past the last row the export actually captured. Never
+    // `params.before_order`, which by now may cover rows this call never saw.
+    let Some(cut) = scanned.last_order.map(|order| order + 1) else {
+        return to_value(&FleetTranscriptPruneResult {
+            exported,
+            deleted: 0,
+            export_path,
+        });
+    };
+    let deleted = FleetProviderEventRepo::delete_acp_before(pool, &params.session_key, cut)
+        .await
+        .map_err(|error| store_err(&error))?;
+    tracing::info!(
+        session_key = %params.session_key,
+        before_order = params.before_order,
+        cut,
+        deleted,
+        exported,
+        export = ?export_path,
+        "operator pruned acp transcript rows"
+    );
+    to_value(&FleetTranscriptPruneResult {
+        exported,
+        deleted: u32::try_from(deleted).unwrap_or(u32::MAX),
+        export_path,
+    })
+}
+
+/// How far one prune's export actually got.
+struct PrunedRange {
+    rows: u32,
+    /// `ingest_order` of the LAST exported row: the delete's watermark, and
+    /// `None` when nothing matched at all.
+    last_order: Option<i64>,
+}
+
+/// Page one session's eligible ACP rows into `sink`, oldest first.
+///
+/// Bounded by `FLEET_TRANSCRIPT_PRUNE_MAX` ROWS, checked as the pages arrive so
+/// an over-large prune is refused without ever holding the whole range. `sink`
+/// is `None` for `--no-export`, which still walks the range: the cap and the
+/// delete watermark are the same numbers either way, and one code path cannot
+/// drift from the other.
+async fn export_acp_transcript(
+    pool: &SqlitePool,
+    session_key: &str,
+    before_order: i64,
+    sink: Option<&mut std::fs::File>,
+    path: Option<&str>,
+) -> Result<PrunedRange, RpcError> {
+    use ainb_hangar_proto::fleet::FLEET_TRANSCRIPT_PRUNE_MAX;
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+    use std::io::Write as _;
+
+    const PAGE: i64 = 512;
+
+    let mut writer = sink.map(std::io::BufWriter::new);
+    let mut rows: u32 = 0;
+    let mut last_order = None;
+    loop {
+        let page = FleetProviderEventRepo::list_acp_before(
+            pool,
+            session_key,
+            last_order.unwrap_or(0),
+            before_order,
+            PAGE,
+        )
+        .await
+        .map_err(|error| store_err(&error))?;
+        if page.is_empty() {
+            break;
+        }
+        rows = rows.saturating_add(u32::try_from(page.len()).unwrap_or(u32::MAX));
+        if rows > FLEET_TRANSCRIPT_PRUNE_MAX {
+            return Err(invalid_params(&format!(
+                "more than {FLEET_TRANSCRIPT_PRUNE_MAX} rows match; narrow --before (max {FLEET_TRANSCRIPT_PRUNE_MAX} per prune)"
+            )));
+        }
+        if let Some(writer) = writer.as_mut() {
+            for row in &page {
+                let line =
+                    serde_json::to_string(&transcript_export_line(row)).map_err(|error| {
+                        internal(&format!("could not serialise a transcript row: {error}"))
+                    })?;
+                writeln!(writer, "{line}").map_err(|error| {
+                    internal(&format!(
+                        "could not write {}: {error}",
+                        path.unwrap_or("the export")
+                    ))
+                })?;
+            }
+        }
+        last_order = page.last().map(|row| row.ingest_order);
+    }
+
+    if let Some(writer) = writer {
+        let file = writer.into_inner().map_err(|error| {
+            internal(&format!(
+                "could not write {}: {error}",
+                path.unwrap_or("the export")
+            ))
+        })?;
+        // Durable BEFORE the delete: without this the "export then delete"
+        // ordering only holds against a process crash, not a machine crash.
+        // The parent directory entry goes with it, because a synced file whose
+        // name has not reached the disk is a file the operator cannot open.
+        file.sync_all().map_err(|error| {
+            internal(&format!(
+                "could not flush {}: {error}",
+                path.unwrap_or("the export")
+            ))
+        })?;
+        if let Some(parent) = path.and_then(|path| std::path::Path::new(path).parent()) {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+    Ok(PrunedRange { rows, last_order })
+}
+
+/// One export line: the FULL durable row, not the read-API chunk shape.
+///
+/// After the delete this file is the only copy, so it carries every column,
+/// with `raw_payload` kept as the exact stored string `raw_blake3` was taken
+/// over rather than a re-parsed value that would not re-digest.
+fn transcript_export_line(
+    row: &ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRow,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ingest_order": row.ingest_order,
+        "event_id": row.event_id,
+        "provider": row.provider,
+        "source": row.source,
+        "session_key": row.session_key,
+        "provider_session_id": row.provider_session_id,
+        "observed_at": row.observed_at,
+        "received_at": row.received_at,
+        "event_type": row.event_type,
+        "raw_payload": row.raw_payload,
+        "raw_blake3": row.raw_blake3,
+        "projection_revision": row.projection_revision,
+    })
 }
 
 /// Return a bounded, durable newest-first receipt projection.

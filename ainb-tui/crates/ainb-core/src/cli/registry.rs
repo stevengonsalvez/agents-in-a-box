@@ -2141,6 +2141,47 @@ impl CliCommand for FleetCommand {
                 );
         let transcript = Command::new("transcript")
             .about("Page or follow one session's full execution transcript")
+            // `prune` is a SUBCOMMAND of a command that also takes a required
+            // positional, so both negations are load-bearing: without them
+            // `transcript prune --session x` either demands a session_key it
+            // will never use, or parses `prune` AS the session key.
+            .subcommand_negates_reqs(true)
+            .args_conflicts_with_subcommands(true)
+            .subcommand(
+                Command::new("prune")
+                    .about(
+                        "Export then delete this session's ACP transcript rows below a watermark",
+                    )
+                    .arg(
+                        clap::Arg::new("session")
+                            .long("session")
+                            .required(true)
+                            .help("The session whose transcript to prune"),
+                    )
+                    .arg(
+                        clap::Arg::new("before")
+                            .long("before")
+                            .required(true)
+                            .value_parser(clap::value_parser!(i64))
+                            .help("Delete rows with ingest_order strictly below this"),
+                    )
+                    .arg(
+                        clap::Arg::new("export")
+                            .long("export")
+                            .help("Write the deleted rows here as JSONL first (required)"),
+                    )
+                    .arg(
+                        clap::Arg::new("no-export")
+                            .long("no-export")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Delete WITHOUT an export; there is no undo"),
+                    )
+                    .after_help(
+                        "Refuses without --export unless --no-export is explicit. Only \
+                         source='acp' rows are eligible; nothing else in the provider-event \
+                         ledger is ever touched.",
+                    ),
+            )
             .arg(
                 clap::Arg::new("session_key")
                     .required(true)

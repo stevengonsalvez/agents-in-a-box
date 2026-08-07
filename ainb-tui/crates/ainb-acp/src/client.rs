@@ -53,7 +53,8 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, CloseSessionRequest, ContentBlock, InitializeRequest, LoadSessionRequest,
     NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest, TextContent,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, JsonRpcRequest, Responder};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -81,6 +82,26 @@ pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// JSON-RPC `Invalid params`.
 const INVALID_PARAMS: i32 = -32602;
+
+/// `claude-agent-acp`'s typed "Resource not found" for a well-formed but
+/// unknown session id (spike gate re-run 2026-08-06; it carries `data.uri`).
+const RESOURCE_NOT_FOUND: i32 = -32002;
+
+/// JSON-RPC `Internal error`, which is all `codex-acp` gives an unknown session.
+const INTERNAL_ERROR: i32 = -32603;
+
+/// The one and only place this string is matched.
+///
+/// HAZARD, named deliberately: `codex-acp` (1.1.10, re-measured 2026-08-06) does
+/// NOT type its unknown-session failure. It answers an opaque `-32603` whose
+/// `data.details` reads `no rollout found for thread id <uuid>`, which is
+/// indistinguishable from a genuine internal fault except by this substring. An
+/// adapter release that rewords the message silently turns "rebuild the context"
+/// into "fail the spawn", so the fallback is deliberately the SAFE direction
+/// (spawn failure, retried once, receipt says so) rather than a silent rebuild
+/// of every internal error. `claude-agent-acp` needs none of this: its -32002 is
+/// typed.
+const CODEX_UNKNOWN_SESSION_NEEDLE: &str = "no rollout found";
 
 /// Everything that can go wrong between the daemon and one adapter, typed so
 /// the pool can decide fail-fast vs retry without string matching.
@@ -139,6 +160,39 @@ pub enum AcpError {
         /// Adapter token.
         adapter: String,
     },
+}
+
+impl AcpError {
+    /// Does this `session/load` failure mean "the adapter has never heard of
+    /// this session", and therefore "rebuild the context", rather than "the
+    /// spawn failed"?
+    ///
+    /// The two adapters answer the SAME condition in two shapes (spike gate
+    /// re-run 2026-08-06, measured against `claude-agent-acp` 0.65.0 and
+    /// `codex-acp` 1.1.10):
+    ///
+    /// | Adapter | Unknown session id |
+    /// |---|---|
+    /// | `claude-agent-acp` | typed `-32002` "Resource not found" with `data.uri` |
+    /// | `codex-acp` | opaque `-32603` with `data.details` `no rollout found for thread id <uuid>` |
+    ///
+    /// [`CODEX_UNKNOWN_SESSION_NEEDLE`] carries the string-match hazard note;
+    /// this is the ONE place either shape is decided. Everything else, a closed
+    /// transport included, is a spawn failure: a session we cannot prove is
+    /// unknown must not be silently rebuilt, because a rebuild throws away the
+    /// adapter-side history the load was supposed to recover.
+    #[must_use]
+    pub fn load_means_rebuild(&self) -> bool {
+        match self {
+            // The adapter cannot load at all: the rebuild path is the only path.
+            Self::LoadUnsupported { .. } => true,
+            Self::Rpc { code, message, .. } => {
+                *code == RESOURCE_NOT_FOUND
+                    || (*code == INTERNAL_ERROR && message.contains(CODEX_UNKNOWN_SESSION_NEEDLE))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What `initialize` told us about the adapter.
@@ -252,6 +306,9 @@ impl PermissionRequest {
 pub struct AdapterProcess {
     provider: String,
     permission_mode: String,
+    /// [`AdapterConfig::config_options`], the static settings re-applied after
+    /// every `session/load` alongside the mode.
+    config_options: Vec<(String, String)>,
     connection: ConnectionTo<Agent>,
     info: AgentInfo,
     supports_load: bool,
@@ -306,6 +363,7 @@ impl AdapterProcess {
         Ok(Self {
             provider: config.name.clone(),
             permission_mode: config.permission_mode.clone(),
+            config_options: config.config_options.clone(),
             info: AgentInfo {
                 name: initialized
                     .agent_info
@@ -363,21 +421,33 @@ impl AdapterProcess {
         self.supports_load
     }
 
-    /// `session/new` plus the I13 mode assertion. Returns the adapter's id.
+    /// `session/new` plus the I13 mode assertion and the static config
+    /// application. Returns the adapter's id.
     pub async fn new_session(&self, cwd: &Path) -> Result<String, AcpError> {
         let reply =
             send_within_spawn_timeout(&self.connection, "session/new", NewSessionRequest::new(cwd))
                 .await?;
         let session_id = reply.session_id.to_string();
-        self.assert_mode(&session_id, reply.modes.as_ref()).await?;
+        if let Err(error) = self.apply_static_config(&session_id, reply.modes.as_ref()).await {
+            // The adapter created the session before we refused it. Left open it
+            // counts against the adapter's own limits and, for a mode we could
+            // not prove, sits there in whatever permission regime it inherited,
+            // with nothing on our side holding its id.
+            let _ = self.close_session(&session_id).await;
+            return Err(error);
+        }
         Ok(session_id)
     }
 
-    /// `session/load` plus the SAME mode assertion.
+    /// `session/load` plus the SAME mode assertion and the SAME config
+    /// application, in the same step.
     ///
-    /// The re-assertion is not belt-and-braces: the spike proved codex config
-    /// does not survive a load, and the permission mode is the one setting
-    /// whose silent loss disables R8 entirely.
+    /// Re-applying is not belt-and-braces. The gate re-run of 2026-08-06 proved
+    /// it for BOTH adapters, not just codex: `claude-agent-acp` 0.65.0 also
+    /// reverts a pinned mode to ambient after a load, and had simply never been
+    /// probed for it. A resume that only re-applied for codex would fail every
+    /// claude mode assertion and silently degrade to re-prime, so `session/load`
+    /// would never actually be used.
     pub async fn load_session(&self, session_id: &str, cwd: &Path) -> Result<(), AcpError> {
         if !self.supports_load {
             return Err(AcpError::LoadUnsupported {
@@ -390,7 +460,38 @@ impl AdapterProcess {
             LoadSessionRequest::new(session_id.to_string(), cwd),
         )
         .await?;
-        self.assert_mode(session_id, reply.modes.as_ref()).await
+        self.apply_static_config(session_id, reply.modes.as_ref()).await
+    }
+
+    /// Assert the pinned mode, then (re)apply every static config option.
+    ///
+    /// ONE function so `session/new` and `session/load` cannot drift: the plan's
+    /// "the same config was applied at `session/new`, so re-applying it restores
+    /// the pre-load state exactly" is only true while both paths read the same
+    /// list in the same order.
+    async fn apply_static_config(
+        &self,
+        session_id: &str,
+        modes: Option<&SessionModeState>,
+    ) -> Result<(), AcpError> {
+        self.assert_mode(session_id, modes).await?;
+        for (config_id, value) in &self.config_options {
+            // The reply IS inspected: the spike lost a whole probe run to
+            // `session/set_config_option` taking `configId` rather than
+            // `optionId`, erroring, and being ignored, so the run silently
+            // continued on a model nobody chose.
+            send(
+                &self.connection,
+                "session/set_config_option",
+                SetSessionConfigOptionRequest::new(
+                    session_id.to_string(),
+                    config_id.clone(),
+                    value.as_str(),
+                ),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// `session/prompt`. Resolves at TURN END, which is what the delivery leg
@@ -416,14 +517,24 @@ impl AdapterProcess {
     }
 
     /// `session/close`. Session-level idle eviction; the process stays warm.
+    ///
+    /// Forgets the session's observed mode on the way out, whatever the adapter
+    /// answers: the map is keyed by an adapter-minted id and a long-lived
+    /// process evicts and rebuilds sessions for its whole life, so keeping dead
+    /// entries grows it without bound and leaves [`Self::mode_violated`]
+    /// answering about a session nobody holds.
     pub async fn close_session(&self, session_id: &str) -> Result<(), AcpError> {
-        send(
+        let closed = send(
             &self.connection,
             "session/close",
             CloseSessionRequest::new(session_id.to_string()),
         )
         .await
-        .map(|_| ())
+        .map(|_| ());
+        if let Ok(mut modes) = self.observed_modes.lock() {
+            modes.remove(session_id);
+        }
+        closed
     }
 
     /// The mode last reported for a session, for the pool's health surface.
@@ -677,18 +788,25 @@ where
 
 fn classify(method: &'static str, error: &agent_client_protocol::Error) -> AcpError {
     let code = i32::from(error.code);
+    // `data` is folded into the message rather than dropped: it is where an
+    // adapter puts the only distinguishing detail it gives (codex's "no rollout
+    // found …" for an unknown session, claude's `uri`), so discarding it would
+    // make [`AcpError::load_means_rebuild`] unable to tell an unknown session
+    // from a genuine internal fault, and would leave the delivery receipt
+    // reading "Internal error" with no follow-up.
+    let message = match &error.data {
+        Some(data) => format!("{}; {data}", error.message),
+        None => error.message.clone(),
+    };
     if code == INVALID_PARAMS {
-        return AcpError::InvalidParams {
-            method,
-            message: error.message.clone(),
-        };
+        return AcpError::InvalidParams { method, message };
     }
     if agent_client_protocol::is_incoming_transport_closed(error) {
-        return AcpError::Transport(format!("{method}: {}", error.message));
+        return AcpError::Transport(format!("{method}: {message}"));
     }
     AcpError::Rpc {
         method,
         code,
-        message: error.message.clone(),
+        message,
     }
 }

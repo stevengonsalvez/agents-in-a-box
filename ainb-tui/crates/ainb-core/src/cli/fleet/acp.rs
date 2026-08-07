@@ -10,7 +10,7 @@
 
 use ainb_hangar_proto::fleet::{
     FLEET_TRANSCRIPT_LIST_MAX, FleetAcpSessionCreateParams, FleetTranscriptChunk,
-    FleetTranscriptListParams, FleetTranscriptSubscribeParams,
+    FleetTranscriptListParams, FleetTranscriptPruneParams, FleetTranscriptSubscribeParams,
 };
 use anyhow::Result;
 
@@ -66,8 +66,12 @@ async fn create(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
 }
 
 /// `ainb fleet transcript <session_key> [--after N] [--limit N] [--follow]`
+/// and `ainb fleet transcript prune ...`.
 pub async fn execute_transcript(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     reject_tabular(format);
+    if let Some(("prune", sub)) = matches.subcommand() {
+        return prune(sub, format).await;
+    }
     let Some(session_key) = matches.get_one::<String>("session_key").cloned() else {
         CliFailure::bad_input("a session_key is required").exit();
     };
@@ -100,6 +104,73 @@ pub async fn execute_transcript(matches: &clap::ArgMatches, format: OutputFormat
         }
     }
     Ok(())
+}
+
+/// `ainb fleet transcript prune --session <key> --before <order>
+/// (--export <path> | --no-export)`
+///
+/// The Retention section's operator export-then-delete. Refusing without
+/// `--export` is the point, not friction: this is the one chat-bus verb that
+/// destroys data, and the daemon has no undo. `--no-export` says "I meant it".
+///
+/// The path is resolved against the OPERATOR's cwd here and sent absolute: the
+/// daemon writes the file, and its working directory is not the operator's, so
+/// a relative `--export ./out.jsonl` would otherwise land somewhere nobody
+/// looks.
+async fn prune(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    let Some(session_key) = matches.get_one::<String>("session").cloned() else {
+        CliFailure::bad_input("--session is required").exit();
+    };
+    let Some(before_order) = matches.get_one::<i64>("before").copied() else {
+        CliFailure::bad_input("--before <ingest_order> is required").exit();
+    };
+    let no_export = matches.get_flag("no-export");
+    let export_path = matches.get_one::<String>("export").map(|path| absolute(path));
+    if export_path.is_some() && no_export {
+        CliFailure::bad_input("--export and --no-export are mutually exclusive").exit();
+    }
+    if export_path.is_none() && !no_export {
+        CliFailure::bad_input(
+            "--export <path> is required; pass --no-export to delete without an export",
+        )
+        .exit();
+    }
+
+    let result = client()
+        .transcript_prune(FleetTranscriptPruneParams {
+            session_key,
+            before_order,
+            export_path,
+            no_export,
+        })
+        .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => CliFailure::from(error).exit(),
+    };
+    if format == OutputFormat::Json {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        match &result.export_path {
+            Some(path) => println!("exported {} chunks to {path}", result.exported),
+            None => println!("exported 0 chunks (--no-export)"),
+        }
+        println!("deleted {} chunks", result.deleted);
+    }
+    Ok(())
+}
+
+/// Resolve a path against the operator's cwd WITHOUT requiring it to exist:
+/// the export file is created by the daemon, so `canonicalize` would refuse it.
+fn absolute(path: &str) -> String {
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        return path.display().to_string();
+    }
+    std::env::current_dir().map_or_else(
+        |_| path.display().to_string(),
+        |cwd| cwd.join(path).display().to_string(),
+    )
 }
 
 /// Stream this session's transcript until the operator stops us.

@@ -25,6 +25,8 @@
 //! | `FAKE_ACP_CHUNKS` | emit N `agent_message_chunk` updates per prompt instead of a script |
 //! | `FAKE_ACP_CHUNK_DELAY_MS` | sleep this long between chunks (paced streaming, I12) |
 //! | `FAKE_ACP_LOAD_REPLAY` | emit N updates BEFORE answering `session/load` (the replay-ordering probe) |
+//! | `FAKE_ACP_MODE_REVERT_ON_LOAD` | `currentModeId` returned by `session/load` (the ambient-mode revert BOTH real adapters do) |
+//! | `FAKE_ACP_LOAD_UNKNOWN_SESSION` | `claude` \| `codex` \| `opaque`: fail `session/load` in that adapter's unknown-session shape |
 //! | `FAKE_ACP_MODE_FLIP` | emit a `current_mode_update` carrying this mode at the END of every prompt turn (the mid-conversation flip) |
 //! | `FAKE_ACP_SESSION_PREFIX` | prefix for minted adapter session ids (default `fake-session`) |
 //! | `FAKE_ACP_HANG_SESSIONS` | comma list of adapter session ids (or `*`) whose prompt NEVER answers |
@@ -191,6 +193,44 @@ fn handle(
             respond(out, id, &result);
         }
         "session/load" => {
+            record(&format!("load:{session_id}"));
+            // The two unknown-session shapes the gate re-run measured, so the
+            // client's taxonomy can be tested without either real adapter.
+            match var("FAKE_ACP_LOAD_UNKNOWN_SESSION").as_deref() {
+                // claude-agent-acp 0.65.0: TYPED, with the uri it could not find.
+                Some("claude") => {
+                    return respond_error_with_data(
+                        out,
+                        id,
+                        -32002,
+                        "Resource not found",
+                        &serde_json::json!({"uri": format!("acp://session/{session_id}")}),
+                    );
+                }
+                // codex-acp 1.1.10: opaque -32603, the needle only in data.details.
+                Some("codex") => {
+                    return respond_error_with_data(
+                        out,
+                        id,
+                        -32603,
+                        "Internal error",
+                        &serde_json::json!({
+                            "details": format!("no rollout found for thread id {session_id}"),
+                        }),
+                    );
+                }
+                // A -32603 that is NOT an unknown session: must NOT be rebuilt.
+                Some(_) => {
+                    return respond_error_with_data(
+                        out,
+                        id,
+                        -32603,
+                        "Internal error",
+                        &serde_json::json!({"details": "the adapter fell over"}),
+                    );
+                }
+                None => {}
+            }
             // The replay arrives BEFORE the reply, which is the exact ordering
             // that breaks a client registering its handler after the call.
             for index in 0..count("FAKE_ACP_LOAD_REPLAY") {
@@ -205,13 +245,32 @@ fn handle(
             }
             let mut result = serde_json::json!({});
             if !flag("FAKE_ACP_NO_MODES") {
-                let mode = var("FAKE_ACP_MODE_ON_NEW").unwrap_or_else(|| "default".to_string());
+                // BOTH real adapters revert a pinned mode to ambient on load
+                // (gate re-run 2026-08-06), so the fixture can too, INDEPENDENTLY
+                // of what session/new reported. Without a separate knob a test
+                // could not express "new pinned it, load lost it".
+                let mode = var("FAKE_ACP_MODE_REVERT_ON_LOAD")
+                    .or_else(|| var("FAKE_ACP_MODE_ON_NEW"))
+                    .unwrap_or_else(|| "default".to_string());
                 result["modes"] = serde_json::json!({
                     "currentModeId": mode,
-                    "availableModes": [{"id": "default", "name": "Default"}],
+                    "availableModes": [
+                        {"id": "default", "name": "Default"},
+                        {"id": "bypassPermissions", "name": "Bypass"},
+                    ],
                 });
             }
             respond(out, id, &result);
+        }
+        "session/set_config_option" => {
+            record(&format!(
+                "config:{session_id}:{}={}",
+                params["configId"].as_str().unwrap_or_default(),
+                params["value"].as_str().unwrap_or_default()
+            ));
+            // `configOptions` is REQUIRED on the reply; `{}` is a parse error,
+            // and the client surfaces parse errors rather than swallowing them.
+            respond(out, id, &serde_json::json!({"configOptions": []}));
         }
         "session/set_mode" => {
             if flag("FAKE_ACP_REFUSE_SET_MODE") {
@@ -427,6 +486,25 @@ fn respond_error(out: &SharedOut, id: &serde_json::Value, code: i32, message: &s
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": code, "message": message},
+        }),
+    );
+}
+
+/// An error carrying `data`, which is where BOTH real adapters put the only
+/// detail that says "unknown session" rather than "something broke".
+fn respond_error_with_data(
+    out: &SharedOut,
+    id: &serde_json::Value,
+    code: i32,
+    message: &str,
+    data: &serde_json::Value,
+) {
+    write_line(
+        out,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": code, "message": message, "data": data},
         }),
     );
 }
