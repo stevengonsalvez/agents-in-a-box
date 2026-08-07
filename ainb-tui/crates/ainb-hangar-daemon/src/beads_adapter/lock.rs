@@ -291,8 +291,17 @@ pub struct BdLockGuard {
 }
 
 impl Drop for BdLockGuard {
+    /// Release by compare-and-delete, never a blind unlink.
+    ///
+    /// A guard can outlive its own pidfile: a contender whose liveness predicate
+    /// judged us dead reclaims the path and publishes its own. A blind unlink
+    /// here would then delete THAT live holder's pidfile — the same double-hold
+    /// the steal path is careful to avoid, reintroduced on the way out. Removing
+    /// only while the file still names us keeps the invariant symmetric.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if read_pid(&self.path) == Ok(std::process::id() as i32) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -727,6 +736,25 @@ mod tests {
             "expected at least one winner per round, got {} over {ROUNDS} rounds",
             acquisitions.load(Ordering::SeqCst)
         );
+    }
+
+    /// Releasing must not delete a pidfile that is no longer ours.
+    ///
+    /// The mirror of the steal-path invariant: if a contender reclaimed the path
+    /// while we held a guard, our drop must leave ITS pidfile alone, or the lock
+    /// admits two holders on the way out instead of on the way in.
+    #[test]
+    fn dropping_a_guard_leaves_a_successors_pidfile_alone() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("daemon.lock");
+        let guard = BdLock::new(path.clone()).acquire().expect("acquire");
+
+        // A successor reclaimed the path and published its own pid.
+        std::fs::write(&path, "424242").expect("successor publishes");
+        drop(guard);
+
+        assert!(path.exists(), "the successor's pidfile was deleted");
+        assert_eq!(read_pid(&path), Ok(424_242));
     }
 
     /// A live holder is never stolen from: the contender blocks until release.
