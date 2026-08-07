@@ -316,6 +316,15 @@ final class FleetStore: ObservableObject {
         )
     }
 
+    func openStructuredInterviewInClaude(on session: FleetSession) {
+        performStructured(
+            .releaseStructured(requestFingerprint: session.currentRequestFingerprint ?? ""),
+            on: session,
+            allowed: session.provider == .claude && session.capabilities.structuredAnswer,
+            failurePrefix: "Open Claude picker"
+        )
+    }
+
     func canDecideApproval(_ decision: FleetApprovalDecision, on session: FleetSession) -> Bool {
         guard session.attention == .approval,
               session.capabilities.approvals,
