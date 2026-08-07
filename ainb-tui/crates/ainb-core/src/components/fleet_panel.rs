@@ -16,7 +16,7 @@
 //   - B                  broadcast a ping prompt to the selected session
 //   - y                  approve the selected APPROVE permission request
 //   - n                  deny (on an APPROVE row) / open the new-ATC prompt (elsewhere)
-//   - r                  force-refresh from the store
+//   - F5                 force-refresh from the daemon snapshot
 //   - q / Esc            back to the previous screen
 //
 // Style follows the ainb-tui guide (rounded borders, gold titles,
@@ -171,6 +171,13 @@ impl FleetPanelState {
     pub fn refresh(&mut self) {
         self.drain_stream_updates();
         self.drain_canonical_updates();
+    }
+
+    /// Request a fresh daemon snapshot on a worker thread, then apply any
+    /// completed stream/action updates immediately.
+    pub fn force_refresh(&mut self) {
+        crate::fleet::control::request_fleet_snapshot(Arc::clone(&self.stream_updates));
+        self.refresh();
     }
 
     fn start_subscription(&mut self) {
@@ -944,7 +951,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .unwrap_or("no attachment");
     frame.render_widget(
         Paragraph::new(format!(
-            "1-5 views  ↑↓ select  Enter answer  {attach_help}  B broadcast  q/Esc back"
+            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  B broadcast  q/Esc back"
         ))
         .style(Style::default().fg(MUTED_GRAY)),
         Rect::new(

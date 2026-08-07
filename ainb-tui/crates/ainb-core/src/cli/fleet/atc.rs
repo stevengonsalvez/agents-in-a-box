@@ -123,6 +123,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             // at it (no-op if a prior notifyd install already extracted it).
             let paths_nd = ainb_plugin_notifyd::paths::Paths::under(home.join(".agents-in-a-box"));
             let _ = ainb_plugin_notifyd::install::extract_hook_script(&paths_nd);
+            let _ = ainb_plugin_notifyd::install::extract_hook_bin(&paths_nd);
             match plumbing::settings::install_claude_hooks(&home, &script) {
                 Ok(_) => hooks_installed = true,
                 Err(e) => tracing::warn!("failed to install lifecycle hooks: {e}"),

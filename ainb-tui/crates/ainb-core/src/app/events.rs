@@ -3004,6 +3004,10 @@ impl EventHandler {
             return Some(AppEvent::FleetPanelCanonicalKey(key));
         }
         match key_event.code {
+            KeyCode::F(5) => Some(AppEvent::FleetPanelRefresh),
+            KeyCode::Char('r') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(AppEvent::FleetPanelRefresh)
+            }
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
             KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
@@ -3292,16 +3296,6 @@ impl EventHandler {
                 expected_version,
                 action,
             } => {
-                if action.is_high_risk() && !state.fleet_panel_state.daemon_online() {
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::ActionFailed {
-                            session_key,
-                            detail: "Fleet daemon offline, high-risk action disabled".into(),
-                        },
-                    );
-                    return;
-                }
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
                     FleetAction::DismissStructured { .. } => "rejected interview",
@@ -6198,7 +6192,7 @@ impl EventHandler {
                     state.fleet_panel_state.option_prev();
                 }
             }
-            AppEvent::FleetPanelRefresh => state.fleet_panel_state.refresh(),
+            AppEvent::FleetPanelRefresh => state.fleet_panel_state.force_refresh(),
             AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
             AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
             AppEvent::FleetPanelNewAtcBackspace => state.fleet_panel_state.new_atc_backspace(),
@@ -8819,6 +8813,17 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r')))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::F(5)),
+            Some(AppEvent::FleetPanelRefresh)
+        ));
+        assert!(matches!(
+            EventHandler::handle_key_event(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &mut state
+            ),
+            Some(AppEvent::FleetPanelRefresh)
         ));
 
         // Esc/q pop back to the saved origin, not hardcoded home.

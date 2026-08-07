@@ -145,10 +145,12 @@ ainb_send() {
   return 2
 }
 
-# Dev launches set AINB_BIN to their freshly built binary. Do not fall back to
-# a different installed `ainb`: that silently projects hook events with stale
-# Fleet code while the visible TUI is current.
+# Dev launches set AINB_BIN to their freshly built binary. Hook processes do
+# not inherit that shell, so use the installer-recorded binary before PATH.
 AINB_HOOK_BIN="${AINB_BIN:-}"
+if [ -z "${AINB_HOOK_BIN}" ] && [ -r "${AINB_DIR}/hooks/ainb-bin" ]; then
+  IFS= read -r AINB_HOOK_BIN < "${AINB_DIR}/hooks/ainb-bin" || true
+fi
 if [ -z "${AINB_HOOK_BIN}" ]; then
   AINB_HOOK_BIN="$(command -v ainb 2>/dev/null || true)"
 fi

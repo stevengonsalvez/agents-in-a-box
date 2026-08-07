@@ -99,6 +99,49 @@ pub enum FleetHostUpdate {
 /// Shared ordered queue drained by the UI thread.
 pub type FleetHostUpdateSink = Arc<Mutex<Vec<FleetHostUpdate>>>;
 
+/// Fetch one fresh authoritative snapshot without waiting for the persistent
+/// revision stream to reconnect. Direct action RPCs use the same short-lived
+/// authenticated transport, so this remains useful after a stream disconnect.
+pub fn request_fleet_snapshot(updates: FleetHostUpdateSink) {
+    let _ = std::thread::Builder::new()
+        .name("ainb-fleet-refresh".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    publish_host_update(
+                        &updates,
+                        FleetHostUpdate::Health(FleetDaemonHealth::Offline(format!(
+                            "refresh runtime failed: {error}"
+                        ))),
+                    );
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let result = async {
+                    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+                        .map_err(|error| error.to_string())?;
+                    client.fleet_snapshot().await.map_err(|error| error.to_string())
+                }
+                .await;
+                match result {
+                    Ok(snapshot) => {
+                        let mut git_context_cache = HashMap::new();
+                        publish_snapshot(&updates, snapshot, &mut git_context_cache);
+                        publish_host_update(&updates, FleetHostUpdate::Health(FleetDaemonHealth::Online));
+                    }
+                    Err(error) => publish_host_update(
+                        &updates,
+                        FleetHostUpdate::Health(FleetDaemonHealth::Offline(format!(
+                            "refresh failed: {error}"
+                        ))),
+                    ),
+                }
+            });
+        });
+}
+
 /// Start one persistent Fleet stream worker.
 pub fn spawn_fleet_subscription(
     updates: FleetHostUpdateSink,
