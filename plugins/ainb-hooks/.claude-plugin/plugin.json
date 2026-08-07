@@ -1,6 +1,6 @@
 {
   "name": "ainb-hooks",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Emit every safely observable Claude Code lifecycle event into Hangar's durable provider log. User-facing events still reach ainb-notifyd over its Unix socket. The same notify.sh powers ATC structured control when installed with AINB_MANAGED=atc. stall_guard.py additionally blocks turn-end when a session would idle on in-flight work with no wake armed, so ATC-managed sessions do not silently park on a running CI job.",
   "author": {
     "name": "Agents-in-a-Box"
