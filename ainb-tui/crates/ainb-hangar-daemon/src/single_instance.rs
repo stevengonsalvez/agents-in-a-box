@@ -107,6 +107,95 @@ fn ps_args(pid: i32) -> Option<String> {
     (!args.is_empty()).then(|| args.to_string())
 }
 
+/// How often the watchdog re-checks that this daemon still owns its home.
+///
+/// Overridable with `AINB_HANGAR_OWNERSHIP_WATCH_MS` so a tripwire can drive
+/// several ticks inside a test budget, mirroring `HANGAR_DAEMON_POLL_MS`.
+fn watchdog_interval() -> std::time::Duration {
+    std::env::var("AINB_HANGAR_OWNERSHIP_WATCH_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis,
+        )
+}
+
+/// What one watchdog sample saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// The lock still names us. Nothing to do.
+    Ours,
+    /// The lock is absent or unreadable. NOT proof we lost it — a steal may be
+    /// mid-flight, and a daemon that exited on a transient read failure would be
+    /// a worse bug than the one this watches for.
+    Unknown,
+    /// Another pid holds the lock and is a live daemon: it owns the home now.
+    Lost(i32),
+    /// Another pid is recorded but is not a live daemon — debris, not an owner.
+    Stale(i32),
+}
+
+/// Classify the lock file's current contents against our own pid.
+///
+/// Pure but for the `holder_is_live` probe, so every branch is testable.
+fn sample<F>(lock: &Path, mine: i32, holder_is_live: F) -> Held
+where
+    F: Fn(i32) -> bool,
+{
+    let Some(holder) = std::fs::read_to_string(lock)
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+    else {
+        return Held::Unknown;
+    };
+    if holder == mine {
+        Held::Ours
+    } else if holder_is_live(holder) {
+        Held::Lost(holder)
+    } else {
+        Held::Stale(holder)
+    }
+}
+
+/// Watch that this daemon still owns `dir`, resolving with the new owner's pid
+/// if it ever stops owning it.
+///
+/// The layer that does not depend on any exit path running. A daemon can only
+/// lose a lock it holds by something outside its control — an operator deleting
+/// the file, a predicate misfire, a home restored from a backup — and two
+/// daemons on one home is the failure this whole module exists to prevent, so
+/// the right response is to stand down rather than race.
+///
+/// Scoped to THIS home by construction: it reads one file and signals no one.
+/// That is the difference between this and an argv-matching reaper, which cannot
+/// tell which home a process serves and would kill daemons belonging to others.
+pub async fn watch_ownership(dir: &Path) -> i32 {
+    let lock = lock_path_in(dir);
+    let mine = i32::try_from(std::process::id()).unwrap_or(-1);
+    let interval = watchdog_interval();
+    loop {
+        tokio::time::sleep(interval).await;
+        match sample(&lock, mine, holder_is_live_daemon) {
+            Held::Ours => {}
+            Held::Lost(pid) => return pid,
+            // Neither is proof of loss. If the home really is free, the next
+            // daemon to take it turns this into `Lost` on a later tick — one
+            // tick of overlap, versus an exit on a transient read.
+            Held::Unknown => tracing::warn!(
+                lock = %lock.display(),
+                "hangar ownership lock is missing; continuing to serve"
+            ),
+            Held::Stale(pid) => tracing::warn!(
+                lock = %lock.display(),
+                holder = pid,
+                "hangar ownership lock names a stale pid; continuing to serve"
+            ),
+        }
+    }
+}
+
 /// Does this argv line belong to a hangar daemon?
 ///
 /// Two shapes launch one (`cli::hangar::resolve_daemon_launch`): the sidecar
@@ -215,6 +304,28 @@ mod tests {
             Ownership::Acquired(_) => {}
             other => panic!("expected a recycled-pid lock to be reclaimed, got {other:?}"),
         }
+    }
+
+    /// The watchdog's whole decision table. The dangerous cell is `Unknown`:
+    /// reading an absent or unreadable file as "we lost it" would let a
+    /// transient failure shut down a healthy daemon.
+    #[test]
+    fn the_watchdog_stands_down_only_for_a_live_successor() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = dir.path().join("daemon.lock");
+        let mine = 4242;
+
+        assert_eq!(sample(&lock, mine, |_| true), Held::Unknown, "absent");
+
+        std::fs::write(&lock, "not-a-pid").expect("write");
+        assert_eq!(sample(&lock, mine, |_| true), Held::Unknown, "unreadable");
+
+        std::fs::write(&lock, mine.to_string()).expect("write");
+        assert_eq!(sample(&lock, mine, |_| true), Held::Ours);
+
+        std::fs::write(&lock, "9001").expect("write");
+        assert_eq!(sample(&lock, mine, |_| true), Held::Lost(9001));
+        assert_eq!(sample(&lock, mine, |_| false), Held::Stale(9001));
     }
 
     /// The fail-safe direction: an unreadable process table must NOT be read as

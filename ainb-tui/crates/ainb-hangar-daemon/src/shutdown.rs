@@ -29,6 +29,12 @@ pub enum Cause {
     /// SIGTERM — `hangar daemon stop`, `restart`, launchd/systemd, or a
     /// system shutdown.
     Terminate,
+    /// This daemon no longer owns its hangar home; the named pid does.
+    ///
+    /// Nobody signalled us — we noticed. Standing down is the only correct
+    /// response: two daemons on one home race the same database and unlink each
+    /// other's socket.
+    LockLost(i32),
 }
 
 impl Cause {
@@ -47,6 +53,7 @@ impl Cause {
         match self {
             Self::Interrupt => "SIGINT",
             Self::Terminate => "SIGTERM",
+            Self::LockLost(_) => "lock-lost",
         }
     }
 }
@@ -60,6 +67,10 @@ pub struct Watch {
     /// `None` only when the SIGTERM handler could not be installed; the daemon
     /// then degrades to SIGINT rather than refusing to run.
     terminate: Option<tokio::signal::unix::Signal>,
+    /// Resolves with the new owner's pid if this daemon ever stops owning its
+    /// home. `None` for a daemon that holds no lock (a test harness driving the
+    /// run loop directly).
+    lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>,
 }
 
 impl Watch {
@@ -78,7 +89,18 @@ impl Watch {
                     None
                 }
             };
-        Self { terminate }
+        Self {
+            terminate,
+            lock_lost: None,
+        }
+    }
+
+    /// Also stand down when `lock_lost` resolves — see
+    /// [`crate::single_instance::watch_ownership`].
+    #[must_use]
+    pub fn on_lock_lost(mut self, lock_lost: tokio::sync::oneshot::Receiver<i32>) -> Self {
+        self.lock_lost = Some(lock_lost);
+        self
     }
 
     /// Resolve on the first signal asking the daemon to stop.
@@ -87,17 +109,37 @@ impl Watch {
     /// branches: `Signal::recv` is cancel-safe by contract, and a dropped
     /// `ctrl_c()` future leaves the process-wide handler installed.
     pub async fn recv(&mut self) -> Cause {
-        match self.terminate.as_mut() {
-            Some(terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => Cause::Interrupt,
-                    _ = terminate.recv() => Cause::Terminate,
+        // `Option::as_mut` + `futures::future::OptionFuture` would read better,
+        // but a never-resolving branch keeps this to one dependency-free
+        // `select!` whose arms are all cancel-safe.
+        let signalled = async {
+            match self.terminate.as_mut() {
+                Some(terminate) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => Cause::Interrupt,
+                        _ = terminate.recv() => Cause::Terminate,
+                    }
+                }
+                None => {
+                    let _ = tokio::signal::ctrl_c().await;
+                    Cause::Interrupt
                 }
             }
-            None => {
-                let _ = tokio::signal::ctrl_c().await;
-                Cause::Interrupt
+        };
+        match self.lock_lost.as_mut() {
+            Some(lock_lost) => {
+                tokio::select! {
+                    cause = signalled => cause,
+                    // A dropped sender (the watchdog task died) is not a lost
+                    // lock, so it must never masquerade as one: fall back to
+                    // waiting on the signals alone.
+                    owner = lock_lost => match owner {
+                        Ok(pid) => Cause::LockLost(pid),
+                        Err(_) => std::future::pending().await,
+                    },
+                }
             }
+            None => signalled.await,
         }
     }
 }
@@ -127,5 +169,36 @@ mod tests {
     fn each_cause_names_its_signal() {
         assert_eq!(Cause::Interrupt.as_str(), "SIGINT");
         assert_eq!(Cause::Terminate.as_str(), "SIGTERM");
+        assert_eq!(Cause::LockLost(7).as_str(), "lock-lost");
+    }
+
+    /// Losing the home is not a reason to kill the operator's attached panes:
+    /// the daemon that now owns the home adopts them.
+    #[test]
+    fn a_lost_lock_leaves_attached_sessions_alone() {
+        assert!(!Cause::LockLost(7).reaps_interactive_sessions());
+    }
+
+    #[tokio::test]
+    async fn a_resolved_watchdog_stands_the_daemon_down() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut watch = Watch::new().on_lock_lost(rx);
+        tx.send(9001).expect("send new owner");
+        assert_eq!(watch.recv().await, Cause::LockLost(9001));
+    }
+
+    /// A watchdog that died must not be read as a lost lock — that would shut
+    /// the daemon down on a task panic.
+    #[tokio::test]
+    async fn a_dropped_watchdog_is_not_a_lost_lock() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let mut watch = Watch::new().on_lock_lost(rx);
+        drop(tx);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), watch.recv())
+                .await
+                .is_err(),
+            "a dropped watchdog resolved the shutdown seam"
+        );
     }
 }

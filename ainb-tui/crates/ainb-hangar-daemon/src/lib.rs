@@ -788,7 +788,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // ONE id instead of claiming for an id nothing is bound to.
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
     cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
-    run(store.pool().clone(), cfg, stats, broker.sink()).await
+    // The ownership watchdog: the one layer that survives every exit path not
+    // running. If this daemon ever stops owning its home — an operator deleting
+    // the lock, a home restored from a backup — it stands down instead of
+    // racing the daemon that owns it now. Home-scoped by construction: it reads
+    // one file and signals nobody, so unlike an argv-matching reaper it can
+    // never touch a daemon serving a different home.
+    let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
+    let watchdog_dir = dir.clone();
+    tokio::spawn(async move {
+        let owner = crate::single_instance::watch_ownership(&watchdog_dir).await;
+        let _ = lost_tx.send(owner);
+    });
+
+    run(
+        store.pool().clone(),
+        cfg,
+        stats,
+        broker.sink(),
+        crate::shutdown::Watch::new().on_lock_lost(lost_rx),
+    )
+    .await
 }
 
 #[cfg(test)]

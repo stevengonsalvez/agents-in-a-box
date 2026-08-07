@@ -435,6 +435,7 @@ pub async fn run(
     cfg: DaemonConfig,
     stats: Arc<HealthStats>,
     events: EventSink,
+    mut shutdown: crate::shutdown::Watch,
 ) -> anyhow::Result<()> {
     // hangar-e2e-5: record the resolved headless OS-sandbox posture once at boot.
     // Without this line an exit-65 dispatch failure was ambiguous between "fix
@@ -472,7 +473,7 @@ pub async fn run(
         tracing::info!(claim = false, "claim loop disabled; sweepers only");
         // Same seam as the claim loop below: a sweepers-only daemon must answer
         // `daemon stop` too, and it holds the same ownership lock to release.
-        let cause = crate::shutdown::Watch::new().recv().await;
+        let cause = shutdown.recv().await;
         tracing::info!(signal = cause.as_str(), "ainb-hangar-daemon shutting down");
         return Ok(());
     };
@@ -521,10 +522,6 @@ pub async fn run(
     // a54 shutdown reap: the set of live interactive tmux sessions, so `Ctrl-C`
     // can kill each by exact name instead of orphaning a detached pane.
     let interactive = InteractiveSessions::default();
-    // Installed ONCE, outside the loop: re-registering a SIGTERM handler on every
-    // tick would churn a process-wide resource for no reason.
-    let mut shutdown = crate::shutdown::Watch::new();
-
     loop {
         tokio::select! {
             biased;

@@ -255,3 +255,60 @@ fn a_stale_lock_left_by_a_killed_daemon_is_reclaimed() {
         "the successor must own the home after stealing the stale lock"
     );
 }
+
+/// The layer that does not depend on any exit path running: a daemon that stops
+/// owning its home stands down by itself.
+///
+/// The impostor is a REAL second daemon (booted on its own home, so it is a
+/// legitimate process with daemon argv) whose pid is written into the first
+/// home's lock. Nothing signals the first daemon — it notices, which is the
+/// whole point: no reaper has to identify it, and no cross-home process
+/// matching is involved.
+#[test]
+fn a_daemon_that_loses_its_home_stands_down() {
+    let home = tempfile::tempdir().expect("tempdir home");
+    let elsewhere = tempfile::tempdir().expect("tempdir other home");
+
+    let mut incumbent = DaemonProcess::spawn(
+        home.path(),
+        &[CODEX_OFF, ("AINB_HANGAR_OWNERSHIP_WATCH_MS", "200")],
+    );
+    let holder = wait_for_lock(home.path());
+    wait_for_socket(home.path());
+
+    // A live daemon on a DIFFERENT home: real process, real daemon argv.
+    let successor = DaemonProcess::spawn(elsewhere.path(), &[CODEX_OFF]);
+    let successor_pid = i32::try_from(successor.pid()).expect("pid fits i32");
+    wait_for_lock(elsewhere.path());
+
+    // Hand the home over behind the incumbent's back.
+    std::fs::write(lock_path(home.path()), successor_pid.to_string()).expect("reassign the lock");
+
+    assert!(
+        incumbent.wait_for_exit(Duration::from_secs(30)),
+        "a daemon whose home was taken over must stand down (holder was {holder})"
+    );
+}
+
+/// The dangerous half of the watchdog: a MISSING lock is not proof of loss.
+///
+/// A daemon that exited on a transient read would be a worse bug than the one
+/// the watchdog watches for, so an absent file must leave it serving.
+#[test]
+fn a_missing_lock_does_not_shut_the_daemon_down() {
+    let home = tempfile::tempdir().expect("tempdir home");
+    let mut daemon = DaemonProcess::spawn(
+        home.path(),
+        &[CODEX_OFF, ("AINB_HANGAR_OWNERSHIP_WATCH_MS", "200")],
+    );
+    wait_for_lock(home.path());
+    wait_for_socket(home.path());
+
+    std::fs::remove_file(lock_path(home.path())).expect("remove the lock");
+
+    // Several watchdog ticks with no lock at all.
+    assert!(
+        !daemon.wait_for_exit(Duration::from_secs(3)),
+        "the daemon shut down over a missing lock file"
+    );
+}
