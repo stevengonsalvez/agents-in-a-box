@@ -25,6 +25,7 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         notch.click()
 
         waitFor(app.textFields["fleet.notch.search"])
+        waitFor(app.buttons["fleet.notch.quit"])
         XCTAssertFalse(app.buttons["fleet.notch.show-all"].exists, "separate Fleet window CTA must not exist")
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "expanded-notch"

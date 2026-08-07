@@ -12,10 +12,17 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(FleetRosterPresentation.visibleSessions(sessions, search: "", filters: .all).map(\.sessionKey), ["attention", "running-new", "running-old", "idle"])
     }
 
-    func testOnlyCanonicalFieldsParticipateInSearchAndFilters() {
-        let value = session(key: "codex-1", lifecycle: .running, attention: .approval)
+    func testSearchIncludesSessionIdentityAndCanonicalFields() {
+        let value = session(
+            key: "codex-1",
+            lifecycle: .running,
+            cwd: "/Users/stevie/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-minor-bugs--abcd",
+            attention: .approval
+        )
         XCTAssertTrue(FleetRosterPresentation.matches(value, search: "codex", filters: .attentionOnly))
-        XCTAssertTrue(FleetRosterPresentation.matches(value, search: "/workspace", filters: .all))
+        XCTAssertTrue(FleetRosterPresentation.matches(value, search: "/users/stevie", filters: .all))
+        XCTAssertTrue(FleetRosterPresentation.matches(value, search: "agents-in-a-box", filters: .all))
+        XCTAssertTrue(FleetRosterPresentation.matches(value, search: "f/minor-bugs", filters: .all))
         XCTAssertFalse(FleetRosterPresentation.matches(value, search: "request", filters: .all))
     }
 

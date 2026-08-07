@@ -117,7 +117,16 @@ enum FleetRosterPresentation {
 
     static func matches(_ session: FleetSession, search: String, filters: FleetRosterFilters) -> Bool {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let searchable = [session.sessionKey, session.displayName ?? "", session.cwd, session.provider.rawValue]
+        let identity = sessionIdentity(for: session)
+        let searchable = [
+            session.sessionKey,
+            session.displayName ?? "",
+            session.cwd,
+            session.provider.rawValue,
+            identity.repository,
+            identity.worktree ?? "",
+            identity.branch ?? "",
+        ]
         return (query.isEmpty || searchable.contains { $0.lowercased().contains(query) })
             && filters.focus.matches(session)
             && (!filters.attentionOnly || session.attention != .none)
