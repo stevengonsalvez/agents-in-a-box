@@ -3296,6 +3296,22 @@ impl EventHandler {
                 expected_version,
                 action,
             } => {
+                // An Offline daemon means the stream is down and cached rows are
+                // only good for "safe inspection" (see FleetDaemonHealth), which
+                // is exactly what the panel banner promises the user. Destructive
+                // and structured actions must not dispatch against that stale
+                // view. F5 / Ctrl-R force-refreshes back to Online, which is the
+                // intended way out of this state.
+                if action.is_high_risk() && !state.fleet_panel_state.daemon_online() {
+                    Self::reduce_fleet_event(
+                        state,
+                        FleetEvent::ActionFailed {
+                            session_key,
+                            detail: "Fleet daemon offline, high-risk action disabled".into(),
+                        },
+                    );
+                    return;
+                }
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
                     FleetAction::DismissStructured { .. } => "rejected interview",
