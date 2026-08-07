@@ -20,8 +20,9 @@ const SYSTEMD_UNIT: &str = "ainb-phone-bridge.service";
 /// Resolved paths used to build the service definition.
 #[derive(Debug, Clone)]
 pub struct ServicePaths {
-    /// The `ainb` binary to exec (ProgramArguments[0] / first ExecStart token).
-    /// Bare `ainb` unless `$AINB_BIN` overrides it — see [`resolve_paths`].
+    /// The `ainb` binary the unit's command runs. Bare `ainb` unless
+    /// `$AINB_BIN` overrides it — see [`resolve_paths`]. NOT necessarily
+    /// `argv[0]`: on launchd that is the shell wrapping this command.
     pub ainb_bin: String,
     /// `~/.agents-in-a-box/phone-bridge.log`.
     pub log_path: PathBuf,
@@ -32,11 +33,12 @@ pub struct ServicePaths {
 /// Resolve the service paths from the current process.
 ///
 /// The binary is deliberately NOT `current_exe()`: that freezes a
-/// version-scoped absolute path (`/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb`,
-/// `~/.cargo/bin/ainb`) into the unit, and the next `brew upgrade ainb` deletes
-/// it — launchd then exits 78 `EX_CONFIG` and parks the bridge in the penalty
-/// box forever. Bare `ainb` re-resolves at every launch against the `PATH` the
-/// unit carries; `$AINB_BIN` remains the explicit override. See issue #608.
+/// version-scoped absolute path (a `/opt/homebrew/Cellar/ainb/<version>/libexec`
+/// directory, `~/.cargo/bin/ainb`) into the unit, and the next
+/// `brew upgrade ainb` deletes it — launchd then exits 78 `EX_CONFIG` and parks
+/// the bridge in the penalty box forever. Bare `ainb` is looked up again at
+/// every launch, by the shell the unit runs it through (see [`daemon_argv`]);
+/// `$AINB_BIN` remains the explicit override. See issue #608.
 pub fn resolve_paths() -> Result<ServicePaths> {
     let ainb_bin = unit_program::ainb_bin_from(std::env::var("AINB_BIN").ok().as_deref());
     let mut log_path = dirs::home_dir().context("no home directory")?;
@@ -50,14 +52,19 @@ pub fn resolve_paths() -> Result<ServicePaths> {
     })
 }
 
-/// ProgramArguments / ExecStart argv: `<ainb> fleet bridge run`. No token, ever.
+/// The command the daemon runs: `<ainb> fleet bridge run`. No token, ever.
+const DAEMON_ARGS: [&str; 3] = ["fleet", "bridge", "run"];
+
+/// launchd `ProgramArguments`: `/bin/sh -c "exec <ainb> fleet bridge run"`.
+///
+/// The shell wrapper is load-bearing, not cosmetic. launchd resolves
+/// `ProgramArguments[0]` against its OWN job environment and ignores the
+/// plist's `EnvironmentVariables` PATH entirely, so a bare `ainb` there does
+/// not spawn at all — worse than the pinned path it replaces. Probed against
+/// launchd with this exact plist shape: bare `argv[0]` with the plist PATH set
+/// exits 78 `EX_CONFIG` and never runs, `/bin/sh -c "exec …"` exits 0.
 fn daemon_argv(paths: &ServicePaths) -> Vec<String> {
-    vec![
-        paths.ainb_bin.clone(),
-        "fleet".to_string(),
-        "bridge".to_string(),
-        "run".to_string(),
-    ]
+    unit_program::shell_wrapped_argv(&paths.ainb_bin, &DAEMON_ARGS)
 }
 
 // ── macOS launchd ───────────────────────────────────────────────────────────
@@ -178,15 +185,19 @@ fn systemd_unit_path() -> Result<PathBuf> {
 /// Render the systemd user unit. Public for unit testing.
 #[must_use]
 pub fn build_systemd_unit(paths: &ServicePaths) -> String {
-    let exec_start = daemon_argv(paths)
-        .iter()
-        .map(|a| {
-            if a.contains(char::is_whitespace) {
-                format!("\"{a}\"")
-            } else {
-                a.clone()
-            }
-        })
+    // Unlike launchd, systemd DOES resolve a non-absolute `ExecStart` against
+    // the $PATH the unit supplies via Environment=, so no shell wrapper is
+    // needed here — hence the direct argv rather than `daemon_argv`.
+    //
+    // Caveat, and the reason `bridge status` checks: that is systemd 250+
+    // behaviour. Older systemd searches a fixed compile-time list
+    // (/usr/local/bin:/usr/bin:/bin) that misses `~/.cargo/bin` and
+    // `~/.local/bin`, where an install outside that list needs the explicit
+    // $AINB_BIN override. Status reports such a unit as MISSING rather than
+    // certifying a service that can never start as healthy.
+    let exec_start = std::iter::once(paths.ainb_bin.as_str())
+        .chain(DAEMON_ARGS)
+        .map(unit_program::shell_quote)
         .collect::<Vec<_>>()
         .join(" ");
     let config_env = paths
@@ -194,13 +205,6 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
         .as_ref()
         .map(|c| format!("Environment=AINB_CONFIG_PATH={c}\n"))
         .unwrap_or_default();
-    // The unit carries its own PATH, exactly as the plist does. Without it a
-    // bare `ainb` would be resolved against systemd's fixed compile-time search
-    // path (/usr/local/bin:/usr/bin:/bin), which misses `~/.cargo/bin` and
-    // `~/.local/bin` — a $PATH supplied via Environment= is what systemd (250+)
-    // searches instead. On older systemd, an install outside the fixed list
-    // needs the explicit $AINB_BIN override; `bridge status` now says so out
-    // loud rather than reporting a unit that can never start as healthy.
     format!(
         "[Unit]\n\
          Description=ainb phone bridge (Telegram + Slack)\n\
@@ -294,15 +298,18 @@ pub fn status() -> Result<String> {
     if !unit.exists() {
         return Ok(format!("{kind}: not installed ({})", unit.display()));
     }
-    let note = std::fs::read_to_string(&unit)
-        .ok()
-        .and_then(|text| unit_program::missing_program(&text))
-        .map_or_else(String::new, |program| {
-            format!(
-                ", program MISSING ({program})\n  \
-                 ↳ the bridge can never start — re-run `ainb fleet bridge install` to repoint it"
-            )
-        });
+    let health = match std::fs::read_to_string(&unit) {
+        Ok(text) => unit_program::unit_program_health(&text),
+        Err(e) => {
+            unit_program::ProgramHealth::Unreadable(format!("cannot read {}: {e}", unit.display()))
+        }
+    };
+    let note = health.problem().map_or_else(String::new, |problem| {
+        format!(
+            ", {problem}\n  \
+             ↳ the bridge can never start — re-run `ainb fleet bridge install` to repoint it"
+        )
+    });
     Ok(format!("{kind}: installed ({}){note}", unit.display()))
 }
 
@@ -318,13 +325,16 @@ mod tests {
         }
     }
 
+    /// A Cellar path for a version that cannot be installed, so the "moved
+    /// binary" assertions never depend on what this host happens to have.
+    const GONE: &str = "/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb";
+
     #[test]
     fn plist_argv_is_fleet_bridge_run_and_carries_no_token() {
         let xml = build_plist(&paths());
-        assert!(xml.contains("<string>ainb</string>"));
-        assert!(xml.contains("<string>fleet</string>"));
-        assert!(xml.contains("<string>bridge</string>"));
-        assert!(xml.contains("<string>run</string>"));
+        assert!(xml.contains("<string>/bin/sh</string>"));
+        assert!(xml.contains("<string>-c</string>"));
+        assert!(xml.contains("<string>exec ainb fleet bridge run</string>"));
         // No token leakage: nothing token-ish in the rendered plist.
         let lower = xml.to_lowercase();
         assert!(!lower.contains("token"), "plist must never embed a token");
@@ -367,9 +377,9 @@ mod tests {
     }
 
     /// Regression for issue #608: `ainb fleet bridge install` on a homebrew
-    /// install pinned `/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb` — a
-    /// VERSION directory that the next `brew upgrade` deletes. Nothing derived
-    /// from `current_exe()` may reach a unit.
+    /// install pinned the Cellar VERSION directory, which the next
+    /// `brew upgrade` deletes. Nothing derived from `current_exe()` may reach
+    /// a unit.
     #[test]
     fn units_do_not_pin_an_absolute_binary_path() {
         let resolved = resolve_paths().expect("resolve_paths");
@@ -384,33 +394,54 @@ mod tests {
             "systemd unit pinned current_exe: {unit}"
         );
 
-        // Absent an explicit $AINB_BIN override, argv[0] carries no directory
-        // component at all, so there is no Cellar/cargo prefix to go stale.
+        // Absent an explicit $AINB_BIN override, the program the unit actually
+        // runs carries no directory component, so there is no Cellar/cargo
+        // prefix that a later upgrade can invalidate.
         if std::env::var("AINB_BIN").unwrap_or_default().is_empty() {
             for text in [&plist, &unit] {
-                let program = unit_program::unit_program(text).expect("argv[0]");
-                assert_eq!(program, "ainb", "argv[0] should be bare, got {program}");
+                let program = unit_program::unit_program_health(text)
+                    .program()
+                    .map(str::to_string)
+                    .expect("program");
+                assert_eq!(program, "ainb", "program should be bare, got {program}");
             }
         }
     }
 
-    /// A bare argv[0] is only exec'able if the unit tells the scheduler where
-    /// to look; systemd otherwise searches a fixed compile-time path.
+    /// launchd will NOT PATH-search `ProgramArguments[0]`; it resolves it
+    /// against its own job environment and ignores the plist's
+    /// `EnvironmentVariables` PATH. So the plist must hand it an absolute
+    /// `/bin/sh` and let the shell — which does honour PATH — find `ainb`.
+    /// A bare `ainb` here would not spawn at all.
     #[test]
-    fn units_carry_the_path_their_bare_argv0_needs() {
+    fn launchd_gets_an_absolute_program_and_defers_lookup_to_the_shell() {
+        let plist = build_plist(&paths());
+        let argv0 = plist
+            .split_once("<key>ProgramArguments</key>")
+            .and_then(|(_, rest)| rest.split_once("<string>"))
+            .and_then(|(_, rest)| rest.split_once("</string>"))
+            .map(|(v, _)| v.trim().to_string())
+            .expect("argv[0]");
+        assert_eq!(argv0, "/bin/sh");
+        assert!(
+            std::path::Path::new(&argv0).is_absolute(),
+            "launchd cannot spawn a non-absolute argv[0]"
+        );
+        // And the PATH the shell will use is still written into the plist.
+        assert!(plist.contains("<key>PATH</key>"));
+    }
+
+    /// systemd, unlike launchd, DOES resolve a non-absolute `ExecStart`
+    /// against the `$PATH` the unit supplies, so no shell wrapper is needed —
+    /// but the unit must actually supply that PATH.
+    #[test]
+    fn systemd_unit_carries_the_path_its_bare_exec_start_needs() {
         let expected = unit_program::unit_path_env();
         let unit = build_systemd_unit(&paths());
+        assert!(unit.contains("ExecStart=ainb fleet bridge run"));
         assert!(
             unit.contains(&format!("Environment=\"PATH={expected}\"")),
             "systemd unit carries no PATH: {unit}"
-        );
-        assert_eq!(
-            unit_program::unit_search_path(&unit).as_deref(),
-            Some(&*expected)
-        );
-        assert_eq!(
-            unit_program::unit_search_path(&build_plist(&paths())).as_deref(),
-            Some(&*expected)
         );
     }
 
@@ -419,32 +450,63 @@ mod tests {
     /// so the bare case is judged against the unit's own PATH.
     #[test]
     fn status_flags_a_unit_whose_program_is_missing() {
-        let plist = build_plist(&paths());
-        let unit = build_systemd_unit(&paths());
-        // Substitute argv[0] where it actually sits — bare `ainb` is too short
-        // to replace safely across a whole unit (the log path contains it).
-        let repoint = |text: &str, to: &str| {
-            text.replace("<string>ainb</string>", &format!("<string>{to}</string>"))
-                .replace("ExecStart=ainb ", &format!("ExecStart={to} "))
+        use unit_program::ProgramHealth;
+
+        // Repoint the binary at the one place it appears in each flavour: the
+        // shell command string for launchd, the ExecStart line for systemd.
+        let repoint = |to: &str| {
+            let mut p = paths();
+            p.ainb_bin = to.to_string();
+            [build_plist(&p), build_systemd_unit(&p)]
         };
 
-        for base in [&plist, &unit] {
-            let stale = repoint(
-                base,
-                "/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb",
-            );
+        for stale in repoint(GONE) {
             assert_eq!(
-                unit_program::missing_program(&stale),
-                Some("/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb".into()),
+                unit_program::unit_program_health(&stale),
+                ProgramHealth::Missing(GONE.into()),
                 "moved binary not flagged: {stale}"
             );
-
-            let healthy = repoint(base, "sh");
+        }
+        // `ls`, not `sh`: a shell name is treated as a wrapper and unwrapped,
+        // so it cannot stand in for an ordinary resolvable binary here.
+        for healthy in repoint("ls") {
             assert_eq!(
-                unit_program::missing_program(&healthy),
-                None,
+                unit_program::unit_program_health(&healthy),
+                ProgramHealth::Resolves("ls".into()),
                 "resolvable binary wrongly flagged: {healthy}"
             );
         }
+    }
+
+    /// The wrapper must not become a blindfold: `/bin/sh` always resolves, so
+    /// a detector reading `argv[0]` would certify every broken bridge as
+    /// healthy — the exact bug class #608 is about.
+    #[test]
+    fn the_shell_wrapper_does_not_hide_a_dead_binary_from_status() {
+        let mut p = paths();
+        p.ainb_bin = GONE.to_string();
+        let plist = build_plist(&p);
+        assert!(
+            plist.contains("<string>/bin/sh</string>"),
+            "premise: {plist}"
+        );
+        assert_eq!(
+            unit_program::unit_program_health(&plist).program(),
+            Some(GONE)
+        );
+    }
+
+    /// A stale unit installed by an older ainb has no shell wrapper at all.
+    /// It must still be judged on its pinned binary, not reported unreadable.
+    #[test]
+    fn a_legacy_unwrapped_unit_is_still_flagged() {
+        let legacy = format!(
+            "<key>ProgramArguments</key>\n<array>\n\t<string>{GONE}</string>\n\t\
+             <string>fleet</string>\n\t<string>bridge</string>\n\t<string>run</string>\n</array>"
+        );
+        assert_eq!(
+            unit_program::unit_program_health(&legacy),
+            unit_program::ProgramHealth::Missing(GONE.into())
+        );
     }
 }
