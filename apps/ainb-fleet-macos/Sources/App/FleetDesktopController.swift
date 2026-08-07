@@ -516,7 +516,10 @@ private struct FleetUsageView: View {
                 }
                 .pickerStyle(.segmented)
                 Spacer()
-                Button("Refresh") { store.refreshUsage(period: period) }
+                Button("Refresh") {
+                    store.refreshUsage(period: period)
+                    store.refreshQuota()
+                }
                     .disabled(!store.canReadUsage)
             }
 
@@ -534,12 +537,18 @@ private struct FleetUsageView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear { store.refreshUsage(period: period) }
+        .onAppear {
+            store.refreshUsage(period: period)
+            store.refreshQuota()
+        }
         .onChange(of: period) { _, value in store.refreshUsage(period: value) }
         .accessibilityIdentifier("fleet.notch.usage")
     }
 
     @ViewBuilder private func usage(_ summary: FleetUsageSummaryResult) -> some View {
+        if let quotaSummary = store.quotaSummary {
+            quotaCard(quotaSummary)
+        }
         if let total = summary.totals {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -576,6 +585,60 @@ private struct FleetUsageView: View {
                 Text(summary.detail ?? "Daemon returned no usable usage projection.").font(.caption)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder private func quotaCard(_ summary: FleetQuotaSummaryResult) -> some View {
+        if !summary.providers.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Live quota", systemImage: "gauge.with.dots.needle.67percent")
+                        .font(.headline)
+                    Spacer()
+                    Text(summary.state == .ready ? "Live" : summary.state.rawValue.capitalized)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(summary.state == .ready ? .mint : .orange)
+                }
+                ForEach(summary.providers, id: \.provider) { provider in
+                    HStack(spacing: 10) {
+                        Text(provider.provider.capitalized)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 58, alignment: .leading)
+                        quotaWindow("5h", window: provider.fiveHour)
+                        quotaWindow("Week", window: provider.sevenDay)
+                    }
+                }
+                if let detail = summary.detail {
+                    Text(detail).font(.caption).foregroundStyle(FleetNotchPalette.muted)
+                }
+            }
+            .padding(14)
+            .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if let detail = summary.detail {
+            Label(detail, systemImage: "gauge.with.dots.needle.67percent")
+                .font(.caption)
+                .foregroundStyle(FleetNotchPalette.muted)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    @ViewBuilder private func quotaWindow(_ label: String, window: FleetQuotaWindow?) -> some View {
+        if let window {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(label) · \(window.remainingPercent)% left")
+                    .font(.caption.weight(.semibold))
+                if let reset = window.resetsAt {
+                    Text(Date(timeIntervalSince1970: TimeInterval(reset) / 1_000), style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(FleetNotchPalette.muted)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 9)
+            .background(FleetNotchPalette.canvas, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
     }
 
