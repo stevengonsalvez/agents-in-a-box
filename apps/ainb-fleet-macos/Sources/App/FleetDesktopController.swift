@@ -97,7 +97,8 @@ final class FleetDesktopController: NSObject {
     }
 
     private func setNotchExpanded(_ expanded: Bool) {
-        DispatchQueue.main.async { [weak self] in self?.positionNotch() }
+        guard let panel = notchPanel else { return }
+        panel.setFrame(FleetNotchGeometry.frame(expanded: expanded, on: notchScreen(for: panel)), display: true)
     }
 
     func open(_ url: URL) {
@@ -114,11 +115,12 @@ final class FleetDesktopController: NSObject {
     }
 
     private func positionNotch() {
-        guard let panel = notchPanel,
-              let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-        else { return }
-        let frame = screen.frame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - panel.frame.height))
+        guard let panel = notchPanel else { return }
+        panel.setFrame(FleetNotchGeometry.frame(expanded: navigation.isExpanded, on: notchScreen(for: panel)), display: true)
+    }
+
+    private func notchScreen(for panel: NSWindow) -> NSScreen? {
+        panel.screen ?? NSScreen.main ?? NSScreen.screens.first
     }
 }
 
@@ -201,10 +203,7 @@ private struct FleetNotchView: View {
     }
 
     private var notchSize: CGSize {
-        let requested = CGSize(width: navigation.isExpanded ? 920 : 320, height: navigation.isExpanded ? 720 : 38)
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? CGRect(origin: .zero, size: requested)
-        return CGSize(width: min(requested.width, visible.width), height: min(requested.height, visible.height))
+        FleetNotchGeometry.size(expanded: navigation.isExpanded, on: NSScreen.main)
     }
 
     private var expandedContent: some View {
@@ -226,6 +225,14 @@ private struct FleetNotchView: View {
                         Label(providerLabel, systemImage: "slider.horizontal.3")
                     }
                     .accessibilityIdentifier("fleet.notch.provider-filter")
+                    Menu {
+                        ForEach(FleetRosterFocus.allCases) { focus in
+                            Button(focus.label) { presentation.preferences.filters.focus = focus }
+                        }
+                    } label: {
+                        Label(presentation.preferences.filters.focus.label, systemImage: "line.3.horizontal.decrease.circle")
+                    }
+                    .accessibilityIdentifier("fleet.notch.focus-filter")
                     Button(action: toggleExpanded) { Image(systemName: "xmark") }
                         .accessibilityLabel("Close Fleet controls")
                 }
@@ -289,21 +296,6 @@ private struct FleetNotchView: View {
     private var rosterContent: some View {
         VStack(alignment: .leading, spacing: 14) {
 
-            if navigation.route == .sessions {
-                ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(FleetRosterFocus.allCases) { focus in
-                        FleetNotchFocusChip(
-                            focus: focus,
-                            selected: presentation.preferences.filters.focus == focus
-                        ) {
-                            toggleFocus(focus)
-                        }
-                    }
-                }
-            }
-            }
-
             HStack {
                 Text("\(routedSessions.count) of \(store.sessions.count) sessions")
                     .font(.caption.weight(.medium))
@@ -362,34 +354,24 @@ private struct FleetNotchView: View {
         store.selectedSessionKey = routedSessions.first?.sessionKey
     }
 
-    private func toggleFocus(_ focus: FleetRosterFocus) {
-        if presentation.preferences.filters.focus == focus, focus != .all {
-            presentation.preferences.filters.focus = .all
-        } else {
-            presentation.preferences.filters.focus = focus
-        }
-    }
 }
 
-private struct FleetNotchFocusChip: View {
-    let focus: FleetRosterFocus
-    let selected: Bool
-    let toggle: () -> Void
+private enum FleetNotchGeometry {
+    static func size(expanded: Bool, on screen: NSScreen?) -> CGSize {
+        let requested = CGSize(width: expanded ? 920 : 320, height: expanded ? 720 : 38)
+        let available = screen?.frame.size ?? requested
+        return CGSize(width: min(requested.width, available.width), height: min(requested.height, available.height))
+    }
 
-    var body: some View {
-        Button(action: toggle) {
-            Text(focus.label)
-                .font(.subheadline.weight(selected ? .bold : .medium))
-                .foregroundStyle(selected ? .black : Color.white.opacity(0.92))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(selected ? FleetNotchPalette.mint : FleetNotchPalette.control, in: Capsule())
-                .overlay {
-                    Capsule().stroke(selected ? FleetNotchPalette.mint : FleetNotchPalette.muted.opacity(0.35), lineWidth: 1)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("fleet.notch.filter.\(focus.rawValue)")
+    static func frame(expanded: Bool, on screen: NSScreen?) -> NSRect {
+        guard let screen else { return NSRect(origin: .zero, size: size(expanded: expanded, on: nil)) }
+        let size = size(expanded: expanded, on: screen)
+        return NSRect(
+            x: screen.frame.midX - size.width / 2,
+            y: screen.frame.maxY - size.height,
+            width: size.width,
+            height: size.height
+        )
     }
 }
 
