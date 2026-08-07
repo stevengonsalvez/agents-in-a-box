@@ -2530,6 +2530,9 @@ async fn execute_fleet_action(
             request_fingerprint,
             ..
         }
+        | ControlAction::ReleaseStructured {
+            request_fingerprint,
+        }
         | ControlAction::ReconcileStructured {
             request_fingerprint,
         }
@@ -2695,6 +2698,12 @@ async fn execute_fleet_action(
                 } if session.provider == "claude" => {
                     execute_claude_structured_dismiss(&session, request_fingerprint).await
                 }
+                ControlAction::ReleaseStructured {
+                    request_fingerprint,
+                } if session.provider == "claude" => {
+                    execute_claude_structured_release(pool, events, &session, request_fingerprint)
+                        .await
+                }
                 ControlAction::ReconcileStructured {
                     request_fingerprint,
                 } if session.provider == "claude" => {
@@ -2736,6 +2745,7 @@ async fn execute_fleet_action(
                 }
                 ControlAction::StructuredAnswer { .. }
                 | ControlAction::DismissStructured { .. }
+                | ControlAction::ReleaseStructured { .. }
                 | ControlAction::ReconcileStructured { .. }
                 | ControlAction::Approve { .. }
                 | ControlAction::ApproveForSession { .. }
@@ -3749,6 +3759,115 @@ async fn execute_claude_structured_dismiss(
     }
 }
 
+/// Yield one exact Fleet-held interview back to Claude's native picker.
+///
+/// The broker remains the compare-and-swap authority for this transition. The
+/// follow-up event preserves the same request fingerprint and payload, adding
+/// only the delivery-route marker consumed by Fleet clients after refresh.
+async fn execute_claude_structured_release(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
+    let Some(mut request) =
+        (match crate::fleet::current_request_wire(pool, &session.session_key).await {
+            Ok(request) => request,
+            Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+        })
+    else {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("current Claude question is absent".to_string()),
+        );
+    };
+    let session_id = session.provider_session_id.clone().unwrap_or_default();
+    let fingerprint = request_fingerprint.to_string();
+    let socket = match approve_socket_path() {
+        Ok(socket) => socket,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let released = match tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_release_structured(&socket, &session_id, &fingerprint)
+    })
+    .await
+    {
+        Ok(Ok(ack)) if ack.matched => true,
+        Ok(Ok(ack)) if ack.stale => {
+            return (
+                ActionReceiptStatus::Failed,
+                Some("Claude structured request is stale".to_string()),
+            );
+        }
+        Ok(Ok(ack)) => {
+            return (
+                ActionReceiptStatus::Failed,
+                ack.error.or_else(|| Some("Claude request no longer waiting".to_string())),
+            );
+        }
+        Ok(Err(error)) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    if !released {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("Claude request no longer waiting".to_string()),
+        );
+    }
+
+    let object = request.as_object_mut();
+    let Some(object) = object else {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("stored Claude question payload is invalid".to_string()),
+        );
+    };
+    object.insert(
+        "fleet_delivery".to_string(),
+        serde_json::Value::String("native_claude".to_string()),
+    );
+    let event = NewFleetEvent {
+        event_id: format!(
+            "fleet-native-picker:{}:{request_fingerprint}",
+            session.session_key
+        ),
+        session_key: session.session_key.clone(),
+        observed_at: SystemClock.now_ms(),
+        authority: ObservationAuthority::Authoritative,
+        event_type: "AskUserQuestion".to_string(),
+        payload: request.to_string(),
+        patch: FleetSessionPatch {
+            lifecycle_state: Some("IDLE".to_string()),
+            attention_state: Some("ASK".to_string()),
+            current_request_fingerprint: Some(Some(request_fingerprint.to_string())),
+            ..FleetSessionPatch::default()
+        },
+    };
+    match FleetRepo::apply_event(pool, &event).await {
+        Ok(result) => {
+            if !result.duplicate {
+                events.emit_fleet_revision(result.revision);
+            }
+            (
+                ActionReceiptStatus::Delivered,
+                Some("released to Claude native picker".to_string()),
+            )
+        }
+        Err(error) => (
+            ActionReceiptStatus::Failed,
+            Some(format!("released to Claude, Fleet refresh failed: {error}")),
+        ),
+    }
+}
+
 async fn reconcile_claude_structured(
     pool: &SqlitePool,
     events: &EventSink,
@@ -3762,6 +3881,15 @@ async fn reconcile_claude_structured(
     use ainb_hangar_proto::fleet::ActionReceiptStatus;
     use ainb_hangar_store::repo::fleet::{
         FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
+    let native_picker = match crate::fleet::current_request_wire(pool, &session.session_key).await {
+        Ok(Some(request)) => request
+            .get("fleet_delivery")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|route| route == "native_claude"),
+        Ok(None) => false,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
 
     let socket = match approve_socket_path() {
@@ -3787,6 +3915,16 @@ async fn reconcile_claude_structured(
             Some("Claude interview is live".to_string()),
         );
     }
+    // Generic transcript text cannot prove which interview it belongs to. A
+    // normal Fleet-held interview therefore stays visible until Claude emits
+    // its authoritative tool lifecycle event. Only the explicit native route
+    // owns a uniquely identifiable terminal widget to reconcile here.
+    if !native_picker {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("Claude interview liveness is unresolved; Fleet card retained".to_string()),
+        );
+    }
     let Some(target) = session.tmux_target.as_deref() else {
         return (
             ActionReceiptStatus::Unknown,
@@ -3797,7 +3935,8 @@ async fn reconcile_claude_structured(
         Ok(pane) => pane,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
-    if !claude_interview_was_declined(&pane) {
+    let native_picker_closed = !claude_native_picker_is_visible(&pane);
+    if !native_picker_closed {
         return (
             ActionReceiptStatus::Unknown,
             Some("Claude interview liveness is unresolved; Fleet card retained".to_string()),
@@ -3832,15 +3971,22 @@ async fn reconcile_claude_structured(
             }
             (
                 ActionReceiptStatus::Delivered,
-                Some("Claude interview ended, cleared stale Fleet card".to_string()),
+                Some(if native_picker_closed {
+                    "Claude native picker completed, cleared Fleet card".to_string()
+                } else {
+                    "Claude interview ended, cleared stale Fleet card".to_string()
+                }),
             )
         }
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
     }
 }
 
-fn claude_interview_was_declined(pane: &str) -> bool {
-    pane.contains("User declined to answer questions")
+/// Claude's own AskUserQuestion widget always exposes this fixed interaction
+/// footer while it owns terminal input. Native-route reconciliation only clears
+/// a card after that footer disappears, never while the picker remains active.
+fn claude_native_picker_is_visible(pane: &str) -> bool {
+    pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
 }
 
 fn approve_socket_path() -> std::io::Result<PathBuf> {
@@ -4550,9 +4696,9 @@ fn action_capability(
 ) -> bool {
     use ainb_hangar_proto::fleet::ControlAction;
     match action {
-        ControlAction::StructuredAnswer { .. } | ControlAction::ReconcileStructured { .. } => {
-            capabilities.structured_answer
-        }
+        ControlAction::StructuredAnswer { .. }
+        | ControlAction::ReleaseStructured { .. }
+        | ControlAction::ReconcileStructured { .. } => capabilities.structured_answer,
         ControlAction::DismissStructured { .. } => capabilities.structured_dismiss,
         ControlAction::Approve { .. } | ControlAction::Deny { .. } => capabilities.approvals,
         ControlAction::ApproveForSession { .. } => capabilities.approval_session,
@@ -11054,6 +11200,16 @@ mod tests {
         assert!(action_capability(&capabilities, &action));
     }
 
+    #[test]
+    fn native_claude_picker_footer_controls_reconcile_clearance() {
+        assert!(claude_native_picker_is_visible(
+            "Release proof?\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+        ));
+        assert!(!claude_native_picker_is_visible(
+            "User answered Claude's questions: Release proof? → East"
+        ));
+    }
+
     #[tokio::test]
     async fn fleet_reproject_uses_daemon_broker_for_live_revision() {
         use ainb_hangar_proto::fleet::{
@@ -11169,16 +11325,6 @@ mod tests {
             session.current_request_fingerprint.as_deref(),
             Some("fingerprint-1")
         );
-    }
-
-    #[test]
-    fn declined_claude_interview_requires_native_completion_text() {
-        assert!(claude_interview_was_declined(
-            "User declined to answer questions\n · Where? (North / South)"
-        ));
-        assert!(!claude_interview_was_declined(
-            "Where is the place? (North / South)"
-        ));
     }
 
     #[tokio::test]
