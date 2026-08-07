@@ -8543,7 +8543,7 @@ fn run_daemon_stop() -> Result<()> {
 }
 
 /// `hangar daemon restart`: `stop` (if running) then `start`.
-fn run_daemon_restart() -> Result<()> {
+pub(crate) fn run_daemon_restart() -> Result<()> {
     run_daemon_stop()?;
     run_daemon_start()
 }
