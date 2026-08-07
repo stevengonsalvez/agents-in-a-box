@@ -445,10 +445,20 @@ mod tests {
     /// false positive the whole check exists to remove.
     #[test]
     fn an_unrecognised_unit_is_unknown_not_healthy() {
-        let health = unit_program_health("this is not a unit");
-        assert!(matches!(health, ProgramHealth::Unreadable(_)));
-        assert!(health.problem().unwrap().contains("UNKNOWN"));
-        assert_eq!(health.program(), None);
+        for junk in ["", "this is not a unit", "<plist><dict></dict></plist>"] {
+            let health = unit_program_health(junk);
+            assert!(
+                matches!(health, ProgramHealth::Unreadable(_)),
+                "junk unit reported as {health:?}"
+            );
+            assert!(health.problem().unwrap().contains("UNKNOWN"));
+            assert_eq!(health.program(), None);
+        }
+        assert!(
+            ProgramHealth::Unreadable("boom".into())
+                .problem()
+                .is_some_and(|p| p.contains("UNKNOWN"))
+        );
     }
 
     #[test]
