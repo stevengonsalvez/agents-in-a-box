@@ -336,6 +336,43 @@ async fn send_prints_json_on_stdout_and_exits_zero() {
     .await;
 }
 
+/// A body may LEAD with a dash. `-y do the thing` is an ordinary message, and
+/// before `allow_hyphen_values` clap read it as an unknown flag, so the send
+/// never left the CLI. That is the same symptom the run command's tmux send
+/// had, on the path most users will now take.
+#[tokio::test]
+async fn send_accepts_a_dash_prefixed_body() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "msg",
+            "send",
+            "--target",
+            "claude:one",
+            "--text",
+            "-y ship it",
+            "--request-id",
+            "req-dash",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "a dash-prefixed body must reach the daemon; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value =
+                serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+            assert_eq!(parsed["deliveries"][0]["state"], "DELIVERED");
+        },
+    )
+    .await;
+}
+
 /// `-` reads the body from stdin, so a long prompt never has to fit in argv.
 #[tokio::test]
 async fn send_reads_the_body_from_stdin() {
