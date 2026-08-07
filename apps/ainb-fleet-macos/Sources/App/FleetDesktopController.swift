@@ -68,7 +68,7 @@ final class FleetDesktopController: NSObject {
                     defer: false
                 )
             } else {
-                panel = NSPanel(
+                panel = FleetNotchPanel(
                     contentRect: NSRect(origin: .zero, size: size),
                     styleMask: [.borderless, .nonactivatingPanel],
                     backing: .buffered,
@@ -80,6 +80,7 @@ final class FleetDesktopController: NSObject {
             panel.hasShadow = false
             panel.level = FleetAppConfiguration.isUITest ? .floating : .statusBar
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            (panel as? NSPanel)?.becomesKeyOnlyIfNeeded = true
             let contentView = NSHostingView(rootView: FleetNotchView(
                 store: store,
                 presentation: presentation,
