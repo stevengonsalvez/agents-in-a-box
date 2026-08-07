@@ -70,6 +70,9 @@ fn seeded_snapshot() -> DaemonHealthSnapshot {
         // version-skew banner — the skew case is exercised by its own test.
         daemon_version: env!("CARGO_PKG_VERSION").into(),
         db_error: None,
+        // No ACP pool in the baseline fixture: the pane renders the classic
+        // runtimes view, which is what these goldens pin.
+        acp_pool: None,
     }
 }
 

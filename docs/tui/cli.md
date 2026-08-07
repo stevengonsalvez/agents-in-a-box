@@ -2019,6 +2019,8 @@ Commands:
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   msg           Chat bus: persisted messages with per-recipient delivery receipts
+  acp           ACP sessions: daemon-owned headless agents that answer on the chat bus
+  transcript    Page or follow one session's full execution transcript
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
   cost          Per-session / model / day / group spend rollups + budget caps
@@ -2040,6 +2042,8 @@ EXAMPLES:
   ainb fleet broadcast "git pull" --all     Send a prompt to every session
   ainb fleet msg send --target <key> --text hi  Chat-bus message with receipts
   ainb fleet msg follow --format json   Stream chat messages as NDJSON
+  ainb fleet acp create --provider claude-agent-acp --cwd .  Mint an ACP session
+  ainb fleet transcript <key> --follow  Stream one session's execution log
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
   ainb fleet approve <session-id>  Approve that session's pending permission request
@@ -2196,6 +2200,66 @@ Usage: ainb fleet msg follow [OPTIONS]
 Options:
       --after <after>    Resume after this message id (default: the log head)
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet acp`
+
+ACP sessions: daemon-owned headless agents that answer on the chat bus
+
+```console
+$ ainb fleet acp --help
+ACP sessions: daemon-owned headless agents that answer on the chat bus
+
+Usage: ainb fleet acp [OPTIONS] <COMMAND>
+
+Commands:
+  create  Mint an ACP session; no adapter starts until its first message
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet acp create`
+
+Mint an ACP session; no adapter starts until its first message
+
+```console
+$ ainb fleet acp create --help
+Mint an ACP session; no adapter starts until its first message
+
+Usage: ainb fleet acp create [OPTIONS] --provider <provider> --cwd <cwd>
+
+Options:
+      --format <format>      Output format [default: text] [possible values: text, json, csv, markdown]
+      --provider <provider>  Adapter token (claude-agent-acp, codex-acp)
+      --cwd <cwd>            Working directory for the session (resolved to an absolute path)
+      --scope <scope>        Explicit scope key (default: session:<session_key>)
+  -h, --help                 Print help
+
+Creating is idempotent per live scope: a second create for the same --scope returns the existing session_key.
+```
+
+### `ainb fleet transcript`
+
+Page or follow one session's full execution transcript
+
+```console
+$ ainb fleet transcript --help
+Page or follow one session's full execution transcript
+
+Usage: ainb fleet transcript [OPTIONS] <session_key>
+
+Arguments:
+  <session_key>  The session whose transcript to read
+
+Options:
+      --after <after>    Return chunks after this ingest_order
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <limit>    Page size (clamped to the daemon's maximum) [default: 50]
+      --follow           Stream chunks until stopped; NDJSON under --format json. They arrive DURING the turn, not after it
   -h, --help             Print help
 ```
 

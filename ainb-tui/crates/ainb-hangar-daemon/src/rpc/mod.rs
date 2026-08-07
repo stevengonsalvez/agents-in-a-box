@@ -1172,6 +1172,9 @@ async fn handle(
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
+        methods::FLEET_ACP_SESSION_CREATE => {
+            handle_fleet_acp_session_create(pool, req, events).await
+        }
         methods::FLEET_RUNTIME_STATUS => handle_fleet_runtime_status(req, health).await,
         methods::FLEET_USAGE_SUMMARY => handle_fleet_usage_summary(req).await,
         methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
@@ -1764,8 +1767,15 @@ async fn message_send_inner(
     let mut deliveries = Vec::with_capacity(targets.len());
     for session_key in &targets {
         let leg_fingerprint = message_leg_request_id(&row.id, session_key);
-        let (mut status, mut detail) =
-            deliver_message_leg(pool, &leg_fingerprint, session_key, &params.text, events).await;
+        let (mut status, mut detail) = deliver_message_leg(
+            pool,
+            &leg_fingerprint,
+            &row.id,
+            session_key,
+            &params.text,
+            events,
+        )
+        .await;
         // A store fault while recording the outcome downgrades THIS leg to
         // UNKNOWN, never the whole request: the earlier legs already submitted
         // verified prompts, so answering `Err` would invite a retry under a
@@ -1846,6 +1856,7 @@ fn message_leg_request_id(message_id: &str, session_key: &str) -> String {
 async fn deliver_message_leg(
     pool: &SqlitePool,
     leg_request_id: &str,
+    message_id: &str,
     session_key: &str,
     text: &str,
     events: &EventSink,
@@ -1892,13 +1903,24 @@ async fn deliver_message_leg(
                 Some("target_not_running".to_string()),
             );
         }
-        // ACP recipients join the bus in a later phase; until their action arms
-        // exist a chat send must not fall through to the tmux machinery.
-        if session.provider == "acp" {
-            return (
-                ActionReceiptStatus::Rejected,
-                Some("target_not_tmux; ACP recipients are not wired yet".to_string()),
-            );
+        // The ACP leg. It NEVER goes through `execute_fleet_action`: the prompt
+        // runs in the recipient's own ACP session and the delivery stays
+        // PENDING until TURN END, which the pool resolves through the same
+        // claim/resolve receipt path. Returning a terminal state here would
+        // mean answering "delivered" for a turn that has not started.
+        if session.provider == crate::acp_pool::ACP_PROVIDER_TOKEN {
+            let (status, detail) = acp_delivery_leg(message_id, session_key, text).await;
+            record_acp_leg_receipt(
+                pool,
+                leg_request_id,
+                message_id,
+                &session,
+                text,
+                status,
+                detail.as_deref(),
+            )
+            .await;
+            return (status, detail);
         }
         let sent_version = session.version;
         let receipt = execute_fleet_action(
@@ -1943,6 +1965,70 @@ async fn deliver_message_leg(
                 );
             }
         }
+    }
+}
+
+/// Write the ACP leg's action receipt, which its `execute_fleet_action` bypass
+/// would otherwise skip entirely.
+///
+/// A tmux leg gets its receipt from `execute_fleet_action`. The ACP leg
+/// deliberately never goes through that function, so without this one
+/// `fleet/message_send` answered `fleet/receipt_get` for a tmux recipient and
+/// `null` for an ACP one, and the asymmetry was invisible until an operator
+/// queried the leg id and got nothing back.
+///
+/// TERMINAL, exactly like the operator `SendPrompt` arm and for the same
+/// reason: nothing reopens an action receipt once its handler returns, so a
+/// PENDING one would be flipped to `UNKNOWN` by the first reader while the turn
+/// was still running perfectly well. The turn's real outcome lives in the
+/// DELIVERY leg, and the detail names the message so the follow-up is obvious.
+async fn record_acp_leg_receipt(
+    pool: &SqlitePool,
+    leg_request_id: &str,
+    message_id: &str,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    text: &str,
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+    detail: Option<&str>,
+) {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
+    use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+    let action = ControlAction::SendPrompt {
+        text: text.to_string(),
+    };
+    let Ok(action_json) = serde_json::to_string(&action) else {
+        return;
+    };
+    let (status, detail) = if status == ActionReceiptStatus::Pending {
+        (
+            ActionReceiptStatus::Delivered,
+            Some(format!("acp_queued; message {message_id}")),
+        )
+    } else {
+        (status, detail.map(str::to_string))
+    };
+    let now = SystemClock.now_ms();
+    let receipt = NewActionReceipt {
+        request_id: leg_request_id.to_string(),
+        session_key: session.session_key.clone(),
+        action_kind: action.kind().to_string(),
+        action_fingerprint: stable_fingerprint(&action_json),
+        expected_version: session.version,
+        idempotency_key: None,
+        status: receipt_status_token(status).to_string(),
+        detail,
+        session_version: Some(session.version),
+        created_at: now,
+        updated_at: now,
+    };
+    if let Err(error) = FleetRepo::upsert_action_receipt(pool, &receipt).await {
+        tracing::error!(
+            session_key = %session.session_key,
+            %message_id,
+            %error,
+            "could not record the acp delivery leg's action receipt"
+        );
     }
 }
 
@@ -2465,10 +2551,30 @@ async fn execute_fleet_action(
         pool,
         &params.session_key,
         params.expected_version,
-        request_fingerprint,
+        // Applied BELOW instead, because ACP sessions are exempt from it.
+        None,
     )
     .await
     .map_err(fleet_repo_err)?;
+    // The fingerprint gate is a STALENESS check for providers whose session row
+    // carries the one request they are blocked on. An ACP session can be blocked
+    // on SEVERAL at once (an adapter running parallel tool calls raises a
+    // `session/request_permission` per call) and the row has room for exactly
+    // one, so enforcing equality here would make every ask but the newest
+    // permanently unanswerable and hold its adapter until the turn deadline.
+    // The pool's parked map is the authority there: a fingerprint that is
+    // already answered, or was never raised, comes back `NotWaiting`.
+    if session.provider != crate::acp_pool::ACP_PROVIDER_TOKEN
+        && request_fingerprint.is_some_and(|expected| {
+            session.current_request_fingerprint.as_deref() != Some(expected)
+        })
+    {
+        return Err(fleet_repo_err(
+            ainb_hangar_store::repo::fleet::FleetRepoError::RequestFingerprintMismatch {
+                session_key: params.session_key.clone(),
+            },
+        ));
+    }
     let capabilities: ainb_hangar_proto::fleet::FleetCapabilities =
         serde_json::from_str(&session.capabilities).unwrap_or_default();
 
@@ -2544,6 +2650,13 @@ async fn execute_fleet_action(
             key,
         )
         .await
+    } else if session.provider == crate::acp_pool::ACP_PROVIDER_TOKEN {
+        // The I8 trap, exactly where the plan retargeted it (graft 8): an ACP
+        // session's action is answered HERE, ahead of every tmux fallthrough.
+        // Without this arm a `SendPrompt` would fall into `verified_tmux_send`
+        // and report "exact tmux process identity is unavailable" for a session
+        // that has no tmux pane by design.
+        execute_acp_action(pool, &session, &params.action).await
     } else {
         if session.provider == "codex" {
             match crate::fleet_provider::codex_manager::active_handle().await {
@@ -4019,6 +4132,412 @@ fn normalize_picker_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Mint an ACP session: the `fleet_session` + `fleet_acp_session` PAIR under one
+/// `session_key`, in ONE transaction, with NO process spawn.
+///
+/// R3's entry point. Without it no ACP recipient can ever exist, and
+/// `message_send` deliberately never auto-provisions one. The pool spawns the
+/// adapter lazily on the first prompt, so a create that never receives a message
+/// costs nothing but a row.
+async fn handle_fleet_acp_session_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
+    };
+    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
+    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
+
+    require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
+    let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
+    if params.cwd.trim().is_empty() {
+        return Err(invalid_params("cwd must not be empty"));
+    }
+    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(invalid_params("scope_key must not be empty"));
+    }
+    // Validated against the ADAPTER REGISTRY, not the schema: the store only
+    // length-checks `provider` so the next adapter needs no migration, which
+    // makes this the one place an unknown token is refused.
+    let acp = crate::acp_pool::active_handle().await;
+    let known = acp.as_ref().map_or_else(
+        || ainb_acp::config::AdapterConfig::is_known_adapter(&params.provider),
+        |pool| pool.config().knows(&params.provider),
+    );
+    if !known {
+        return Err(invalid_params(&format!(
+            "unknown ACP provider {:?}; known adapters are {} and {}",
+            params.provider,
+            ainb_acp::config::CLAUDE_ADAPTER,
+            ainb_acp::config::CODEX_ADAPTER
+        )));
+    }
+    let permission_mode = acp.as_ref().map_or_else(
+        || "default".to_string(),
+        |pool| pool.config().permission_mode(&params.provider),
+    );
+
+    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
+    let scope_key = params.scope_key.clone().unwrap_or_else(|| format!("session:{session_key}"));
+    let now = SystemClock.now_ms();
+    let event = NewFleetEvent {
+        event_id: format!("acp-session-create:{session_key}"),
+        session_key: session_key.clone(),
+        observed_at: now,
+        authority: ObservationAuthority::Authoritative,
+        event_type: "acp_session_created".to_string(),
+        payload: serde_json::json!({
+            "provider": params.provider,
+            "cwd": params.cwd,
+            "scopeKey": scope_key,
+            "permissionMode": permission_mode,
+        })
+        .to_string(),
+        patch: FleetSessionPatch {
+            // `acp` on the WIRE, with the concrete adapter in
+            // `fleet_acp_session.provider`. The snapshot maps this token to
+            // `FleetProvider::Acp`; anything else would render as Unknown.
+            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
+            cwd: Some(params.cwd.clone()),
+            management_state: Some("MANAGED".to_string()),
+            capabilities: Some(acp_capabilities()),
+            confidence: Some("HIGH".to_string()),
+            lifecycle_state: Some("IDLE".to_string()),
+            attention_state: Some("NONE".to_string()),
+            transport_health: Some("HEALTHY".to_string()),
+            ..FleetSessionPatch::default()
+        },
+    };
+    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
+        pool,
+        &NewFleetAcpSession {
+            session_key: session_key.clone(),
+            scope_key,
+            provider: params.provider.clone(),
+            cwd: params.cwd.clone(),
+            permission_mode,
+            state: "IDLE".to_string(),
+            created_at: now,
+            last_active_at: now,
+        },
+        &event,
+    )
+    .await
+    .map_err(|error| internal(&format!("acp session create: {error}")))?;
+    // The scope was ALREADY held by a live session, so this create replayed onto
+    // it instead of minting the key above. Idempotent only while the caller
+    // asked for the same SESSION: answering a `codex-acp` create with a live
+    // `claude-agent-acp` key would silently hand back a session that prompts a
+    // DIFFERENT agent than the caller believes it is driving, and answering a
+    // create for `~/work/api` with a session rooted at `~/work/web` would run
+    // every later prompt against a different repository. Both misroute in
+    // silence for the whole life of the scope. Graft 4 rejects the same class
+    // of replay on `fleet_message`; this is its ACP twin.
+    if row.session_key != session_key {
+        let mismatch = if row.provider == params.provider {
+            (row.cwd != params.cwd).then(|| ("cwd", row.cwd.clone(), params.cwd.clone()))
+        } else {
+            Some(("provider", row.provider.clone(), params.provider.clone()))
+        };
+        if let Some((field, held, asked)) = mismatch {
+            return Err(invalid_params(&format!(
+                "scope_key {:?} is already held by a session whose {field} is {held:?}, \
+                 not {asked:?}; stop it before creating a different one",
+                row.scope_key
+            )));
+        }
+    }
+    if let Some(revision) = revision {
+        events.emit_fleet_revision(revision);
+    }
+    to_value(&FleetAcpSessionCreateResult {
+        session_key: row.session_key,
+        scope_key: row.scope_key,
+    })
+}
+
+/// EXACTLY the actions Phase 5 wires, and nothing else.
+///
+/// `action_capability` gates on this JSON before any handler runs, so an unset
+/// flag is a Rejected receipt rather than an action that reaches the pool and
+/// fails somewhere less legible.
+fn acp_capabilities() -> String {
+    serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
+        structured_answer: true,
+        structured_dismiss: false,
+        approvals: true,
+        approval_session: false,
+        send_prompt: true,
+        continue_turn: false,
+        retry: false,
+        interrupt: true,
+        start: false,
+        stop: true,
+        restart: false,
+        kill: true,
+        archive: false,
+        // An ACP session has no pane. Leaving these true would make the tmux
+        // surfaces offer attach/paste for a session that can never honour it.
+        tmux_attach: false,
+        tmux_text: false,
+        verified_picker: false,
+    })
+    .unwrap_or_else(|_| "{}".to_string())
+}
+
+/// One chat delivery to an ACP recipient: persist nothing new, just hand the
+/// prompt to the pool and leave the leg PENDING for turn end.
+async fn acp_delivery_leg(
+    message_id: &str,
+    session_key: &str,
+    text: &str,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use crate::acp_pool::SubmitOutcome;
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+
+    let Some(acp) = crate::acp_pool::active_handle().await else {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("acp_pool_unavailable".to_string()),
+        );
+    };
+    match acp.submit_prompt(session_key, message_id, text).await {
+        SubmitOutcome::Queued => (ActionReceiptStatus::Pending, None),
+        SubmitOutcome::Rejected(detail) => {
+            (ActionReceiptStatus::Rejected, Some(detail.to_string()))
+        }
+    }
+}
+
+/// Every `fleet/action` an ACP session accepts.
+///
+/// The permission arms are R8's answer leg: today a non-claude provider falls
+/// to `(Unknown, "authoritative provider request transport is not active")`,
+/// which would make every ACP permission unanswerable.
+async fn execute_acp_action(
+    pool: &SqlitePool,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    action: &ainb_hangar_proto::fleet::ControlAction,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use crate::acp_pool::{ConvergeCause, PermissionDecision, SubmitOutcome};
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
+
+    let Some(acp) = crate::acp_pool::active_handle().await else {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("acp_pool_unavailable".to_string()),
+        );
+    };
+    match action {
+        ControlAction::SendPrompt { text } if text.trim().is_empty() => (
+            ActionReceiptStatus::Rejected,
+            Some(DETAIL_EMPTY_PROMPT.to_string()),
+        ),
+        ControlAction::SendPrompt { text } => {
+            // An operator prompt joins the SAME bus a chat message does, so it
+            // gets a message row, a delivery leg, and a threaded reply rather
+            // than a turn nothing can correlate afterwards.
+            match acp_operator_message(pool, &session.session_key, text).await {
+                Ok(message_id) => {
+                    let outcome = acp.submit_prompt(&session.session_key, &message_id, text).await;
+                    match outcome {
+                        // The ACTION receipt is terminal here on purpose: the
+                        // prompt is durably on the bus and its real outcome
+                        // lives in the DELIVERY leg, which the pool resolves at
+                        // turn end. A Pending action receipt would never
+                        // advance, because nothing reopens an action receipt
+                        // once its handler returns, so `fleet/receipt_get` on an
+                        // ACP prompt would hang forever on a receipt no code
+                        // path owns. The detail names the message so the
+                        // follow-up query is obvious.
+                        SubmitOutcome::Queued => (
+                            ActionReceiptStatus::Delivered,
+                            Some(format!("acp_queued; message {message_id}")),
+                        ),
+                        // The leg was written with the message row, so a refusal
+                        // MUST resolve it here. Left PENDING it survives until
+                        // some later boot scan, and the chat path (which does
+                        // resolve it) and this one would disagree about the same
+                        // rejection.
+                        SubmitOutcome::Rejected(detail) => {
+                            let leg_fingerprint =
+                                message_leg_request_id(&message_id, &session.session_key);
+                            if let Err(error) = record_leg_outcome(
+                                pool,
+                                &message_id,
+                                &session.session_key,
+                                &leg_fingerprint,
+                                ActionReceiptStatus::Rejected,
+                                Some(detail),
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    session_key = %session.session_key,
+                                    %message_id,
+                                    %error,
+                                    "could not resolve a refused acp operator prompt's leg"
+                                );
+                            }
+                            (ActionReceiptStatus::Rejected, Some(detail.to_string()))
+                        }
+                    }
+                }
+                Err(error) => (
+                    ActionReceiptStatus::Failed,
+                    Some(format!("store_error; {error}")),
+                ),
+            }
+        }
+        ControlAction::Approve {
+            request_fingerprint,
+            ..
+        }
+        | ControlAction::Deny {
+            request_fingerprint,
+            ..
+        } => {
+            let decision = if matches!(action, ControlAction::Approve { .. }) {
+                PermissionDecision::Approve
+            } else {
+                PermissionDecision::Deny
+            };
+            acp_permission_receipt(
+                acp.answer_permission(&session.session_key, request_fingerprint, decision).await,
+            )
+        }
+        ControlAction::StructuredAnswer {
+            request_fingerprint,
+            answers,
+            ..
+        } => {
+            // The structured answer IS the option id: ACP permissions are a
+            // closed set the adapter offered, so anything else is refused
+            // rather than guessed at.
+            let Some(option) = answers.first().and_then(|answer| {
+                answer.selected_options.first().or(answer.text.as_ref()).map(String::as_str)
+            }) else {
+                return (
+                    ActionReceiptStatus::Rejected,
+                    Some("structured answer must name one adapter option id".to_string()),
+                );
+            };
+            acp_permission_receipt(
+                acp.answer_permission(
+                    &session.session_key,
+                    request_fingerprint,
+                    PermissionDecision::Option(option.to_string()),
+                )
+                .await,
+            )
+        }
+        ControlAction::Interrupt | ControlAction::Stop => {
+            if acp.cancel(&session.session_key, ConvergeCause::OperatorStop).await {
+                (
+                    ActionReceiptStatus::Delivered,
+                    Some("acp session/cancel".to_string()),
+                )
+            } else {
+                (
+                    ActionReceiptStatus::Rejected,
+                    Some("no live ACP turn to cancel".to_string()),
+                )
+            }
+        }
+        ControlAction::Kill => {
+            if acp.teardown(&session.session_key, ConvergeCause::OperatorStop).await {
+                (
+                    ActionReceiptStatus::Delivered,
+                    Some("acp session closed".to_string()),
+                )
+            } else {
+                (
+                    ActionReceiptStatus::Rejected,
+                    Some("no live ACP session to close".to_string()),
+                )
+            }
+        }
+        _ => (
+            ActionReceiptStatus::Rejected,
+            Some(DETAIL_CAPABILITY_UNAVAILABLE.to_string()),
+        ),
+    }
+}
+
+/// Map the pool's answer routing onto a receipt an operator can read.
+fn acp_permission_receipt(
+    answer: crate::acp_pool::PermissionAnswer,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use crate::acp_pool::PermissionAnswer;
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+
+    match answer {
+        PermissionAnswer::Delivered(option) => (
+            ActionReceiptStatus::Delivered,
+            Some(format!("acp permission answered; option {option}")),
+        ),
+        PermissionAnswer::NotWaiting => (
+            ActionReceiptStatus::Failed,
+            Some("ACP permission is no longer waiting".to_string()),
+        ),
+        PermissionAnswer::UnknownOption => (
+            ActionReceiptStatus::Rejected,
+            Some("the adapter never offered that option".to_string()),
+        ),
+        PermissionAnswer::NoSession => (
+            ActionReceiptStatus::Failed,
+            Some("no live ACP session for this key".to_string()),
+        ),
+    }
+}
+
+/// Persist an operator's direct `SendPrompt` as a chat message plus its leg, so
+/// the ACP turn resolves through exactly one receipt path.
+async fn acp_operator_message(
+    pool: &SqlitePool,
+    session_key: &str,
+    text: &str,
+) -> Result<String, sqlx::Error> {
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+    use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
+
+    let scope_key = FleetAcpSessionRepo::get(pool, session_key)
+        .await?
+        .map_or_else(|| format!("session:{session_key}"), |row| row.scope_key);
+    let row = FleetMessageRepo::insert_message_with_deliveries(
+        pool,
+        &NewFleetMessage {
+            id: SystemIdGen.new_ulid(),
+            request_id: None,
+            request_fingerprint: None,
+            scope_key,
+            origin_message_id: None,
+            sender: "operator".to_string(),
+            kind: "user".to_string(),
+            body: text.to_string(),
+            created_at: SystemClock.now_ms(),
+        },
+        std::slice::from_ref(&session_key.to_string()),
+    )
+    .await
+    .map_err(|error| match error {
+        ainb_hangar_store::repo::fleet_message::FleetMessageError::Sql(sql) => sql,
+        other => sqlx::Error::Protocol(other.to_string()),
+    })?;
+    Ok(row.id)
 }
 
 fn action_capability(
@@ -10316,6 +10835,13 @@ async fn daemon_health_snapshot(
         // Live drift probe: a stale daemon serving a newer database (or a dead
         // database file) must surface as a loud banner, not silent zero stats.
         db_error: ainb_hangar_store::schema_drift(pool).await,
+        // "Why is the copilot stuck?" must be answerable from ONE pane, so the
+        // pool's queue depths, in-flight ages and breaker state ride the same
+        // health snapshot the runtime rows do. `None` when no pool is running.
+        acp_pool: match crate::acp_pool::active_handle().await {
+            Some(acp) => Some(acp.health().await),
+            None => None,
+        },
     })
 }
 

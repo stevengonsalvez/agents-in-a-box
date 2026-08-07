@@ -51,10 +51,11 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, CloseSessionRequest, ContentBlock, InitializeRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, PromptResponse, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionModeRequest, TextContent,
+    NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest, TextContent,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, JsonRpcRequest};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, JsonRpcRequest, Responder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -153,6 +154,98 @@ pub struct AgentInfo {
     pub version: Option<String>,
 }
 
+/// One `session/request_permission` the adapter is BLOCKED on.
+///
+/// The adapter cannot make progress until this is answered, so the responder is
+/// carried (not answered inline): the daemon raises an attention row, the human
+/// answers through `fleet/action`, and only then does this reply reach the
+/// adapter's pending JSON-RPC id. A dropped `PermissionRequest` is answered
+/// `Cancelled` by the upstream responder's own cancellation, so an unanswered
+/// permission can never wedge the adapter forever.
+pub struct PermissionRequest {
+    /// The adapter's request, verbatim.
+    pub request: RequestPermissionRequest,
+    responder: Responder<RequestPermissionResponse>,
+}
+
+impl std::fmt::Debug for PermissionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionRequest")
+            .field("session_id", &self.session_id())
+            .field("options", &self.option_ids())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PermissionRequest {
+    /// The ACP session this permission belongs to (the demux key).
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.request.session_id.to_string()
+    }
+
+    /// The adapter's pending JSON-RPC request id, as JSON.
+    ///
+    /// Carried onto the fleet event so an operator can correlate the attention
+    /// row with the adapter's own log line.
+    #[must_use]
+    pub fn rpc_id(&self) -> serde_json::Value {
+        self.responder.id()
+    }
+
+    /// Every option id the adapter offered, in its order.
+    #[must_use]
+    pub fn option_ids(&self) -> Vec<String> {
+        self.request.options.iter().map(|option| option.option_id.to_string()).collect()
+    }
+
+    /// The option ids paired with their human labels, for the attention row.
+    #[must_use]
+    pub fn options_wire(&self) -> Vec<serde_json::Value> {
+        self.request
+            .options
+            .iter()
+            .map(|option| {
+                serde_json::json!({
+                    "optionId": option.option_id.to_string(),
+                    "name": option.name,
+                    "kind": option.kind,
+                })
+            })
+            .collect()
+    }
+
+    /// Answer with one of the adapter's own option ids.
+    ///
+    /// An id the adapter never offered is refused HERE rather than sent: the
+    /// adapter would answer `-32602` and the turn would fail for a reason no
+    /// operator could read back from the receipt.
+    pub fn answer_selected(self, option_id: &str) -> Result<(), AcpError> {
+        if !self.option_ids().iter().any(|id| id == option_id) {
+            return Err(AcpError::InvalidParams {
+                method: "session/request_permission",
+                message: format!("option {option_id:?} was not offered by the adapter"),
+            });
+        }
+        self.responder
+            .respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                    option_id.to_string(),
+                )),
+            ))
+            .map_err(|error| AcpError::Transport(error.message))
+    }
+
+    /// Answer `Cancelled`: the operator declined, or the session is going away.
+    pub fn answer_cancelled(self) -> Result<(), AcpError> {
+        self.responder
+            .respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ))
+            .map_err(|error| AcpError::Transport(error.message))
+    }
+}
+
 /// One running adapter process, hosting many ACP sessions (graft 6).
 ///
 /// Dropping this kills the child (`kill_on_drop`) and ends the connection task.
@@ -164,7 +257,7 @@ pub struct AdapterProcess {
     supports_load: bool,
     observed_modes: Arc<Mutex<HashMap<String, String>>>,
     shutdown: Option<oneshot::Sender<()>>,
-    child: Child,
+    child: Mutex<Child>,
 }
 
 impl AdapterProcess {
@@ -175,6 +268,7 @@ impl AdapterProcess {
     pub async fn spawn(
         config: &AdapterConfig,
         updates: mpsc::UnboundedSender<SessionNotification>,
+        permissions: mpsc::UnboundedSender<PermissionRequest>,
     ) -> Result<Self, AcpError> {
         let mut child = spawn_child(config)?;
         let stdin = child
@@ -187,7 +281,13 @@ impl AdapterProcess {
             .ok_or_else(|| AcpError::Transport("adapter stdout was not piped".to_string()))?;
 
         let observed_modes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
-        let connection = connect(stdin, stdout, updates, Arc::clone(&observed_modes));
+        let connection = connect(
+            stdin,
+            stdout,
+            updates,
+            permissions,
+            Arc::clone(&observed_modes),
+        );
         let (connection, shutdown) = connection.await?;
 
         let initialized = send_within_spawn_timeout(
@@ -217,8 +317,33 @@ impl AdapterProcess {
             connection,
             observed_modes,
             shutdown: Some(shutdown),
-            child,
+            child: Mutex::new(child),
         })
+    }
+
+    /// Whether the adapter's stdout is still open.
+    ///
+    /// The pool consults this BEFORE it issues a prompt, which is what makes
+    /// the I6 "provably never reached the adapter" branch provable: a prompt
+    /// refused here was never written, so requeueing it cannot double-deliver.
+    /// Once `session/prompt` has been issued the answer is no longer knowable
+    /// and the outcome is UNKNOWN, never a blind resend.
+    pub fn is_alive(&self) -> bool {
+        !self.connection.is_incoming_closed()
+    }
+
+    /// Resolve when the adapter's incoming stream closes, i.e. when the process
+    /// died or shut down. The pool's convergence trigger.
+    pub async fn wait_closed(&self) {
+        self.connection.incoming_closed().await;
+    }
+
+    /// SIGKILL the child without consuming the process handle, so a teardown
+    /// path that only holds an `Arc` can still stop it.
+    pub fn kill(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.start_kill();
+        }
     }
 
     /// The adapter token this process serves.
@@ -327,8 +452,18 @@ impl AdapterProcess {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
+        self.kill();
+        let waited = {
+            let Ok(mut child) = self.child.lock() else {
+                return;
+            };
+            child.try_wait().ok().flatten()
+        };
+        if waited.is_none() {
+            // `kill_on_drop` reaps whatever this misses; a blocking wait here
+            // would need the lock held across an await point.
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn assert_mode(
@@ -432,6 +567,7 @@ async fn connect<I, O>(
     stdin: I,
     stdout: O,
     updates: mpsc::UnboundedSender<SessionNotification>,
+    permissions: mpsc::UnboundedSender<PermissionRequest>,
     observed_modes: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<(ConnectionTo<Agent>, oneshot::Sender<()>), AcpError>
 where
@@ -439,23 +575,46 @@ where
     O: AsyncRead + Send + Unpin + 'static,
 {
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
-    let builder = Client.builder().name("ainb-acp").on_receive_notification(
-        async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
-            if let SessionUpdate::CurrentModeUpdate(update) = &notification.update {
-                if let Ok(mut modes) = observed_modes.lock() {
-                    modes.insert(
-                        notification.session_id.to_string(),
-                        update.current_mode_id.to_string(),
-                    );
+    let builder = Client
+        .builder()
+        .name("ainb-acp")
+        .on_receive_notification(
+            async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
+                if let SessionUpdate::CurrentModeUpdate(update) = &notification.update {
+                    if let Ok(mut modes) = observed_modes.lock() {
+                        modes.insert(
+                            notification.session_id.to_string(),
+                            update.current_mode_id.to_string(),
+                        );
+                    }
                 }
-            }
-            // A closed receiver means the pool is gone; the connection task
-            // stops on its own shutdown signal, not on this.
-            let _ = updates.send(notification);
-            Ok(())
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+                // A closed receiver means the pool is gone; the connection task
+                // stops on its own shutdown signal, not on this.
+                let _ = updates.send(notification);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        // R8's inbound leg. The handler PARKS the responder rather than
+        // answering: the whole point of the permission surface is that a human
+        // decides, and the adapter is blocked meanwhile by protocol design.
+        // Auto-answering here (the upstream example's YOLO shape) is exactly
+        // the silent-approval hazard the spike found.
+        .on_receive_request(
+            async move |request: RequestPermissionRequest,
+                        responder: Responder<RequestPermissionResponse>,
+                        _cx: ConnectionTo<Agent>| {
+                if let Err(error) = permissions.send(PermissionRequest { request, responder }) {
+                    // Nobody is listening (the pool is gone). Dropping the
+                    // parked request answers it `Cancelled` through the
+                    // responder's own cancellation, which unblocks the adapter
+                    // rather than wedging it.
+                    drop(error);
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
 
     let (connection_tx, connection_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

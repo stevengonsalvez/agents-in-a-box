@@ -57,7 +57,9 @@ async fn mode_is_the_requested_one(adapter: &str) {
     let Some(config) = gated(adapter) else { return };
     let requested = config.permission_mode.clone();
     let (tx, _rx) = mpsc::unbounded_channel();
-    let process = AdapterProcess::spawn(&config, tx).await.expect("spawn real adapter");
+    let process = AdapterProcess::spawn(&config, tx, permission_sink())
+        .await
+        .expect("spawn real adapter");
     eprintln!(
         "real adapter {adapter} reported agentInfo {:?}",
         process.info()
@@ -92,7 +94,9 @@ async fn secret_word_survives_a_reload(adapter: &str) {
     let cwd = std::env::temp_dir();
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let first = AdapterProcess::spawn(&config, tx).await.expect("spawn real adapter");
+    let first = AdapterProcess::spawn(&config, tx, permission_sink())
+        .await
+        .expect("spawn real adapter");
     if !first.supports_load() {
         eprintln!("skipped: {adapter} does not advertise loadSession");
         return;
@@ -108,7 +112,9 @@ async fn secret_word_survives_a_reload(adapter: &str) {
     drop(first);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let second = AdapterProcess::spawn(&config, tx).await.expect("respawn real adapter");
+    let second = AdapterProcess::spawn(&config, tx, permission_sink())
+        .await
+        .expect("respawn real adapter");
     second.load_session(&session, Path::new(&cwd)).await.expect("session/load");
 
     // `session/load` replays the ENTIRE history as notifications, the secret
@@ -164,4 +170,14 @@ async fn claude_agent_acp_recalls_a_secret_word_after_reload() {
 #[ignore = "real adapter + credentials"]
 async fn codex_acp_recalls_a_secret_word_after_reload() {
     secret_word_survives_a_reload(CODEX_ADAPTER).await;
+}
+
+/// A permission sink nothing reads: these suites drive the protocol legs, not
+/// R8's answer path (that lives in the daemon's pool tests). Dropping the
+/// receiver would answer every ask `Cancelled`, so the sender is leaked
+/// deliberately to keep the fixture's behaviour unchanged.
+fn permission_sink() -> tokio::sync::mpsc::UnboundedSender<ainb_acp::client::PermissionRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::forget(rx);
+    tx
 }

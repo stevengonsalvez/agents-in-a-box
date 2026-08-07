@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 
 use crate::cli::OutputFormat;
 
+pub mod acp;
 pub mod approve;
 pub mod atc;
 pub mod bridge;
@@ -39,6 +40,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("standup", sub)) => standup::execute(sub, format).await,
         Some(("broadcast", sub)) => broadcast::execute(sub, format).await,
         Some(("msg", sub)) => msg::execute(sub, format).await,
+        Some(("acp", sub)) => acp::execute(sub, format).await,
+        Some(("transcript", sub)) => acp::execute_transcript(sub, format).await,
         Some(("sequence", sub)) => sequence::execute(sub, format).await,
         Some(("needs", sub)) => needs::execute(sub, format).await,
         Some(("runtime", sub)) => runtime::execute(sub, format).await,
