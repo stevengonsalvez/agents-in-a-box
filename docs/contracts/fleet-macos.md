@@ -16,6 +16,30 @@ depend on the TUI, CLI output, daemon database, or Rust internals.
 | Authentication and socket handlers | `ainb-tui/crates/ainb-hangar-daemon/src/rpc/` | `apps/ainb-fleet-macos/Sources/FleetRPC/HangarLocation.swift` and `FleetConnection.swift` |
 | Executable daemon fixture | `ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs` | `apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift` |
 
+## Standalone runtime
+
+Fleet setup is an explicit CLI provisioning step:
+
+```sh
+ainb fleet runtime install
+```
+
+It idempotently starts or repairs the Hangar daemon and notifyd, then installs
+supported provider hooks. The app never invokes this command or interprets its
+output. After setup it discovers the daemon socket and token, negotiates the
+public protocol, then reports hook health through `fleet/runtime_status`.
+
+## Fleet-only read RPCs
+
+| Method | Capability | Purpose | Safety rule |
+| --- | --- | --- | --- |
+| `fleet/runtime_status` | `fleet.runtime.read` | Provider-hook installation and delivery health | No paths, logs, credentials, or hook files cross the boundary. |
+| `fleet/usage_summary` | `fleet.usage.read` | Bounded canonical provider Usage for today, 7 days, or 30 days | No transcripts or raw provider histories cross the boundary. Cost is absent when daemon pricing is unknown. |
+
+Fleet calls either method only after a compatible `fleet/negotiate` result
+advertises its capability. Missing capabilities remain unavailable UI states,
+never client-side fallback reads.
+
 ## Change rules
 
 - Adding optional response fields is compatible until Fleet needs to display them.
