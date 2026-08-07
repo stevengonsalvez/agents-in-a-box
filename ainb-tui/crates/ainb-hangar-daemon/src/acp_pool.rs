@@ -193,6 +193,31 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
+    /// [`PoolConfig::default`] with the turn deadline overridden by
+    /// `AINB_ACP_TURN_DEADLINE_MS` when it names a positive number.
+    ///
+    /// The 30-minute default is right for a human waiting on a real adapter and
+    /// useless to a smoke run that has to PROVE the deadline converges a wedged
+    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`). The sweep interval
+    /// follows the deadline down, because a 15 s sweep cannot observe a 2 s
+    /// deadline promptly; it is never lengthened, so the production cadence is
+    /// untouched when the variable is unset or junk.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Some(ms) = std::env::var("AINB_ACP_TURN_DEADLINE_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+        {
+            config.turn_deadline = Duration::from_millis(ms);
+            config.sweep_interval = config
+                .sweep_interval
+                .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+        }
+        config
+    }
+
     /// The pinned permission mode for `provider`, or `default`.
     #[must_use]
     pub fn permission_mode(&self, provider: &str) -> String {
