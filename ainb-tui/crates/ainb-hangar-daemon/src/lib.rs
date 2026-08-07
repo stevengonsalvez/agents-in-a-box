@@ -486,7 +486,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     let acp_pool = crate::acp_pool::AcpPool::new(
         store.clone(),
         broker.sink(),
-        crate::acp_pool::PoolConfig::default(),
+        crate::acp_pool::PoolConfig::from_env(),
     );
     let _acp_sweeper = acp_pool.spawn_sweeper();
     crate::acp_pool::install(acp_pool).await;

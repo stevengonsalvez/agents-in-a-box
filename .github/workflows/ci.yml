@@ -12,6 +12,9 @@ on:
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main, v2]
+  # The chat-bus smoke lane is opt-in and boots real processes; manual dispatch
+  # is how an operator asks for it without labelling a PR.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -468,6 +471,41 @@ jobs:
           workspaces: "ainb-tui -> target"
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run -p ainb-acp --all-features --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Live chat-bus smoke — OPT-IN, same posture as the `#[ignore]`d real-adapter
+  # probes.
+  #
+  # It boots a real hangar daemon, a private tmux server and real ACP adapter
+  # processes, which is more than every PR should pay for; and unlike the unit
+  # lanes a red run here can also mean "this runner has no tmux", so it is not
+  # a gate. Ask for it by labelling a PR `chat-bus-smoke`, by setting the repo
+  # variable AINB_CHAT_BUS_SMOKE=1, or by dispatching the workflow.
+  # ────────────────────────────────────────────────────────────────────────────
+  chat-bus-smoke:
+    name: Chat bus live smoke (opt-in)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      vars.AINB_CHAT_BUS_SMOKE == '1' ||
+      contains(github.event.pull_request.labels.*.name, 'chat-bus-smoke')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - name: Install the harness's tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux jq sqlite3
+      # Journeys print `SMOKE-RESULT <journey> <PASS|FAIL|SKIP> <reason>`; the
+      # script exits non-zero if any journey FAILs. A SKIP (for example the
+      # resume journey against a daemon without Phase 6) keeps the lane green
+      # and says so in the log.
+      - name: Live chat-bus smoke
+        run: bash scripts/chat-bus-smoke.sh
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
