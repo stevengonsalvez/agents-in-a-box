@@ -105,6 +105,12 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             let _ = timer::teardown(&meta.name);
         } else {
             timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
+            // Pinning `current_exe()` used to guarantee the unit pointed at a
+            // real binary. Resolving at firing time does not, so say so now
+            // rather than reporting a successful setup that can never fire.
+            if let Some(warning) = timer::install_would_be_unrunnable(&meta) {
+                eprintln!("warning: heartbeat timer installed but {warning}");
+            }
         }
     }
 
@@ -407,6 +413,12 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     }
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta)?)?;
     let timer_installed = timer::is_installed(&name);
+    // A unit file existing is NOT the same as a working timer: if the binary it
+    // names cannot be found, launchd exits 78 EX_CONFIG and parks the job
+    // forever while `installed: true` keeps claiming health.
+    let timer_health = timer::installed_program_health(&name);
+    let timer_program = timer_health.program().map(str::to_string);
+    let timer_problem = timer_health.problem();
     let session_running = tmux_session_exists(&meta.tmux_session()).await;
 
     // Heartbeat staleness (M-A1): the heartbeat stamps `last_heartbeat_ms` every
@@ -435,6 +447,8 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
         "heartbeat_interval_min": meta.heartbeat_interval_min,
         "idle_pause_min": meta.idle_pause_min,
         "timer_installed": timer_installed,
+        "timer_program": timer_program,
+        "timer_program_problem": timer_problem,
         "session_running": session_running,
         "tmux_session": meta.tmux_session(),
         "last_heartbeat_ms": last_heartbeat_ms,
@@ -449,8 +463,11 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             "  session:   {} (running: {session_running})",
             meta.tmux_session()
         );
+        let program_note = timer_problem
+            .as_ref()
+            .map_or_else(String::new, |problem| format!(", {problem}"));
         println!(
-            "  heartbeat: {} (timer installed: {timer_installed}, every {}m)",
+            "  heartbeat: {} (timer installed: {timer_installed}{program_note}, every {}m)",
             if meta.heartbeat_enabled {
                 "enabled"
             } else {
@@ -458,6 +475,12 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             },
             meta.heartbeat_interval_min
         );
+        if timer_problem.is_some() {
+            println!(
+                "             the timer cannot fire. Re-run `ainb fleet atc setup {}` to repoint it.",
+                meta.name
+            );
+        }
         match heartbeat_age_ms {
             Some(age) => {
                 let mins = age / 60_000;
@@ -494,11 +517,15 @@ async fn list(format: OutputFormat) -> Result<()> {
             None => continue,
         };
         let running = tmux_session_exists(&meta.tmux_session()).await;
+        // Same program check as `status`, so the fleet-wide view cannot claim a
+        // timer is fine while the per-instance view calls it dead.
+        let timer_problem = timer::installed_program_health(name).problem();
         rows.push(json!({
             "name": meta.name,
             "heartbeat_enabled": meta.heartbeat_enabled,
             "heartbeat_interval_min": meta.heartbeat_interval_min,
             "timer_installed": timer::is_installed(name),
+            "timer_program_problem": timer_problem,
             "session_running": running,
         }));
     }
@@ -519,7 +546,9 @@ async fn list(format: OutputFormat) -> Result<()> {
                     "off"
                 },
                 r["heartbeat_interval_min"].as_u64().unwrap_or(0),
-                if r["timer_installed"].as_bool().unwrap_or(false) {
+                if r["timer_program_problem"].is_string() {
+                    "BROKEN"
+                } else if r["timer_installed"].as_bool().unwrap_or(false) {
                     "installed"
                 } else {
                     "absent"
