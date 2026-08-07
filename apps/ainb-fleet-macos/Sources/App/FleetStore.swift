@@ -96,6 +96,7 @@ final class FleetStore: ObservableObject {
     @Published private(set) var atcSchedulerOwnership: AtcSchedulerOwnership?
     @Published private(set) var timeline: [FleetTimelineEntry] = []
     @Published private(set) var usageSummary: FleetUsageSummaryResult?
+    @Published private(set) var quotaSummary: FleetQuotaSummaryResult?
     @Published private(set) var runtimeStatus: FleetRuntimeStatusResult?
     @Published private(set) var pendingIntentID: String?
     @Published private(set) var controlNotice: String?
@@ -167,6 +168,10 @@ final class FleetStore: ObservableObject {
 
     var canReadUsage: Bool {
         connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.usage.read") == true
+    }
+
+    var canReadQuota: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.quota.read") == true
     }
 
     var canReadRuntime: Bool {
@@ -514,6 +519,22 @@ final class FleetStore: ObservableObject {
             } catch {
                 usageSummary = nil
                 controlNotice = "Usage refresh refused: \(String(describing: error))"
+            }
+        }
+    }
+
+    func refreshQuota() {
+        guard canReadQuota, let connection else {
+            quotaSummary = nil
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                quotaSummary = try await connection.quotaSummary()
+            } catch {
+                quotaSummary = nil
+                controlNotice = "Quota refresh refused: \(String(describing: error))"
             }
         }
     }

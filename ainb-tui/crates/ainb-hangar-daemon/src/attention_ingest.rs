@@ -329,6 +329,11 @@ impl AttentionIngest {
                 tracing::warn!(error = %error, "fleet provider event projection link failed");
                 return LineOutcome::Retry;
             }
+            // Transcript writes commonly accompany hook events. The usage service
+            // coalesces this into one background scan, so Fleet converges without
+            // needing the TUI or a client-side filesystem read.
+            crate::fleet_usage::request_refresh().await;
+            crate::fleet_quota::request_refresh().await;
         }
 
         if !is_qualifying(semantic_event) {

@@ -1177,6 +1177,7 @@ async fn handle(
         }
         methods::FLEET_RUNTIME_STATUS => handle_fleet_runtime_status(req, health).await,
         methods::FLEET_USAGE_SUMMARY => handle_fleet_usage_summary(req).await,
+        methods::FLEET_QUOTA_SUMMARY => handle_fleet_quota_summary(req).await,
         methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
         methods::FLEET_MESSAGE_LIST => handle_fleet_message_list(pool, req).await,
         // Both subscribe acks carry a head cursor; their per-connection
@@ -1404,15 +1405,18 @@ async fn handle_fleet_usage_summary(req: &RpcRequest) -> Result<serde_json::Valu
 
     require_fleet_capability(FLEET_CAPABILITY_USAGE_READ)?;
     let params: FleetUsageSummaryParams = parse_params(req, "{ period? }")?;
-    let summary =
-        tokio::task::spawn_blocking(move || crate::fleet_usage::scan_summary(params.period))
-            .await
-            .map_err(|error| RpcError {
-                code: INTERNAL_ERROR,
-                message: format!("usage summary worker failed: {error}"),
-                data: None,
-            })?;
+    let summary = crate::fleet_usage::summary(params.period).await;
     to_value(&summary)
+}
+
+/// Return bounded daemon-owned live quota windows without exposing provider
+/// statusline caches or account credentials to the Fleet client.
+async fn handle_fleet_quota_summary(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FLEET_CAPABILITY_QUOTA_READ, FleetQuotaSummaryParams};
+
+    require_fleet_capability(FLEET_CAPABILITY_QUOTA_READ)?;
+    let _: FleetQuotaSummaryParams = parse_params(req, "{}")?;
+    to_value(&crate::fleet_quota::summary().await)
 }
 
 /// Return supported provider-hook health without leaking runtime files or

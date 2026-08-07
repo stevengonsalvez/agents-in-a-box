@@ -27,6 +27,8 @@ pub const FLEET_CAPABILITY_ATC_READ: &str = "fleet.atc.read";
 pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
 /// Negotiated capability for bounded daemon-owned usage summaries.
 pub const FLEET_CAPABILITY_USAGE_READ: &str = "fleet.usage.read";
+/// Negotiated capability for bounded live provider-quota summaries.
+pub const FLEET_CAPABILITY_QUOTA_READ: &str = "fleet.quota.read";
 /// Negotiated capability for runtime and provider-hook health.
 pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
 /// Negotiated capability required for chat-bus message sends.
@@ -52,6 +54,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_MESSAGE_SEND,
     "fleet.protocol.negotiate",
     FLEET_CAPABILITY_RECEIPT_READ,
+    FLEET_CAPABILITY_QUOTA_READ,
     "fleet.snapshot.read",
     FLEET_CAPABILITY_START_EXECUTE,
     "fleet.subscription.live",
@@ -659,6 +662,61 @@ pub struct FleetUsageSummaryResult {
     pub projects: Vec<FleetUsageProjectBucket>,
     /// Safe daemon status detail for partial or unavailable summaries, capped
     /// by [`FLEET_USAGE_DETAIL_MAX_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One live provider quota window. `used_percent` is provider-reported, so
+/// clients derive remaining quota as `100 - used_percent` without guessing a
+/// token cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetQuotaWindow {
+    /// Provider-reported used percentage, clamped to 0..=100 by the producer.
+    pub used_percent: u8,
+    /// Absolute reset instant in epoch milliseconds when the provider supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    /// `true` when this came from local transcript estimation, not provider data.
+    #[serde(default)]
+    pub estimated: bool,
+}
+
+/// Parameters for `fleet/quota_summary`. Reserved for future provider filters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetQuotaSummaryParams {}
+
+/// Live quota projection for one provider. Absent windows mean unavailable,
+/// not zero usage or unlimited capacity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetQuotaProvider {
+    /// Stable provider identifier, currently `claude` or `codex`.
+    pub provider: String,
+    /// Provider's rolling five-hour window, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<FleetQuotaWindow>,
+    /// Provider's rolling seven-day window, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<FleetQuotaWindow>,
+    /// Provider plan tier, when its source reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    /// Source observation time in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+/// Bounded daemon-owned live quota result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetQuotaSummaryResult {
+    /// Availability of the current projection.
+    pub state: FleetUsageSummaryState,
+    /// Time the daemon assembled this projection, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<i64>,
+    /// At most one row per supported provider.
+    #[serde(default)]
+    pub providers: Vec<FleetQuotaProvider>,
+    /// Safe status detail for stale, partial, or unavailable data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -1326,6 +1384,7 @@ mod tests {
             // point: the catalogue never advertises a -32601 method.
             FLEET_CAPABILITY_ACP_SPAWN,
             FLEET_CAPABILITY_USAGE_READ,
+            FLEET_CAPABILITY_QUOTA_READ,
             FLEET_CAPABILITY_RUNTIME_READ,
         ] {
             assert!(
@@ -1489,6 +1548,23 @@ mod tests {
             }],
             detail: Some("copilot shutdown metrics unavailable".to_string()),
         });
+        round_trip(&FleetQuotaSummaryResult {
+            state: FleetUsageSummaryState::Partial,
+            generated_at: Some(1_700_000_000_000),
+            providers: vec![FleetQuotaProvider {
+                provider: "claude".to_string(),
+                five_hour: Some(FleetQuotaWindow {
+                    used_percent: 42,
+                    resets_at: Some(1_700_018_000_000),
+                    estimated: false,
+                }),
+                seven_day: None,
+                plan_type: None,
+                updated_at: Some(1_700_000_000_000),
+            }],
+            detail: Some("Codex quota unavailable".to_string()),
+        });
+        round_trip(&FleetQuotaSummaryParams {});
     }
 
     #[test]

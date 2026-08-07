@@ -197,7 +197,7 @@ final class FleetConnectionTests: XCTestCase {
                     "protocol_version": 2,
                     "read_compatible": true,
                     "write_compatible": false,
-                    "capability_ids": ["fleet.runtime.read", "fleet.usage.read"],
+                    "capability_ids": ["fleet.runtime.read", "fleet.usage.read", "fleet.quota.read"],
                 ])
                 let runtime = try Self.readRequest(from: serverDescriptor)
                 XCTAssertEqual(runtime["method"] as? String, "fleet/runtime_status")
@@ -221,6 +221,17 @@ final class FleetConnectionTests: XCTestCase {
                     ],
                     "daily": [], "providers": [], "models": [], "projects": [], "detail": NSNull(),
                 ])
+                let quota = try Self.readRequest(from: serverDescriptor)
+                XCTAssertEqual(quota["method"] as? String, "fleet/quota_summary")
+                try Self.writeResponse(to: serverDescriptor, request: quota, result: [
+                    "state": "ready", "generated_at": 1,
+                    "providers": [[
+                        "provider": "codex",
+                        "five_hour": ["used_percent": 42, "resets_at": 2_000, "estimated": false],
+                        "seven_day": NSNull(), "plan_type": "pro", "updated_at": 1,
+                    ]],
+                    "detail": NSNull(),
+                ])
             } catch {
                 serverResult.record(error)
             }
@@ -236,12 +247,14 @@ final class FleetConnectionTests: XCTestCase {
         _ = try await connection.negotiate()
         let runtime = try await connection.runtimeStatus()
         let usage = try await connection.usageSummary(FleetUsageSummaryParams(period: .trailing7Days))
+        let quota = try await connection.quotaSummary()
 
         XCTAssertEqual(runtime.hooks.map(\.provider), ["codex"])
         XCTAssertEqual(runtime.hooks.first?.deliveryReady, false)
         XCTAssertEqual(usage.state, .ready)
         XCTAssertEqual(usage.totals?.totalTokens, 123)
         XCTAssertNil(usage.totals?.costUSD)
+        XCTAssertEqual(quota.providers.first?.fiveHour?.remainingPercent, 58)
         await fulfillment(of: [serverDone], timeout: 1)
         try serverResult.throwIfRecorded()
     }

@@ -97,6 +97,8 @@ pub mod execenv;
 pub mod fleet;
 /// Claude and Codex provider transports for authoritative Fleet control.
 pub mod fleet_provider;
+/// Bounded live provider-quota projection for the public Fleet RPC.
+pub mod fleet_quota;
 /// Bounded canonical Usage projection for the public Fleet RPC.
 pub mod fleet_usage;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
@@ -529,6 +531,11 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // so it lives in `boot`'s scope alongside the other background handles.
     let _profile_watch = crate::profile::profiles_dir()
         .and_then(|dir| crate::profile::spawn_index_watch(store.pool().clone(), dir));
+
+    // Fleet Usage survives TUI restarts: load the daemon-owned bounded snapshot
+    // now, then refresh it on a background worker before Fleet opens its socket.
+    crate::fleet_usage::install(&dir).await;
+    crate::fleet_quota::install(&dir).await;
 
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the

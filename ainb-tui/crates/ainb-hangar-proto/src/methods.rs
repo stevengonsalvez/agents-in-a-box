@@ -415,6 +415,11 @@ pub const FLEET_TIMELINE: &str = "fleet/timeline";
 /// Params: [`crate::fleet::FleetUsageSummaryParams`]; result:
 /// [`crate::fleet::FleetUsageSummaryResult`]. Gated by `fleet.usage.read`.
 pub const FLEET_USAGE_SUMMARY: &str = "fleet/usage_summary";
+/// Read bounded daemon-owned live provider quota windows.
+///
+/// Result: [`crate::fleet::FleetQuotaSummaryResult`]. Gated by
+/// `fleet.quota.read`.
+pub const FLEET_QUOTA_SUMMARY: &str = "fleet/quota_summary";
 /// Read bounded daemon and provider-hook runtime health.
 pub const FLEET_RUNTIME_STATUS: &str = "fleet/runtime_status";
 /// Rebuild one stale Claude interview through the live daemon broker.
@@ -1708,6 +1713,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_START,
     FLEET_TIMELINE,
     FLEET_USAGE_SUMMARY,
+    FLEET_QUOTA_SUMMARY,
     FLEET_RUNTIME_STATUS,
     FLEET_REPROJECT_CLAUDE_INTERVIEW,
     // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
@@ -1999,6 +2005,7 @@ mod tests {
             FLEET_START,
             FLEET_TIMELINE,
             FLEET_USAGE_SUMMARY,
+            FLEET_QUOTA_SUMMARY,
             FLEET_RUNTIME_STATUS,
             FLEET_REPROJECT_CLAUDE_INTERVIEW,
             HANGAR_DISPATCH_ATTEMPTS_LIST,
