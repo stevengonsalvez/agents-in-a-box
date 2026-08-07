@@ -131,8 +131,8 @@ impl TranscriptReducer {
     /// every update classifies as [`Classified::Replayed`] and produces
     /// nothing at all, so the store writer is never handed a row to persist.
     ///
-    /// The caller flushes any pending text BEFORE turning this on, and clears
-    /// it once the `session/load` reply has landed.
+    /// The caller flushes any pending text BEFORE turning this on. Clearing it
+    /// is [`Self::begin_turn`]'s job, not the caller's: see there.
     pub fn set_replaying(&mut self, replaying: bool) {
         self.replaying = replaying;
     }
@@ -225,8 +225,17 @@ impl TranscriptReducer {
 
     /// Reset the final-message accumulator for the next turn. The pending text
     /// buffer is flushed by the caller first.
+    ///
+    /// This is also where the [`Self::set_replaying`] seam closes, and the
+    /// reason is a timing assumption we would rather not make: a caller that
+    /// cleared the flag after quiescing the load would classify a replay tail
+    /// that outran the quiesce window as live output, duplicating rows and
+    /// putting an old turn's text on the chat timeline. A replay tail can only
+    /// be mistaken for live output once a LIVE turn exists, and that is exactly
+    /// here.
     pub fn begin_turn(&mut self) {
         self.final_message.clear();
+        self.replaying = false;
     }
 
     /// Build the transcript row for a permission ask.

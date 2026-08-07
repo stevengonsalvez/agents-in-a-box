@@ -57,7 +57,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{PromptResponse, SessionNotification, StopReason};
@@ -300,8 +300,17 @@ enum Control {
     Evict,
     /// Stop the actor entirely.
     Shutdown,
-    /// The hosting process died: drop the handle and converge.
-    ProcessExited,
+    /// The named process died: drop the handle and converge.
+    ///
+    /// PROCESS-SCOPED for the same reason [`Control::Cancel`] is turn-scoped.
+    /// The exit watcher reads the routes it hosted and only then sends this,
+    /// and a legal I6 requeue in between moves the session onto a NEW process.
+    /// Applied unconditionally, the late event from the dead process would
+    /// detach a live route, write `turn_interrupted`, resolve a running turn's
+    /// leg UNKNOWN and drain the queue, all while the prompt is still going.
+    /// A `Weak` that no longer upgrades cannot be the process this actor holds,
+    /// because holding it would keep it alive.
+    ProcessExited(Weak<ProviderProcess>),
 }
 
 /// One queued prompt.
@@ -995,7 +1004,8 @@ impl AcpPool {
             let sessions = pool.sessions.lock().await;
             for session_key in hosted {
                 if let Some(handle) = sessions.get(&session_key) {
-                    let _ = handle.control.send(Control::ProcessExited);
+                    // Named, so a session that has already moved on ignores it.
+                    let _ = handle.control.send(Control::ProcessExited(Arc::downgrade(&entry)));
                 }
             }
         });
@@ -1444,7 +1454,22 @@ impl SessionActor {
                 self.set_state("EVICTED");
                 false
             }
-            Control::ProcessExited => {
+            Control::ProcessExited(dead) => {
+                // Not ours: this actor already requeued onto a live process
+                // (I6) and the event is a straggler from the corpse. Applying
+                // it would kill a turn that is genuinely running.
+                //
+                // A DETACHED actor skips it too, and cannot thereby strand an
+                // open turn: the prompt arm is guarded by `self.turn.is_none()`,
+                // so nothing detaches this actor while a turn is open, and an
+                // open turn therefore always still holds its process.
+                if !holds_process(&dead, self.process.as_ref()) {
+                    tracing::debug!(
+                        session_key = %self.session_key,
+                        "dropping an exit event for a process this session no longer holds"
+                    );
+                    return false;
+                }
                 self.drain_updates().await;
                 self.detach();
                 self.converge(ConvergeCause::AdapterExit).await;
@@ -1754,12 +1779,20 @@ impl SessionActor {
     /// `session/prompt` is issued by construction, so a retry here cannot
     /// double-deliver. An open breaker is terminal: retrying it is the
     /// crash-loop the breaker exists to stop.
+    ///
+    /// The SECOND attempt never tries `session/load`. A load failure that is
+    /// not provably "unknown session" leaves `acp_session_id` in place on
+    /// purpose (a rebuild would throw away adapter-side history), and nothing
+    /// else ever clears it, so an adapter whose replay is slower than the spawn
+    /// timeout would retry the same load on every attempt of every prompt
+    /// forever. Attempt two rebuilds instead: losing adapter-side history to a
+    /// re-primed context is recoverable, a permanently wedged scope is not.
     async fn attach_with_one_requeue(
         &mut self,
         message_id: &str,
     ) -> Result<Arc<ProviderProcess>, &'static str> {
         for attempt in 0..2 {
-            match self.ensure_session(message_id).await {
+            match self.ensure_session(message_id, attempt == 0).await {
                 Ok(process) => return Ok(process),
                 Err(EnsureFailure::BreakerOpen) => return Err(DELIVERY_BREAKER_OPEN),
                 // I13 is terminal: an adapter that will not hold the pinned mode
@@ -1794,10 +1827,10 @@ impl SessionActor {
     /// not DEPEND on `session/load`:
     ///
     /// ```text
-    ///   stored acp_session_id?  ──no──▶ session/new ─▶ re-prime prelude
-    ///        │yes                             (reprimed, or fresh when there
-    ///        │                                 was no id and no history)
-    ///   adapter advertises loadSession? ──no──▶ ─────────────┘
+    ///   stored acp_session_id? ──no──▶ session/new ─▶ re-prime prelude
+    ///        │yes                            (reprimed, or fresh when there
+    ///        │                                was no id and no history)
+    ///   allow_load AND adapter advertises loadSession? ──no──▶ ────┘
     ///        │yes
     ///   route + replay seam live, THEN session/load
     ///        ├─ ok ────────────────────▶ path = loaded
@@ -1806,13 +1839,20 @@ impl SessionActor {
     ///        └─ anything else ─────────▶ spawn failure, one legal requeue
     /// ```
     ///
-    /// `message_id` is the prompt this attach is for: the re-prime corpus
-    /// excludes it, because it is about to be sent as the prompt itself and a
-    /// body quoted inside the fenced context AND asked as the question reads as
-    /// the operator saying it twice.
+    /// `allow_load` is false on the retry (see
+    /// [`SessionActor::attach_with_one_requeue`]): it is the only thing that
+    /// stops an unclassifiable load failure from being retried forever, because
+    /// no path clears `acp_session_id` and neither convergence nor teardown
+    /// touches it.
+    ///
+    /// `message_id` is the prompt this attach is for: the re-prime corpus stops
+    /// BELOW it, because it is about to be sent as the prompt itself and a body
+    /// quoted inside the fenced context AND asked as the question reads as the
+    /// operator saying it twice.
     async fn ensure_session(
         &mut self,
         message_id: &str,
+        allow_load: bool,
     ) -> Result<Arc<ProviderProcess>, EnsureFailure> {
         if let Some(process) = self.process.clone() {
             if process.process.is_alive() && self.acp_session_id.is_some() {
@@ -1847,7 +1887,7 @@ impl SessionActor {
         // are the same code path and must NOT be the same receipt.
         let had_stored = stored.is_some();
         let mut path = None;
-        if let Some(stored) = stored.filter(|_| process.process.supports_load()) {
+        if let Some(stored) = stored.filter(|_| allow_load && process.process.supports_load()) {
             if self.try_load(&process, &stored).await? {
                 path = Some(RESUME_LOADED);
             }
@@ -1921,11 +1961,12 @@ impl SessionActor {
             .process
             .load_session(acp_session_id, std::path::Path::new(&self.cwd))
             .await;
-        // Drained with the seam STILL ON: the notifications sit in the actor's
-        // channel until something reads them, and turning the flag off first
-        // would classify the whole replay normally on the next select pass.
+        // Drained with the seam STILL ON, and LEFT on: the notifications sit in
+        // the actor's channel until something reads them, and a replay tail
+        // that outran the quiesce window would otherwise be classified as live
+        // output. `begin_turn` closes the seam when a live turn actually
+        // starts, which is the only moment the distinction can matter.
         self.quiesce().await;
-        self.reducer.set_replaying(false);
 
         match loaded {
             Ok(()) => Ok(true),
@@ -2489,20 +2530,47 @@ async fn stored_acp_session_id(pool: &SqlitePool, session_key: &str) -> Option<S
 /// never spoken gets its prompt unadorned rather than an empty fence that only
 /// tells the agent to distrust a context it does not have.
 ///
+/// `message_id` is the prompt this rebuild is for, and it bounds the corpus by
+/// SEQ rather than being filtered out of it by id. A delivery row exists from
+/// the moment a message is queued, so an id filter alone still hands the agent
+/// every message queued BEHIND this one as if it were earlier history, and a
+/// burst deeper than [`ainb_acp::reprime::REPRIME_ROWS`] pushes the in-flight
+/// prompt out of the window entirely. An id that resolves to no row leaves the
+/// bound unknowable, so the rebuild carries no prelude rather than a wrong one.
+///
 /// Free for the same `Sync` reason as [`resolve_leg`], and PUBLIC so the
 /// plan's "byte-identical prelude for a fixed corpus" is assertable against the
 /// real delivery-join query rather than against a hand-built row list.
 pub async fn render_resume_prelude(
     pool: &SqlitePool,
     session_key: &str,
-    exclude_message_id: &str,
+    message_id: &str,
 ) -> Option<String> {
+    let before_seq = match FleetMessageRepo::seq_for_id(pool, message_id).await {
+        Ok(Some(seq)) => seq,
+        Ok(None) => {
+            tracing::error!(
+                %session_key,
+                %message_id,
+                "the in-flight prompt has no message row; rebuilding with no prior context"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::error!(
+                %session_key,
+                %message_id,
+                %error,
+                "could not resolve the in-flight prompt's cursor; rebuilding with no prior context"
+            );
+            return None;
+        }
+    };
     let rows = FleetMessageRepo::list_for_session(
         pool,
         session_key,
-        // One extra: the in-flight prompt is in the corpus and is dropped
-        // below, so asking for exactly N could yield N-1 usable rows.
-        i64::try_from(ainb_acp::reprime::REPRIME_ROWS + 1).unwrap_or(i64::MAX),
+        before_seq,
+        i64::try_from(ainb_acp::reprime::REPRIME_ROWS).unwrap_or(i64::MAX),
     )
     .await
     .unwrap_or_else(|error| {
@@ -2515,7 +2583,6 @@ pub async fn render_resume_prelude(
     });
     let corpus: Vec<ainb_acp::reprime::CorpusRow> = rows
         .into_iter()
-        .filter(|row| row.id != exclude_message_id)
         .map(|row| ainb_acp::reprime::CorpusRow {
             sender: row.sender,
             kind: row.kind,
@@ -2660,6 +2727,18 @@ fn choose_option(
         .map(|option| option.option_id.to_string())
 }
 
+/// Is a [`Control::ProcessExited`] about the process the actor still holds?
+///
+/// A `Weak` that no longer upgrades cannot be it: holding the process would
+/// keep it alive. Generic so the three cases are testable without spawning a
+/// real adapter.
+fn holds_process<T>(dead: &Weak<T>, current: Option<&Arc<T>>) -> bool {
+    match (dead.upgrade(), current) {
+        (Some(dead), Some(current)) => Arc::ptr_eq(&dead, current),
+        _ => false,
+    }
+}
+
 /// The stable identity of one permission ask.
 ///
 /// It keys the parked responder, the attention row, and
@@ -2674,4 +2753,40 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
     });
     let digest = blake3::hash(serde_json::to_string(&body).unwrap_or_default().as_bytes());
     digest.to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, holds_process};
+
+    /// The exit event is PROCESS-SCOPED. The interleaving it defends against
+    /// (the watcher snapshots the routes a dying process hosted, the actor then
+    /// requeues onto a new one before it reads the message) is a real race but
+    /// not reachable on demand from a test, so the decision itself is pinned
+    /// here instead.
+    #[test]
+    fn an_exit_event_is_only_applied_to_the_process_the_actor_holds() {
+        let mine = Arc::new(1_u32);
+        let other = Arc::new(1_u32);
+
+        assert!(
+            holds_process(&Arc::downgrade(&mine), Some(&mine)),
+            "the process this actor is on converges"
+        );
+        assert!(
+            !holds_process(&Arc::downgrade(&other), Some(&mine)),
+            "an equal-VALUED but different process is a straggler, not ours"
+        );
+        assert!(
+            !holds_process(&Arc::downgrade(&mine), None),
+            "a detached actor has no process to converge"
+        );
+
+        let dead = Arc::downgrade(&other);
+        drop(other);
+        assert!(
+            !holds_process(&dead, Some(&mine)),
+            "a process nobody holds cannot be the one this actor holds"
+        );
+    }
 }

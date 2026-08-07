@@ -37,6 +37,13 @@
 //!   and a process stops only after its idle window has actually elapsed.
 //! * **I16 boot** a session a daemon killed with SIGKILL left mid-turn is
 //!   converged at startup, with no pool and no operator.
+//! * **Re-prime corpus is history** the delivery-join corpus stops BELOW the
+//!   in-flight prompt, so a rebuild during a burst quotes back neither the
+//!   question being asked nor the ones still queued, and a first-ever turn in a
+//!   burst is FRESH rather than falsely marked `context_rebuilt{reprimed}`.
+//! * **Resume cannot wedge** an unclassifiable `session/load` failure is not a
+//!   rebuild on the first attempt, and IS one on the second, so a stored adapter
+//!   id nothing ever clears cannot fail every prompt forever.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1845,15 +1852,25 @@ async fn a_codex_shaped_unknown_session_rebuilds_under_the_same_key() {
     a_forced_rebuild_keeps_the_session_key("codex", "acp:i5-codex").await;
 }
 
-/// The other half of the taxonomy: a `-32603` that is NOT an unknown session
-/// must NOT be rebuilt. Rebuilding would throw away the adapter-side history
-/// the load was there to recover, on the strength of a generic internal error.
+/// The other half of the taxonomy, and the wedge it used to cause.
+///
+/// A `-32603` that is NOT an unknown session must not be treated as one on the
+/// FIRST attempt: rebuilding there would throw away the adapter-side history the
+/// load was there to recover, on the strength of a generic internal error.
+///
+/// But nothing ever clears `acp_session_id` (neither convergence nor teardown
+/// does), so retrying the same load on the second attempt made this permanent:
+/// an adapter whose replay is slower than the spawn timeout would fail every
+/// prompt, forever, with no operator path back. The second attempt therefore
+/// SKIPS the load and rebuilds. Losing adapter-side history to a re-primed
+/// context is recoverable; a scope that can never take another prompt is not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_opaque_internal_error_is_a_spawn_failure_not_a_rebuild() {
+async fn an_opaque_load_failure_rebuilds_on_the_second_attempt_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log = dir.path().join("rpc.log");
     let (_dir, store, pool) = harness(&[
         ("FAKE_ACP_LOAD_UNKNOWN_SESSION", "opaque"),
+        ("FAKE_ACP_CHUNKS", "1"),
         ("FAKE_ACP_RPC_LOG", log.to_str().expect("utf8 path")),
     ])
     .await;
@@ -1863,11 +1880,27 @@ async fn an_opaque_internal_error_is_a_spawn_failure_not_a_rebuild() {
 
     pool.submit_prompt(&session.session_key, &message_id, "hi").await;
     let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
-    assert_eq!(state, "FAILED", "{detail:?}");
-    assert_eq!(detail.as_deref(), Some("adapter_exit"));
+    assert_eq!(
+        state, "DELIVERED",
+        "the scope must make progress rather than wedge on a load it can never pass: {detail:?}"
+    );
+    assert_eq!(
+        detail.as_deref(),
+        Some("resume=reprimed"),
+        "and it must say so: the context came from the corpus, not from the adapter"
+    );
+
+    let lines = rpc_log(&log);
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with("load:")).count(),
+        1,
+        "attempt one tried the load; attempt two did not try it again: {lines:?}"
+    );
+    let load_at = lines.iter().position(|line| line.starts_with("load:")).expect("a load");
+    let new_at = lines.iter().position(|line| line.starts_with("new:")).expect("a rebuild");
     assert!(
-        !rpc_log(&log).iter().any(|line| line.starts_with("new:")),
-        "no session was rebuilt on an unclassified failure"
+        load_at < new_at,
+        "the rebuild is the SECOND attempt, never the first answer to an unclassified error: {lines:?}"
     );
     assert_eq!(
         FleetAcpSessionRepo::get(store.pool(), &session.session_key)
@@ -1876,8 +1909,8 @@ async fn an_opaque_internal_error_is_a_spawn_failure_not_a_rebuild() {
             .expect("session row")
             .acp_session_id
             .as_deref(),
-        Some("still-there"),
-        "the stored adapter id survives for the next attempt"
+        Some("fake-session-1"),
+        "the wedging id is replaced by the one the rebuild minted"
     );
 }
 
@@ -2155,16 +2188,90 @@ async fn the_reprime_prelude_is_deterministic_over_the_delivery_join() {
         "from a broadcast",
     )
     .await;
+    let joined_in_flight = seed_message(&store, &joined.session_key, "the next question").await;
     let narrow = ainb_hangar_daemon::acp_pool::render_resume_prelude(
         store.pool(),
         &joined.session_key,
-        "none",
+        &joined_in_flight,
     )
     .await
     .expect("a prelude");
     assert!(
         narrow.contains("from a broadcast"),
         "a broadcast-delivered prompt is never lost from a rebuilt context"
+    );
+}
+
+/// The corpus is HISTORY, and a delivery row exists from the moment a message
+/// is QUEUED, not from the moment it is prompted.
+///
+/// So the corpus is bounded by the in-flight prompt's `seq`. Without that bound
+/// a rebuild during a burst hands the agent the question it is about to be
+/// asked, plus every question still waiting behind it, under a header saying
+/// all of it already happened, and answers a prompt the operator has not seen
+/// the reply to yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_reprime_corpus_stops_below_the_in_flight_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let session = seed_session(&store, "acp:burst").await;
+
+    // Distinct BODY LENGTHS: `seed_message` mints its id from the body length.
+    seed_message(&store, &session.session_key, "history").await;
+    let in_flight = seed_message(&store, &session.session_key, "live-question").await;
+    seed_message(&store, &session.session_key, "queued-question").await;
+
+    let prelude = ainb_hangar_daemon::acp_pool::render_resume_prelude(
+        store.pool(),
+        &session.session_key,
+        &in_flight,
+    )
+    .await
+    .expect("a prelude");
+
+    assert!(
+        prelude.contains("history"),
+        "history the agent really did see is still the corpus: {prelude}"
+    );
+    assert!(
+        !prelude.contains("live-question"),
+        "the prompt about to be asked is not also quoted as context: {prelude}"
+    );
+    assert!(
+        !prelude.contains("queued-question"),
+        "and neither is the one still waiting behind it: {prelude}"
+    );
+}
+
+/// A first-ever turn that happens to arrive in a burst has nothing to rebuild,
+/// so it is FRESH: no `context_rebuilt` marker and no `resume=` on the receipt.
+///
+/// The queued sibling has a delivery row from the moment it is queued, so an
+/// unbounded corpus would find it, render a prelude out of it, and stamp the
+/// transcript with a `reprimed` marker claiming a context was restored on a
+/// session that has never spoken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_ever_turn_in_a_burst_is_fresh_not_reprimed() {
+    let (_dir, store, pool) = harness(&[("FAKE_ACP_CHUNKS", "1")]).await;
+    let session = seed_session(&store, "acp:first-burst").await;
+
+    let first = seed_message(&store, &session.session_key, "a").await;
+    let second = seed_message(&store, &session.session_key, "bb").await;
+    pool.submit_prompt(&session.session_key, &first, "a").await;
+    pool.submit_prompt(&session.session_key, &second, "bb").await;
+
+    let (state, detail) = await_terminal(&store, &first, &session.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+    assert_eq!(
+        detail, None,
+        "a session with no history rebuilt nothing, so its receipt claims nothing"
+    );
+    assert!(
+        !transcript(&store, &session.session_key)
+            .await
+            .iter()
+            .any(|(kind, _)| kind == "acp.context_rebuilt"),
+        "no context was rebuilt, so the transcript must not say one was"
     );
 }
 
@@ -2204,10 +2311,11 @@ async fn hostile_bodies_stay_inside_their_envelope_through_the_corpus_path() {
         .expect("seed hostile body");
     }
 
+    let in_flight = seed_message(&store, &session.session_key, "the question").await;
     let prelude = ainb_hangar_daemon::acp_pool::render_resume_prelude(
         store.pool(),
         &session.session_key,
-        "none",
+        &in_flight,
     )
     .await
     .expect("a prelude");

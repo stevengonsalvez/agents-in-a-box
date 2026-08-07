@@ -1459,6 +1459,36 @@ async fn transcript_prune_exports_before_it_deletes_and_refuses_a_bare_delete() 
     assert_eq!(first["session_key"], session_key);
     assert_eq!(first["ingest_order"], chunks[0]["ingest_order"]);
 
+    // After the delete this file is the ONLY copy, so it carries the whole
+    // durable row and not the read-API projection: the read shape drops
+    // `provider`, `source`, `provider_session_id`, `received_at`, `raw_blake3`
+    // and `projection_revision`, and a row missing those cannot be put back.
+    for field in [
+        "ingest_order",
+        "event_id",
+        "provider",
+        "source",
+        "session_key",
+        "provider_session_id",
+        "observed_at",
+        "received_at",
+        "event_type",
+        "raw_payload",
+        "raw_blake3",
+        "projection_revision",
+    ] {
+        assert!(
+            first.get(field).is_some(),
+            "the export dropped {field}, so the row cannot be reconstructed: {first}"
+        );
+    }
+    let payload = first["raw_payload"].as_str().expect("the exact stored payload string");
+    assert_eq!(
+        blake3::hash(payload.as_bytes()).to_hex().to_string(),
+        first["raw_blake3"].as_str().expect("the stored digest"),
+        "the exported payload re-digests to the exported digest, so the export round-trips"
+    );
+
     let after = client
         .call(
             methods::FLEET_TRANSCRIPT_LIST,

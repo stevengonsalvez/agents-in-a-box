@@ -345,24 +345,34 @@ impl FleetProviderEventRepo {
         rows.iter().map(row_from).collect()
     }
 
-    /// The rows [`Self::delete_acp_before`] would remove, oldest first.
+    /// One PAGE of the rows [`Self::delete_acp_before`] could remove, oldest
+    /// first, starting strictly above `after_ingest_order`.
     ///
-    /// The export half of export-then-delete, and deliberately the SAME
-    /// predicate as the delete: an export built from a different filter would
-    /// silently omit rows the delete then destroys.
+    /// The export half of export-then-delete. Paged rather than fetched whole
+    /// because the prune's ceiling is a ROW cap and a row's payload has no byte
+    /// cap: an export that materialised every row plus its serialisation would
+    /// size its peak memory off operator input.
+    ///
+    /// The caller must delete on the watermark it actually EXPORTED
+    /// (`last exported ingest_order + 1`), never on `before_ingest_order`: a
+    /// turn that commits between the last page and the delete lands below the
+    /// requested watermark and would otherwise be destroyed without ever having
+    /// been exported.
     pub async fn list_acp_before(
         pool: &SqlitePool,
         session_key: &str,
+        after_ingest_order: i64,
         before_ingest_order: i64,
         limit: i64,
     ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
              FROM fleet_provider_event \
-             WHERE session_key = ? AND ingest_order < ? AND source = 'acp' \
+             WHERE session_key = ? AND ingest_order > ? AND ingest_order < ? AND source = 'acp' \
              ORDER BY ingest_order ASC LIMIT ?",
         )
         .bind(session_key)
+        .bind(after_ingest_order)
         .bind(before_ingest_order)
         .bind(limit.max(0))
         .fetch_all(pool)
@@ -372,6 +382,12 @@ impl FleetProviderEventRepo {
 
     /// The operator export-then-delete leg: remove one session's ACP
     /// transcript rows below `before_ingest_order`, returning the count.
+    ///
+    /// `before_ingest_order` is the EXPORTED watermark
+    /// (`last exported ingest_order + 1`), never the watermark the operator
+    /// asked for. Re-evaluating the operator's predicate here would delete
+    /// every row committed since the export read its last page, and after this
+    /// call the export is the only copy those rows never made it into.
     ///
     /// Two refusal rules, both enforced by the statement itself:
     /// - a row with `source <> 'acp'` is never touched, regardless of the
@@ -695,6 +711,47 @@ mod tests {
         assert!(FleetProviderEventRepo::get(store.pool(), "acp-0").await.unwrap().is_none());
         assert!(FleetProviderEventRepo::get(store.pool(), "acp-3").await.unwrap().is_some());
         assert!(FleetProviderEventRepo::get(store.pool(), "acp-4").await.unwrap().is_some());
+    }
+
+    /// The data-loss case the export watermark exists for: a turn commits
+    /// BELOW the operator's `--before` while the export is still being written.
+    /// Deleting on the operator's watermark would destroy that row unexported,
+    /// and after the delete the export is the only copy.
+    #[tokio::test]
+    async fn delete_acp_before_spares_a_row_committed_after_the_export_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_mixed(&store).await;
+        // What the export actually captured, asked for with a watermark far
+        // above the log (exactly what `--before 1000000` does).
+        let exported =
+            FleetProviderEventRepo::list_acp_before(store.pool(), "acp:s-1", 0, 1_000_000, 512)
+                .await
+                .unwrap();
+        assert_eq!(exported.len(), 5, "acp-0..4 were exported");
+
+        // A live turn commits while the operator's file is being fsynced.
+        let late = FleetProviderEventRepo::append(store.pool(), &acp_event("acp-late", "acp:s-1"))
+            .await
+            .unwrap();
+        assert!(
+            late.ingest_order < 1_000_000,
+            "the late row is inside the range the operator asked for"
+        );
+
+        let cut = exported.last().unwrap().ingest_order + 1;
+        let deleted = FleetProviderEventRepo::delete_acp_before(store.pool(), "acp:s-1", cut)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted as usize,
+            exported.len(),
+            "deleted can never exceed exported"
+        );
+        assert!(
+            FleetProviderEventRepo::get(store.pool(), "acp-late").await.unwrap().is_some(),
+            "a row committed after the export page survives the prune"
+        );
     }
 
     /// Refusal rule one: a non-ACP row is never touched, even when the caller

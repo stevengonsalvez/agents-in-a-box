@@ -40,9 +40,19 @@ pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
 /// Negotiated capability required for the operator export-then-delete of ACP
 /// transcript rows.
 ///
-/// DELIBERATELY separate from [`FLEET_CAPABILITY_TRANSCRIPT_READ`]: this is the
-/// only destructive verb on the chat-bus surface, and a reader that can page a
-/// transcript must not thereby be able to delete one.
+/// Separate from [`FLEET_CAPABILITY_TRANSCRIPT_READ`] so the catalogue names the
+/// destructive verb on its own: a build can ship the transcript read surface
+/// without advertising the delete, and a client can tell the two apart.
+///
+/// ADVISORY, not an authorisation boundary (review 2026-08-07). Capabilities are
+/// declared by the DAEMON and echoed by `fleet/negotiate`; a client declares
+/// version ranges and never capabilities, and negotiate holds no
+/// connection-scoped state, so the daemon-side check can only answer "does this
+/// build advertise it", never "may this caller use it". Anyone who can call
+/// `fleet/transcript_list` on a socket can call `fleet/transcript_prune` on it.
+/// The real boundary is the socket itself: same-uid peer credentials plus the
+/// bearer token (`rpc/auth.rs`). Splitting this into an enforced permission
+/// needs per-connection granted capabilities, which is a v3 surface change.
 pub const FLEET_CAPABILITY_TRANSCRIPT_PRUNE: &str = "fleet.transcript.prune";
 
 /// Fleet capability identifiers advertised during protocol negotiation.

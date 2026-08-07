@@ -301,32 +301,43 @@ impl FleetMessageRepo {
         rows.iter().map(message_from).collect()
     }
 
-    /// The resume re-prime corpus: the LAST `limit` messages a session either
-    /// received (a `fleet_message_delivery` row exists for it, broadcasts
-    /// included) or sent (`sender` = `session_key`), returned oldest first.
+    /// The resume re-prime corpus: the LAST `limit` messages BELOW `before_seq`
+    /// that a session either received (a `fleet_message_delivery` row exists for
+    /// it, broadcasts included) or sent (`sender` = `session_key`), returned
+    /// oldest first.
     ///
     /// This is the delivery JOIN, deliberately not a raw scope filter, so a
     /// broadcast-delivered prompt is never lost from a rebuilt context.
+    ///
+    /// `before_seq` is the in-flight prompt's `seq`, and it is what makes the
+    /// corpus HISTORY. A delivery row exists from the moment a message is
+    /// queued, so an unbounded window renders the prompt about to be asked, and
+    /// every message still sitting behind it in the queue, under a header that
+    /// says all of it already happened. Under a burst deeper than the row limit
+    /// the in-flight prompt is not even in the window.
     pub async fn list_for_session(
         pool: &SqlitePool,
         session_key: &str,
+        before_seq: i64,
         limit: i64,
     ) -> Result<Vec<FleetMessageRow>, sqlx::Error> {
         // UNION of two indexed halves (idx_fleet_message_sender and
         // idx_fleet_message_delivery_session); newest window first, then
         // reversed so the caller renders in seq order.
         let rows = sqlx::query(&format!(
-            "SELECT {MESSAGE_COLUMNS} FROM fleet_message WHERE sender = ? \
+            "SELECT {MESSAGE_COLUMNS} FROM fleet_message WHERE sender = ? AND seq < ? \
              UNION \
              SELECT m.seq, m.id, m.request_id, m.request_fingerprint, m.scope_key, \
                     m.origin_message_id, m.sender, m.kind, m.body, m.created_at \
              FROM fleet_message m \
              JOIN fleet_message_delivery d ON d.message_id = m.id \
-             WHERE d.session_key = ? \
+             WHERE d.session_key = ? AND m.seq < ? \
              ORDER BY seq DESC LIMIT ?"
         ))
         .bind(session_key)
+        .bind(before_seq)
         .bind(session_key)
+        .bind(before_seq)
         .bind(limit.max(0))
         .fetch_all(pool)
         .await?;
@@ -670,7 +681,9 @@ mod tests {
             .await
             .unwrap();
 
-        let corpus = FleetMessageRepo::list_for_session(store.pool(), "acp:s-1", 20).await.unwrap();
+        let corpus = FleetMessageRepo::list_for_session(store.pool(), "acp:s-1", i64::MAX, 20)
+            .await
+            .unwrap();
         assert_eq!(
             corpus.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["bcast-1", "reply-1"],
@@ -678,10 +691,39 @@ mod tests {
         );
 
         // The window keeps the NEWEST rows when the limit bites.
-        let windowed =
-            FleetMessageRepo::list_for_session(store.pool(), "acp:s-1", 1).await.unwrap();
+        let windowed = FleetMessageRepo::list_for_session(store.pool(), "acp:s-1", i64::MAX, 1)
+            .await
+            .unwrap();
         assert_eq!(windowed.len(), 1);
         assert_eq!(windowed[0].id, "reply-1", "oldest dropped first");
+    }
+
+    /// The corpus is HISTORY, and a delivery row exists from the moment a
+    /// message is QUEUED. Without the seq bound a rebuild hands the agent the
+    /// prompt it is about to be asked, plus everything still queued behind it,
+    /// under a header saying all of it already happened.
+    #[tokio::test]
+    async fn list_for_session_stops_below_the_in_flight_prompt() {
+        let (_dir, store) = store().await;
+        for id in ["old-1", "in-flight", "queued"] {
+            FleetMessageRepo::insert_message(store.pool(), &message(id, "session:acp:s-1"))
+                .await
+                .unwrap();
+            FleetMessageRepo::insert_delivery(store.pool(), id, "acp:s-1").await.unwrap();
+        }
+        let in_flight = FleetMessageRepo::seq_for_id(store.pool(), "in-flight")
+            .await
+            .unwrap()
+            .expect("the in-flight prompt has a row");
+
+        let corpus = FleetMessageRepo::list_for_session(store.pool(), "acp:s-1", in_flight, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            corpus.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["old-1"],
+            "history only: neither the in-flight prompt nor the one queued behind it"
+        );
     }
 
     #[tokio::test]

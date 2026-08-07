@@ -428,7 +428,14 @@ impl AdapterProcess {
             send_within_spawn_timeout(&self.connection, "session/new", NewSessionRequest::new(cwd))
                 .await?;
         let session_id = reply.session_id.to_string();
-        self.apply_static_config(&session_id, reply.modes.as_ref()).await?;
+        if let Err(error) = self.apply_static_config(&session_id, reply.modes.as_ref()).await {
+            // The adapter created the session before we refused it. Left open it
+            // counts against the adapter's own limits and, for a mode we could
+            // not prove, sits there in whatever permission regime it inherited,
+            // with nothing on our side holding its id.
+            let _ = self.close_session(&session_id).await;
+            return Err(error);
+        }
         Ok(session_id)
     }
 
@@ -510,14 +517,24 @@ impl AdapterProcess {
     }
 
     /// `session/close`. Session-level idle eviction; the process stays warm.
+    ///
+    /// Forgets the session's observed mode on the way out, whatever the adapter
+    /// answers: the map is keyed by an adapter-minted id and a long-lived
+    /// process evicts and rebuilds sessions for its whole life, so keeping dead
+    /// entries grows it without bound and leaves [`Self::mode_violated`]
+    /// answering about a session nobody holds.
     pub async fn close_session(&self, session_id: &str) -> Result<(), AcpError> {
-        send(
+        let closed = send(
             &self.connection,
             "session/close",
             CloseSessionRequest::new(session_id.to_string()),
         )
         .await
-        .map(|_| ())
+        .map(|_| ());
+        if let Ok(mut modes) = self.observed_modes.lock() {
+            modes.remove(session_id);
+        }
+        closed
     }
 
     /// The mode last reported for a session, for the pool's health surface.
