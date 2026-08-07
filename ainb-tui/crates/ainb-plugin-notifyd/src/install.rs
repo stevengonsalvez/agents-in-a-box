@@ -300,18 +300,19 @@ fn register_claude_plugin() -> ClaudeRegister {
     }
     // Install, then update. `install` is idempotent but does not refresh an
     // existing cached marketplace plugin, leaving hook code behind `ainb`.
-    let installed = match Command::new("claude").args(["plugin", "install", CLAUDE_PLUGIN_REF]).output() {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            let msg = first_line(&o.stderr, &o.stdout);
-            if msg.to_lowercase().contains("already") {
-                true
-            } else {
-                return ClaudeRegister::Failed(msg);
+    let installed =
+        match Command::new("claude").args(["plugin", "install", CLAUDE_PLUGIN_REF]).output() {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                let msg = first_line(&o.stderr, &o.stdout);
+                if msg.to_lowercase().contains("already") {
+                    true
+                } else {
+                    return ClaudeRegister::Failed(msg);
+                }
             }
-        }
-        Err(e) => return ClaudeRegister::Failed(e.to_string()),
-    };
+            Err(e) => return ClaudeRegister::Failed(e.to_string()),
+        };
     if !installed {
         return ClaudeRegister::Failed("plugin install did not complete".into());
     }
