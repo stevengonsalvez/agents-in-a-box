@@ -3315,6 +3315,7 @@ impl EventHandler {
                 let action_label = match &action {
                     FleetAction::StructuredAnswer { .. } => "answered ask",
                     FleetAction::DismissStructured { .. } => "rejected interview",
+                    FleetAction::ReleaseStructured { .. } => "opened Claude picker",
                     FleetAction::ReconcileStructured { .. } => "reconciled interview",
                     FleetAction::Approve { .. } => "approved request",
                     FleetAction::Deny { .. } => "denied request",
