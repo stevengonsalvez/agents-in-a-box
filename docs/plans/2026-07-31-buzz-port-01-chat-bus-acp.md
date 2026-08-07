@@ -574,13 +574,17 @@ Manual:
 
 One scripted, repeatable, whole-system validation run against REAL processes, the tmux-verify discipline applied to the chat bus. Lands with Phase 6 and runs at the exit checkpoint (then stays as the release smoke).
 
-- [ ] Script `ainb-tui/scripts/chat-bus-smoke.sh` (or xtask): scratch hangar home + private tmux server (`TMUX_TMPDIR`, `TMUX` removed, exact-name cleanup only), real `ainb-hangar-daemon`, 3 real tmux sessions running the fake-agent harness from `tripwire_cli_run_prompt.rs`
-- [ ] Journey 1, bus on tmux: `ainb fleet msg send --target <3 sessions>` lands verbatim in all 3 panes (capture-pane assertion), deliveries all DELIVERED, `msg list` shows the row, `msg follow` in a side process observed the event
-- [ ] Journey 2, ACP: `ainb fleet acp create` + `msg send` to it; transcript chunks stream via `transcript --follow` BEFORE turn end; timeline gets exactly the final message. Real adapter when creds present, scripted fake adapter otherwise, mode disclosed in output
-- [ ] Journey 3, resume: SIGKILL the daemon mid-turn, restart, same conversation continues (`session/load` path or re-prime marker visible in transcript); no ghost attention rows
-- [ ] Journey 4, convergence: SIGKILL only the adapter process; scope accepts the next message with no daemon restart; delivery terminal with enumerated detail
-- [ ] Each journey asserts the EXACT user-visible outcome (frame truth, not "screen shows something"); failures dump pane captures + daemon log tail
-- [ ] Wired as a CI-optional lane (real tmux, env-gated like the `#[ignore]` adapter tests) and documented in the Operational runbook as the "is the chat bus actually alive" command
+- [x] Script `ainb-tui/scripts/chat-bus-smoke.sh`: scratch hangar home + private tmux server (`TMUX_TMPDIR`, `TMUX` removed, exact-name cleanup only), real `ainb-hangar-daemon`, 3 real tmux sessions running the fake-agent harness from `tripwire_cli_run_prompt.rs`. Registration is the REAL path: the panes run an agent process named `claude`, and the daemon's own tmux reconciler discovers them, so nothing is seeded into the store
+- [x] Journey `j1`, bus on tmux: `ainb fleet msg send --target <3 sessions>` lands verbatim in all 3 panes (capture-pane assertion), deliveries all DELIVERED, `msg list` shows the row, `msg follow` in a side process observed the event
+- [x] Journey `j2`, ACP: `ainb fleet acp create` + `msg send` to it; a chunk is readable from `transcript --follow` while the leg is still PENDING and before `acp.turn_completed`; timeline gets exactly the final message. Real adapter when installed AND credentialled, `fake_acp_adapter` otherwise, mode disclosed in the banner
+- [x] Journey `j3`, resume: SIGKILL the daemon mid-turn, restart, same conversation continues (`acp.context_rebuilt {loaded|reprimed}` marker in the transcript); no ghost attention rows. SKIPS WITH A REASON on a daemon without the Phase 6 resume routine (probe: the re-prime prelude marker is dead-stripped from a pre-Phase-6 binary), and flips to a real run the day it lands, with no edit to the script
+- [x] Journey `j4`, convergence: SIGKILL only the adapter process; scope accepts the next message with no daemon restart; delivery terminal `UNKNOWN` with the enumerated detail `adapter_exit`
+- [x] Fault matrix, one journey each: `j5a` queue overflow (32 accepted, then REJECTED `queue_full`), `j5b` turn deadline (UNKNOWN `turn_deadline` plus the adapter's own `session/cancel` for that session id, deadline compressed for the run via `AINB_ACP_TURN_DEADLINE_MS`), `j5c` idempotency (replay delivers once, conflicting reuse exits 5), `j5d` permission round trip (attention row → `fleet/action` approve → DELIVERED, row closed), `j5e` unknown target (per-delivery REJECTED `target_unknown`, request still exit 0 and persisted)
+- [x] Each journey asserts the EXACT user-visible outcome (frame truth, not "screen shows something"); failures dump pane captures + daemon log tail; each prints `SMOKE-RESULT <journey> <PASS|FAIL|SKIP> <reason>` and any FAIL exits the script non-zero
+- [x] Runnable one at a time for recording (`./scripts/chat-bus-smoke.sh j2`) and all together for CI
+- [x] Wired as a CI-optional lane (`chat-bus-smoke` in `.github/workflows/ci.yml`, opt-in by PR label / repo variable / manual dispatch, the same posture as the `#[ignore]`d adapter tests) and documented in the Operational runbook below as the "is the chat bus actually alive" command
+- [ ] Journey `j5d` has no CLI verb to exercise: part 1 ships no `ainb` command that answers an ACP permission (`ainb fleet approve` is the notifyd broker path for Claude hooks), so the smoke speaks `fleet/action` on `hangar.sock` directly, exactly as the TUI and macOS app do. Worth a CLI verb in part 2
+- [ ] Receipts have no wire reader: `fleet/message_list` returns messages, not the delivery join, so every `detail` assertion in the smoke reads `fleet_message_delivery` from SQLite READ-ONLY. The runbook's question 1 ("why did this message not deliver") is therefore not answerable from the CLI alone today
 
 ---
 
@@ -633,6 +637,15 @@ Three questions an operator will ask, each of which must have an answer built by
 1. **"Why did this message not deliver?"** `fleet/message_list` gives the row; the delivery join gives per-recipient state plus an enumerated `detail` reason (Observability); the `fleet.message.send` span in `daemon.<date>` gives the request-scoped trace. If `detail` is free text only, this question is unanswerable at scale
 2. **"Why is the copilot stuck?"** `hangar/daemon_health` pool fields give queue depth, oldest in-flight turn age, and breaker state. The remedy is `fleet/action Interrupt` on the session (Phase 5 arms), and failing that the turn deadline converges it automatically (I16). Before this review the honest answer was "restart the daemon"
 3. **"What is the pool doing?"** Live/cap/evicted counts and per-scope state on the same pane, with the `acp.spawn` span recording whether each session resumed by load or by re-prime
+4. **"Is the chat bus actually alive?"** `ainb-tui/scripts/chat-bus-smoke.sh` — one command, a throwaway hangar home and tmux server, and a `SMOKE-RESULT` line per journey (exit non-zero on any FAIL). Run it after a daemon upgrade, before a release, and at the part 1 exit checkpoint:
+
+   ```bash
+   cd ainb-tui && ./scripts/chat-bus-smoke.sh          # every journey
+   cd ainb-tui && ./scripts/chat-bus-smoke.sh j2       # one journey, for a recording
+   cd ainb-tui && ./scripts/chat-bus-smoke.sh --keep j4  # keep the scratch world to poke at
+   ```
+
+   It touches nothing an operator owns: scratch `$AINB_HANGAR_HOME`, scratch `$HOME`, a private tmux server, and cleanup that kills tmux sessions by exact name only. Journeys that a build cannot support SKIP with a reason instead of failing (`j3` against a daemon with no Phase 6 resume; `j5d` when a real adapter occupies the fixture's registry slot).
 
 ## CLI surface (parity rule, added 2026-08-05)
 
