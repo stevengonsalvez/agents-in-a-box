@@ -1155,7 +1155,19 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // navigated away instead of attaching.
         FleetKey::Char('a') => return attach_intent(state, true),
         FleetKey::Enter => begin_structured_answer(state),
-        FleetKey::Char('c') => return release_structured_intent(state),
+        FleetKey::Char('c') => {
+            let native_picker = state
+                .selected_key
+                .as_deref()
+                .and_then(|key| state.roster.iter().find(|row| row.session_key == key))
+                .is_some_and(native_claude_picker);
+            if let Some(intent) = release_structured_intent(state) {
+                return Some(intent);
+            }
+            if !native_picker {
+                return request_action(state, FleetAction::Continue);
+            }
+        }
         FleetKey::Char('t') => {
             state.mode = FleetMode::Start(StartState {
                 provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
@@ -1211,13 +1223,15 @@ fn release_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent> 
         .selected_key
         .as_deref()
         .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
+    if native_claude_picker(row) {
+        state.feedback = Some("Claude native picker route is unavailable".into());
+        return None;
+    }
     if !row.provider.eq_ignore_ascii_case("claude")
         || !row.is_managed()
         || !row.attention_state.eq_ignore_ascii_case("ASK")
         || !row.capabilities.contains("structured_answer")
-        || native_claude_picker(row)
     {
-        state.feedback = Some("Claude native picker route is unavailable".into());
         return None;
     }
     let request_fingerprint = row.current_request_fingerprint.clone()?;
@@ -4735,6 +4749,23 @@ mod tests {
             native_reduced.state.feedback.as_deref(),
             Some("Claude native picker route is unavailable")
         );
+
+        let mut ordinary_state = FleetPaneState::default();
+        ordinary_state.set_sessions(vec![session(
+            "codex:run",
+            "codex",
+            "IDLE",
+            "NONE",
+            "managed",
+        )]);
+        let ordinary_reduced = apply(&ordinary_state, FleetEvent::Key(FleetKey::Char('c')));
+        assert!(matches!(
+            ordinary_reduced.intent,
+            Some(FleetIntent::Execute {
+                action: FleetAction::Continue,
+                ..
+            })
+        ));
     }
 
     #[test]
