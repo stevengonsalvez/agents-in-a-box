@@ -2478,8 +2478,24 @@ impl TuiSession {
             let _ = write!(env_prefix, "{k}='{v}' ");
         }
 
+        // `env -u AINB_HANGAR_HOME` is load-bearing, and it is the ONLY thing
+        // pinning this TUI to the hangar the test just seeded.
+        //
+        // Hangar home resolution puts `AINB_HANGAR_HOME` AHEAD of `HOME`, so a
+        // launch that sets only `HOME` is not isolated: if that variable is set
+        // anywhere in the tmux SERVER's environment, the TUI silently talks to a
+        // different hangar than the daemon this test spawned, and the board
+        // renders its chrome over no data. Every daemon spawn in this file
+        // already does `.env_remove("AINB_HANGAR_HOME")` for exactly this
+        // reason; the TUI was the one launch that did not, and it goes through
+        // `tmux send-keys`, where the tmux server's environment is inherited
+        // from whichever process happened to start it.
+        // `exec env -u ...`, in that order: `exec` is a SHELL BUILTIN, so
+        // `env ... exec prog` makes env search $PATH for a binary called `exec`
+        // and die with "env: 'exec': No such file or directory". Exec-ing env
+        // keeps the no-extra-shell-process property and still clears the var.
         let cmd = format!(
-            "HOME='{}' {plugin_root}{env_prefix}exec '{}' tui",
+            "exec env -u AINB_HANGAR_HOME HOME='{}' {plugin_root}{env_prefix}'{}' tui",
             home.display(),
             bin.display()
         );
