@@ -600,6 +600,22 @@ fn window(period: FleetUsagePeriod, now: DateTime<Utc>) -> (DateTime<Utc>, DateT
     )
 }
 
+/// The MCP server a tool call belongs to, for `mcp__<server>__<tool>` names.
+///
+/// Returns `None` for an ordinary tool, which is what keeps `Read` and `Bash` in
+/// the tool list.
+///
+/// BOTH segments must be present and non-empty. `mcp__github` and
+/// `mcp__github__` name no tool, so they are ordinary strings rather than MCP
+/// calls: treating them as MCP would delete a real tool from the tool list and
+/// invent a server bucket that never made a call.
+fn mcp_server_of(tool: &str) -> Option<String> {
+    tool.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .filter(|(server, tool_name)| !server.is_empty() && !tool_name.is_empty())
+        .map(|(server, _)| server.to_string())
+}
+
 /// Reduce a shell command line to just its program name.
 ///
 /// The dashboard reports WHICH programs an operator runs, never the arguments
@@ -809,12 +825,41 @@ fn dashboard_from_window(
     branches.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
     // Tool / MCP / shell named-count breakdowns.
-    let mut tools = named_buckets(&usage.tools);
-    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    // The scanner deliberately leaves `mcp_servers` empty and ships MCP calls as
+    // raw `mcp__<server>__<tool>` entries in `tools`, because attribution is
+    // consumer-specific (see the module header on
+    // `ainb_plugin_session_reader::scanner`, which points at burndown's
+    // `rebuild_activity_and_mcp_columns` as the reference). Doing that split
+    // here is this module's job, not the scanner's. Skipping it left the MCP
+    // panel permanently blank AND leaked `mcp__github__create_issue` style
+    // strings into the tool list, one row per tool instead of one per server.
+    let mut plain_tools: Vec<FleetUsageNamedBucket> = Vec::new();
+    let mut mcp_counts: HashMap<String, u64> = HashMap::new();
+    for row in named_buckets(&usage.tools) {
+        match mcp_server_of(&row.name) {
+            Some(server) => {
+                let slot = mcp_counts.entry(server).or_default();
+                *slot = slot.saturating_add(row.call_count);
+            }
+            None => plain_tools.push(row),
+        }
+    }
+    let mut tools = plain_tools;
+    // Tie-break by name so a cap boundary is deterministic across scans.
+    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
     tools.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
-    let mut mcp_servers = named_buckets(&usage.mcp_servers);
-    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    // Anything the scanner did populate is merged in rather than replaced, so
+    // this keeps working if it ever starts attributing servers itself.
+    for row in named_buckets(&usage.mcp_servers) {
+        let slot = mcp_counts.entry(row.name).or_default();
+        *slot = slot.saturating_add(row.call_count);
+    }
+    let mut mcp_servers: Vec<_> = mcp_counts
+        .into_iter()
+        .map(|(name, call_count)| FleetUsageNamedBucket { name, call_count })
+        .collect();
+    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
     mcp_servers.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
     // Only the PROGRAM name leaves this module, never the command line. The
@@ -1753,6 +1798,85 @@ mod tests {
             "$7 over 7 days, not $7 over 1"
         );
         assert_eq!(forecast.projected_30d_cost_usd, Some(30.0));
+    }
+
+    /// The scanner ships MCP calls as raw `mcp__<server>__<tool>` entries inside
+    /// `tools` and leaves `mcp_servers` empty on purpose, leaving attribution to
+    /// each consumer. Without that split here the MCP panel renders permanently
+    /// blank AND the tool list is polluted with prefixed names, one row per tool
+    /// rather than one per server. Mirrors burndown's
+    /// `rebuild_activity_and_mcp_columns_splits_mcp_prefix_from_tools`.
+    #[test]
+    fn mcp_tools_are_attributed_to_servers_and_leave_the_tool_list() {
+        assert_eq!(
+            mcp_server_of("mcp__github__create_issue").as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            mcp_server_of("Read"),
+            None,
+            "an ordinary tool is not an MCP call"
+        );
+        assert_eq!(
+            mcp_server_of("mcp__"),
+            None,
+            "a prefix with no server is not a server"
+        );
+
+        use ainb_plugin_types_sessions::Provider;
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, tools: Vec<String>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.01),
+            tools,
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        };
+        let usage = UsageData {
+            calls: vec![
+                call(1, vec!["mcp__github__create_issue".into(), "Read".into()]),
+                call(2, vec!["mcp__github__list_prs".into()]),
+                call(3, vec!["mcp__context7__query_docs".into(), "Read".into()]),
+            ],
+            ..UsageData::default()
+        };
+        let result = dashboard_from_usage(&usage, now);
+
+        let tool_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !tool_names.iter().any(|n| n.starts_with("mcp__")),
+            "no mcp__ tool may leak into the tool list: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"Read"),
+            "ordinary tools stay: {tool_names:?}"
+        );
+
+        let github = result
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "github")
+            .expect("github server row");
+        assert_eq!(
+            github.call_count, 2,
+            "two mcp__github__* tools collapse into one server row"
+        );
+        assert!(
+            result.mcp_servers.iter().any(|s| s.name == "context7"),
+            "every distinct server gets a row"
+        );
     }
 
     #[test]
