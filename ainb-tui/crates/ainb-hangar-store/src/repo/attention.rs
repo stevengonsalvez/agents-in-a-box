@@ -3,7 +3,8 @@
 //!
 //! [`AttentionRepo`] is a thin, stateless sqlx layer over the durable set of
 //! input requests every session on the host raises. The daemon's ingest
-//! producer classifies a session and calls [`AttentionRepo::insert`]; the
+//! producer classifies a session and calls [`AttentionRepo::insert_if_absent`]
+//! (or [`AttentionRepo::insert`] where no request identity exists); the
 //! control-centre surfaces read the open set via [`AttentionRepo::list_open`]
 //! (workspace-scoped) or [`AttentionRepo::list_fleet`] (host-wide); the answer
 //! router flips a row through [`AttentionRepo::mark_answered_if_open`].
@@ -178,6 +179,60 @@ impl AttentionRepo {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Insert one attention row unless an equivalent one is already present,
+    /// returning `true` when THIS call raised the row.
+    ///
+    /// `request_key` (0080) is the stable identity of the request the row is
+    /// about — the same still-open question observed by a later hook firing
+    /// derives the same key. Two duplicate shapes are absorbed here:
+    ///
+    /// - the SAME `id` (a replay of one durable hook line), and
+    /// - a DIFFERENT `id` carrying the same `(session_id, request_key)` while a
+    ///   row for it is still `open` — the re-fired `Notification` for a question
+    ///   nobody has answered yet, which is what turned one live question into
+    ///   three cards.
+    ///
+    /// `false` means "already raised" for both, and the caller must NOT emit a
+    /// second `AttentionRaised` nudge. `INSERT OR IGNORE` makes that one
+    /// atomic statement rather than a check-then-insert two concurrent ingest
+    /// passes could both win. Foreign-key violations are NOT suppressed by
+    /// `OR IGNORE`, so a dangling `workspace_id` still errors.
+    ///
+    /// Pass `None` for `request_key` when the producer has no stable request
+    /// identity (waiting / error / escalation cards); those rows keep pure
+    /// id-based idempotency.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the insert fails — e.g. a dangling
+    /// `workspace_id` FK violation.
+    pub async fn insert_if_absent(
+        pool: &SqlitePool,
+        row: &NewAttention,
+        request_key: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO attention \
+             (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at, \
+              raise_transcript, channels, request_key) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.session_id)
+        .bind(&row.cwd)
+        .bind(&row.workspace_id)
+        .bind(row.kind.as_str())
+        .bind(&row.payload)
+        .bind(i64::from(row.degraded))
+        .bind(row.created_at)
+        .bind(&row.raise_transcript)
+        .bind(row.channels.to_db())
+        .bind(request_key)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// List OPEN attention rows for a workspace scope, oldest first.
@@ -401,6 +456,71 @@ impl AttentionRepo {
         .fetch_all(pool)
         .await?;
         rows.iter().map(|r| r.try_get("id")).collect()
+    }
+
+    /// Close open rows that no live Fleet session still claims, returning how
+    /// many were closed.
+    ///
+    /// The `attention` table and `fleet_session.attention_state` are two
+    /// independent records of "needs input" with no cross-writes between them,
+    /// so they drift: measured live at 732 open rows against 7 sessions Fleet
+    /// believed were waiting, the oldest 25 days stale. Every one of those rows
+    /// is an un-dismissable card in the control centre for a question that was
+    /// answered, abandoned, or whose session exited long ago.
+    ///
+    /// A row is closed when NO `fleet_session` with its `session_id` reports a
+    /// non-`NONE` `attention_state` — covering both "the session is gone
+    /// entirely" and "the session is here and says it needs nothing".
+    ///
+    /// Scoped to the three kinds the hook ingest raises. `escalation` (ATC
+    /// paging a human), `approval`, and `codex_request_user` come from producers
+    /// that own their own lifecycles and whose `session_id` need not appear in
+    /// `fleet_session` at all — an ATC escalation swept away because Fleet has
+    /// never heard of its session is a dropped page, not a cleaned-up card.
+    ///
+    /// Two further bounds keep this safe to run against a populated database:
+    ///
+    /// - `older_than_ms` — rows newer than this are never touched. A card raised
+    ///   seconds ago may legitimately lead its `fleet_session` projection, and
+    ///   closing it would delete a live question.
+    /// - `limit` — caps one pass, so a pathological backlog cannot turn a boot
+    ///   into a multi-second stall.
+    ///
+    /// Every close is guarded by `state = 'open'`, so it can never clobber a
+    /// concurrent human answer (first-answer-wins still holds).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn close_unclaimed_open(
+        pool: &SqlitePool,
+        older_than_ms: i64,
+        answered_at: i64,
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE attention \
+             SET state = 'answered', answered_by = 'resolved:sweep', \
+                 answer = 'closed by reconcile: no session claims it', answered_at = ? \
+             WHERE state = 'open' AND id IN ( \
+                 SELECT a.id FROM attention a \
+                 WHERE a.state = 'open' AND a.created_at < ? \
+                   AND a.kind IN ('ask_user_question', 'waiting', 'error') \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM fleet_session f \
+                       WHERE f.provider_session_id = a.session_id \
+                         AND f.attention_state != 'NONE' \
+                   ) \
+                 ORDER BY a.created_at ASC \
+                 LIMIT ? \
+             )",
+        )
+        .bind(answered_at)
+        .bind(older_than_ms)
+        .bind(limit)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 }
 
@@ -677,6 +797,239 @@ mod tests {
             .unwrap();
         let none = AttentionRepo::get(store.pool(), "t2").await.unwrap().unwrap();
         assert!(none.raise_transcript.is_none());
+    }
+
+    /// Seed one Fleet session so the sweep can see what still claims a card.
+    async fn seed_fleet_session(pool: &SqlitePool, provider_session_id: &str, attention: &str) {
+        sqlx::query(
+            "INSERT INTO fleet_session \
+             (session_key, provider, provider_session_id, attention_state, discovered_at, \
+              last_observed_at) \
+             VALUES (?, 'claude', ?, ?, 0, 0)",
+        )
+        .bind(format!("claude:{provider_session_id}"))
+        .bind(provider_session_id)
+        .bind(attention)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_request_key_collapses_repeat_firings_onto_one_open_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        // Two hook firings for ONE live question: distinct event-derived ids,
+        // the same request key. Only the first raises a row.
+        let first = AttentionRepo::insert_if_absent(
+            store.pool(),
+            &ask("att:sess:evt-1", "sess", None, 1000),
+            Some("fnv1a64:same"),
+        )
+        .await
+        .unwrap();
+        assert!(first, "the first firing raises the row");
+        let second = AttentionRepo::insert_if_absent(
+            store.pool(),
+            &ask("att:sess:evt-2", "sess", None, 2000),
+            Some("fnv1a64:same"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !second,
+            "a re-firing of the same open request raises nothing"
+        );
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            1,
+            "one question is one card, however often the hook re-fires"
+        );
+
+        // A DIFFERENT question in the same session still raises its own card.
+        assert!(
+            AttentionRepo::insert_if_absent(
+                store.pool(),
+                &ask("att:sess:evt-3", "sess", None, 3000),
+                Some("fnv1a64:other"),
+            )
+            .await
+            .unwrap()
+        );
+        // As does the same key in a DIFFERENT session.
+        assert!(
+            AttentionRepo::insert_if_absent(
+                store.pool(),
+                &ask("att:other:evt-4", "other", None, 4000),
+                Some("fnv1a64:same"),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_request_key_is_answerable_again() {
+        // The uniqueness is scoped to the OPEN set on purpose: a swallowed card
+        // strands a blocked session, which is worse than a duplicate one.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        assert!(
+            AttentionRepo::insert_if_absent(
+                store.pool(),
+                &ask("att:sess:evt-1", "sess", None, 1000),
+                Some("fnv1a64:same"),
+            )
+            .await
+            .unwrap()
+        );
+        AttentionRepo::mark_answered_if_open(store.pool(), "att:sess:evt-1", "tui", "yes", 1500)
+            .await
+            .unwrap();
+
+        assert!(
+            AttentionRepo::insert_if_absent(
+                store.pool(),
+                &ask("att:sess:evt-2", "sess", None, 2000),
+                Some("fnv1a64:same"),
+            )
+            .await
+            .unwrap(),
+            "once the first card is closed the same request is raisable again"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, "att:sess:evt-2");
+    }
+
+    #[tokio::test]
+    async fn insert_if_absent_without_a_key_keeps_pure_id_idempotency() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        assert!(
+            AttentionRepo::insert_if_absent(store.pool(), &ask("w1", "sess", None, 1000), None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !AttentionRepo::insert_if_absent(store.pool(), &ask("w1", "sess", None, 1000), None)
+                .await
+                .unwrap(),
+            "a replay of the same durable line is still absorbed by the id"
+        );
+        // Two keyless rows for one session are independent cards, not duplicates.
+        assert!(
+            AttentionRepo::insert_if_absent(store.pool(), &ask("w2", "sess", None, 2000), None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_closes_only_rows_no_live_session_still_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_fleet_session(store.pool(), "asking", "ASK").await;
+        seed_fleet_session(store.pool(), "quiet", "NONE").await;
+
+        for (id, session, ts) in [
+            ("keep-asking", "asking", 1_000_i64),
+            ("close-quiet", "quiet", 1_000),
+            ("close-gone", "vanished", 1_000),
+            ("keep-fresh", "vanished", 9_000),
+        ] {
+            AttentionRepo::insert(store.pool(), &ask(id, session, None, ts)).await.unwrap();
+        }
+
+        // Cutoff 5_000: `keep-fresh` is newer and out of scope; the session that
+        // still says ASK is out of scope whatever its age.
+        let closed = AttentionRepo::close_unclaimed_open(store.pool(), 5_000, 9_999, 100)
+            .await
+            .unwrap();
+        assert_eq!(closed, 2, "only the stale unclaimed rows close");
+
+        let open: Vec<_> = AttentionRepo::list_fleet(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(open, ["keep-asking", "keep-fresh"]);
+        let swept = AttentionRepo::get(store.pool(), "close-gone").await.unwrap().unwrap();
+        assert_eq!(swept.state, "answered");
+        assert_eq!(swept.answered_by.as_deref(), Some("resolved:sweep"));
+        assert_eq!(swept.answered_at, Some(9_999));
+
+        // A second pass finds nothing left to do (the sweep is idempotent).
+        assert_eq!(
+            AttentionRepo::close_unclaimed_open(store.pool(), 5_000, 10_000, 100)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_closes_an_escalation() {
+        // An ATC escalation is a human being paged, raised against a session id
+        // Fleet may never have seen. Sweeping it on that basis is a dropped page.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let mut page = ask("paged", "no-such-session", None, 1_000);
+        page.kind = AttentionKind::Escalation;
+        AttentionRepo::insert(store.pool(), &page).await.unwrap();
+        let mut approval = ask("perm", "no-such-session", None, 1_000);
+        approval.kind = AttentionKind::Approval;
+        AttentionRepo::insert(store.pool(), &approval).await.unwrap();
+        let mut waiting = ask("waiting", "no-such-session", None, 1_000);
+        waiting.kind = AttentionKind::Waiting;
+        AttentionRepo::insert(store.pool(), &waiting).await.unwrap();
+
+        assert_eq!(
+            AttentionRepo::close_unclaimed_open(store.pool(), 5_000, 9_999, 100)
+                .await
+                .unwrap(),
+            1,
+            "only the ingest-owned card is swept"
+        );
+        let open: Vec<_> = AttentionRepo::list_fleet(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(open, ["paged", "perm"]);
+    }
+
+    #[tokio::test]
+    async fn sweep_respects_its_pass_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        for i in 0..5 {
+            AttentionRepo::insert(store.pool(), &ask(&format!("s{i}"), "gone", None, i))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            AttentionRepo::close_unclaimed_open(store.pool(), 5_000, 9_999, 2)
+                .await
+                .unwrap(),
+            2,
+            "one pass never exceeds its bound"
+        );
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            3
+        );
     }
 
     #[tokio::test]
