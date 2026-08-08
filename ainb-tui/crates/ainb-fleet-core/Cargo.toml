@@ -50,6 +50,12 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 fs2 = { workspace = true }
 
+[features]
+default = []
+# Opt-in end-to-end tests that drive a REAL tmux pane (tests/tmux_send_integrity.rs).
+# Off by default because they need a tmux server on the host.
+tmux-tests = []
+
 [dev-dependencies]
 # Isolated tempdir for the session-registry writer's round-trip tests.
 tempfile = { workspace = true }
