@@ -1677,6 +1677,15 @@ async fn message_send_inner(
     if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
         return Err(invalid_params("scope_key must not be empty"));
     }
+    // A supplied actor is RECORDED, not trusted for authorisation — the socket
+    // token already authenticated the caller. Rejecting a blank one keeps
+    // `sender` from degrading into whitespace that renders as nobody.
+    if params.actor.as_deref().is_some_and(|actor| actor.trim().is_empty()) {
+        return Err(invalid_params("actor must not be empty"));
+    }
+    // Absent means the operator: every human surface omits the key, so the
+    // default is exactly the value that used to be hardcoded below.
+    let sender = params.actor.clone().unwrap_or_else(|| "operator".to_string());
     let mut seen = HashSet::new();
     let targets: Vec<String> = params
         .targets
@@ -1717,7 +1726,7 @@ async fn message_send_inner(
             request_fingerprint: Some(request_fingerprint),
             scope_key,
             origin_message_id: None,
-            sender: "operator".to_string(),
+            sender,
             kind: "user".to_string(),
             body: params.text.clone(),
             created_at: SystemClock.now_ms(),
