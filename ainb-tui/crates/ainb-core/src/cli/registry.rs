@@ -2058,6 +2058,13 @@ impl CliCommand for FleetCommand {
                     .arg(
                         clap::Arg::new("text")
                             .long("text")
+                            // A body may LEAD with a dash: "-y do the thing" is
+                            // an ordinary message. Without this clap reads it as
+                            // an unknown flag and the send never leaves the CLI,
+                            // which is the same class of defect that made the
+                            // run command's tmux send corrupt dash-prefixed
+                            // prompts. `-` alone still means stdin.
+                            .allow_hyphen_values(true)
                             .help("Message body, or `-` to read stdin"),
                     )
                     .arg(

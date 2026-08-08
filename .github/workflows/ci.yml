@@ -474,6 +474,38 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Recording artifacts — a GATE, unlike the smoke lane below.
+  #
+  # Nine zero-byte GIFs reached main because a recorder failed silently and
+  # nothing checked that a committed artifact carries bytes. A file existing is
+  # not evidence. This is five seconds of CI that would have caught it.
+  # ────────────────────────────────────────────────────────────────────────────
+  recordings:
+    name: Recording artifacts are not empty
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every committed recording carries bytes
+        run: |
+          empty="$(find explainers/recordings -type f -empty -print)"
+          if [ -n "$empty" ]; then
+            echo "::error::empty recording artifacts committed:"; echo "$empty"; exit 1
+          fi
+          echo "all recordings non-empty"
+      - name: every file the outcomes contract names exists
+        run: |
+          missing=0
+          for doc in $(find explainers/recordings -name EXPECTED-OUTCOMES.md); do
+            dir="$(dirname "$doc")"
+            # Filenames the contract references, as `name.ext` in backticks.
+            for f in $(grep -oE '`[A-Za-z0-9._-]+\.(gif|mp4|png)`' "$doc" | tr -d '`' | sort -u); do
+              [ -f "$dir/$f" ] || { echo "::error::$doc names $f, which does not exist"; missing=1; }
+            done
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every named artifact exists"
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Live chat-bus smoke — OPT-IN, same posture as the `#[ignore]`d real-adapter
   # probes.
   #

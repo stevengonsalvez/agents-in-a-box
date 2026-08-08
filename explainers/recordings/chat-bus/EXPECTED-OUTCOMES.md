@@ -33,7 +33,23 @@ adapter mode `fixture`, turn deadline compressed to 45000 ms via
 | `j5c.gif` / `.mp4` | fault: idempotency replay | `one delivery for two identical sends · exit 5 on the conflicting third` then `✓ j5c PASS` |
 | `j5d.gif` / `.mp4` | fault: permission round trip | `attention row → fleet/action approve → DELIVERED, row closed` then `✓ j5d PASS` |
 | `j5e.gif` / `.mp4` | fault: unknown target | `DELIVERED + REJECTED/target_unknown in one request, message persisted` then `✓ j5e PASS` |
-| `full-suite.gif` / `.mp4` | every journey, one run | nine `SMOKE-RESULT j... PASS` lines followed by `SMOKE-RESULT overall PASS` |
+
+## Why there is no whole-suite tape
+
+There deliberately is not one. Three attempts to capture the ~15 minute
+end-to-end run in this environment died mid-capture (vhs drives a headless
+browser; the longest successful capture here truncated at 453 seconds), and a
+truncated tape that stops after four journeys is worse than none: it looks like
+evidence and is not. The nine journey tapes ARE the uncut end-to-end evidence,
+one full run each, and the suite is reproducible in one command:
+
+```bash
+./ainb-tui/scripts/chat-bus-smoke.sh    # nine journeys, one SMOKE-RESULT line each
+```
+
+If a whole-suite tape is wanted later, record it somewhere a 15 minute capture
+is reliable and terminate on `Wait+Screen@2400s /SMOKE-RESULT overall/`, never a
+fixed `Sleep`.
 
 ## Fail signatures
 

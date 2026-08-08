@@ -1088,9 +1088,9 @@ impl AcpPool {
     /// that actor's own incarnation.
     async fn retire_actor(&self, session_key: &str, generation: u64) {
         let mut sessions = self.sessions.lock().await;
-        if sessions.get(session_key).is_some_and(|handle| handle.generation == generation) {
-            sessions.remove(session_key);
-        }
+        retire_if_current(&mut sessions, session_key, generation, |handle| {
+            handle.generation
+        });
     }
 
     const fn pool_writer_config(&self) -> WriterConfig {
@@ -2764,6 +2764,27 @@ fn holds_process<T>(dead: &Weak<T>, current: Option<&Arc<T>>) -> bool {
     }
 }
 
+/// Drop a session's map entry ONLY while the retiring actor still owns it.
+///
+/// Teardown then respawn is the normal path through convergence and resume, so
+/// a predecessor's retirement routinely races its successor's registration. An
+/// unguarded remove there evicts the LIVE actor's entry and leaves a running
+/// actor nothing can route to. Generic so the race is testable without an
+/// adapter process.
+fn retire_if_current<H>(
+    sessions: &mut HashMap<String, H>,
+    session_key: &str,
+    generation: u64,
+    generation_of: impl Fn(&H) -> u64,
+) {
+    if sessions
+        .get(session_key)
+        .is_some_and(|handle| generation_of(handle) == generation)
+    {
+        sessions.remove(session_key);
+    }
+}
+
 /// The stable identity of one permission ask.
 ///
 /// It keys the parked responder, the attention row, and
@@ -2782,7 +2803,7 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, holds_process};
+    use super::{Arc, HashMap, holds_process, retire_if_current};
 
     /// The exit event is PROCESS-SCOPED. The interleaving it defends against
     /// (the watcher snapshots the routes a dying process hosted, the actor then
@@ -2813,5 +2834,36 @@ mod tests {
             !holds_process(&dead, Some(&mine)),
             "a process nobody holds cannot be the one this actor holds"
         );
+    }
+
+    /// Retirement is GENERATION-scoped. Teardown then respawn is the normal
+    /// path through convergence and resume, so a predecessor's retirement
+    /// routinely lands after its successor registered; removing then would
+    /// leave a live actor nothing can route to.
+    #[test]
+    fn a_retiring_actor_never_evicts_its_successor() {
+        let mut sessions: HashMap<String, u64> = HashMap::new();
+        sessions.insert("acp:1".to_string(), 7);
+
+        // The successor registered first: generation 8 now owns the entry.
+        sessions.insert("acp:1".to_string(), 8);
+        retire_if_current(&mut sessions, "acp:1", 7, |generation| *generation);
+        assert_eq!(
+            sessions.get("acp:1"),
+            Some(&8),
+            "the predecessor's retirement must not evict the live successor"
+        );
+
+        // The owner retires: the entry goes.
+        retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
+        assert!(
+            sessions.get("acp:1").is_none(),
+            "the owning actor clears its own entry"
+        );
+
+        // Retiring twice, or against a session nobody registered, is a no-op.
+        retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
+        retire_if_current(&mut sessions, "acp:missing", 1, |generation| *generation);
+        assert!(sessions.is_empty());
     }
 }

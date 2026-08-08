@@ -520,7 +520,11 @@ journey_j1() {
   banner "J1 · chat bus on tmux" \
     "one send to 3 real panes: verbatim delivery, 3 DELIVERED receipts, the row in msg list, and a live follower that saw it"
 
-  local text="[j1 $RUN_ID] hello fleet, deliver me verbatim"
+  # The body LEADS with a dash on purpose. Phase 0 exists because a bare
+  # send-keys parses a dash-prefixed payload as a tmux flag and corrupts it;
+  # asserting the flags structurally elsewhere is not the same as putting the
+  # symptom on the path a user actually takes.
+  local text="-y [j1 $RUN_ID] hello fleet, deliver me verbatim"
   local request_id="j1-$RUN_ID"
   # An explicit broadcast scope, minted here rather than by the daemon, so the
   # `msg list` assertion reads THIS journey's scope instead of paging a shared
@@ -724,6 +728,18 @@ journey_j3() {
   replies="$(ainb_cli --format json fleet msg list --scope "$scope_key" --limit 100 |
     jq '[.messages[] | select(.kind == "agent")] | length')"
   (( replies >= 2 )) || { fail "the conversation did not continue: only $replies agent replies"; return 1; }
+  # The resume path is ASSERTED, not merely printed. A daemon whose every
+  # session/load fails re-primes forever and still delivers, so a journey that
+  # only counts replies passes while the fast path is silently dead. That is
+  # exactly the degradation the 2026-08-06 gate caught by hand.
+  [[ "$mode" == loaded ]] || {
+    fail "resume degraded to [$mode]: the adapter's own session/load did not carry the conversation"
+    return 1
+  }
+  # Not asserted here, deliberately: that the agent RECALLS the secret word.
+  # The fixture echoes its prompt, so only a real adapter can answer that, and
+  # the check lives in the real-adapter probes (acp_resume_real.rs) which run
+  # where an adapter is installed. This journey proves the transport path.
 
   log "   resumed via [$mode] on the same session_key · $replies agent replies · 0 ghost attention rows"
 }
