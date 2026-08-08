@@ -366,6 +366,184 @@ pub fn execute_fleet_broadcast_blocking(
     })
 }
 
+/// Page the copilot chat surface on a worker thread.
+///
+/// One worker, four calls, because the surface needs all four to say anything
+/// true: the channel (to learn its MINTED `channel:<ulid>` scope), the
+/// timeline, the open confirm cards, and the activity feed.
+///
+/// The scope is RESOLVED, never assumed. `fleet/channel_create` mints the id,
+/// so a client that hardcodes `channel:copilot` reads an empty timeline forever
+/// against a real daemon while every one of its unit tests stays green. That is
+/// the same shape as the ACP provider label that shipped as `UNKNOWN`.
+///
+/// The confirm feed is fetched RAW so one card carrying a state token this
+/// build predates cannot blank the whole list; the screen decodes card by card
+/// and refuses to answer any it could not decode.
+pub fn chat_page_blocking(
+    scope_key: Option<String>,
+) -> Result<ainb_plugin_hangar::screen::fleet_chat::ChatSnapshot, String> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_ACTIVITY_LIST_MAX, FLEET_MESSAGE_LIST_MAX, FleetActivityListParams,
+        FleetChannelCreateParams, FleetChannelKind, FleetConfirmListParams, FleetMessageListParams,
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+
+        // Resolve the copilot channel. NEWEST wins, matching the daemon's own
+        // `newest_of_kind` resolution in `fleet/copilot_configure`, so the two
+        // never disagree about which channel is "the" copilot channel.
+        let channels = client.channel_list().await.map_err(|error| error.to_string())?;
+        let existing = channels
+            .channels
+            .into_iter()
+            .filter(|channel| channel.kind == FleetChannelKind::Copilot)
+            .filter(|channel| scope_key.as_ref().is_none_or(|wanted| &channel.scope_key == wanted))
+            .next_back();
+        let channel = match existing {
+            Some(channel) => channel,
+            None => {
+                // Create-if-absent, on a read path, deliberately: the copilot
+                // channel is a singleton an operator expects to simply exist,
+                // and there is no other door to it in the TUI. A race creates a
+                // duplicate at worst, and newest-wins keeps every reader on the
+                // same one.
+                client
+                    .channel_create(FleetChannelCreateParams {
+                        kind: FleetChannelKind::Copilot,
+                        name: "copilot".to_string(),
+                        recipients: None,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .channel
+            }
+        };
+        let scope = channel.scope_key.clone();
+
+        // A COPILOT channel carries no recipient list: `fleet/channel_create`
+        // rejects one, because its membership is the ACP session that ANSWERS
+        // on the scope. So the recipient is resolved the way the contract says
+        // it is minted, by creating that session against this scope. The call
+        // is idempotent per live scope, so a poll returns the standing session
+        // rather than minting a second one every second.
+        //
+        // The daemon's refusal is KEPT, not swallowed: its wording is the only
+        // actionable thing an operator gets ("scope_key ... is already held by
+        // a session whose cwd is X, not Y" is how a TUI launched from a
+        // different directory than the one that first opened the chat reads).
+        // Dropping it leaves the screen saying "no copilot session yet" forever
+        // with the explanation discarded.
+        let (target_session_key, session_detail) = match client
+            .acp_session_create(ainb_hangar_proto::fleet::FleetAcpSessionCreateParams {
+                provider: COPILOT_DEFAULT_PROVIDER.to_string(),
+                cwd: std::env::current_dir()
+                    .map(|cwd| cwd.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string()),
+                scope_key: Some(scope.clone()),
+            })
+            .await
+        {
+            Ok(created) => (Some(created.session_key), None),
+            // A channel that DOES carry members (a broadcast channel reusing
+            // this page) keeps its first member as the recipient.
+            Err(error) => (channel.recipients.first().cloned(), Some(error.to_string())),
+        };
+
+        let messages = client
+            .message_list(FleetMessageListParams {
+                scope_key: Some(scope.clone()),
+                origin_id: None,
+                after_id: None,
+                limit: FLEET_MESSAGE_LIST_MAX,
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .messages;
+
+        // The confirm and activity feeds are NOT fatal to the page: a daemon
+        // built between phases answers -32601 here, and a chat that refuses to
+        // render its timeline over that is a worse surface than one that says
+        // which half is missing.
+        let (confirms, confirms_detail) = match client
+            .confirm_list_raw(FleetConfirmListParams {
+                scope_key: Some(scope.clone()),
+            })
+            .await
+        {
+            Ok(confirms) => (confirms, None),
+            Err(crate::fleet::bridge::daemon::DaemonError::Rpc { code, .. })
+                if code == RPC_METHOD_NOT_FOUND =>
+            {
+                (
+                    Vec::new(),
+                    Some("not served by this daemon yet".to_string()),
+                )
+            }
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        let activity = client
+            .activity_list(FleetActivityListParams {
+                scope_key: Some(scope.clone()),
+                after_seq: None,
+                limit: FLEET_ACTIVITY_LIST_MAX,
+            })
+            .await
+            .map(|page| page.activities)
+            .unwrap_or_default();
+
+        Ok(ainb_plugin_hangar::screen::fleet_chat::ChatSnapshot {
+            scope_key: Some(scope),
+            target_session_key,
+            messages,
+            confirms,
+            confirms_detail,
+            session_detail,
+            activity,
+        })
+    })
+}
+
+/// Post one operator message into the copilot channel on a worker thread.
+///
+/// No `actor` rides this: an operator send omits the key, which is exactly what
+/// the daemon defaults to. A copilot-authored write is the daemon's own MCP
+/// path and never originates at a human's keyboard.
+pub fn chat_send_blocking(
+    params: ainb_hangar_proto::fleet::FleetMessageSendParams,
+) -> Result<ainb_hangar_proto::fleet::FleetMessageSendResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.message_send(params).await.map_err(|error| error.to_string())
+    })
+}
+
+/// Answer one guardrail confirm card on a worker thread.
+pub fn chat_confirm_answer_blocking(
+    params: ainb_hangar_proto::fleet::FleetConfirmAnswerParams,
+) -> Result<ainb_hangar_proto::fleet::FleetConfirmAnswerResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.confirm_answer(params).await.map_err(|error| error.to_string())
+    })
+}
+
 /// Execute one authoritative Fleet action on a worker thread.
 pub fn execute_fleet_action_blocking(
     params: ainb_hangar_proto::fleet::FleetActionParams,
@@ -691,6 +869,20 @@ fn publish(feedback: &Mutex<ActionFeedback>, message: String) {
         g.message = message;
     }
 }
+
+/// JSON-RPC "method not found". A part-2 method answers this until its dispatch
+/// arm lands, by design: the capability id is defined and deliberately not
+/// advertised until then, so a client must degrade on this code rather than
+/// read an absent feed as an empty one.
+const RPC_METHOD_NOT_FOUND: i32 = -32601;
+
+/// The adapter the copilot channel's ACP session is minted with when nothing
+/// has configured one yet.
+///
+/// `fleet/copilot_configure` owns the real choice. This only decides which
+/// adapter the FIRST `fleet/acp_session_create` names, and that call is
+/// idempotent per live scope, so an already-configured copilot keeps its own.
+const COPILOT_DEFAULT_PROVIDER: &str = "claude-agent-acp";
 
 #[cfg(test)]
 mod tests {
