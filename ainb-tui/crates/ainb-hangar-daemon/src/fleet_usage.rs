@@ -246,7 +246,12 @@ pub async fn dashboard() -> FleetUsageDashboardResult {
 fn load_cache(path: &Path) -> Option<CachedSummaries> {
     let bytes = std::fs::read(path).ok()?;
     let cached: CachedSummaries = serde_json::from_slice(&bytes).ok()?;
-    (cached.version == CACHE_VERSION).then_some(cached)
+    // Accept OLDER caches, not just the current version. `CachedSummary` is
+    // unchanged across the v1 to v2 bump and `dashboard` defaults to None, so a
+    // v1 file still answers fleet/usage_summary correctly while the dashboard
+    // fills in on the next refresh. Rejecting it would drop the stable endpoint
+    // to SCANNING until a cold rescan of the whole corpus finished.
+    (cached.version <= CACHE_VERSION).then_some(cached)
 }
 
 fn write_cache(path: &Path, cached: &CachedSummaries) -> std::io::Result<()> {
@@ -491,6 +496,7 @@ fn window(period: FleetUsagePeriod, now: DateTime<Utc>) -> (DateTime<Utc>, DateT
 #[derive(Default)]
 struct CostCompleteness {
     daily: HashMap<NaiveDate, bool>,
+    weeks: HashMap<NaiveDate, bool>,
     models: HashMap<String, bool>,
     projects: HashMap<String, bool>,
     sessions: HashMap<String, bool>,
@@ -503,11 +509,41 @@ fn session_key(provider: &str, project: &str, session_id: &str) -> String {
     format!("{provider}:{project}:{session_id}")
 }
 
+/// Reduce a shell command line to just its program name.
+///
+/// The dashboard reports WHICH programs an operator runs, never the arguments
+/// they ran them with. Arguments are where absolute paths and credentials live,
+/// and this value reaches both the wire and a world-readable cache file.
+///
+/// Leading `VAR=value` assignments are skipped rather than reported, since an
+/// inline `API_KEY=...` would otherwise become the bucket name and defeat the
+/// whole point. A basename is taken so `/usr/local/bin/foo` and `foo` agree and
+/// no install prefix leaks. Anything unrecognisable degrades to `"other"`
+/// rather than falling back to the raw string.
+fn program_name(command: &str) -> String {
+    command
+        .split_whitespace()
+        .find(|token| !token.contains('='))
+        .and_then(|token| token.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| "other".to_string(), ToString::to_string)
+}
+
+/// Monday anchoring the ISO week containing `date`, matching how the scanner
+/// keys its weekly buckets. The completeness map has to agree with the bucket
+/// map or the lookup silently misses.
+fn week_anchor(date: NaiveDate) -> NaiveDate {
+    use chrono::Datelike;
+    date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
+}
+
 fn completeness(calls: &[ProviderCall]) -> CostCompleteness {
     let mut result = CostCompleteness::default();
     for call in calls {
         let priced = call.cost_usd.is_some();
-        mark(&mut result.daily, call.timestamp.date_naive(), priced);
+        let day = call.timestamp.date_naive();
+        mark(&mut result.daily, day, priced);
+        mark(&mut result.weeks, week_anchor(day), priced);
         mark(&mut result.models, call.model.clone(), priced);
         mark(&mut result.projects, call.project.clone(), priced);
         mark(
@@ -621,14 +657,22 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
         .collect();
     let projected = scanner::aggregate(calls.clone());
     let cost_complete = calls.iter().all(|call| call.cost_usd.is_some());
+    let completeness = completeness(&calls);
 
     // Weekly buckets from scanner's pre-computed weekly aggregates.
+    //
+    // Priced-ness is per week, not the global flag: the scanner sums costs with
+    // None coalescing, so a week containing one unpriced call would otherwise
+    // report a partial sum as if it were the whole week's spend.
     let mut weekly: Vec<_> = projected
         .weekly
         .into_iter()
         .map(|(week_start, bucket)| FleetUsageWeeklyBucket {
+            bucket: bucket_from(
+                &bucket,
+                completeness.weeks.get(&week_start).copied().unwrap_or(false),
+            ),
             week_start: week_start.to_string(),
-            bucket: bucket_from(&bucket, cost_complete),
         })
         .collect();
     // Ascending by week (scanner keys off a BTreeMap), and a 371-day window
@@ -659,7 +703,12 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
     keep_newest(&mut heatmap, FLEET_DASHBOARD_MAX_HEATMAP_CELLS);
 
     // Forecast: linear extrapolation from trailing 7 days of daily data.
-    let forecast = build_forecast(&projected.daily, now);
+    //
+    // Gated on per-day completeness. The scanner coalesces None when summing a
+    // day's cost, so an ungated forecast would quote a confident dollar figure
+    // built from a partial sum, counting every unpriced call as free, while the
+    // totals beside it correctly render null.
+    let forecast = build_forecast(&projected.daily, &completeness.daily, now);
 
     // Provider / model / project breakdowns (reuse existing helpers).
     let mut providers: Vec<_> = grouped_usage(&calls, |call| call.provider.as_str().to_string())
@@ -671,14 +720,13 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
         .collect();
     sort_and_cap(&mut providers, |row| &row.bucket);
 
-    let completeness = completeness(&calls);
     let mut models: Vec<_> = projected
         .models
         .into_iter()
         .map(|row| FleetUsageModelBucket {
             bucket: bucket_from(
                 &row.bucket,
-                completeness.models.get(&row.model).copied().unwrap_or(true),
+                completeness.models.get(&row.model).copied().unwrap_or(false),
             ),
             model: row.model,
         })
@@ -691,7 +739,7 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
         .map(|row| FleetUsageProjectBucket {
             bucket: bucket_from(
                 &row.bucket,
-                completeness.projects.get(&row.name).copied().unwrap_or(true),
+                completeness.projects.get(&row.name).copied().unwrap_or(false),
             ),
             project: row.name,
             repo: row.repo,
@@ -705,9 +753,13 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
         .into_iter()
         .map(|row| {
             let key = session_key(row.provider.as_str(), &row.project, &row.session_id);
-            let priced = completeness.sessions.get(&key).copied().unwrap_or(true);
+            let priced = completeness.sessions.get(&key).copied().unwrap_or(false);
             FleetUsageSessionBucket {
-                session_id: key,
+                // The BARE session id. provider, project and session_id are
+                // already three fields on this struct, so the composite added
+                // nothing a client could use: it cannot even be re-split, since
+                // a project label may itself contain a colon.
+                session_id: row.session_id,
                 provider: row.provider.as_str().to_string(),
                 project: row.project,
                 bucket: bucket_from(&row.bucket, priced),
@@ -731,7 +783,7 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
         .branches
         .into_iter()
         .map(|row| {
-            let priced = completeness.branches.get(&row.branch).copied().unwrap_or(true);
+            let priced = completeness.branches.get(&row.branch).copied().unwrap_or(false);
             FleetUsageBranchBucket {
                 bucket: bucket_from(&row.bucket, priced),
                 branch: row.branch,
@@ -773,15 +825,24 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
     mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count));
     mcp_servers.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
-    let mut shell_commands: Vec<_> = projected
-        .shell_commands
+    // Only the PROGRAM name leaves this module, never the command line. The
+    // scanner keys these on the verbatim `input.command`, which routinely
+    // carries absolute paths and can carry credentials, and this result is both
+    // sent over the wire and written to a world-readable cache file. Shipping a
+    // program name matches how `tools` ships a tool name and keeps the promise
+    // in this module's header.
+    let mut by_program: HashMap<String, u64> = HashMap::new();
+    for row in projected.shell_commands {
+        *by_program.entry(program_name(&row.name)).or_default() +=
+            u64::try_from(row.calls).unwrap_or(u64::MAX);
+    }
+    let mut shell_commands: Vec<_> = by_program
         .into_iter()
-        .map(|row| FleetUsageNamedBucket {
-            name: row.name,
-            call_count: u64::try_from(row.calls).unwrap_or(u64::MAX),
-        })
+        .map(|(name, call_count)| FleetUsageNamedBucket { name, call_count })
         .collect();
-    shell_commands.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    // Tie-break by name so a cap boundary is deterministic across scans.
+    shell_commands
+        .sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
     shell_commands.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
     FleetUsageDashboardResult {
@@ -807,8 +868,12 @@ fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDash
 }
 
 /// Trailing-7-day linear forecast.
+///
+/// `day_completeness` gates the cost leg only; the token projection is always
+/// exact and does not depend on pricing.
 fn build_forecast(
     daily: &[(NaiveDate, TokenBucket)],
+    day_completeness: &HashMap<NaiveDate, bool>,
     now: DateTime<Utc>,
 ) -> Option<FleetUsageForecast> {
     let cutoff = now.date_naive() - Duration::days(TRAILING_FORECAST_DAYS);
@@ -820,11 +885,18 @@ fn build_forecast(
     // quote an "every day is a working day" rate and overstate the projection --
     // for someone who works two days a week, by roughly 3.5x.
     //
-    // The span is capped at the 7-day window and floored at 1, so a brand-new
-    // user with a single day of history is not diluted by six days of absence
-    // they were never around for.
-    let span_days = (now.date_naive() - earliest).num_days() + 1;
-    let denominator = span_days.clamp(1, TRAILING_FORECAST_DAYS) as u64;
+    // Shortening the window to the observed span is ONLY right for an account
+    // with no earlier history: a long-time user who happened to be idle for six
+    // days and worked today would otherwise be divided by 1 and projected at 30x
+    // a single day. Any activity at or before the cutoff proves the account is
+    // not new, so the full window is the honest divisor.
+    let has_earlier_history = daily.iter().any(|(date, _)| *date <= cutoff);
+    let denominator = if has_earlier_history {
+        TRAILING_FORECAST_DAYS as u64
+    } else {
+        let span_days = (now.date_naive() - earliest).num_days() + 1;
+        span_days.clamp(1, TRAILING_FORECAST_DAYS) as u64
+    };
 
     let total_tokens: u64 = trailing
         .iter()
@@ -838,8 +910,16 @@ fn build_forecast(
         .sum();
     let avg_daily_tokens = total_tokens / denominator;
 
-    let total_cost: Option<f64> =
-        trailing.iter().try_fold(0.0_f64, |acc, (_, b)| b.cost_usd.map(|c| acc + c));
+    // A sampled day whose cost is only partially known makes the whole
+    // projection unknowable. The scanner coalesces None when summing a day, so
+    // without this gate an unpriced call silently counts as $0 and the forecast
+    // reads as confident and cheap.
+    let all_sampled_days_priced = trailing
+        .iter()
+        .all(|(date, _)| day_completeness.get(date).copied().unwrap_or(false));
+    let total_cost: Option<f64> = all_sampled_days_priced
+        .then(|| trailing.iter().try_fold(0.0_f64, |acc, (_, b)| b.cost_usd.map(|c| acc + c)))
+        .flatten();
     let avg_daily_cost = total_cost.map(|c| c / denominator as f64);
 
     Some(FleetUsageForecast {
@@ -976,13 +1056,20 @@ mod tests {
         assert!(forecast.avg_daily_cost_usd.is_some());
         // Dimension breakdowns.
         assert_eq!(result.sessions.len(), 1);
-        assert!(result.sessions[0].session_id.contains("claude"));
+        assert_eq!(
+            result.sessions[0].session_id, "s1",
+            "the bare session id ships, not a composite"
+        );
+        assert_eq!(result.sessions[0].provider, "claude");
         assert_eq!(result.branches.len(), 1);
         assert_eq!(result.branches[0].branch, "feat/dash");
         assert_eq!(result.tools.len(), 1);
         assert_eq!(result.tools[0].name, "Read");
         assert_eq!(result.shell_commands.len(), 1);
-        assert_eq!(result.shell_commands[0].name, "cargo test");
+        assert_eq!(
+            result.shell_commands[0].name, "cargo",
+            "only the program name leaves the daemon"
+        );
         assert_eq!(result.providers.len(), 1);
         assert_eq!(result.models.len(), 1);
         assert_eq!(result.projects.len(), 1);
@@ -1104,12 +1191,12 @@ mod tests {
         let priced = result
             .sessions
             .iter()
-            .find(|s| s.session_id.ends_with(":priced"))
+            .find(|s| s.session_id == "priced")
             .expect("priced session present");
         let unpriced = result
             .sessions
             .iter()
-            .find(|s| s.session_id.ends_with(":unpriced"))
+            .find(|s| s.session_id == "unpriced")
             .expect("unpriced session present");
         assert_eq!(
             priced.bucket.cost_usd,
@@ -1152,8 +1239,13 @@ mod tests {
         };
 
         // Worked 2 days out of a 7-day span: $10 total.
-        let forecast = build_forecast(&[(day(6), spend(5.0)), (day(0), spend(5.0))], now)
-            .expect("trailing data yields a forecast");
+        let priced_days = HashMap::from([(day(6), true), (day(0), true)]);
+        let forecast = build_forecast(
+            &[(day(6), spend(5.0)), (day(0), spend(5.0))],
+            &priced_days,
+            now,
+        )
+        .expect("trailing data yields a forecast");
 
         assert_eq!(
             forecast.sample_days, 7,
@@ -1183,18 +1275,216 @@ mod tests {
             ..TokenBucket::default()
         };
 
-        let forecast = build_forecast(&[(now.date_naive(), bucket)], now).expect("forecast");
+        let priced_days = HashMap::from([(now.date_naive(), true)]);
+        let forecast =
+            build_forecast(&[(now.date_naive(), bucket)], &priced_days, now).expect("forecast");
 
         assert_eq!(forecast.sample_days, 1);
         assert_eq!(forecast.avg_daily_cost_usd, Some(3.0));
         assert_eq!(forecast.projected_30d_cost_usd, Some(90.0));
     }
 
+    /// Command ARGUMENTS are where absolute paths and credentials live, and this
+    /// result reaches both the wire and a world-readable cache file. Only the
+    /// program name may leave the daemon.
+    #[test]
+    fn shell_commands_ship_the_program_only_never_the_arguments() {
+        assert_eq!(program_name("cargo test --workspace"), "cargo");
+        // An absolute install prefix must not leak, and must fold together with
+        // the bare invocation of the same program.
+        assert_eq!(
+            program_name("/usr/local/bin/rg --hidden /Users/someone/src"),
+            "rg"
+        );
+        // A leading inline assignment is skipped: reporting it would make the
+        // secret itself the bucket name.
+        assert_eq!(
+            program_name("API_KEY=sk-live-abc123 ./deploy.sh --prod"),
+            "deploy.sh"
+        );
+        assert_eq!(program_name(""), "other");
+        assert_eq!(program_name("FOO=1 BAR=2"), "other");
+
+        // Nothing resembling an argument survives the full projection, and
+        // variants of one program collapse into a single counted row.
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, cmd: &str| ProviderCall {
+            id,
+            provider: ainb_plugin_types_sessions::Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.01),
+            tools: vec![],
+            bash_commands: vec![cmd.to_string()],
+            user_message: String::new(),
+            branch: None,
+        };
+        let usage = UsageData {
+            calls: vec![
+                call(1, "git commit -m 'secret /Users/someone/private'"),
+                call(2, "git push origin main"),
+                call(
+                    3,
+                    "curl -H 'Authorization: Bearer sk-live-xyz' https://api.example.com",
+                ),
+            ],
+            ..UsageData::default()
+        };
+        let result = dashboard_from_usage(&usage, now);
+
+        let git = result.shell_commands.iter().find(|r| r.name == "git").expect("git row");
+        assert_eq!(git.call_count, 2, "both git invocations fold into one row");
+        for row in &result.shell_commands {
+            assert!(
+                !row.name.contains(' ') && !row.name.contains('/'),
+                "a bare program name cannot carry arguments or paths, got {:?}",
+                row.name
+            );
+        }
+        let shipped = format!("{:?}", result.shell_commands);
+        for leaked in ["Bearer", "sk-live", "/Users/", "secret", "origin"] {
+            assert!(
+                !shipped.contains(leaked),
+                "{leaked} must never reach the wire"
+            );
+        }
+    }
+
+    /// A week containing one unpriced call must report no cost rather than a
+    /// partial sum. The scanner coalesces None when summing, so the partial
+    /// figure would otherwise read as the whole week's spend.
+    #[test]
+    fn one_unpriced_call_only_blanks_its_own_week() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, day: NaiveDate, cost: Option<f64>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: day.and_hms_opt(12, 0, 0).unwrap().and_utc(),
+            input_tokens: 10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 10,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        };
+        // This week (Mon 2026-08-03) is fully priced; last week has one gap.
+        let this_week = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let last_week = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        let usage = UsageData {
+            calls: vec![
+                call(1, this_week, Some(0.02)),
+                call(2, last_week, Some(0.05)),
+                call(3, last_week, None),
+            ],
+            ..UsageData::default()
+        };
+        let result = dashboard_from_usage(&usage, now);
+
+        let priced =
+            result.weekly.iter().find(|w| w.week_start == "2026-08-03").expect("this week");
+        let partial =
+            result.weekly.iter().find(|w| w.week_start == "2026-07-27").expect("last week");
+        assert_eq!(
+            priced.bucket.cost_usd,
+            Some(0.02),
+            "a fully priced week keeps its cost"
+        );
+        assert_eq!(
+            partial.bucket.cost_usd, None,
+            "a week with an unpriced call must not report the partial sum as its total"
+        );
+    }
+
+    /// The forecast is the only cost surface that does not flow through
+    /// `bucket_from`, so it needs its own gate: quoting a confident dollar
+    /// projection built from partial day sums is the exact failure the
+    /// never-zero rule exists to prevent.
+    #[test]
+    fn forecast_reports_no_cost_when_a_sampled_day_is_unpriced() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let bucket = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+        let daily = [(day(1), bucket(5.0)), (day(0), bucket(5.0))];
+
+        // Day 0's cost is a partial sum, so the projection is unknowable.
+        let gapped = HashMap::from([(day(1), true), (day(0), false)]);
+        let forecast = build_forecast(&daily, &gapped, now).expect("forecast");
+        assert_eq!(
+            forecast.projected_30d_cost_usd, None,
+            "an unpriced sampled day must blank the cost projection, not count it as free"
+        );
+        assert_eq!(forecast.avg_daily_cost_usd, None);
+        // Tokens are exact regardless of pricing, so they must still be reported.
+        assert!(
+            forecast.projected_30d_tokens > 0,
+            "the token projection does not depend on price"
+        );
+
+        let complete = HashMap::from([(day(1), true), (day(0), true)]);
+        let priced = build_forecast(&daily, &complete, now).expect("forecast");
+        assert!(
+            priced.projected_30d_cost_usd.is_some(),
+            "a fully priced sample still forecasts"
+        );
+    }
+
+    /// A long-time user who was idle all week and worked today must not be
+    /// divided by one and projected at 30x a single day. Earlier history is the
+    /// evidence that distinguishes them from a genuinely new account.
+    #[test]
+    fn forecast_does_not_treat_a_long_idle_user_as_brand_new() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let spend = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+
+        // Activity 90 days ago proves the account is not new, then a $7 day today.
+        let daily = [(day(90), spend(1.0)), (day(0), spend(7.0))];
+        let priced = HashMap::from([(day(90), true), (day(0), true)]);
+        let forecast = build_forecast(&daily, &priced, now).expect("forecast");
+
+        assert_eq!(
+            forecast.sample_days, 7,
+            "an established account uses the full window"
+        );
+        assert_eq!(
+            forecast.avg_daily_cost_usd,
+            Some(1.0),
+            "$7 over 7 days, not $7 over 1"
+        );
+        assert_eq!(forecast.projected_30d_cost_usd, Some(30.0));
+    }
+
     #[test]
     fn forecast_requires_trailing_data() {
         let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
         // Empty daily data yields no forecast.
-        assert!(build_forecast(&[], now).is_none());
+        assert!(build_forecast(&[], &HashMap::new(), now).is_none());
         // Data older than 7 days is excluded.
         let old_date = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
         let bucket = TokenBucket {
@@ -1202,6 +1492,6 @@ mod tests {
             cost_usd: Some(1.0),
             ..TokenBucket::default()
         };
-        assert!(build_forecast(&[(old_date, bucket)], now).is_none());
+        assert!(build_forecast(&[(old_date, bucket)], &HashMap::new(), now).is_none());
     }
 }
