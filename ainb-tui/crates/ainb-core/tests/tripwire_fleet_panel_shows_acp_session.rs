@@ -86,18 +86,32 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
-/// Press `f` until the Fleet panel is actually on screen.
-fn open_fleet_panel(session: &str) -> Option<String> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+fn wait_for(session: &str, needle: &str, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
-        let capture = capture_pane(session);
-        if capture.contains("Fleet ·") {
-            return Some(capture);
+        if capture_pane(session).contains(needle) {
+            return true;
         }
-        send_key(session, "f");
         thread::sleep(Duration::from_millis(500));
     }
-    None
+    false
+}
+
+/// Open Fleet the way a user does: wait for the home screen to paint, then
+/// press `f` ONCE.
+///
+/// Pressing `f` on a loop until something happens would be the wrong test. A
+/// modal that swallows the first press is precisely the failure this is here to
+/// catch, and a retry loop makes it invisible. The spacing in the home banner is
+/// load-bearing too: the setup wizard's splash also says "Agents in a Box", so
+/// the unspaced name would match a screen that eats `f` rather than the screen
+/// that acts on it.
+fn open_fleet_panel(session: &str) -> bool {
+    if !wait_for(session, "A I N B", 60) {
+        return false;
+    }
+    send_key(session, "f");
+    wait_for(session, "Fleet ·", 30)
 }
 
 #[test]
@@ -174,9 +188,11 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         .status()
         .expect("launch the TUI");
 
-    open_fleet_panel(session).unwrap_or_else(|| {
-        panic!("the Fleet panel never opened:\n{}", capture_pane(session));
-    });
+    assert!(
+        open_fleet_panel(session),
+        "the Fleet panel did not open on the first `f`:\n{}",
+        capture_pane(session)
+    );
 
     // The panel lands on the action queue, which shows only what needs the
     // operator; an idle chat session is not on it. `5` is the All view, the
