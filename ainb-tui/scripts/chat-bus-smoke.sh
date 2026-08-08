@@ -9,6 +9,7 @@
 #   ./scripts/chat-bus-smoke.sh j2         # one journey, for recording
 #   ./scripts/chat-bus-smoke.sh j1 j5c     # a subset
 #   ./scripts/chat-bus-smoke.sh j6         # the real TUI, the operating surface
+#   ./scripts/chat-bus-smoke.sh j7         # the real TUI's copilot chat screen
 #   ./scripts/chat-bus-smoke.sh --keep j4  # leave the scratch world behind
 #
 # What it stands up (nothing touches the operator's real hangar or tmux):
@@ -23,10 +24,11 @@
 #   * ACP adapters: the real ones when they are installed AND credentialled,
 #     otherwise the `fake_acp_adapter` fixture from `ainb-acp`. The mode is
 #     printed in the banner, never guessed at by the reader.
-#   * for J6, the REAL `ainb tui` in a session of its own on that private
-#     server. Every other journey drives the daemon and the CLI; J6 drives the
-#     OPERATING SURFACE, because part 1 shipped a bus the TUI consumed without
-#     anything ever opening it.
+#   * for J6 and J7, the REAL `ainb tui` in a session of its own on that private
+#     server. Every other journey drives the daemon and the CLI; those two drive
+#     the OPERATING SURFACE, because part 1 shipped a bus the TUI consumed
+#     without anything ever opening it. J6 reads the Fleet panel's roster; J7
+#     opens the copilot CHAT on it and operates the conversation.
 #
 # How the tmux sessions become fleet sessions: they are NOT seeded into the
 # store. The daemon's own tmux reconciler (`spawn_tmux_reconciler`, every 3 s)
@@ -201,6 +203,21 @@ rpc() { # method [params-json]
 # runbook answers "why did this not deliver" from that column, so the smoke
 # reads it directly, READ-ONLY, and says so wherever it does.
 db() { sqlite3 -readonly "$DB" "$1"; }
+
+# The ONE writer in this file, and it seeds a PRECONDITION, never an outcome.
+#
+# J7 needs an open guardrail confirm card on screen. A card is minted by
+# `ainb_hangar_daemon::copilot::gate`, called from the copilot's own tool
+# bridge — and that bridge is not built yet, so NOTHING on the wire, in the CLI
+# or in the TUI can open one. Seeding the row is the only way to reach the
+# surface under test at all.
+#
+# What that costs is scoped and stated: the row is the precondition, and every
+# assertion AFTER it is real product behaviour on the real wire — the panel
+# decoding the card through `fleet/confirm_list`, rendering it answerable, and
+# `y` resolving it through `fleet/confirm_answer`. The day the tool bridge
+# lands, this seed is replaced by a copilot tool call and nothing else moves.
+db_write() { sqlite3 "$DB" "$1"; }
 
 delivery_state()  { db "SELECT state FROM fleet_message_delivery WHERE message_id='$1' AND session_key='$2';"; }
 delivery_detail() { db "SELECT COALESCE(detail,'') FROM fleet_message_delivery WHERE message_id='$1' AND session_key='$2';"; }
@@ -1155,9 +1172,226 @@ journey_j6() {
   log "   Fleet opened on the first \`f\` ·$roster· card [$identity] labelled [$provider_cell]"
 }
 
+# ---- J7: the copilot chat, on the operating surface -----------------------
+
+# Chrome the chat screen itself paints (`ainb-plugin-hangar/src/screen/fleet_chat.rs`),
+# so a match means the copilot CHAT is on screen, not merely that Fleet opened.
+CHAT_SCREEN_MARKER='Fleet chat · #copilot'
+# The composer's own help line. The header above paints while the screen is
+# still LOADING, so waiting for this instead is what makes the keys that follow
+# land on a surface that can receive them.
+CHAT_COMPOSER_MARKER='Enter sends · Tab confirm cards'
+# The cards help line, which the pane prints only once focus IS on the cards.
+CHAT_CARDS_MARKER='↑↓ card · y approve'
+
+# The newest copilot channel AS THE DAEMON REPORTS IT, through the CLI's own
+# `fleet/channel_list` round trip.
+#
+# Deliberately NOT read off the pane: the thing under test is whether the screen
+# shows the scope the daemon minted, and a reader that took its expected value
+# from the screen would agree with any string the screen chose to print. The
+# first version of this surface hardcoded `channel:copilot` and read an empty
+# timeline forever while every one of its unit tests stayed green.
+copilot_scope() {
+  ainb_cli --format json fleet channel list |
+    jq -r '[.channels[] | select(.kind == "copilot")] | last | .scope_key // empty'
+}
+have_copilot_channel() { [[ -n "$(copilot_scope)" ]]; }
+
+# One timeline row, ANCHORED on the attribution column.
+#
+# `render_timeline` paints a fixed-width 12-column author label, then `│ `, then
+# the body, precisely so a reader can name the row it means. A pane-wide grep
+# for the body would match the composer still echoing what the operator typed,
+# and — the failure this journey exists for — would pass even if both authors
+# rendered under the same name.
+chat_row() { # label body -> the whole row, or empty
+  tui_pane | grep -m1 -E "^ *$1 +│ $2" || true
+}
+chat_row_present() { [[ -n "$(chat_row "$1" "$2")" ]]; }
+
+# The open confirm card's own row: `render_cards` paints
+# `<cursor> [<state>] <tool>  <arguments>  <hint>`.
+chat_card_row() { tui_pane | grep -m1 -E '^ *(▶ )?\[OPEN\] +kill ' || true; }
+chat_card_present() { [[ -n "$(chat_card_row)" ]]; }
+
+journey_j7() {
+  banner "J7 · the copilot chat" \
+    "the real chat screen on a cold-launched \`ainb tui\`: the DAEMON's channel scope on screen, the operator's own message in the conversation, two authors on DISTINCT rows, and an open confirm card answered from the pane"
+
+  "$BIN_DIR/ainb" tui --help >/dev/null 2>&1 || {
+    skip "this ainb has no \`tui\` subcommand: there is no operating surface to drive"
+    return 77
+  }
+  # Part 2's dispatch arms, probed on the WIRE. A part 1 daemon answers -32601
+  # here, and failing on that would report an unimplemented phase as a
+  # regression. Same posture as J3's Phase 6 probe: absence skips with a reason,
+  # and the probe flips itself the day the arms land, with no edit here.
+  local probe
+  probe="$(rpc fleet/channel_list)"
+  if [[ "$(printf '%s' "$probe" | jqr '.error.code // empty')" == "-32601" ]]; then
+    skip "this daemon has no part 2 chat dispatch (fleet/channel_list is not a method)"
+    return 77
+  fi
+
+  local project="$ROOT/j7-project"
+  mkdir -p "$project"
+
+  step "cold-launching the REAL \`ainb tui\` on the private tmux server"
+  TUI_SESSION="ainb-smoke-chat-$RUN_ID"
+  # `-c "$project"`: the chat screen creates the copilot's ACP session against
+  # the TUI's OWN cwd, and the daemon pins a scope to the cwd that first claimed
+  # it. A scratch dir keeps that fact inside this run's world. NOT the
+  # `ainb-smoke-$RUN_ID-` prefix the fake agents use — `resolve_tmux_targets`
+  # selects on that, and a TUI pane joining the roster breaks its exactly-3
+  # check. 200x50 so the chat renders its full-height form.
+  tmux_cmd new-session -d -s "$TUI_SESSION" -x 200 -y 50 -c "$project" \
+    "env -u TMUX HOME=$SCRATCH_HOME AINB_HOME=$SCRATCH_HOME/.agents-in-a-box \
+       AINB_HANGAR_HOME=$HANGAR_HOME TMUX_TMPDIR=$TMUX_DIR PATH=$BIN_DIR:$PATH \
+       AINB_DISABLE_PLUGINS=1 AINB_CODEX_MANAGED=0 \
+       CLAUDE_PEERS_DB=$ROOT/j7-peers.db AINB_FLEET_JOBS_DIR=$ROOT/j7-jobs \
+       $BIN_DIR/ainb tui"
+  wait_until 60 "the TUI to paint its home screen" tui_pane_has "$HOME_SCREEN_MARKER" || return 1
+
+  # Each key pressed ONCE, after waiting for the screen that receives it. A
+  # retry loop is how a modal swallowing the first press goes unnoticed, which
+  # is a real bug this suite has already caught.
+  step "pressing \`f\` ONCE, the way a user opens Fleet"
+  tmux_cmd send-keys -t "$TUI_SESSION" f
+  wait_until 30 "the Fleet panel to open on the FIRST \`f\`" \
+    tui_pane_has "$FLEET_PANEL_MARKER" || return 1
+  step "pressing \`m\` ONCE, the way a user opens the copilot chat"
+  tmux_cmd send-keys -t "$TUI_SESSION" m
+  wait_until 30 "the chat to open on the FIRST \`m\` (a modal in the way would eat it)" \
+    tui_pane_has "$CHAT_SCREEN_MARKER" || return 1
+  wait_until 60 "the chat to finish loading (its composer help line)" \
+    tui_pane_has "$CHAT_COMPOSER_MARKER" || return 1
+
+  step "reading the channel scope back from the DAEMON, independently of the screen"
+  wait_until 45 "the daemon to report the copilot channel the screen asked it to mint" \
+    have_copilot_channel || return 1
+  local scope
+  scope="$(copilot_scope)"
+  case "$scope" in
+    channel:copilot)
+      fail "the chat is bound to a hardcoded channel:copilot; the daemon mints channel:<ulid>"
+      return 1 ;;
+    channel:?*) ;;
+    *) fail "expected a channel:<ulid> scope from fleet/channel_list, got [$scope]"; return 1 ;;
+  esac
+  # The header CELL, not the header ROW. `capture-pane` returns one physical
+  # line per screen row, and anything floating to the right of the chat (a
+  # "Workspaces loaded" toast at column 150, say) lands on the same line. So the
+  # comparison is anchored at the START of the row and bounded by a space: the
+  # header must read EXACTLY this and nothing else, which a `contains` on the
+  # scope would not prove — the scope string appears in the status line too.
+  local expected_header="$CHAT_SCREEN_MARKER · $scope"
+  local header
+  header="$(tui_pane | grep -m1 -E "^ *$CHAT_SCREEN_MARKER · " | sed 's/^ *//')"
+  step "chat header, as the operator sees it: ${header:0:${#expected_header}}"
+  assert_eq "$expected_header" "${header:0:${#expected_header}}" \
+    "the chat must name the scope the DAEMON minted, not one of its own" || return 1
+  case "${header:${#expected_header}:1}" in
+    ''|' ') ;;
+    *) fail "the chat header does not end at the daemon's scope: [$header]"; return 1 ;;
+  esac
+
+  # The session the channel's membership actually resolves to
+  # (`FleetAcpSessionRepo::get_live_by_scope`), read READ-ONLY from the store:
+  # nothing on the v2 wire projects a scope onto its ACP session, and the
+  # screen's own status line is part of what is under test, so it cannot be the
+  # source of the target either.
+  step "resolving the copilot session the chat created on that scope"
+  local live_session_sql="SELECT session_key FROM fleet_acp_session WHERE scope_key='$scope' AND state IN ('ACTIVE','IDLE');"
+  wait_until 60 "the chat to create the copilot's ACP session" \
+    bash -c "[[ -n \"\$(sqlite3 -readonly '$DB' \"$live_session_sql\")\" ]]" || return 1
+  local target
+  target="$(db "$live_session_sql")"
+
+  step "typing in the composer and pressing Enter ONCE, the way an operator asks"
+  local operator_text="what is blocked right now"
+  tmux_cmd send-keys -t "$TUI_SESSION" -l "$operator_text"
+  tmux_cmd send-keys -t "$TUI_SESSION" Enter
+  wait_until 60 "the operator's message to reach the conversation, attributed to the operator" \
+    chat_row_present YOU "$operator_text" || return 1
+
+  # A COPILOT-authored line, minted by the DAEMON from the `actor` the wire
+  # carries — the same field `copilot::post_channel_message` sets. Sent over
+  # `fleet/message_send` directly because part 2 ships no CLI verb that writes
+  # as the copilot, exactly as J5d speaks `fleet/action` for the same reason.
+  step "posting a COPILOT-authored line on the wire the daemon's own copilot writes on"
+  local copilot_text="session one is waiting on an approval"
+  local posted
+  posted="$(rpc fleet/message_send "$(jq -nc --arg scope "$scope" --arg target "$target" \
+    --arg text "$copilot_text" --arg request "j7-copilot-$RUN_ID" \
+    '{scope_key:$scope, actor:"copilot", targets:[$target], text:$text, request_id:$request}')")"
+  [[ -n "$(printf '%s' "$posted" | jqr '.result.message_id // empty')" ]] ||
+    { fail "the copilot line was not accepted by the daemon: $posted"; return 1; }
+  wait_until 60 "the copilot's line to reach the conversation, attributed to the copilot" \
+    chat_row_present COPILOT "$copilot_text" || return 1
+
+  local operator_row copilot_row
+  operator_row="$(chat_row YOU "$operator_text")"
+  copilot_row="$(chat_row COPILOT "$copilot_text")"
+  # Echoed, not merely asserted: a recording of this run should SHOW the two
+  # attributed rows, the way J1 echoes the delivered pane text.
+  step "operator row, as the operator sees it:$(printf '%s' "$operator_row" | tr -s ' ')"
+  step "copilot row, as the operator sees it:$(printf '%s' "$copilot_row" | tr -s ' ')"
+  [[ "$operator_row" != "$copilot_row" ]] ||
+    { fail "the two authors rendered as the same row"; return 1; }
+  # The masquerade check, BOTH ways. The wire carries the author precisely so a
+  # copilot write cannot wear a human's name, and that guarantee dies at the
+  # last inch if the panel paints either row under the other's label.
+  [[ -z "$(chat_row YOU "$copilot_text")" ]] ||
+    { fail "the copilot's line is also attributed to the operator: a copilot write can wear a human's name"; return 1; }
+  [[ -z "$(chat_row COPILOT "$operator_text")" ]] ||
+    { fail "the operator's line is also attributed to the copilot"; return 1; }
+
+  step "seeding ONE open confirm card (a precondition the copilot's tool bridge will mint; see db_write)"
+  local confirm_id="j7-card-$RUN_ID"
+  # `expires_at` far in the future on purpose: `list_open` and `resolve` BOTH
+  # carry an `expires_at > now` term, so a card whose TTL has lapsed is
+  # invisible and unanswerable by design, and a short one here would test the
+  # clock rather than the pane.
+  db_write "INSERT INTO fleet_confirm
+      (confirm_id, scope_key, tool, arguments, target_session_key, state,
+       edited_arguments, created_at, expires_at, answered_at)
+    VALUES
+      ('$confirm_id', '$scope', 'kill', '{\"session\":\"${TMUX_KEYS[0]}\"}',
+       '${TMUX_KEYS[0]}', 'open', NULL, $(date +%s)000, 4000000000000, NULL);" ||
+    { fail "could not seed the confirm card"; return 1; }
+  wait_until 45 "the card to reach the pane" chat_card_present || return 1
+  local card_row
+  card_row="$(chat_card_row)"
+  step "confirm card, as the operator sees it:$(printf '%s' "$card_row" | tr -s ' ')"
+  assert_contains "$card_row" "y approve" \
+    "an OPEN card must render as ANSWERABLE, not as a card the operator can only read" || return 1
+
+  step "pressing \`Tab\` ONCE to focus the cards"
+  tmux_cmd send-keys -t "$TUI_SESSION" Tab
+  wait_until 20 "focus to reach the cards (their own help line)" \
+    tui_pane_has "$CHAT_CARDS_MARKER" || return 1
+  step "pressing \`y\` ONCE to approve, from the pane"
+  tmux_cmd send-keys -t "$TUI_SESSION" y
+  wait_until 45 "the daemon to record the answer" \
+    bash -c "[[ \"\$(sqlite3 -readonly '$DB' \"SELECT state FROM fleet_confirm WHERE confirm_id='$confirm_id'\")\" != open ]]" || return 1
+  local card_state
+  card_state="$(db "SELECT state FROM fleet_confirm WHERE confirm_id='$confirm_id';")"
+  assert_eq "approved" "$card_state" \
+    "\`y\` from the pane must approve the card through fleet/confirm_answer" || return 1
+  wait_until 30 "the answered card to LEAVE the pane" \
+    tui_pane_has "CONFIRM CARDS · none open" || return 1
+
+  tmux_cmd send-keys -t "$TUI_SESSION" Escape
+  tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null || true
+  TUI_SESSION=""
+
+  log "   chat opened on one \`f\` + one \`m\` · scope [$scope] on screen · YOU and COPILOT on distinct rows · card [$confirm_id] answered [$card_state]"
+}
+
 # --------------------------------------------------------------------- driver
 
-ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e j6)
+ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e j6 j7)
 
 run_journey() {
   local name="$1"
@@ -1183,10 +1417,10 @@ main() {
   while (( $# )); do
     case "$1" in
       --keep) KEEP_ROOT=1 ;;
-      -h|--help) sed -n '2,48p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
+      -h|--help) sed -n '2,50p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
       all) selected+=("${ALL_JOURNEYS[@]}") ;;
       j5) selected+=(j5a j5b j5c j5d j5e) ;;
-      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e|j6) selected+=("$1") ;;
+      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e|j6|j7) selected+=("$1") ;;
       *) log "unknown journey: $1 (try: ${ALL_JOURNEYS[*]}, j5, all)"; exit 2 ;;
     esac
     shift
