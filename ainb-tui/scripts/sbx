@@ -38,17 +38,65 @@ die() { echo "sbx: $*" >&2; exit 1; }
 info() { echo "  $*"; }
 
 # --- guards -----------------------------------------------------------------
-guard() {
+# `down` does `rm -rf` on BOTH paths, so both must be validated, not just the
+# home. An unguarded SBX_WORK=/ would have deleted the disk.
+validate_path() {
+  local label="$1" p="$2"
+  [ -n "$p" ]                  || die "$label is empty"
+  case "$p" in /) die "$label may not be /";; esac
+  case "$p" in /*) ;; *) die "$label must be absolute (got '$p')";; esac
+  # Require depth >= 2 and a sandbox-shaped root, so a typo cannot target $HOME,
+  # /usr, /etc or a git worktree.
+  local depth; depth=$(printf '%s' "${p#/}" | tr -cd '/' | wc -c | tr -d ' ')
+  [ "$depth" -ge 1 ] || die "$label too shallow to delete safely: $p"
+  case "$p" in
+    /tmp/*|/private/tmp/*|/var/folders/*) ;;
+    *) die "$label must live under /tmp (got '$p'); refusing rm -rf outside a temp root";;
+  esac
   local real="$HOME/.agents-in-a-box"
-  [ "$SBX_HOME" = "$real" ] && die "refusing to use the REAL home ($real)"
-  case "$SBX_HOME" in "$real"/*) die "refusing to nest inside the real home";; esac
-  # SUN_LEN: the socket path is <home>/hangar.sock and must stay under 104 bytes.
-  local slen=$(( ${#SBX_HOME} + 12 ))
-  [ "$slen" -ge 100 ] && die "SBX_HOME too long ($slen bytes with socket) - Unix sockets cap at 104"
+  [ "$p" = "$real" ] && die "$label may not be the REAL home"
+  case "$p" in "$real"/*) die "$label may not nest inside the real home";; esac
+  case "$p" in "$HOME") die "$label may not be \$HOME";; esac
+}
+
+guard() {
+  validate_path SBX_HOME "$SBX_HOME"
+  validate_path SBX_WORK "$SBX_WORK"
+  [ "$SBX_HOME" = "$SBX_WORK" ] && die "SBX_HOME and SBX_WORK must differ"
+  # SUN_LEN caps at 104 BYTES, not characters - measure bytes.
+  local slen; slen=$(printf '%s/hangar.sock' "$SBX_HOME" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$slen" -ge 100 ] && die "socket path $slen bytes - Unix sockets cap at 104"
   [ -x "$AINB" ] || die "no ainb binary at $AINB (build first: cargo build -p ainb --bin ainb)"
 }
 
-sbx_env() { echo "AINB_HANGAR_HOME=$SBX_HOME AINB_CODEX_MANAGED=0"; }
+# AINB_BIN pins which binary the hook lazy-spawns. Without it the hook falls
+# through to a stale pin under the real home, or whatever `ainb` is on PATH -
+# either of which drags the sandbox back onto the developer's stack.
+sbx_env() { echo "AINB_HANGAR_HOME=$SBX_HOME AINB_CODEX_MANAGED=0 AINB_BIN=$AINB"; }
+
+# Namespace tmux per sandbox home, so two sandboxes cannot list or kill each
+# other's sessions.
+sbx_tag() { printf '%s' "$SBX_HOME" | cksum | cut -d' ' -f1; }
+sbx_prefix() { echo "${TMUX_PREFIX}$(sbx_tag)-"; }
+
+# Codex's invariant: no signal unless we spawned the pid AND it still looks like
+# ours. Verify the argv actually references this sandbox home before signalling.
+owned_kill() {
+  local pid="$1" what="$2"
+  [ -n "$pid" ] || return 1
+  ps -p "$pid" >/dev/null 2>&1 || return 1
+  # UID check: never signal another user's process.
+  local puid; puid=$(ps -p "$pid" -o uid= 2>/dev/null | tr -d ' ')
+  [ "$puid" = "$(id -u)" ] || { info "refusing $what: pid $pid belongs to uid $puid"; return 1; }
+  # Ownership proof: the process argv or its open files must reference OUR home.
+  if ps -p "$pid" -o args= 2>/dev/null | grep -q -- "$SBX_HOME" \
+     || lsof -p "$pid" 2>/dev/null | grep -q -- "$SBX_HOME"; then
+    kill "$pid" 2>/dev/null && info "stopped $what ($pid)"
+    return 0
+  fi
+  info "refusing $what: pid $pid shows no link to $SBX_HOME (fail closed)"
+  return 1
+}
 
 # --- the sandbox project ----------------------------------------------------
 # Hooks resolve their home from THEIR OWN env, which a parent export does not
@@ -105,28 +153,31 @@ cmd_status() {
   for s in hangar notify approve; do
     printf '  %-14s %s\n' "$s.sock" "$( [ -S "$SBX_HOME/$s.sock" ] && echo bound || echo absent)"
   done
-  printf '  %-14s %s\n' "tmux" "$(tmux ls 2>/dev/null | grep -c "^${TMUX_PREFIX}") session(s)"
+  local pfx; pfx=$(sbx_prefix)
+  printf '  %-14s %s\n' "tmux" "$(tmux ls 2>/dev/null | grep -c "^${pfx}") session(s)"
 }
 
 cmd_down() {
   guard
-  local dpid npid
-  dpid=$(cat "$SBX_HOME/hangar/daemon.pid" 2>/dev/null | tr -d '[:space:]')
-  npid=$(cat "$SBX_HOME/notifyd.sbxpid" 2>/dev/null | tr -d '[:space:]')
-  # Exact PIDs only. Never pkill/killall - that is how the real notifyd died.
-  [ -n "$dpid" ] && kill "$dpid" 2>/dev/null && info "stopped daemon $dpid"
-  [ -n "$npid" ] && kill "$npid" 2>/dev/null && info "stopped notifyd $npid"
-  tmux ls 2>/dev/null | grep "^${TMUX_PREFIX}" | cut -d: -f1 | while read -r s; do
+  # Exact PIDs only, each proven ours first. Never pkill/killall - an unproven
+  # host-wide reap is exactly how the developer's real notifyd got killed.
+  owned_kill "$(cat "$SBX_HOME/hangar/daemon.pid" 2>/dev/null | tr -d '[:space:]')" "hangar daemon"
+  owned_kill "$(cat "$SBX_HOME/notifyd.sbxpid"   2>/dev/null | tr -d '[:space:]')" "notifyd"
+  owned_kill "$(cat "$SBX_HOME/macos.sbxpid"     2>/dev/null | tr -d '[:space:]')" "macOS Fleet app"
+  local pfx; pfx=$(sbx_prefix)
+  tmux ls 2>/dev/null | grep "^${pfx}" | cut -d: -f1 | while read -r s; do
     tmux kill-session -t "$s" && info "killed tmux $s"   # exact name, never a wildcard
   done
   sleep 1
+  # guard() has already proven both paths are absolute, under a temp root, deep
+  # enough, and not the real home or $HOME.
   rm -rf "$SBX_HOME" "$SBX_WORK"
   info "removed $SBX_HOME and $SBX_WORK"
 }
 
 cmd_claude() {
   guard
-  local name="${TMUX_PREFIX}claude"
+  local name; name="$(sbx_prefix)claude"
   tmux kill-session -t "$name" 2>/dev/null
   tmux new-session -d -s "$name" -x 200 -y 50 -c "$SBX_WORK"
   tmux send-keys -t "$name" -l "cd $SBX_WORK && $(sbx_env) claude"
@@ -139,8 +190,8 @@ cmd_claude() {
 cmd_interview() {
   guard
   local marker="${1:-SBX-$$}"
-  local name="${TMUX_PREFIX}claude"
-  tmux has-session -t "$name" 2>/dev/null || die "no sandbox claude session; run: sbx claude"
+  local name; name="$(sbx_prefix)claude"
+  tmux has-session -t "" 2>/dev/null || die "no sandbox claude session; run: sbx claude"
   tmux send-keys -t "$name" -l "Call AskUserQuestion right now with exactly one question: header $marker, question text 'sandbox route? $marker', options 'Alpha' and 'Bravo'. Nothing else afterwards."
   sleep 1; tmux send-keys -t "$name" C-m
   info "fired $marker, waiting for it to reach Fleet..."
@@ -164,7 +215,7 @@ cmd_interview() {
 
 cmd_tui() {
   guard
-  local name="${TMUX_PREFIX}tui"
+  local name; name="$(sbx_prefix)tui"
   tmux kill-session -t "$name" 2>/dev/null
   tmux new-session -d -s "$name" -x 210 -y 52
   tmux send-keys -t "$name" -l "$(sbx_env) $AINB tui"
