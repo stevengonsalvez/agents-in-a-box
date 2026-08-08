@@ -665,13 +665,56 @@ private struct FleetNotchDetail: View {
     }
 }
 
-private enum UsageMode: String, CaseIterable, Identifiable {
-    case quick, dashboard
+/// One usage view, segmented into tabs, rather than a single long scroll.
+///
+/// Modelled on CodeBurn's `InsightMode`: a scrolling pill row over one shared
+/// dataset, so a tab is a lens on the same numbers rather than a separate
+/// fetch. The previous Quick/Dashboard split asked the operator to learn a
+/// distinction that bought them nothing, since both showed cost over different
+/// windows.
+private enum UsageTab: String, CaseIterable, Identifiable {
+    case overview, trend, calendar, forecast, projects, sessions, commands
+
     var id: Self { self }
-    var label: String {
+
+    var title: String {
         switch self {
-        case .quick: "Quick"
-        case .dashboard: "Dashboard"
+        case .overview: "Overview"
+        case .trend: "Trend"
+        case .calendar: "Calendar"
+        case .forecast: "Forecast"
+        case .projects: "Projects"
+        case .sessions: "Sessions"
+        case .commands: "Commands"
+        }
+    }
+}
+
+/// The window a client-derived tab is looking at.
+///
+/// Only the daily series can honour this without a wire change: the dashboard
+/// ships 53 weeks of daily cells, so slicing them is free. The breakdowns
+/// arrive pre-aggregated over the whole window and cannot be re-sliced here,
+/// which is why they carry an explicit "53 weeks" caption instead of silently
+/// ignoring the selection.
+private enum UsageLens: String, CaseIterable, Identifiable {
+    case week, month, all
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .week: "7d"
+        case .month: "30d"
+        case .all: "53w"
+        }
+    }
+
+    var days: Int? {
+        switch self {
+        case .week: 7
+        case .month: 30
+        case .all: nil
         }
     }
 }
@@ -679,252 +722,264 @@ private enum UsageMode: String, CaseIterable, Identifiable {
 private struct FleetUsageView: View {
     @ObservedObject var store: FleetStore
     @Binding var period: FleetUsagePeriod
-    @State private var mode: UsageMode = .quick
+    @State private var tab: UsageTab = .overview
+    // 30d by default: across 53 weeks a single recent spike flattens every
+    // other bar into the axis, so the long window is what Calendar is for.
+    @State private var lens: UsageLens = .month
+    @State private var selectedDay: FleetHeatmapCell?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                // Labels are hidden because the segment titles already say what
-                // they select. Shown, "Mode" gets squeezed by the width limit
-                // and wraps to "Mod / e" in the notch's narrow header.
-                Picker("Mode", selection: $mode) {
-                    ForEach(UsageMode.allCases) { m in Text(m.label).tag(m) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 180)
+        VStack(alignment: .leading, spacing: 10) {
+            header
 
-                if mode == .quick {
-                    Picker("Usage period", selection: $period) {
-                        ForEach(FleetUsagePeriod.allCases) { option in Text(option.label).tag(option) }
+            if !store.canReadDashboard {
+                unavailable(
+                    "Usage unavailable",
+                    detail: "This daemon does not advertise fleet.dashboard.read."
+                )
+            } else if let dash = store.usageDashboard {
+                if dash.totals == nil {
+                    unavailable(
+                        "Usage \(dash.state.rawValue)",
+                        detail: dash.detail ?? "The daemon has no usable projection yet."
+                    )
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            content(dash)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 8)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: 260)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-
-                Spacer()
-                Button("Refresh") {
-                    if mode == .quick {
-                        store.refreshUsage(period: period)
-                        store.refreshQuota()
-                    } else {
-                        store.refreshDashboard()
-                        store.refreshQuota()
-                    }
-                }
-                .disabled(mode == .quick ? !store.canReadUsage : !store.canReadDashboard)
-            }
-
-            switch mode {
-            case .quick:
-                quickContent
-            case .dashboard:
-                dashboardContent
+            } else {
+                ProgressView("Building 53-week dashboard\u{2026}")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear {
-            store.refreshUsage(period: period)
-            store.refreshQuota()
             store.refreshDashboard()
+            store.refreshQuota()
         }
-        .onChange(of: period) { _, value in store.refreshUsage(period: value) }
         .accessibilityIdentifier("fleet.notch.usage")
     }
 
-    // MARK: - Quick mode (existing summary view)
-
-    @ViewBuilder private var quickContent: some View {
-        if !store.canReadUsage {
-            VStack(spacing: 8) {
-                Image(systemName: "chart.bar.xaxis").font(.title2)
-                Text("Usage unavailable").font(.headline)
-                Text("This daemon does not advertise fleet.usage.read.").font(.caption)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                FleetPillSwitcher(selection: $tab, options: UsageTab.allCases) { $0.title }
+                Spacer(minLength: 8)
+                Button("Refresh") {
+                    store.refreshDashboard()
+                    store.refreshQuota()
+                }
+                .controlSize(.small)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let summary = store.usageSummary {
-            usage(summary)
-        } else {
-            ProgressView("Reading canonical provider usage\u{2026}")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if tab.showsLens {
+                FleetPillSwitcher(selection: $lens, options: UsageLens.allCases) { $0.title }
+            }
         }
     }
 
-    @ViewBuilder private func usage(_ summary: FleetUsageSummaryResult) -> some View {
-        if let total = summary.totals {
-            // EVERYTHING scrolls, including the quota card and the hero.
-            //
-            // The notch panel is pinned to a fixed height with `.top`
-            // alignment, so a column laid out beside a ScrollView takes its
-            // ideal height and is simply clipped: the ScrollView then receives
-            // its full content height and never has anything to scroll. The
-            // result was a panel whose lower half could not be reached at all.
-            // Making the scroll view the whole body, and letting it claim the
-            // remaining height, is what actually makes the content reachable.
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if let quotaSummary = store.quotaSummary {
-                        quotaCard(quotaSummary)
+    @ViewBuilder private func content(_ dash: FleetUsageDashboardResult) -> some View {
+        switch tab {
+        case .overview: overviewTab(dash)
+        case .trend: trendTab(dash)
+        case .calendar: calendarTab(dash)
+        case .forecast: forecastTab(dash)
+        case .projects: projectsTab(dash)
+        case .sessions: sessionsTab(dash)
+        case .commands: commandsTab(dash)
+        }
+    }
+
+    // MARK: - Tabs
+
+    @ViewBuilder private func overviewTab(_ dash: FleetUsageDashboardResult) -> some View {
+        if let total = dash.totals { heroCard(total, state: dash) }
+        if let quota = store.quotaSummary { quotaCard(quota) }
+
+        let stats = FleetUsageStats(heatmap: dash.heatmap)
+        FleetStatStrip(tiles: [
+            .init(label: "Peak day", value: stats.peakCostText, accent: true),
+            .init(label: "Avg active day", value: stats.averageActiveText, accent: false),
+            .init(label: "Streak", value: stats.streakText, accent: false),
+        ])
+
+        if !dash.providers.isEmpty {
+            FleetShareCard(
+                title: "Providers",
+                slices: dash.providers.map {
+                    .init(label: $0.provider.capitalized, value: $0.bucket.costUSD ?? Double($0.bucket.totalTokens))
+                },
+                priced: dash.providers.first?.bucket.costUSD != nil
+            )
+        }
+    }
+
+    @ViewBuilder private func trendTab(_ dash: FleetUsageDashboardResult) -> some View {
+        let cells = slice(dash.heatmap)
+        card("Daily spend", caption: lensCaption(cells.count)) {
+            FleetBarChart(
+                cells: cells,
+                selected: $selectedDay,
+                valueOf: { $0.costUSD ?? Double($0.callCount) },
+                priced: cells.contains { $0.costUSD != nil }
+            )
+        }
+        if let day = selectedDay {
+            FleetDayDetail(day: day)
+        }
+        if !dash.weekly.isEmpty {
+            card("Weekly", caption: "\(dash.weekly.count) weeks") {
+                FleetMetricList(rows: dash.weekly.suffix(12).map {
+                    .init(label: $0.weekStart, value: metric($0.bucket), amount: sortValue($0.bucket))
+                })
+            }
+        }
+    }
+
+    @ViewBuilder private func calendarTab(_ dash: FleetUsageDashboardResult) -> some View {
+        card("Activity", caption: "\(dash.heatmap.count) active days") {
+            VStack(alignment: .leading, spacing: 8) {
+                FleetHeatmapGrid(cells: dash.heatmap, selected: $selectedDay)
+                FleetHeatmapLegend().padding(.leading, 30)
+            }
+        }
+        if let day = selectedDay {
+            FleetDayDetail(day: day)
+        }
+        let stats = FleetUsageStats(heatmap: dash.heatmap)
+        FleetStatStrip(tiles: [
+            .init(label: "Active days", value: "\(dash.heatmap.count)", accent: false),
+            .init(label: "Busiest weekday", value: stats.busiestWeekday, accent: false),
+            .init(label: "Longest streak", value: stats.longestStreakText, accent: false),
+        ])
+    }
+
+    @ViewBuilder private func forecastTab(_ dash: FleetUsageDashboardResult) -> some View {
+        if let f = dash.forecast {
+            card("30-day forecast", caption: "from \(f.sampleDays)d sample") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 18) {
+                        FleetBigStat(
+                            value: f.projected30dCostUSD.map(FleetFormat.currency) ?? FleetFormat.tokens(f.projected30dTokens),
+                            caption: "projected"
+                        )
+                        FleetBigStat(
+                            value: f.avgDailyCostUSD.map(FleetFormat.currency) ?? FleetFormat.tokens(f.avgDailyTokens),
+                            caption: "per day",
+                            muted: true
+                        )
                     }
-                    totalsHero(total)
-                    if !summary.daily.isEmpty { section("Daily", rows: summary.daily.map { "\($0.date)  \(value($0.bucket))" }) }
-                    if !summary.providers.isEmpty { section("Providers", rows: summary.providers.map { "\($0.provider.capitalized)  \(value($0.bucket))" }) }
-                    if !summary.models.isEmpty { section("Models", rows: summary.models.map { "\($0.model)  \(value($0.bucket))" }) }
-                    if !summary.projects.isEmpty { section("Projects", rows: summary.projects.map { "\(FleetProjectLabel.display($0.project, repo: $0.repo))  \(value($0.bucket))" }) }
+                    let stats = FleetUsageStats(heatmap: dash.heatmap)
+                    FleetStatStrip(tiles: [
+                        .init(label: "Yesterday", value: stats.yesterdayText, accent: false),
+                        .init(label: "Last 7d", value: stats.lastSevenText, accent: false),
+                        .init(label: "Peak day", value: stats.peakCostText, accent: false),
+                    ])
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            if let quotaSummary = store.quotaSummary {
-                quotaCard(quotaSummary)
-            }
-            VStack(spacing: 8) {
-                Image(systemName: "chart.bar.xaxis").font(.title2)
-                Text("Usage \(summary.state.rawValue)").font(.headline)
-                Text(summary.detail ?? "Daemon returned no usable usage projection.").font(.caption)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            emptyCard("No forecast yet", detail: "It needs at least one day of recent activity.")
         }
+        if let total = dash.totals { heroCard(total, state: dash) }
     }
 
-    // MARK: - Dashboard mode (53-week rich view)
+    @ViewBuilder private func projectsTab(_ dash: FleetUsageDashboardResult) -> some View {
+        breakdown("Projects", rows: dash.projects.map {
+            .init(
+                label: FleetProjectLabel.display($0.project, repo: $0.repo),
+                value: metric($0.bucket),
+                amount: sortValue($0.bucket),
+                secondary: FleetFormat.count($0.bucket.callCount, unit: "call")
+            )
+        })
+        breakdown("Branches", rows: dash.branches.map {
+            .init(
+                label: $0.branch,
+                value: metric($0.bucket),
+                amount: sortValue($0.bucket),
+                secondary: FleetFormat.count($0.bucket.callCount, unit: "call")
+            )
+        })
+    }
 
-    @ViewBuilder private var dashboardContent: some View {
-        if !store.canReadDashboard {
-            VStack(spacing: 8) {
-                Image(systemName: "chart.bar.xaxis").font(.title2)
-                Text("Dashboard unavailable").font(.headline)
-                Text("This daemon does not advertise fleet.dashboard.read.").font(.caption)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let dash = store.usageDashboard {
-            dashboardBody(dash)
+    @ViewBuilder private func sessionsTab(_ dash: FleetUsageDashboardResult) -> some View {
+        breakdown("Sessions", rows: dash.sessions.map {
+            .init(
+                label: FleetProjectLabel.display($0.project, repo: nil),
+                value: metric($0.bucket),
+                amount: sortValue($0.bucket),
+                secondary: $0.provider
+            )
+        })
+        breakdown("Models", rows: dash.models.map {
+            .init(
+                label: $0.model,
+                value: metric($0.bucket),
+                amount: sortValue($0.bucket),
+                secondary: FleetFormat.count($0.bucket.callCount, unit: "call")
+            )
+        })
+    }
+
+    @ViewBuilder private func commandsTab(_ dash: FleetUsageDashboardResult) -> some View {
+        breakdown("Shell commands", rows: dash.shellCommands.map {
+            .init(label: $0.name, value: FleetFormat.count($0.callCount, unit: "call"), amount: Double($0.callCount))
+        })
+        breakdown("Tools", rows: dash.tools.map {
+            .init(label: $0.name, value: FleetFormat.count($0.callCount, unit: "call"), amount: Double($0.callCount))
+        })
+        if dash.mcpServers.isEmpty {
+            emptyCard("No MCP servers", detail: "No mcp__ prefixed tool calls in this window.")
         } else {
-            ProgressView("Building 53-week dashboard\u{2026}")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            breakdown("MCP servers", rows: dash.mcpServers.map {
+                .init(label: $0.name, value: FleetFormat.count($0.callCount, unit: "call"), amount: Double($0.callCount))
+            })
         }
     }
 
-    @ViewBuilder private func dashboardBody(_ dash: FleetUsageDashboardResult) -> some View {
-        // The quota card and the hero scroll with the rest: see the note in
-        // `usage(_:)`. Kept outside, they consumed roughly half a 720pt panel
-        // and left the weekly trend and every breakdown unreachable.
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let quotaSummary = store.quotaSummary {
-                    quotaCard(quotaSummary)
-                }
+    // MARK: - Building blocks
 
-                if let total = dash.totals {
-                    totalsHero(total)
-                }
-
-                // Forecast card
-                if let f = dash.forecast {
-                    forecastCard(f)
-                }
-
-                // Activity heatmap (mini grid)
-                if !dash.heatmap.isEmpty {
-                    heatmapCard(dash.heatmap)
-                }
-
-                // Weekly trend
-                if !dash.weekly.isEmpty {
-                    section("Weekly", rows: dash.weekly.map { "\($0.weekStart)  \(value($0.bucket))" })
-                }
-
-                // Dimension breakdowns
-                if !dash.providers.isEmpty { section("Providers", rows: dash.providers.map { "\($0.provider.capitalized)  \(value($0.bucket))" }) }
-                if !dash.models.isEmpty { section("Models", rows: dash.models.map { "\($0.model)  \(value($0.bucket))" }) }
-                if !dash.projects.isEmpty { section("Projects", rows: dash.projects.map { "\(FleetProjectLabel.display($0.project, repo: $0.repo))  \(value($0.bucket))" }) }
-                if !dash.sessions.isEmpty { section("Sessions", rows: dash.sessions.map { "\($0.provider)  \(FleetProjectLabel.display($0.project, repo: nil))  \(value($0.bucket))" }) }
-                if !dash.branches.isEmpty { section("Branches", rows: dash.branches.map { "\($0.branch)  \(value($0.bucket))" }) }
-                if !dash.tools.isEmpty { namedSection("Tools", rows: dash.tools) }
-                if !dash.mcpServers.isEmpty { namedSection("MCP Servers", rows: dash.mcpServers) }
-                if !dash.shellCommands.isEmpty { namedSection("Shell Commands", rows: dash.shellCommands) }
-
-                if let detail = dash.detail {
-                    Text(detail).font(.caption).foregroundStyle(FleetNotchPalette.muted)
-                }
-                if !dash.costComplete {
-                    Label("Some calls have no canonical price", systemImage: "exclamationmark.triangle")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Shared components
-
-    private func totalsHero(_ total: FleetUsageBucket) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(total.costUSD.map(currency) ?? tokens(total.totalTokens))
+    private func heroCard(_ total: FleetUsageBucket, state dash: FleetUsageDashboardResult) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(total.costUSD.map(FleetFormat.currency) ?? FleetFormat.tokens(total.totalTokens))
                     .font(.system(size: 34, weight: .bold, design: .rounded))
-                Text(total.costUSD == nil ? "Tokens, price unavailable" : "Canonical provider cost")
-                    .font(.caption)
-                    .foregroundStyle(FleetNotchPalette.muted)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
-                Text("\(total.callCount) calls")
-                Text("\(total.sessionCount) sessions")
-                Text("\(total.projectCount) projects")
-            }
-            .font(.caption)
-            .foregroundStyle(FleetNotchPalette.muted)
-        }
-        .padding(16)
-        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    @ViewBuilder private func forecastCard(_ f: FleetUsageForecast) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("30-day forecast", systemImage: "chart.line.uptrend.xyaxis")
-                .font(.headline)
-            HStack(spacing: 20) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(f.projected30dCostUSD.map(currency) ?? tokens(f.projected30dTokens))
-                        .font(.title2.weight(.semibold))
-                    Text("projected").font(.caption2).foregroundStyle(FleetNotchPalette.muted)
+                    .monospacedDigit()
+                    .foregroundStyle(dash.costComplete ? FleetNotchPalette.mint : .orange)
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(FleetFormat.count(total.callCount, unit: "call"))
+                    Text(FleetFormat.count(total.sessionCount, unit: "session"))
+                    Text(FleetFormat.count(total.projectCount, unit: "project"))
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(f.avgDailyCostUSD.map(currency) ?? tokens(f.avgDailyTokens))
-                        .font(.subheadline.weight(.semibold))
-                    Text("avg/day (\(f.sampleDays)d sample)").font(.caption2).foregroundStyle(FleetNotchPalette.muted)
-                }
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(FleetNotchPalette.muted)
             }
+            Text(dash.costComplete ? "Canonical provider cost, 53 weeks" : "Partial: some calls have no canonical price")
+                .font(.caption2)
+                .foregroundStyle(dash.costComplete ? FleetNotchPalette.muted : .orange)
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    @ViewBuilder private func heatmapCard(_ cells: [FleetHeatmapCell]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Activity").font(.headline)
-            heatmapGrid(cells)
-        }
-        .padding(14)
-        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    /// Week-per-column, weekday-per-row -- the conventional contribution grid.
-    /// A `LazyVGrid` would fill row-major, putting 53 consecutive DAYS in each
-    /// row so nothing lines up by weekday; columns have to be built explicitly.
-    private func heatmapGrid(_ cells: [FleetHeatmapCell]) -> some View {
-        let weeks = FleetHeatmapLayout.weekColumns(cells)
-        let maxCalls = cells.map(\.callCount).max() ?? 0
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 2) {
-                ForEach(weeks, id: \.weekStart) { week in
-                    VStack(spacing: 2) {
-                        ForEach(0..<7, id: \.self) { weekday in
-                            heatmapCellView(week.days[weekday], max: maxCalls)
+    @ViewBuilder private func quotaCard(_ summary: FleetQuotaSummaryResult) -> some View {
+        if !summary.providers.isEmpty {
+            card("Live quota", caption: summary.state == .ready ? "live" : summary.state.rawValue) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(summary.providers, id: \.provider) { p in
+                        HStack(spacing: 10) {
+                            Text(p.provider.capitalized)
+                                .font(.caption.weight(.semibold))
+                                .frame(width: 54, alignment: .leading)
+                            quotaBar("5h", p.fiveHour)
+                            quotaBar("wk", p.sevenDay)
                         }
                     }
                 }
@@ -932,115 +987,611 @@ private struct FleetUsageView: View {
         }
     }
 
-    @ViewBuilder private func heatmapCellView(_ cell: FleetHeatmapCell?, max: UInt64) -> some View {
+    @ViewBuilder private func quotaBar(_ label: String, _ window: FleetQuotaWindow?) -> some View {
+        if let window {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Text(label).font(.caption2).foregroundStyle(FleetNotchPalette.muted)
+                    Text("\(window.remainingPercent)%")
+                        .font(.caption2.weight(.semibold))
+                        .monospacedDigit()
+                }
+                FleetProgressBar(fraction: Double(window.remainingPercent) / 100.0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Spacer().frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder private func breakdown(_ title: String, rows: [FleetMetricList.Row]) -> some View {
+        if !rows.isEmpty {
+            card(title, caption: lens == .all ? "53 weeks" : "53 weeks (window fixed)") {
+                FleetMetricList(rows: rows)
+            }
+        }
+    }
+
+    private func card<Content: View>(
+        _ title: String,
+        caption: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Spacer()
+                if let caption {
+                    Text(caption).font(.caption2).foregroundStyle(FleetNotchPalette.muted)
+                }
+            }
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func emptyCard(_ title: String, detail: String) -> some View {
+        card(title) {
+            Text(detail).font(.caption).foregroundStyle(FleetNotchPalette.muted)
+        }
+    }
+
+    private func unavailable(_ title: String, detail: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "chart.bar.xaxis").font(.title2)
+            Text(title).font(.headline)
+            Text(detail).font(.caption).foregroundStyle(FleetNotchPalette.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Helpers
+
+    private func slice(_ cells: [FleetHeatmapCell]) -> [FleetHeatmapCell] {
+        guard let days = lens.days else { return cells }
+        return Array(cells.suffix(days))
+    }
+
+    private func lensCaption(_ count: Int) -> String {
+        lens.days == nil ? "\(count) active days" : "last \(lens.title)"
+    }
+
+    private func metric(_ bucket: FleetUsageBucket) -> String {
+        bucket.costUSD.map(FleetFormat.currency) ?? FleetFormat.tokens(bucket.totalTokens)
+    }
+
+    private func sortValue(_ bucket: FleetUsageBucket) -> Double {
+        bucket.costUSD ?? Double(bucket.totalTokens)
+    }
+}
+
+private extension UsageTab {
+    /// Only the tabs driven by the daily series can honour a window client-side.
+    var showsLens: Bool { self == .trend }
+}
+
+// MARK: - Usage widgets
+//
+// Hand-rolled rather than Swift Charts, so there is no macOS version gate and
+// every widget fits the notch's tight type scale. The shapes are deliberately
+// simple: a rounded rect whose length is a fraction of the section maximum
+// carries almost all the meaning in a panel this narrow.
+
+/// Shared number formatting.
+///
+/// The hero previously rendered `$36147.86` because `String(format:)` applies
+/// no grouping separator. On the headline figure that is the difference between
+/// a number you can read at a glance and one you have to count digits in.
+enum FleetFormat {
+    /// Always a bare "$", never the locale's "US$".
+    ///
+    /// `.currency(code: "USD")` renders "US$" outside a US locale, which is
+    /// both wrong for this product and inconsistent with the compact form
+    /// beside it, so the symbol is fixed and only the digits are localised.
+    static func currency(_ value: Double) -> String {
+        "$" + value.formatted(.number.precision(.fractionLength(2)))
+    }
+
+    static func compactCurrency(_ value: Double) -> String {
+        value < 1000
+            ? currency(value)
+            : "$" + value.formatted(.number.notation(.compactName).precision(.fractionLength(1)))
+    }
+
+    static func tokens(_ value: UInt64) -> String {
+        value.formatted(.number.notation(.compactName)) + " tokens"
+    }
+
+    static func count(_ value: UInt64, unit: String) -> String {
+        "\(value.formatted(.number)) \(value == 1 ? unit : unit + "s")"
+    }
+}
+
+/// A scrolling pill row, in place of a segmented Picker.
+///
+/// A `.segmented` Picker distributes width evenly and squeezes labels until they
+/// wrap, which is how "Mode" became "Mod / e". Pills size to their content and
+/// scroll, so the tab list can grow without the labels degrading.
+private struct FleetPillSwitcher<Option: Hashable & Identifiable>: View {
+    @Binding var selection: Option
+    let options: [Option]
+    let title: (Option) -> String
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(options) { option in
+                    let isSelected = option == selection
+                    Button { selection = option } label: {
+                        Text(title(option))
+                            .font(.caption.weight(isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? Color.black : Color.primary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                isSelected ? FleetNotchPalette.mint : FleetNotchPalette.control,
+                                in: Capsule()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("fleet.usage.tab.\(title(option))")
+                }
+            }
+            .padding(.vertical, 1)
+        }
+    }
+}
+
+/// A labelled row with an inline bar scaled to the section maximum.
+///
+/// This replaces the old `[String]` rows. Passing a formatted string meant the
+/// view had nothing left to draw with, which is why every breakdown rendered as
+/// flat text; keeping the magnitude alongside the label is what turns nine
+/// lists into nine charts.
+private struct FleetMetricList: View {
+    struct Row: Identifiable {
+        let id = UUID()
+        let label: String
+        let value: String
+        let amount: Double
+        var secondary: String?
+    }
+
+    let rows: [Row]
+
+    var body: some View {
+        let maximum = rows.map(\.amount).max() ?? 0
+        VStack(spacing: 5) {
+            ForEach(rows) { row in
+                HStack(spacing: 8) {
+                    Text(row.label)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help(row.label)
+
+                    FleetBar(fraction: maximum > 0 ? row.amount / maximum : 0)
+                        .frame(width: 84)
+
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(row.value)
+                            .font(.caption.weight(.medium))
+                            .monospacedDigit()
+                        if let secondary = row.secondary {
+                            Text(secondary)
+                                .font(.system(size: 9))
+                                .foregroundStyle(FleetNotchPalette.muted)
+                        }
+                    }
+                    .frame(width: 96, alignment: .trailing)
+                }
+            }
+        }
+    }
+}
+
+/// The bar itself: a track with a fill whose opacity also rises with the value,
+/// so ranking survives even where the lengths are close.
+private struct FleetBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.06))
+                Capsule()
+                    .fill(FleetNotchPalette.mint.opacity(0.42 + min(max(fraction, 0), 1) * 0.48))
+                    .frame(width: max(2, geo.size.width * min(max(fraction, 0), 1)))
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+private struct FleetProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.08))
+                Capsule()
+                    .fill(colour)
+                    .frame(width: max(2, geo.size.width * min(max(fraction, 0), 1)))
+            }
+        }
+        .frame(height: 5)
+    }
+
+    /// Headroom, not usage: green when there is plenty left, orange when the
+    /// window is nearly spent.
+    private var colour: Color {
+        switch fraction {
+        case ..<0.15: .red
+        case ..<0.35: .orange
+        default: FleetNotchPalette.mint
+        }
+    }
+}
+
+private struct FleetStatStrip: View {
+    struct Tile: Identifiable {
+        let id = UUID()
+        let label: String
+        let value: String
+        let accent: Bool
+    }
+
+    let tiles: [Tile]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(tiles) { tile in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(tile.label)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(FleetNotchPalette.muted)
+                    Text(tile.value)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(tile.accent ? FleetNotchPalette.mint : Color.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
+}
+
+private struct FleetBigStat: View {
+    let value: String
+    let caption: String
+    var muted: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: muted ? 17 : 24, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(muted ? Color.primary : FleetNotchPalette.mint)
+            Text(caption)
+                .font(.system(size: 9.5))
+                .foregroundStyle(FleetNotchPalette.muted)
+        }
+    }
+}
+
+/// Vertical bars for the daily series, with click-to-inspect.
+private struct FleetBarChart: View {
+    let cells: [FleetHeatmapCell]
+    @Binding var selected: FleetHeatmapCell?
+    let valueOf: (FleetHeatmapCell) -> Double
+    let priced: Bool
+
+    private let height: CGFloat = 68
+
+    var body: some View {
+        let maximum = cells.map(valueOf).max() ?? 0
+        HStack(alignment: .bottom, spacing: 1.5) {
+            ForEach(cells, id: \.date) { cell in
+                let fraction = maximum > 0 ? valueOf(cell) / maximum : 0
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(colour(for: cell, fraction: fraction))
+                    .frame(height: max(2, height * fraction))
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selected = (selected?.date == cell.date) ? nil : cell }
+                    .help("\(cell.date): \(priced ? FleetFormat.compactCurrency(valueOf(cell)) : "\(cell.callCount) calls")")
+            }
+        }
+        .frame(height: height, alignment: .bottom)
+    }
+
+    private func colour(for cell: FleetHeatmapCell, fraction: Double) -> Color {
+        if selected?.date == cell.date { return .white }
+        return FleetNotchPalette.mint.opacity(0.42 + min(max(fraction, 0), 1) * 0.48)
+    }
+}
+
+/// The detail panel for a picked day, so the grids are inspectable rather than
+/// decorative.
+private struct FleetDayDetail: View {
+    let day: FleetHeatmapCell
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(day.date).font(.caption.weight(.semibold)).monospacedDigit()
+                Text("selected day").font(.system(size: 9)).foregroundStyle(FleetNotchPalette.muted)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(day.costUSD.map(FleetFormat.currency) ?? "no price")
+                    .font(.caption.weight(.medium))
+                    .monospacedDigit()
+                Text(FleetFormat.count(day.callCount, unit: "call"))
+                    .font(.system(size: 9))
+                    .foregroundStyle(FleetNotchPalette.muted)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FleetNotchPalette.selected, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// Contribution grid: week per column, weekday per row, with labels so the
+/// axis is legible.
+private struct FleetHeatmapGrid: View {
+    let cells: [FleetHeatmapCell]
+    @Binding var selected: FleetHeatmapCell?
+
+    private let side: CGFloat = 9
+    private let gap: CGFloat = 2
+
+    var body: some View {
+        let weeks = FleetHeatmapLayout.weekColumns(cells)
+        let maximum = cells.map(\.callCount).max() ?? 0
+        HStack(alignment: .top, spacing: 4) {
+            VStack(alignment: .trailing, spacing: gap) {
+                ForEach(0..<7, id: \.self) { row in
+                    Text(FleetHeatmapLayout.weekdayLabel(row))
+                        .font(.system(size: 7))
+                        .foregroundStyle(FleetNotchPalette.muted)
+                        .frame(height: side, alignment: .trailing)
+                }
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: gap) {
+                    ForEach(weeks, id: \.weekStart) { week in
+                        VStack(spacing: gap) {
+                            ForEach(0..<7, id: \.self) { row in
+                                cellView(week.days[row], maximum: maximum)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func cellView(_ cell: FleetHeatmapCell?, maximum: UInt64) -> some View {
+        let fraction = (cell.map { maximum > 0 ? Double($0.callCount) / Double(maximum) : 0 }) ?? 0
         RoundedRectangle(cornerRadius: 2)
-            .fill(cell.map { heatmapColor($0.callCount, max: max) } ?? Color.clear)
-            .frame(width: 10, height: 10)
+            .fill(fill(cell, fraction: fraction))
+            .frame(width: side, height: side)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let cell else { return }
+                selected = (selected?.date == cell.date) ? nil : cell
+            }
             .help(cell.map { "\($0.date): \($0.callCount) calls" } ?? "")
     }
 
-    /// Zero calls is a real, meaningful value (an idle day) and must render as
-    /// the empty track, not as the faintest shade of "active".
-    private func heatmapColor(_ count: UInt64, max: UInt64) -> Color {
-        guard count > 0, max > 0 else { return FleetNotchPalette.canvas }
-        let intensity = Double(count) / Double(max)
-        return FleetNotchPalette.mint.opacity(0.2 + 0.8 * intensity)
+    private func fill(_ cell: FleetHeatmapCell?, fraction: Double) -> Color {
+        guard let cell else { return Color.clear }
+        if selected?.date == cell.date { return .white }
+        if cell.callCount == 0 { return FleetNotchPalette.canvas }
+        return FleetNotchPalette.mint.opacity(0.25 + fraction * 0.7)
     }
-
-    @ViewBuilder private func quotaCard(_ summary: FleetQuotaSummaryResult) -> some View {
-        if !summary.providers.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Label("Live quota", systemImage: "gauge.with.dots.needle.67percent")
-                        .font(.headline)
-                    Spacer()
-                    Text(summary.state == .ready ? "Live" : summary.state.rawValue.capitalized)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(summary.state == .ready ? .mint : .orange)
-                }
-                ForEach(summary.providers, id: \.provider) { provider in
-                    HStack(spacing: 10) {
-                        Text(provider.provider.capitalized)
-                            .font(.subheadline.weight(.semibold))
-                            .frame(width: 58, alignment: .leading)
-                        quotaWindow("5h", window: provider.fiveHour)
-                        quotaWindow("Week", window: provider.sevenDay)
-                    }
-                }
-                if let detail = summary.detail {
-                    Text(detail).font(.caption).foregroundStyle(FleetNotchPalette.muted)
-                }
-            }
-            .padding(14)
-            .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        } else if let detail = summary.detail {
-            Label(detail, systemImage: "gauge.with.dots.needle.67percent")
-                .font(.caption)
-                .foregroundStyle(FleetNotchPalette.muted)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-    }
-
-    @ViewBuilder private func quotaWindow(_ label: String, window: FleetQuotaWindow?) -> some View {
-        if let window {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("\(label) \u{00b7} \(window.remainingPercent)% left")
-                    .font(.caption.weight(.semibold))
-                if let reset = window.resetsAt {
-                    Text(Date(timeIntervalSince1970: TimeInterval(reset) / 1_000), style: .relative)
-                        .font(.caption2)
-                        .foregroundStyle(FleetNotchPalette.muted)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 7)
-            .padding(.horizontal, 9)
-            .background(FleetNotchPalette.canvas, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        }
-    }
-
-    private func section(_ title: String, rows: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
-            ForEach(rows, id: \.self) { row in
-                Text(row).font(.caption).foregroundStyle(FleetNotchPalette.muted)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func namedSection(_ title: String, rows: [FleetUsageNamedBucket]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
-            ForEach(rows, id: \.name) { row in
-                HStack {
-                    Text(row.name).font(.caption)
-                    Spacer()
-                    Text(callCount(row.callCount)).font(.caption).foregroundStyle(FleetNotchPalette.muted)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func callCount(_ count: UInt64) -> String {
-        "\(count.formatted(.number)) \(count == 1 ? "call" : "calls")"
-    }
-
-    private func value(_ bucket: FleetUsageBucket) -> String {
-        bucket.costUSD.map(currency) ?? tokens(bucket.totalTokens)
-    }
-
-    private func currency(_ value: Double) -> String { String(format: "$%.2f", value) }
-    private func tokens(_ value: UInt64) -> String { value.formatted(.number.notation(.compactName)) + " tokens" }
 }
 
+private struct FleetHeatmapLegend: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("less").font(.system(size: 8)).foregroundStyle(FleetNotchPalette.muted)
+            ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { step in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(step == 0 ? FleetNotchPalette.canvas : FleetNotchPalette.mint.opacity(0.25 + step * 0.7))
+                    .frame(width: 9, height: 9)
+            }
+            Text("more").font(.system(size: 8)).foregroundStyle(FleetNotchPalette.muted)
+        }
+    }
+}
+
+/// Share of spend as a donut, for a small number of slices.
+///
+/// A pie is unreadable past a handful of wedges, so this is only used where the
+/// dimension is naturally short, which in practice means providers.
+private struct FleetShareCard: View {
+    struct Slice: Identifiable {
+        let id = UUID()
+        let label: String
+        let value: Double
+    }
+
+    let title: String
+    let slices: [Slice]
+    let priced: Bool
+
+    var body: some View {
+        let total = slices.map(\.value).reduce(0, +)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.subheadline.weight(.semibold))
+            HStack(spacing: 14) {
+                FleetDonut(slices: slices, total: total)
+                    .frame(width: 82, height: 82)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(slices.enumerated()), id: \.element.id) { index, slice in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(FleetDonut.colour(index))
+                                .frame(width: 7, height: 7)
+                            Text(slice.label).font(.caption)
+                            Spacer(minLength: 6)
+                            Text(total > 0 ? "\(Int((slice.value / total * 100).rounded()))%" : "0%")
+                                .font(.caption.weight(.medium))
+                                .monospacedDigit()
+                                .foregroundStyle(FleetNotchPalette.muted)
+                            Text(priced ? FleetFormat.compactCurrency(slice.value) : "")
+                                .font(.caption.weight(.medium))
+                                .monospacedDigit()
+                                .frame(width: 62, alignment: .trailing)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct FleetDonut: View {
+    let slices: [FleetShareCard.Slice]
+    let total: Double
+
+    static func colour(_ index: Int) -> Color {
+        let palette: [Color] = [FleetNotchPalette.mint, .cyan, .purple, .orange, .pink, .yellow]
+        return palette[index % palette.count]
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            guard total > 0 else { return }
+            let rect = CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+            let centre = CGPoint(x: rect.midX, y: rect.midY)
+            let radius = min(rect.width, rect.height) / 2
+            var start = Angle.degrees(-90)
+            for (index, slice) in slices.enumerated() {
+                let sweep = Angle.degrees(slice.value / total * 360)
+                var path = Path()
+                path.move(to: centre)
+                path.addArc(center: centre, radius: radius, startAngle: start, endAngle: start + sweep, clockwise: false)
+                path.closeSubpath()
+                context.fill(path, with: .color(Self.colour(index)))
+                start = start + sweep
+            }
+            // Punch the middle out so it reads as a donut rather than a pie.
+            var hole = Path()
+            hole.addEllipse(in: CGRect(
+                x: centre.x - radius * 0.58,
+                y: centre.y - radius * 0.58,
+                width: radius * 1.16,
+                height: radius * 1.16
+            ))
+            context.blendMode = .destinationOut
+            context.fill(hole, with: .color(.black))
+        }
+    }
+}
+
+/// Statistics derived entirely from the daily cells already on the wire, so
+/// none of these tiles cost a round trip or a protocol change.
+private struct FleetUsageStats {
+    let heatmap: [FleetHeatmapCell]
+
+    private var priced: Bool { heatmap.contains { $0.costUSD != nil } }
+
+    var peakCostText: String {
+        guard let peak = heatmap.max(by: { value($0) < value($1) }) else { return "\u{2014}" }
+        return priced ? FleetFormat.compactCurrency(value(peak)) : "\(peak.callCount)"
+    }
+
+    var averageActiveText: String {
+        guard !heatmap.isEmpty else { return "\u{2014}" }
+        let mean = heatmap.map(value).reduce(0, +) / Double(heatmap.count)
+        return priced ? FleetFormat.compactCurrency(mean) : String(Int(mean.rounded()))
+    }
+
+    var yesterdayText: String { dayText(offset: 1) }
+
+    var lastSevenText: String {
+        let recent = heatmap.suffix(7).map(value).reduce(0, +)
+        return priced ? FleetFormat.compactCurrency(recent) : String(Int(recent.rounded()))
+    }
+
+    var streakText: String { "\(currentStreak)d" }
+
+    var longestStreakText: String { "\(longestStreak)d" }
+
+    var busiestWeekday: String {
+        var totals = [Double](repeating: 0, count: 7)
+        for cell in heatmap {
+            guard let date = FleetHeatmapLayout.formatter.date(from: cell.date) else { continue }
+            let weekday = FleetHeatmapLayout.calendar.component(.weekday, from: date)
+            totals[(weekday + 5) % 7] += value(cell)
+        }
+        guard let best = totals.enumerated().max(by: { $0.element < $1.element }), best.element > 0 else {
+            return "\u{2014}"
+        }
+        return FleetHeatmapLayout.weekdayLabel(best.offset)
+    }
+
+    private func value(_ cell: FleetHeatmapCell) -> Double { cell.costUSD ?? Double(cell.callCount) }
+
+    private func dayText(offset: Int) -> String {
+        let index = heatmap.count - 1 - offset
+        guard heatmap.indices.contains(index) else { return "\u{2014}" }
+        let cell = heatmap[index]
+        return priced ? FleetFormat.compactCurrency(value(cell)) : "\(cell.callCount)"
+    }
+
+    /// Streaks walk actual calendar dates, since the series is sparse: counting
+    /// consecutive ENTRIES would treat a three-week gap as an unbroken run.
+    private var dates: [Date] {
+        heatmap.compactMap { FleetHeatmapLayout.formatter.date(from: $0.date) }.sorted()
+    }
+
+    private var currentStreak: Int {
+        guard let last = dates.last else { return 0 }
+        var streak = 1
+        var cursor = last
+        for date in dates.dropLast().reversed() {
+            guard let previous = FleetHeatmapLayout.calendar.date(byAdding: .day, value: -1, to: cursor),
+                  FleetHeatmapLayout.calendar.isDate(date, inSameDayAs: previous) else { break }
+            streak += 1
+            cursor = date
+        }
+        return streak
+    }
+
+    private var longestStreak: Int {
+        var best = 0
+        var run = 0
+        var previous: Date?
+        for date in dates {
+            if let previous,
+               let next = FleetHeatmapLayout.calendar.date(byAdding: .day, value: 1, to: previous),
+               FleetHeatmapLayout.calendar.isDate(date, inSameDayAs: next) {
+                run += 1
+            } else {
+                run = 1
+            }
+            best = max(best, run)
+            previous = date
+        }
+        return best
+    }
+}
 /// Turns the scanner's project key into something readable in a narrow panel.
 ///
 /// That key is the project's absolute path with the separators mangled to
@@ -1140,6 +1691,18 @@ enum FleetHeatmapLayout {
 
     /// Matches the daemon's 53-week window.
     static let maxWeeks = 53
+
+    /// Row 0 is Monday, matching `weekColumns`. Only alternate rows are
+    /// labelled, since seven labels do not fit beside a 9pt cell.
+    static func weekdayLabel(_ row: Int) -> String {
+        switch row {
+        case 0: "Mon"
+        case 2: "Wed"
+        case 4: "Fri"
+        case 6: "Sun"
+        default: ""
+        }
+    }
 }
 
 private struct FleetRuntimeSettingsView: View {
