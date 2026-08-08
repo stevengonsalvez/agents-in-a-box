@@ -2582,7 +2582,7 @@ fn wire_channel(
     }
 }
 
-/// Write the copilot session's per-session adapter config (migration 0080).
+/// Write the copilot session's per-session adapter config (migration 0082).
 ///
 /// The refusal this handler exists to make explicit: a `permission_mode` (under
 /// any spelling) is REJECTED, not ignored. serde drops unknown keys by default,

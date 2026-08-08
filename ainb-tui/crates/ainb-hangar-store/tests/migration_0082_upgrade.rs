@@ -1,13 +1,13 @@
-//! Upgrade-from-populated test for migration 0080 (per-session ACP config:
+//! Upgrade-from-populated test for migration 0082 (per-session ACP config:
 //! `model`, `reasoning_effort`, `persona` on `fleet_acp_session`).
 //!
 //! Fresh-database coverage lives in `tripwire_migrations_apply.rs`. This file
 //! proves the migration is safe on a REAL populated database, the state every
 //! upgrading install carries:
 //!
-//! 1. apply only the PRIOR migrations (0001..0079),
+//! 1. apply only the PRIOR migrations (0001..0081),
 //! 2. seed a live ACP session with its chat messages and delivery legs,
-//! 3. apply the embedded migrations (which adds 0080),
+//! 3. apply the embedded migrations (which adds 0082),
 //! 4. assert every seeded row SURVIVES with a NULL (no-override) config, the
 //!    pinned `permission_mode` is untouched and still NOT NULL, the persona
 //!    bound BITES in octets, and a double-apply is a no-op.
@@ -18,8 +18,8 @@ use sqlx::{Row, SqlitePool};
 use ainb_hangar_store::apply_migrations;
 
 /// `sqlx` version number of the migration under test
-/// (`0080_fleet_acp_session_config.sql`).
-const NEW_MIGRATION_VERSION: i64 = 80;
+/// (`0082_fleet_acp_session_config.sql`).
+const NEW_MIGRATION_VERSION: i64 = 82;
 
 /// The persona octet bound the migration's CHECK enforces, mirroring
 /// `ainb_hangar_proto::fleet::FLEET_COPILOT_PERSONA_MAX`.
@@ -44,7 +44,7 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
     migrator.migrations.to_mut().retain(|m| m.version < NEW_MIGRATION_VERSION);
     assert!(
         migrator.migrations.iter().any(|m| m.version == NEW_MIGRATION_VERSION - 1),
-        "the prior-migration set must reach 0079, the schema 0080 alters"
+        "the prior-migration set must reach 0081, the schema 0082 alters"
     );
     migrator.run(&pool).await.expect("prior migrations apply");
     pool
@@ -79,15 +79,15 @@ async fn seed_populated(pool: &SqlitePool) {
     .expect("seed delivery leg");
 }
 
-/// Migration 0080 on a populated DB: the session survives, its config columns
+/// Migration 0082 on a populated DB: the session survives, its config columns
 /// arrive NULL (no override), and the pinned permission mode is untouched.
 #[tokio::test]
-async fn migration_0080_adds_null_config_to_a_populated_database() {
+async fn migration_0082_adds_null_config_to_a_populated_database() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = pool_at_prior_schema(dir.path()).await;
     seed_populated(&pool).await;
 
-    apply_migrations(&pool).await.expect("upgrade applies 0080");
+    apply_migrations(&pool).await.expect("upgrade applies 0082");
 
     // (a) The pre-existing session survives whole, and the new columns default
     //     to NULL: "no override, use the daemon's static config", so an
@@ -136,7 +136,7 @@ async fn migration_0080_adds_null_config_to_a_populated_database() {
     assert_eq!(message_count, 1);
     assert_eq!(delivery_state, "DELIVERED");
 
-    // (c) `permission_mode` is still NOT NULL, i.e. 0080 did not rebuild the
+    // (c) `permission_mode` is still NOT NULL, i.e. 0082 did not rebuild the
     //     table and quietly relax part 1's invariant.
     let mode_notnull: i64 = sqlx::query_scalar(
         "SELECT \"notnull\" FROM pragma_table_info('fleet_acp_session') WHERE name = 'permission_mode'",
@@ -146,14 +146,14 @@ async fn migration_0080_adds_null_config_to_a_populated_database() {
     .expect("read permission_mode column info");
     assert_eq!(mode_notnull, 1, "permission_mode must remain NOT NULL");
 
-    // (d) 0080 is recorded exactly once, and a double-apply is a no-op.
+    // (d) 0082 is recorded exactly once, and a double-apply is a no-op.
     let recorded: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
             .bind(NEW_MIGRATION_VERSION)
             .fetch_one(&pool)
             .await
-            .expect("read 0080 record");
-    assert_eq!(recorded, 1, "0080 recorded as applied exactly once");
+            .expect("read 0082 record");
+    assert_eq!(recorded, 1, "0082 recorded as applied exactly once");
     apply_migrations(&pool).await.expect("second apply is a no-op");
 
     pool.close().await;
@@ -162,11 +162,11 @@ async fn migration_0080_adds_null_config_to_a_populated_database() {
 /// After the upgrade the config columns accept overrides and the persona bound
 /// BITES, counted in octets so a multibyte persona cannot slip past it.
 #[tokio::test]
-async fn migration_0080_persona_bound_is_enforced_in_octets_after_upgrade() {
+async fn migration_0082_persona_bound_is_enforced_in_octets_after_upgrade() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = pool_at_prior_schema(dir.path()).await;
     seed_populated(&pool).await;
-    apply_migrations(&pool).await.expect("upgrade applies 0080");
+    apply_migrations(&pool).await.expect("upgrade applies 0082");
 
     let set_persona = |persona: String| {
         let pool = pool.clone();

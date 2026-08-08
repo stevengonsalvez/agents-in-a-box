@@ -67,7 +67,7 @@ pub struct FleetAcpSessionRow {
     pub last_active_at: i64,
 }
 
-/// One session's per-session adapter override (migration 0080).
+/// One session's per-session adapter override (migration 0082).
 ///
 /// Model, reasoning effort and persona ONLY. The permission mode is absent by
 /// design and not by omission: part 1 pins it at `session/new` and re-asserts
@@ -313,7 +313,7 @@ impl FleetAcpSessionRepo {
         Self::require_hit(result.rows_affected(), session_key)
     }
 
-    /// Read one session's per-session adapter override (migration 0080).
+    /// Read one session's per-session adapter override (migration 0082).
     ///
     /// `None` on every field means "no override": the resume path keeps the
     /// daemon's static adapter config, which is what every pre-0080 row says.
@@ -338,7 +338,7 @@ impl FleetAcpSessionRepo {
         .transpose()
     }
 
-    /// Write one session's per-session adapter override (migration 0080).
+    /// Write one session's per-session adapter override (migration 0082).
     ///
     /// The three 0080 columns and NOTHING else: `permission_mode` is 0079's
     /// column and is deliberately not reachable from here, because a settable

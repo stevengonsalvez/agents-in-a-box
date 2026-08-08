@@ -1,5 +1,5 @@
 //! Channels, guardrail confirm cards and the copilot activity feed
-//! (migration 0081, buzz-port part 2).
+//! (migration 0083, buzz-port part 2).
 //!
 //! Three small tables under one roof because they are one concern: what the
 //! copilot channel is, what it asked a human for, and what it did.
@@ -334,7 +334,7 @@ impl FleetConfirmRepo {
     /// The daemon runs this once at boot, which is what makes the TTL survive a
     /// crash, an upgrade or a restart: the waiters map and its timers are
     /// process state, the rows are not. This is the "expiry sweep" migration
-    /// 0081's `idx_fleet_confirm_open` was indexed for.
+    /// 0083's `idx_fleet_confirm_open` was indexed for.
     pub async fn sweep_expired(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Error> {
         Ok(sqlx::query(
             "UPDATE fleet_confirm SET state = 'expired', answered_at = ? \
