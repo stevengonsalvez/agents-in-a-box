@@ -601,10 +601,21 @@ async fn repair(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     // nothing deletes that token when the daemon stops, so a stale token would
     // make dry-run claim the daemon owns a heartbeat it is not scheduling and
     // invert the preview against what a real run does.
-    let daemon_registered = if !meta.heartbeat_enabled {
+    // In dry-run the daemon question is UNANSWERABLE, not merely unprobed.
+    // Whether a real run takes the daemon branch depends on `atc_register`
+    // SUCCEEDING, and registration fails for reasons a read-only probe cannot
+    // see (generation conflict, unknown instance, proto skew, store error);
+    // `register_heartbeat_with_daemon` returns false for every one of them. So
+    // dry-run does not guess: it reports `daemon_registered: null` and previews
+    // the LOCAL TIMER path, which is the conservative branch.
+    //
+    // The property that matters for a health gate is one-directional: dry-run
+    // must never be GREENER than a real run. Previewing the local path (and
+    // running its refusal gate) guarantees that. The reverse, dry-run failing
+    // where a real run would have handed the heartbeat to the daemon, is the
+    // safe direction to be wrong in, and the output says so explicitly.
+    let daemon_registered = if !meta.heartbeat_enabled || dry_run {
         false
-    } else if dry_run {
-        daemon_is_reachable().await
     } else {
         register_heartbeat_with_daemon(&meta, &paths).await
     };
@@ -616,7 +627,6 @@ async fn repair(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     let mut daemon_unregistered = false;
     let changed;
     let mut program_after: Option<String> = None;
-    let mut problem_after: Option<String> = None;
     let result;
 
     match scheduler {
@@ -634,11 +644,25 @@ async fn repair(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             // would print "nothing to schedule" while the daemon kept sending
             // [HEARTBEAT] every interval, which is the same confident-and-wrong
             // claim this whole line of work exists to remove.
-            daemon_unregistered = if dry_run {
-                daemon_is_reachable().await
-            } else {
-                unregister_heartbeat_with_daemon(&name).await
-            };
+            //
+            // A failed unregister is NOT reportable as "nothing to schedule":
+            // if the daemon still holds the registration it keeps firing, and
+            // exiting 0 there is precisely the confident-and-wrong claim this
+            // verb exists to remove. In dry-run nothing is attempted, so the
+            // field stays null rather than previewing an unregister that may
+            // not even be needed.
+            if !dry_run {
+                let unregistered = unregister_heartbeat_with_daemon(&meta.name).await;
+                if !unregistered && daemon_is_reachable().await {
+                    bail!(
+                        "ATC '{}' has its heartbeat disabled and the local timer was removed, but \
+the daemon is reachable and did NOT accept the unregister, so its cron may still be firing. \
+Re-run once the daemon is healthy, or check `ainb fleet atc list`.",
+                        meta.name
+                    );
+                }
+                daemon_unregistered = unregistered;
+            }
             changed = !removed.is_empty() || daemon_unregistered;
             result = "disabled";
         }
@@ -667,25 +691,36 @@ does not resolve on the PATH the unit will carry, so it still could not fire. No
             }
             changed = timer::install_would_change(&meta);
             if dry_run {
-                timer_units = timer::unit_paths(&name)?;
+                timer_units = timer::unit_paths(&meta.name)?;
             } else {
+                // Exactly one scheduler, enforced on THIS arm too. Registration
+                // returning false does not mean the daemon holds nothing: it
+                // also covers a reachable daemon that declined, and an instance
+                // registered by an earlier `setup` keeps its enabled row. Left
+                // alone, the daemon cron and this local unit would both fire
+                // into one session. Best effort, because a daemon that is down
+                // cannot be told anything and is not scheduling either.
+                daemon_unregistered = unregister_heartbeat_with_daemon(&meta.name).await;
                 // Always install, even when `changed` is false: install also
                 // re-loads the job with launchctl/systemctl, and a byte-perfect
                 // unit whose job was unloaded (OS upgrade, manual unload) is
                 // still a dead heartbeat that a byte-compare no-op would leave
                 // dead.
                 timer_units = timer::install(&meta).context("installing heartbeat timer")?;
-                let after = timer::installed_program_health(&name);
+                // Verify the unit that was WRITTEN, which install addressed by
+                // `meta.name`. Reading back by the raw CLI arg would inspect a
+                // different file whenever the two differ.
+                let after = timer::installed_program_health(&meta.name);
                 match &after {
                     timer::ProgramHealth::Resolves(p) => program_after = Some(p.clone()),
                     other => bail!(
-                        "repaired ATC '{name}' but the installed timer still cannot fire: {}",
+                        "repaired ATC '{}' but the installed timer still cannot fire: {}",
+                        meta.name,
                         other
                             .problem()
                             .unwrap_or_else(|| "no unit on disk after install".to_string())
                     ),
                 }
-                problem_after = after.problem();
             }
             result = "repaired";
         }
@@ -697,15 +732,19 @@ does not resolve on the PATH the unit will carry, so it still could not fire. No
         "dry_run": dry_run,
         "result": result,
         "scheduler": scheduler.as_str(),
-        "daemon_registered": daemon_registered,
-        "daemon_unregistered": daemon_unregistered,
+        // Null in dry-run: nothing was attempted, so neither is KNOWN. A bool
+        // here would be a guess presented as a fact.
+        "daemon_registered": if dry_run { serde_json::Value::Null } else { json!(daemon_registered) },
+        "daemon_unregistered": if dry_run { serde_json::Value::Null } else { json!(daemon_unregistered) },
+        // The JSON surface is what agents and CI consume, so it must not hide
+        // that the unit was written and never handed to launchd/systemd.
+        "activation_skipped": timer::activation_is_skipped(),
         "changed": changed,
         "timer_units": timer_units.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "timer_units_removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "program_before": program_before,
         "problem_before": problem_before,
         "program_after": program_after,
-        "problem_after": problem_after,
     });
 
     if matches!(format, OutputFormat::Text) {

@@ -114,10 +114,24 @@ defaults, rewrites `CLAUDE.md` and the `settings.json` hooks, and spawns a
 session.
 
 It refuses (non-zero exit, nothing written) when the rebuilt unit still could
-not fire, so it never overwrites a working unit with a dead one. `--dry-run`
-has identical exit codes, which makes it usable as a health gate. If the daemon
-is up it hands the heartbeat to the daemon cron and removes the local timer, so
-exactly one scheduler ever fires.
+not fire, so it never overwrites a working unit with a dead one. If the daemon
+takes the heartbeat it removes the local timer, and if it does not it clears any
+stale daemon registration, so exactly one scheduler ever fires.
+
+`--dry-run` writes nothing and is safe as a health gate, with one property
+stated precisely: it is **never greener than a real run**, rather than
+bit-identical to one. Whether a real run hands the heartbeat to the daemon
+depends on registration SUCCEEDING, which a read-only preview cannot determine
+(registration also fails on generation conflicts, proto skew, and store
+errors). So dry-run does not guess: it reports `daemon_registered` /
+`daemon_unregistered` as `null` and previews the local-timer path, which is the
+conservative branch and the one that can refuse. A green `--dry-run` therefore
+implies a real run would not hit the refusal gate; a red one may still be
+repairable if the daemon would have taken it.
+
+The JSON surface carries `activation_skipped`, so a run under
+`AINB_TIMER_SKIP_ACTIVATION=1` (which writes the unit but never loads it) cannot
+be mistaken for a live heartbeat by an agent or CI job reading the payload.
 
 ## Tear down
 

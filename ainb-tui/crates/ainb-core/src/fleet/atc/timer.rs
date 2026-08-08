@@ -535,11 +535,14 @@ fn teardown_launchd(name: &str) -> Result<Vec<PathBuf>> {
     let plist = launchd_plist_path(name)?;
     let mut removed = Vec::new();
     if plist.exists() {
-        if activation_enabled() {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", &plist.display().to_string()])
-                .output();
-        }
+        // Deliberately NOT gated on `activation_enabled()`. Skipping the load
+        // is safe (nothing starts), but skipping the UNLOAD while deleting the
+        // file strands a loaded job with no unit left to unload it with, and
+        // the heartbeat keeps firing with no supported way to stop it. The
+        // shell-out is already best effort, so attempting it costs nothing.
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist.display().to_string()])
+            .output();
         std::fs::remove_file(&plist).context("removing launchd plist")?;
         removed.push(plist);
     }
@@ -568,11 +571,12 @@ fn install_systemd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
 
 fn teardown_systemd(name: &str) -> Result<Vec<PathBuf>> {
     let stem = unit_stem(name);
-    if activation_enabled() {
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", "--now", &format!("{stem}.timer")])
-            .output();
-    }
+    // Deliberately NOT gated on `activation_enabled()`, for the same reason as
+    // the launchd path: deleting the unit while leaving the timer enabled
+    // strands a firing job with nothing left to disable it with.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", &format!("{stem}.timer")])
+        .output();
     let mut removed = Vec::new();
     for path in [systemd_timer_path(name)?, systemd_service_path(name)?] {
         if path.exists() {

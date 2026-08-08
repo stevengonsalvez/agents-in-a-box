@@ -166,9 +166,19 @@ fn repair_installs_a_missing_timer() {
     let v = json_of(&out);
     assert_eq!(v["result"], "repaired");
     assert_eq!(v["changed"], true, "a fresh install is a change: {v}");
+    // `program_after` is the load-bearing field: it is only populated on the
+    // Resolves arm, so its presence proves the post-install health check ran
+    // and passed. (The old assertion here checked `problem_after` was null,
+    // which was true by construction on every reachable path and so could
+    // never fail.)
     assert!(
-        v["problem_after"].is_null(),
-        "repair reported a problem after installing: {v}"
+        v["program_after"].is_string(),
+        "repair did not verify the installed program: {v}"
+    );
+    assert_eq!(
+        v["activation_skipped"], true,
+        "the harness sets AINB_TIMER_SKIP_ACTIVATION, so the JSON must say the \
+         unit was written but not loaded: {v}"
     );
     for unit in unit_files(&home, "tower") {
         assert!(
@@ -503,6 +513,13 @@ fn repair_dry_run_writes_nothing_and_keeps_exit_semantics() {
     assert!(
         v["program_after"].is_null(),
         "dry-run verified a unit it never wrote: {v}"
+    );
+    // Dry-run attempts no daemon call, so neither outcome is KNOWN. Reporting a
+    // bool here would be a guess dressed as a fact, and it previously made the
+    // preview disagree with the real run.
+    assert!(
+        v["daemon_registered"].is_null() && v["daemon_unregistered"].is_null(),
+        "dry-run guessed a daemon outcome it never attempted: {v}"
     );
     assert_eq!(
         std::fs::read(&unit_path).expect("re-read unit"),

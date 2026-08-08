@@ -1044,6 +1044,14 @@ impl InteractiveSessionManager {
     /// The `meta.json` requirement is what keeps the check narrow. A stray
     /// directory under the ATC root that was never provisioned is not claimed.
     fn atc_instance_name(worktree_path: &Path) -> Option<String> {
+        // A git checkout is never an ATC control dir, whatever it sits under.
+        // Without this, a real repository that happened to live beside the ATC
+        // instances would take the ATC name while its bucket key still came
+        // from the repository lookup, so the two would disagree about the same
+        // row. ATC dirs have no `.git` at all, so this costs nothing.
+        if worktree_path.join(".git").exists() {
+            return None;
+        }
         let root = crate::fleet::atc::paths::atc_root().ok()?;
         if let Some(name) = crate::fleet::atc::instance_name_for_cwd_in(&root, worktree_path) {
             return Some(name);
