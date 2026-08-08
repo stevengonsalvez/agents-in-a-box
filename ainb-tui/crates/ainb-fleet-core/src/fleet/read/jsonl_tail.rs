@@ -287,13 +287,13 @@ pub struct LastAssistantInfo {
 /// also contains that ask's result (if it was answered) — the per-window
 /// closure check is therefore complete.
 pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
-    let lines = read_tail_lines(path, MAX_TAIL_ROWS)?;
-    if lines.is_empty() {
+    let rows = parse_rows(&read_tail_lines(path, MAX_TAIL_ROWS)?);
+    if rows.is_empty() {
         return None;
     }
-    for window in [20usize, 40, 80, 160, 320] {
-        let start = lines.len().saturating_sub(window);
-        if let Some(aq) = find_open_ask_user_question(&lines[start..]) {
+    for window in LOOKBACK_WINDOWS {
+        let start = rows.len().saturating_sub(window);
+        if let Some(aq) = find_open_ask_user_question(&rows[start..]) {
             return Some(aq);
         }
         if start == 0 {
@@ -303,16 +303,36 @@ pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
     None
 }
 
+/// The exponential lookback shared by [`last_ask_user_question`] and
+/// [`last_narrative_snapshot`]: cheap for an active session (signal lives in the
+/// last few rows), resilient when the tail is all `tool_result` noise.
+const LOOKBACK_WINDOWS: [usize; 5] = [20, 40, 80, 160, 320];
+
+/// Decode each tail row ONCE, keeping `None` for rows that are not JSON.
+///
+/// The windows above are nested, so parsing inside them re-decoded the newest 20
+/// rows five times over, and `find_open_ask_user_question` decoded every row in
+/// its window twice more (once for [`resolved_tool_use_ids`], once for its own
+/// reverse walk) — roughly 1,240 decodes to examine 320 rows. On a real
+/// transcript a row is a whole tool result (~15 KB), so that was megabytes of
+/// redundant `serde_json` per call, and it is what dominated a `sample(1)`
+/// profile of a pegged daemon (`SliceRead::skip_to_escape` was the top symbol).
+///
+/// A non-JSON row stays in place as `None` rather than being filtered out, so
+/// window arithmetic still counts rows the way the transcript does.
+fn parse_rows(lines: &[String]) -> Vec<Option<Value>> {
+    lines.iter().map(|row| serde_json::from_str::<Value>(row).ok()).collect()
+}
 
 /// Collect the set of `tool_use` ids that have a matching `tool_result` in
 /// `rows` — i.e. tool calls that have been RESOLVED. Claude emits a
 /// `tool_result` block (on a `user`-role row) carrying the original call's
 /// `tool_use_id` for every completed tool call, so membership here means that
 /// call is closed. Used to tell an OPEN AskUserQuestion from an answered one.
-fn resolved_tool_use_ids(rows: &[String]) -> std::collections::HashSet<String> {
+fn resolved_tool_use_ids(rows: &[Option<Value>]) -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
     for row in rows {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
@@ -334,10 +354,10 @@ fn resolved_tool_use_ids(rows: &[String]) -> std::collections::HashSet<String> {
 /// whose `id` has NO matching `tool_result` (see [`resolved_tool_use_ids`]). An
 /// ask block with no `id` (older/edge transcript shapes) is treated as open,
 /// preserving the pre-closure behaviour for transcripts that never carried ids.
-fn find_open_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
+fn find_open_ask_user_question(rows: &[Option<Value>]) -> Option<AskUserQuestionData> {
     let resolved = resolved_tool_use_ids(rows);
     for row in rows.iter().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -548,13 +568,13 @@ fn parse_ts_ms(s: &str) -> Option<i64> {
 /// content. Cheap for active sessions (signal lives in the last few rows);
 /// resilient when the tail is full of tool_result noise.
 pub fn last_narrative_snapshot(path: &Path) -> Option<String> {
-    let lines = read_tail_lines(path, MAX_TAIL_ROWS)?;
-    if lines.is_empty() {
+    let rows = parse_rows(&read_tail_lines(path, MAX_TAIL_ROWS)?);
+    if rows.is_empty() {
         return None;
     }
-    for window in [20usize, 40, 80, 160, 320] {
-        let start = lines.len().saturating_sub(window);
-        if let Some(snap) = synthesize_from_rows(&lines[start..]) {
+    for window in LOOKBACK_WINDOWS {
+        let start = rows.len().saturating_sub(window);
+        if let Some(snap) = synthesize_from_rows(&rows[start..]) {
             return Some(snap);
         }
         if start == 0 {
@@ -564,10 +584,10 @@ pub fn last_narrative_snapshot(path: &Path) -> Option<String> {
     None
 }
 
-fn synthesize_from_rows(rows: &[String]) -> Option<String> {
+fn synthesize_from_rows(rows: &[Option<Value>]) -> Option<String> {
     // Walk backwards; first assistant row with text-or-tool wins.
     for row in rows.iter().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -672,7 +692,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"go"}}"#.to_string(),
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running tests."},{"type":"tool_use","name":"Bash","input":{"command":"cargo test --lib"}}]}}"#.to_string(),
         ];
-        let s = synthesize_from_rows(&rows).expect("synthesised");
+        let s = synthesize_from_rows(&parse_rows(&rows)).expect("synthesised");
         assert!(s.contains("Bash"), "got: {s}");
         assert!(s.contains("cargo test"), "got: {s}");
     }
@@ -682,7 +702,7 @@ mod tests {
         let rows = vec![
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Investigating the RLS chain on auth.audit_log inserts."}]}}"#.to_string(),
         ];
-        let s = synthesize_from_rows(&rows).expect("synthesised");
+        let s = synthesize_from_rows(&parse_rows(&rows)).expect("synthesised");
         assert!(s.contains("Investigating"), "got: {s}");
         assert!(s.contains("RLS"), "got: {s}");
     }
@@ -690,7 +710,7 @@ mod tests {
     #[test]
     fn synth_skips_user_rows() {
         let rows = vec![r#"{"type":"user","message":{"content":"hello"}}"#.to_string()];
-        assert!(synthesize_from_rows(&rows).is_none());
+        assert!(synthesize_from_rows(&parse_rows(&rows)).is_none());
     }
 
     #[test]
