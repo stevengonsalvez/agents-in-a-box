@@ -2027,7 +2027,7 @@ Commands:
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
   runtime       Install the standalone Fleet daemon and provider hooks
-  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
   bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
   help          Print this message or the help of the given subcommand(s)
@@ -2409,17 +2409,18 @@ Options:
 
 ### `ainb fleet atc`
 
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 ```console
 $ ainb fleet atc --help
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 Usage: ainb fleet atc [OPTIONS] <COMMAND>
 
 Commands:
   setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
   teardown  Remove an ATC instance's heartbeat timer + session
+  repair    Reinstall an ATC instance's heartbeat unit from the CURRENT PATH
   status    Report one ATC instance (meta + timer + session liveness)
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
@@ -2470,6 +2471,34 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --purge            Also delete the instance dir (state.json + task-log.md)
   -h, --help             Print help
+```
+
+#### `ainb fleet atc repair`
+
+Rebuild and reload the local heartbeat unit for an instance whose program no longer resolves. Touches ONLY the timer unit: it reuses the instance's existing meta and leaves policy, hooks, the daemon cron and the session alone, which is what makes it safe to run on a live instance. Use this when `atc status` reports `program MISSING`.
+
+```console
+$ ainb fleet atc repair --help
+Rebuild and reload the local heartbeat unit for an instance whose program no longer resolves. Touches ONLY the timer unit: it reuses the instance's existing meta and leaves policy, hooks, the daemon cron and the session alone, which is what makes it safe to run on a live instance. Use this when `atc status` reports `program MISSING`.
+
+Usage: ainb fleet atc repair [OPTIONS] <name>
+
+Arguments:
+  <name>
+          Instance name
+
+Options:
+      --force
+          Reinstall even when the current unit's program resolves
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb fleet atc status`

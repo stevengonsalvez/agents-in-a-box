@@ -2373,7 +2373,7 @@ impl CliCommand for FleetCommand {
 /// Build the `ainb fleet atc` subcommand tree: the persistent ATC brain's
 /// provisioning + management verbs. `heartbeat` is the internal timer-driven
 /// verb (hidden from `--help`).
-fn build_atc_command() -> Command {
+pub(crate) fn build_atc_command() -> Command {
     let interval = clap::Arg::new("interval")
         .long("interval")
         .value_parser(clap::value_parser!(u32))
@@ -2386,7 +2386,7 @@ fn build_atc_command() -> Command {
         );
 
     Command::new("atc")
-        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)")
+        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -2425,6 +2425,24 @@ fn build_atc_command() -> Command {
                         .long("purge")
                         .action(clap::ArgAction::SetTrue)
                         .help("Also delete the instance dir (state.json + task-log.md)"),
+                ),
+        )
+        .subcommand(
+            Command::new("repair")
+                .about("Reinstall an ATC instance's heartbeat unit from the CURRENT PATH")
+                .long_about(
+                    "Rebuild and reload the local heartbeat unit for an instance whose program \
+                     no longer resolves. Touches ONLY the timer unit: it reuses the instance's \
+                     existing meta and leaves policy, hooks, the daemon cron and the session \
+                     alone, which is what makes it safe to run on a live instance. Use this \
+                     when `atc status` reports `program MISSING`.",
+                )
+                .arg(clap::Arg::new("name").required(true).help("Instance name"))
+                .arg(
+                    clap::Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Reinstall even when the current unit's program resolves"),
                 ),
         )
         .subcommand(
