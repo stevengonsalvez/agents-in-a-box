@@ -72,6 +72,13 @@ fn build_plist_with(bin: &str, path: &str, meta: &AtcMeta) -> String {
     let argv = heartbeat_argv_with(bin, &meta.name);
     let home = dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_default();
     let log = home_log_path(&meta.name);
+    // Escaped like `args_xml` below. A PATH or HOME containing `&` or `<` (an
+    // `R&D` directory is enough) otherwise emits malformed XML that launchctl
+    // refuses, while the substring health parser still finds an intact
+    // ProgramArguments array and calls the dead timer healthy.
+    let path = xml_escape(&path);
+    let home = xml_escape(&home);
+    let log = xml_escape(&log);
 
     let args_xml: String = argv
         .iter()

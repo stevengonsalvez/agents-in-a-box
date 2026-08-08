@@ -140,11 +140,17 @@ pub fn build_plist(paths: &ServicePaths) -> String {
     )
 }
 
+/// systemd resolves `%` specifiers inside unit values, so a literal `%` in a
+/// PATH or config path has to be doubled or the whole assignment is corrupted.
+fn systemd_escape(s: &str) -> String {
+    s.replace('%', "%%")
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn install_launchd(paths: &ServicePaths) -> Result<PathBuf> {
+fn install_launchd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     let plist_path = launchd_plist_path()?;
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -154,13 +160,17 @@ fn install_launchd(paths: &ServicePaths) -> Result<PathBuf> {
     }
     std::fs::write(&plist_path, build_plist(paths))
         .with_context(|| format!("writing {}", plist_path.display()))?;
-    // Idempotent reload: unload (ignore errors), then load.
+    // Idempotent reload: unload (ignore errors), then load. The unload runs
+    // even when we will not re-load, so a previously-good unit does not keep
+    // running against a definition that has since gone stale.
     let _ = std::process::Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .output();
-    let _ = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .output();
+    if activate {
+        let _ = std::process::Command::new("launchctl")
+            .args(["load", &plist_path.to_string_lossy()])
+            .output();
+    }
     Ok(plist_path)
 }
 
@@ -199,13 +209,13 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
     // (which the shell DOES honour) is what finds ainb, at every launch.
     let exec_start = daemon_argv(paths)
         .iter()
-        .map(|a| unit_program::shell_quote(a))
+        .map(|a| systemd_escape(&unit_program::shell_quote(a)))
         .collect::<Vec<_>>()
         .join(" ");
     let config_env = paths
         .config_override
         .as_ref()
-        .map(|c| format!("Environment=AINB_CONFIG_PATH={c}\n"))
+        .map(|c| format!("Environment=\"AINB_CONFIG_PATH={}\"\n", systemd_escape(c)))
         .unwrap_or_default();
     format!(
         "[Unit]\n\
@@ -219,18 +229,18 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
          {config_env}\
          ExecStart={exec_start}\n\
          Restart=always\n\
-         RestartSec=10\n\
+         RestartSec=60\n\
          StandardOutput=append:{log}\n\
          StandardError=append:{log}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         log = paths.log_path.display(),
-        path = unit_program::unit_path_env(),
+        path = systemd_escape(&unit_program::unit_path_env()),
     )
 }
 
-fn install_systemd(paths: &ServicePaths) -> Result<PathBuf> {
+fn install_systemd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     let unit_path = systemd_unit_path()?;
     if let Some(parent) = unit_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -243,9 +253,11 @@ fn install_systemd(paths: &ServicePaths) -> Result<PathBuf> {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", SYSTEMD_UNIT])
-        .output();
+    if activate {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", SYSTEMD_UNIT])
+            .output();
+    }
     Ok(unit_path)
 }
 
@@ -267,12 +279,19 @@ fn teardown_systemd() -> Result<Option<PathBuf>> {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// Provision the daemon service for the current platform. Idempotent.
+///
+/// The unit is always written, but it is only STARTED when its program
+/// resolves. Starting one we already know is broken is not harmless: the shell
+/// wrapper means the scheduler spawns successfully and `exec ainb` exits 127,
+/// so `KeepAlive` / `Restart=always` respawn it forever into an unrotated log.
+/// Writing it inactive leaves the operator a unit to reload once PATH is fixed.
 pub fn install() -> Result<PathBuf> {
     let paths = resolve_paths()?;
+    let activate = unit_would_be_unrunnable(&paths).is_none();
     if cfg!(target_os = "macos") {
-        install_launchd(&paths)
+        install_launchd(&paths, activate)
     } else {
-        install_systemd(&paths)
+        install_systemd(&paths, activate)
     }
 }
 
@@ -285,11 +304,14 @@ pub fn install() -> Result<PathBuf> {
 /// [`crate::fleet::atc::timer::install_would_be_unrunnable`].
 #[must_use]
 pub fn install_would_be_unrunnable() -> Option<String> {
-    let paths = resolve_paths().ok()?;
+    unit_would_be_unrunnable(&resolve_paths().ok()?)
+}
+
+fn unit_would_be_unrunnable(paths: &ServicePaths) -> Option<String> {
     let unit = if cfg!(target_os = "macos") {
-        build_plist(&paths)
+        build_plist(paths)
     } else {
-        build_systemd_unit(&paths)
+        build_systemd_unit(paths)
     };
     match unit_program::unit_program_health(&unit) {
         unit_program::ProgramHealth::Missing(p) => Some(format!(
@@ -406,7 +428,7 @@ mod tests {
         let mut p = paths();
         p.config_override = Some("/custom/config.toml".to_string());
         let unit = build_systemd_unit(&p);
-        assert!(unit.contains("Environment=AINB_CONFIG_PATH=/custom/config.toml"));
+        assert!(unit.contains("Environment=\"AINB_CONFIG_PATH=/custom/config.toml\""));
     }
 
     /// Regression for issue #608: `ainb fleet bridge install` on a homebrew
@@ -566,6 +588,29 @@ mod tests {
             !note.contains("can never start"),
             "UNKNOWN must not assert a failure it cannot determine: {note}"
         );
+    }
+
+    /// systemd resolves `%` specifiers inside unit values, and splits an
+    /// unquoted assignment at whitespace. Both would corrupt a real config
+    /// path.
+    #[test]
+    fn systemd_env_assignments_are_quoted_and_percent_escaped() {
+        let mut p = paths();
+        p.config_override = Some("/home/u/My Configs/50%/config.toml".to_string());
+        let unit = build_systemd_unit(&p);
+        assert!(
+            unit.contains("Environment=\"AINB_CONFIG_PATH=/home/u/My Configs/50%%/config.toml\""),
+            "config env not quoted and escaped: {unit}"
+        );
+        // The PATH line gets the same treatment.
+        assert!(!unit.lines().any(|l| l.starts_with("Environment=PATH=")));
+    }
+
+    /// Crash-recovery latency should not silently differ by platform.
+    #[test]
+    fn both_platforms_use_the_same_restart_backoff() {
+        assert!(build_plist(&paths()).contains("<integer>60</integer>"));
+        assert!(build_systemd_unit(&paths()).contains("RestartSec=60"));
     }
 
     /// A stale unit installed by an older ainb has no shell wrapper at all.

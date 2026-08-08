@@ -50,6 +50,15 @@ fn absolutize_explicit_path(bin: &str) -> String {
     if !bin.contains('/') {
         return bin.to_string();
     }
+    // A tilde reaches us unexpanded when it came from a config file or a
+    // quoted assignment rather than the shell. Joining it to the cwd would
+    // produce `/cwd/~/bin/ainb`, which cannot exist, so expand it here: we
+    // shell-quote the result, so the shell will not expand it later either.
+    if let Some(rest) = bin.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
     let path = std::path::Path::new(bin);
     if path.is_absolute() {
         return bin.to_string();
@@ -65,12 +74,20 @@ fn absolutize_explicit_path(bin: &str) -> String {
 /// unit inherits only those, the bridge dies the moment they go away: the #608
 /// failure shape again, moved from the binary path to the `PATH`. So the
 /// standard install directories are always appended as a floor.
+/// Relative entries are dropped. The scheduler launches the unit from `/`, so
+/// a `.` or `target/debug` inherited from the installing shell means something
+/// different there than it did here, and keeping it would let the health check
+/// resolve a binary the daemon can never reach. Dropping them also keeps a
+/// project-local bin directory from deciding which `ainb` runs at every boot.
 #[must_use]
 pub fn unit_path_env() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let mut out: Vec<&str> = Vec::new();
     for dir in current.split(':').chain(STANDARD_BIN_DIRS.split(':')) {
-        if !dir.is_empty() && !out.contains(&dir) {
+        if dir.is_empty() || !std::path::Path::new(dir).is_absolute() {
+            continue;
+        }
+        if !out.contains(&dir) {
             out.push(dir);
         }
     }
@@ -296,7 +313,15 @@ fn shell_split(s: &str) -> Vec<String> {
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
-            '\'' | '"' if quote.is_none() => {
+            // `'` may open anywhere, because `shell_quote` emits `'\''` to
+            // escape an apostrophe mid-token. `"` opens only at a token
+            // boundary: we never emit it, and a legacy unit could carry one as
+            // an ordinary character inside a path.
+            '\'' if quote.is_none() => {
+                quote = Some(c);
+                has_token = true;
+            }
+            '"' if quote.is_none() && !has_token => {
                 quote = Some(c);
                 has_token = true;
             }
@@ -610,6 +635,51 @@ mod tests {
             )
             .as_deref(),
             Some("/opt/my apps/ainb")
+        );
+    }
+
+    /// An unexpanded tilde must not be glued to the cwd: `/cwd/~/bin/ainb`
+    /// cannot exist, and we shell-quote the result so no later expansion saves
+    /// it.
+    #[test]
+    fn a_tilde_override_is_expanded_not_prefixed() {
+        let resolved = ainb_bin_from(Some("~/bin/ainb"));
+        assert!(!resolved.contains('~'), "tilde survived: {resolved}");
+        assert!(std::path::Path::new(&resolved).is_absolute());
+        assert!(resolved.ends_with("bin/ainb"));
+        if let Some(home) = dirs::home_dir() {
+            assert!(resolved.starts_with(&home.display().to_string()));
+        }
+    }
+
+    /// A relative PATH entry means something different from `/`, which is
+    /// where the scheduler launches. Keeping it would let the health check
+    /// resolve a binary the daemon can never reach, and would let a
+    /// project-local bin dir decide which ainb runs at boot.
+    #[test]
+    fn unit_path_drops_relative_entries() {
+        let path = unit_path_env();
+        for dir in path.split(':') {
+            assert!(
+                std::path::Path::new(dir).is_absolute(),
+                "relative entry {dir} survived into the unit PATH: {path}"
+            );
+        }
+    }
+
+    /// `"` opens a quote only at a token boundary. Legacy units double-quoted
+    /// whitespace arguments, but a `"` inside a path was passed through raw,
+    /// and `shell_quote` never emits one.
+    #[test]
+    fn a_literal_double_quote_inside_a_token_is_not_a_quote() {
+        assert_eq!(
+            shell_split("/opt/wi\"rd/ainb fleet bridge run"),
+            vec!["/opt/wi\"rd/ainb", "fleet", "bridge", "run"]
+        );
+        // ...while a leading one still opens, which is what legacy units used.
+        assert_eq!(
+            shell_split("\"/opt/my apps/ainb\" fleet bridge run"),
+            vec!["/opt/my apps/ainb", "fleet", "bridge", "run"]
         );
     }
 
