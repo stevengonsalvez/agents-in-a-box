@@ -609,15 +609,17 @@ impl FleetRepo {
             return Ok(None);
         };
         let next_version = version + 1;
-        sqlx::query(
-            "UPDATE fleet_session SET visible = 0, version = ?, \
-             last_observed_at = MAX(last_observed_at, ?) WHERE session_key = ?",
-        )
-        .bind(next_version)
-        .bind(observed_at)
-        .bind(session_key)
-        .execute(&mut *tx)
-        .await?;
+        // Visibility ONLY. Unlike `supersede_session`, this deliberately does
+        // not touch `last_observed_at`: archiving is the janitor noticing a
+        // session, not anyone observing the SESSION, and stamping it with the
+        // janitor's clock would destroy the one field that says when the thing
+        // was last really alive — the field `list_archived` sorts on and an
+        // operator reads. There is no other surviving record of it.
+        sqlx::query("UPDATE fleet_session SET visible = 0, version = ? WHERE session_key = ?")
+            .bind(next_version)
+            .bind(session_key)
+            .execute(&mut *tx)
+            .await?;
         let revision = sqlx::query(
             "INSERT INTO fleet_event \
              (event_id, session_key, observed_at, authority, event_type, payload, \
@@ -821,9 +823,17 @@ impl FleetRepo {
 
     /// Read a bounded, payload-free Fleet timeline after a global revision.
     ///
-    /// The query joins visible Fleet sessions and filters the closed raw type
-    /// allowlist before `LIMIT`, so excluded history can never consume a page
-    /// or strand a caller's cursor.
+    /// The query joins non-superseded Fleet sessions and filters the closed raw
+    /// type allowlist before `LIMIT`, so excluded history can never consume a
+    /// page or strand a caller's cursor.
+    ///
+    /// The join predicate is `superseded_by IS NULL`, NOT `visible = 1`. Those
+    /// were the same set until archiving existed, and the intent was always the
+    /// former: a superseded duplicate is hidden because its history is already
+    /// reachable through the visible twin that replaced it, so showing it twice
+    /// would be the bug. An ARCHIVED row has no twin — `visible = 1` here would
+    /// erase its whole timeline, which is exactly the promise
+    /// [`Self::list_archived`] makes to the operator.
     pub async fn timeline_after(
         pool: &SqlitePool,
         after_revision: i64,
@@ -834,7 +844,8 @@ impl FleetRepo {
             "SELECT e.revision, e.session_key, e.observed_at, e.authority, e.event_type, \
                     e.session_version, e.applied \
              FROM fleet_event e \
-             INNER JOIN fleet_session s ON s.session_key = e.session_key AND s.visible = 1 \
+             INNER JOIN fleet_session s \
+                ON s.session_key = e.session_key AND s.superseded_by IS NULL \
              WHERE e.revision > ? \
                AND (? IS NULL OR e.session_key = ?) \
                AND e.event_type IN ( \
@@ -844,7 +855,7 @@ impl FleetRepo {
                    'codex_manager_unavailable', 'codex_manager_recovered', \
                    'codex_managed_tui_started', 'tmux_missing', 'tmux_unavailable', \
                    'tmux_available', 'tmux_discovered', 'session_superseded', \
-                   'session_stale' \
+                   'session_stale', 'session_archived' \
                ) \
              ORDER BY e.revision ASC LIMIT ?",
         )
@@ -2041,5 +2052,113 @@ mod tests {
             "a session that came back to life must not be archived on a stale candidate"
         );
         assert_eq!(FleetRepo::snapshot(pool).await.unwrap().sessions.len(), 1);
+    }
+
+    /// Archiving is a VISIBILITY change and must not rewrite when the session
+    /// was last really seen.
+    ///
+    /// `last_observed_at` is the only surviving record of that moment once the
+    /// row leaves the roster — it is what `list_archived` sorts on and what an
+    /// operator reads to answer "when did this actually die". Stamping it with
+    /// the janitor's clock would make every archived session claim it was alive
+    /// until the sweep noticed it.
+    #[tokio::test]
+    async fn archiving_preserves_when_the_session_was_last_really_seen() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-dead",
+                "claude:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("EXITED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let last_alive = FleetRepo::get_session(pool, "claude:s-1").await.unwrap().unwrap();
+        assert_eq!(last_alive.last_observed_at, 100);
+
+        // The janitor runs a long time later, as it does on a 24h TTL.
+        FleetRepo::archive_session(pool, "claude:s-1", 999_999).await.unwrap().unwrap();
+
+        assert_eq!(
+            FleetRepo::get_session(pool, "claude:s-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_observed_at,
+            100,
+            "the janitor's clock must not overwrite the last real observation"
+        );
+        assert_eq!(
+            FleetRepo::list_archived(pool, 50).await.unwrap()[0].last_observed_at,
+            100,
+            "and the archived listing must show that real time, not the sweep time"
+        );
+    }
+
+    /// An archived session keeps its browsable timeline; a superseded duplicate
+    /// still does not get one of its own.
+    ///
+    /// `timeline_after` joined on `visible = 1`, which meant "not a superseded
+    /// duplicate" right up until archiving made a second reason to be invisible.
+    /// Getting this wrong silently empties the history of every archived
+    /// session, contradicting what `list_archived` promises.
+    #[tokio::test]
+    async fn timeline_keeps_archived_history_and_still_hides_superseded_duplicates() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        for (id, key) in [
+            ("e-archived", "claude:archived"),
+            ("e-legacy", "claude:legacy"),
+            ("e-managed", "claude:managed"),
+        ] {
+            let mut seed = event(
+                id,
+                key,
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    management_state: Some("DEGRADED".to_string()),
+                    lifecycle_state: Some("EXITED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            );
+            seed.event_type = "SessionStart".to_string();
+            FleetRepo::apply_event(pool, &seed).await.unwrap();
+        }
+        FleetRepo::archive_session(pool, "claude:archived", 300).await.unwrap().unwrap();
+        FleetRepo::supersede_session(pool, "claude:legacy", "claude:managed", 300)
+            .await
+            .unwrap()
+            .expect("supersede applies");
+
+        let timeline = FleetRepo::timeline_after(pool, 0, None, 100).await.unwrap();
+        let keys: std::collections::BTreeSet<&str> =
+            timeline.iter().map(|row| row.session_key.as_str()).collect();
+
+        assert!(
+            keys.contains("claude:archived"),
+            "an archived session's history must stay reachable — it has no visible twin"
+        );
+        assert!(
+            !keys.contains("claude:legacy"),
+            "a superseded duplicate stays filtered; its history lives on the twin"
+        );
+        assert!(keys.contains("claude:managed"));
+
+        // Scoped to the archived key alone, the way a detail view asks.
+        let scoped =
+            FleetRepo::timeline_after(pool, 0, Some("claude:archived"), 100).await.unwrap();
+        assert!(
+            scoped.iter().any(|row| row.event_type == "session_archived"),
+            "the archive itself must appear, or the timeline just stops with no reason given"
+        );
     }
 }
