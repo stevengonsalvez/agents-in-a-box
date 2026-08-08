@@ -23,7 +23,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
 
 /// Floor between the START of one scan and the start of the next.
@@ -340,13 +340,25 @@ pub async fn dashboard() -> FleetUsageDashboardResult {
 
 fn load_cache(path: &Path) -> Option<CachedSummaries> {
     let bytes = std::fs::read(path).ok()?;
-    let cached: CachedSummaries = serde_json::from_slice(&bytes).ok()?;
-    // Accept OLDER caches, not just the current version. `CachedSummary` is
-    // unchanged across the v1 to v2 bump and `dashboard` defaults to None, so a
-    // v1 file still answers fleet/usage_summary correctly while the dashboard
-    // fills in on the next refresh. Rejecting it would drop the stable endpoint
-    // to SCANNING until a cold rescan of the whole corpus finished.
-    (cached.version <= CACHE_VERSION).then_some(cached)
+    let mut cached: CachedSummaries = serde_json::from_slice(&bytes).ok()?;
+    if cached.version > CACHE_VERSION {
+        return None;
+    }
+    // An OLDER file still answers fleet/usage_summary: `CachedSummary` has not
+    // changed across any bump, and rejecting it outright would drop the stable
+    // endpoint to SCANNING until a cold rescan of the whole corpus finished.
+    //
+    // Its DASHBOARD is a different matter and is dropped. That projection has
+    // changed shape between versions, so an older one is wrong on arrival: it
+    // predates MCP attribution, and one written before the shell-command fix
+    // still holds verbatim argv with absolute paths and possible credentials.
+    // Serving it would re-publish that content over the wire on the first
+    // request after an upgrade. None here just means the panel reads
+    // "scanning" until the next refresh, which is the honest answer.
+    if cached.version < CACHE_VERSION {
+        cached.dashboard = None;
+    }
+    Some(cached)
 }
 
 fn write_cache(path: &Path, cached: &CachedSummaries) -> std::io::Result<()> {
@@ -600,6 +612,25 @@ fn window(period: FleetUsagePeriod, now: DateTime<Utc>) -> (DateTime<Utc>, DateT
     )
 }
 
+/// The MCP server a tool call belongs to, for `mcp__<server>__<tool>` names.
+///
+/// Returns `None` for an ordinary tool, which is what keeps `Read` and `Bash` in
+/// the tool list.
+///
+/// Deliberately matches burndown's `rebuild_activity_and_mcp_columns` rather
+/// than being stricter: a name carrying the prefix but no tool segment, such as
+/// `mcp__github`, is still attributed to that server. Requiring both segments
+/// looked tidier but made the two surfaces disagree on the same corpus, and it
+/// let a literal `mcp__` string through into the tool list, which is exactly
+/// what this projection exists to prevent. Only an empty server is rejected,
+/// since `mcp__` names nothing at all.
+fn mcp_server_of(tool: &str) -> Option<String> {
+    tool.strip_prefix("mcp__")
+        .and_then(|rest| rest.split("__").next())
+        .filter(|server| !server.is_empty())
+        .map(ToString::to_string)
+}
+
 /// Reduce a shell command line to just its program name.
 ///
 /// The dashboard reports WHICH programs an operator runs, never the arguments
@@ -809,12 +840,43 @@ fn dashboard_from_window(
     branches.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
     // Tool / MCP / shell named-count breakdowns.
-    let mut tools = named_buckets(&usage.tools);
-    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    // The scanner deliberately leaves `mcp_servers` empty and ships MCP calls as
+    // raw `mcp__<server>__<tool>` entries in `tools`, because attribution is
+    // consumer-specific (see the module header on
+    // `ainb_plugin_session_reader::scanner`, which points at burndown's
+    // `rebuild_activity_and_mcp_columns` as the reference). Doing that split
+    // here is this module's job, not the scanner's. Skipping it left the MCP
+    // panel permanently blank AND leaked `mcp__github__create_issue` style
+    // strings into the tool list, one row per tool instead of one per server.
+    let mut plain_tools: Vec<FleetUsageNamedBucket> = Vec::new();
+    let mut mcp_counts: HashMap<String, u64> = HashMap::new();
+    for row in named_buckets(&usage.tools) {
+        match mcp_server_of(&row.name) {
+            Some(server) => {
+                let slot = mcp_counts.entry(server).or_default();
+                *slot = slot.saturating_add(row.call_count);
+            }
+            None => plain_tools.push(row),
+        }
+    }
+    let mut tools = plain_tools;
+    // Tie-break by name so a cap boundary is deterministic across scans.
+    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
     tools.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
-    let mut mcp_servers = named_buckets(&usage.mcp_servers);
-    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    // Scanner-supplied rows FILL IN servers we did not derive; they never add to
+    // one we did. The scanner leaves this empty today, but if it ever starts
+    // attributing servers while still shipping the `mcp__` rows inside `tools`,
+    // adding the two sources together would count every one of those calls
+    // twice. Nothing in the wire contract promises the sources are disjoint.
+    for row in named_buckets(&usage.mcp_servers) {
+        mcp_counts.entry(row.name).or_insert(row.call_count);
+    }
+    let mut mcp_servers: Vec<_> = mcp_counts
+        .into_iter()
+        .map(|(name, call_count)| FleetUsageNamedBucket { name, call_count })
+        .collect();
+    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
     mcp_servers.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
 
     // Only the PROGRAM name leaves this module, never the command line. The
@@ -1753,6 +1815,155 @@ mod tests {
             "$7 over 7 days, not $7 over 1"
         );
         assert_eq!(forecast.projected_30d_cost_usd, Some(30.0));
+    }
+
+    /// The scanner ships MCP calls as raw `mcp__<server>__<tool>` entries inside
+    /// `tools` and leaves `mcp_servers` empty on purpose, leaving attribution to
+    /// each consumer. Without that split here the MCP panel renders permanently
+    /// blank AND the tool list is polluted with prefixed names, one row per tool
+    /// rather than one per server. Mirrors burndown's
+    /// `rebuild_activity_and_mcp_columns_splits_mcp_prefix_from_tools`.
+    /// An older cache still answers the stable summary endpoint, but its
+    /// dashboard is dropped rather than re-served. That projection changes
+    /// shape between versions, and one written before the shell-command fix
+    /// still holds verbatim argv with absolute paths and possible credentials,
+    /// so serving it would re-publish that content after an upgrade.
+    #[test]
+    fn an_older_cache_keeps_its_summaries_but_never_its_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-usage.json");
+
+        let stale = serde_json::json!({
+            "version": CACHE_VERSION - 1,
+            "summaries": [],
+            "dashboard": {
+                "state": "ready",
+                "cost_complete": true,
+                "weekly": [], "heatmap": [], "providers": [], "models": [],
+                "projects": [], "sessions": [], "branches": [], "tools": [],
+                "mcp_servers": [],
+                // Exactly the leak that commit 7485cff3 fixed.
+                "shell_commands": [{"name": "curl -H 'Authorization: Bearer sk-live' https://x", "call_count": 3}],
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let loaded = load_cache(&path).expect("an older cache is still usable for summaries");
+        assert!(
+            loaded.dashboard.is_none(),
+            "a stale dashboard must be dropped, not re-served: {:?}",
+            loaded.dashboard
+        );
+
+        // A current-version cache keeps its dashboard.
+        let current = serde_json::json!({
+            "version": CACHE_VERSION,
+            "summaries": [],
+            "dashboard": {
+                "state": "ready", "cost_complete": true,
+                "weekly": [], "heatmap": [], "providers": [], "models": [],
+                "projects": [], "sessions": [], "branches": [], "tools": [],
+                "mcp_servers": [], "shell_commands": [],
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&current).unwrap()).unwrap();
+        assert!(
+            load_cache(&path).expect("current cache loads").dashboard.is_some(),
+            "a current-version dashboard is still served"
+        );
+
+        // A cache from the FUTURE is refused outright.
+        let future = serde_json::json!({"version": CACHE_VERSION + 1, "summaries": []});
+        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert!(
+            load_cache(&path).is_none(),
+            "a newer cache is not ours to interpret"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_are_attributed_to_servers_and_leave_the_tool_list() {
+        assert_eq!(
+            mcp_server_of("mcp__github__create_issue").as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            mcp_server_of("Read"),
+            None,
+            "an ordinary tool is not an MCP call"
+        );
+        assert_eq!(
+            mcp_server_of("mcp__"),
+            None,
+            "a prefix with no server is not a server"
+        );
+        // Matches burndown: a prefixed name with no tool segment still belongs
+        // to its server. Rejecting it would put a literal `mcp__` string in the
+        // tool list and disagree with the other surface over the same logs.
+        assert_eq!(
+            mcp_server_of("mcp__claude-in-chrome").as_deref(),
+            Some("claude-in-chrome"),
+            "a prefixed name with no tool segment still names its server"
+        );
+        assert_eq!(
+            mcp_server_of("mcp__github__").as_deref(),
+            Some("github"),
+            "a trailing separator does not change which server was called"
+        );
+
+        use ainb_plugin_types_sessions::Provider;
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, tools: Vec<String>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.01),
+            tools,
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        };
+        let result = dashboard_of(
+            &[
+                call(1, vec!["mcp__github__create_issue".into(), "Read".into()]),
+                call(2, vec!["mcp__github__list_prs".into()]),
+                call(3, vec!["mcp__context7__query_docs".into(), "Read".into()]),
+            ],
+            now,
+        );
+
+        let tool_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !tool_names.iter().any(|n| n.starts_with("mcp__")),
+            "no mcp__ tool may leak into the tool list: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"Read"),
+            "ordinary tools stay: {tool_names:?}"
+        );
+
+        let github = result
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "github")
+            .expect("github server row");
+        assert_eq!(
+            github.call_count, 2,
+            "two mcp__github__* tools collapse into one server row"
+        );
+        assert!(
+            result.mcp_servers.iter().any(|s| s.name == "context7"),
+            "every distinct server gets a row"
+        );
     }
 
     #[test]
