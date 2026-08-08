@@ -102,6 +102,46 @@ const COLUMNS: &str = "session_key, scope_key, provider, provider_version, acp_s
      cwd, permission_mode, state, open_turn_id, open_turn_started_at, created_at, \
      last_active_at";
 
+/// The write set ONE ended ACP turn commits together.
+///
+/// See [`FleetAcpSessionRepo::commit_turn_end`] for why these three writes
+/// share a transaction rather than landing one at a time.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnEnd<'a> {
+    /// The session whose turn ended.
+    pub session_key: &'a str,
+    /// The prompt whose delivery leg this turn answers.
+    pub message_id: &'a str,
+    /// Receipt-claim fingerprint: the single-winner guard.
+    pub fingerprint: &'a str,
+    /// Terminal delivery state (`DELIVERED`, `FAILED`, `UNKNOWN`).
+    pub state: &'a str,
+    /// Enumerated outcome detail, `None` for a clean delivery.
+    pub detail: Option<&'a str>,
+    /// The lifecycle state the session returns to, normally `IDLE`.
+    pub session_state: &'a str,
+    /// The agent's reply for the timeline, when the turn produced one.
+    pub reply: Option<&'a super::fleet_message::NewFleetMessage>,
+    /// Commit time in epoch milliseconds.
+    pub now: i64,
+}
+
+/// What [`FleetAcpSessionRepo::commit_turn_end`] committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnEndOutcome {
+    /// Receipt, reply and released session all committed.
+    Committed {
+        /// The committed reply's cursor, when the turn produced one. The SEQ
+        /// rather than the row: it is what wakes the message stream, and the
+        /// row is already the caller's own `NewFleetMessage`.
+        reply_seq: Option<i64>,
+    },
+    /// Another resolver already owns this leg's receipt (convergence beat the
+    /// turn home). Only the session release was written: no reply reaches the
+    /// timeline under a receipt that says the turn never landed.
+    AlreadyResolved,
+}
+
 /// Typed access to `fleet_acp_session`.
 pub struct FleetAcpSessionRepo;
 
@@ -371,6 +411,65 @@ impl FleetAcpSessionRepo {
     ) -> Result<(), FleetAcpSessionError> {
         let result = sqlx::query(sql).bind(value).bind(session_key).execute(pool).await?;
         Self::require_hit(result.rows_affected(), session_key)
+    }
+
+    /// Commit everything ONE ended ACP turn changes, in ONE transaction.
+    ///
+    /// A turn ends by writing four things: the transcript's completion marker,
+    /// the delivery receipt, the agent's reply on the timeline, and the
+    /// session's cleared `open_turn_id`. Committed separately, a daemon that
+    /// died between them left states nothing repairs: a reply on the timeline
+    /// whose receipt still said PENDING (convergence then resolves it UNKNOWN,
+    /// so the operator reads a delivered answer under a failed receipt), or a
+    /// resolved receipt for a session still marked mid-turn. The three writes
+    /// that share a store transaction are joined here; the transcript marker is
+    /// a different table with its own writer and is committed BEFORE this, so
+    /// the only surviving crash window leaves a turn the boot scan still sees
+    /// as dirty and converges.
+    ///
+    /// The leg is claimed and resolved by the SAME predicate the cross-process
+    /// resolvers use, so a turn whose receipt convergence already took over
+    /// commits [`TurnEndOutcome::AlreadyResolved`] and its reply is NOT
+    /// written: a timeline answer whose receipt says UNKNOWN cannot be
+    /// corrected afterwards, because the claim is spent. The session is still
+    /// released in that case, so a lost race cannot leave a scope wedged.
+    pub async fn commit_turn_end(
+        pool: &SqlitePool,
+        turn: &TurnEnd<'_>,
+    ) -> Result<TurnEndOutcome, FleetAcpSessionError> {
+        let mut tx = pool.begin().await?;
+        let claimed = super::fleet_message::FleetMessageRepo::resolve_pending_in_tx(
+            &mut tx,
+            turn.message_id,
+            turn.session_key,
+            turn.fingerprint,
+            turn.state,
+            turn.detail,
+            turn.now,
+        )
+        .await?;
+        let reply_seq = match turn.reply.filter(|_| claimed) {
+            Some(reply) => Some(
+                super::fleet_message::FleetMessageRepo::insert_in_tx(&mut tx, reply).await?.seq,
+            ),
+            None => None,
+        };
+        sqlx::query(
+            "UPDATE fleet_acp_session \
+             SET open_turn_id = NULL, open_turn_started_at = NULL, state = ?, last_active_at = ? \
+             WHERE session_key = ?",
+        )
+        .bind(turn.session_state)
+        .bind(turn.now)
+        .bind(turn.session_key)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(if claimed {
+            TurnEndOutcome::Committed { reply_seq }
+        } else {
+            TurnEndOutcome::AlreadyResolved
+        })
     }
 
     /// Insert the `fleet_acp_session` row AND its `fleet_session` twin in ONE

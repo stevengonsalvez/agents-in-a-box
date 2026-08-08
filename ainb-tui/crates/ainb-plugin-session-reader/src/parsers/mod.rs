@@ -103,7 +103,17 @@ where
         ctx.recent_present.push((path_str.clone(), mtime, size));
     }
 
-    read_one_cached(path, &path_str, stat, ctx, parse)
+    let calls = read_one_cached(path, &path_str, stat, ctx, parse);
+    // With a sink installed the caller consumes each file's calls here and the
+    // walk accumulates nothing — see `scanner::scan_windows`. Every other entry
+    // point leaves the sink `None` and gets the calls back unchanged.
+    match ctx.calls_sink.as_mut() {
+        Some(sink) => {
+            sink(calls);
+            Vec::new()
+        }
+        None => calls,
+    }
 }
 
 /// The cached read-parse-insert core shared by the recent and

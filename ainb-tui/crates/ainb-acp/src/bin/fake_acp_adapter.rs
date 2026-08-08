@@ -25,6 +25,8 @@
 //! | `FAKE_ACP_CHUNKS` | emit N `agent_message_chunk` updates per prompt instead of a script |
 //! | `FAKE_ACP_CHUNK_DELAY_MS` | sleep this long between chunks (paced streaming, I12) |
 //! | `FAKE_ACP_LOAD_REPLAY` | emit N updates BEFORE answering `session/load` (the replay-ordering probe) |
+//! | `FAKE_ACP_LOAD_REPLAY_TAIL` | emit N MORE replay updates AFTER the `session/load` reply |
+//! | `FAKE_ACP_LOAD_TAIL_DELAY_MS` | how long after that reply the tail is emitted |
 //! | `FAKE_ACP_MODE_REVERT_ON_LOAD` | `currentModeId` returned by `session/load` (the ambient-mode revert BOTH real adapters do) |
 //! | `FAKE_ACP_LOAD_UNKNOWN_SESSION` | `claude` \| `codex` \| `opaque`: fail `session/load` in that adapter's unknown-session shape |
 //! | `FAKE_ACP_MODE_FLIP` | emit a `current_mode_update` carrying this mode at the END of every prompt turn (the mid-conversation flip) |
@@ -261,6 +263,7 @@ fn handle(
                 });
             }
             respond(out, id, &result);
+            emit_load_tail(out, &session_id);
         }
         "session/set_config_option" => {
             record(&format!(
@@ -447,6 +450,36 @@ fn emit_turn(out: &SharedOut, session_id: &str, params: &serde_json::Value) {
             }),
         );
     }
+}
+
+/// The part of the `session/load` replay that arrives AFTER its own reply.
+///
+/// A client cannot assume the whole replay precedes the reply: the adapter is
+/// free to still be flushing, and the daemon's own demux hands notifications to
+/// a different task than the one awaiting the reply, so a tail can surface at
+/// any point up to the next prompt. Emitted on its own thread so the fixture's
+/// read loop keeps serving while the tail is pending.
+fn emit_load_tail(out: &SharedOut, session_id: &str) {
+    let tail = count("FAKE_ACP_LOAD_REPLAY_TAIL");
+    if tail == 0 {
+        return;
+    }
+    let out = Arc::clone(out);
+    let session_id = session_id.to_string();
+    let delay = std::time::Duration::from_millis(count("FAKE_ACP_LOAD_TAIL_DELAY_MS") as u64);
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        for index in 0..tail {
+            notify_update(
+                &out,
+                &session_id,
+                &serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": format!("tail-replay-{index} ")},
+                }),
+            );
+        }
+    });
 }
 
 /// A live session changing permission regime mid conversation, long after the

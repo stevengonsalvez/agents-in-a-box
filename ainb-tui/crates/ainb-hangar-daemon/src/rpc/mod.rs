@@ -1771,45 +1771,67 @@ async fn message_send_inner(
         return Err(invalid_params("targets must name at least one session"));
     }
 
-    // A CHANNEL scope's recipients are its membership, and nothing else.
-    //
-    // A session scope already carries this rule implicitly: absent a scope_key
-    // a single-target send mints `session:<target>`, so the scope and the
-    // recipient are the same fact. A channel scope is the first case where the
-    // two can disagree, and the disagreement is the interesting one: a send
-    // addressed to `channel:X` but delivered to a session that is not on X
-    // would put the message in X's timeline, where every member reads it, while
-    // delivering it to somebody who was never invited. Fail closed on both
-    // halves: an unknown channel scope, and a target the channel does not name.
-    if let Some(FleetScope::Channel(_)) = params.scope_key.as_deref().and_then(FleetScope::parse) {
-        let scope = params.scope_key.clone().unwrap_or_default();
-        let channel = FleetChannelRepo::by_scope(pool, &scope)
-            .await
-            .map_err(|error| store_err(&error))?
-            .ok_or_else(|| invalid_params(&format!("scope_key {scope:?} names no channel")))?;
-        // A COPILOT channel's membership is not its recipient list: it has
-        // none, because `fleet/channel_create` refuses one on the grounds that
-        // the members ARE the ACP session created against the minted scope.
-        // Resolve that session HERE, or the channel's only true member is a
-        // stranger to its own membership check and every operator message into
-        // the copilot channel is refused.
-        let mut members = channel.recipients.clone();
-        if channel.kind == "copilot" {
-            if let Some(session) =
-                ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo::get_live_by_scope(
-                    pool, &scope,
-                )
+    // A supplied scope must be CONSISTENT with the recipients it claims to
+    // address. Without this, `--target session:B --scope session:A` prompts B
+    // while filing the message in A's timeline: cross-session contamination
+    // from caller-controlled input, not a routing preference. It fails CLOSED,
+    // so every scope kind is allowed here deliberately or not at all.
+    if let Some(scope) = params.scope_key.as_deref().map(str::trim) {
+        if let Some(named) = scope.strip_prefix("session:") {
+            if targets.len() > 1 {
+                return Err(invalid_params(
+                    "a session scope cannot carry a multi-target send; omit scope_key and the \
+                     daemon mints the broadcast scope",
+                ));
+            }
+            if !targets.iter().any(|target| target == named) {
+                return Err(invalid_params(
+                    "scope_key names a session that is not a recipient of this send",
+                ));
+            }
+        } else if scope.strip_prefix("broadcast:").is_some() {
+            if targets.len() < 2 {
+                return Err(invalid_params(
+                    "a broadcast scope needs more than one recipient",
+                ));
+            }
+        } else if scope.strip_prefix("channel:").is_some() {
+            // A channel's recipients are its membership, and nothing else. A
+            // send addressed to `channel:X` but delivered to a session that is
+            // not on X would put the message in X's timeline, where every
+            // member reads it, while delivering it to somebody never invited.
+            let channel = FleetChannelRepo::by_scope(pool, scope)
                 .await
                 .map_err(|error| store_err(&error))?
-            {
-                members.push(session.session_key);
+                .ok_or_else(|| invalid_params(&format!("scope_key {scope:?} names no channel")))?;
+            // A COPILOT channel's membership is not its recipient list: it has
+            // none, because `fleet/channel_create` refuses one on the grounds
+            // that the member IS the ACP session created against the minted
+            // scope. Resolve that session HERE, or the channel's only true
+            // member is a stranger to its own membership check and every
+            // operator message into the copilot channel is refused.
+            let mut members = channel.recipients.clone();
+            if channel.kind == "copilot" {
+                if let Some(session) =
+                    ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo::get_live_by_scope(
+                        pool, scope,
+                    )
+                    .await
+                    .map_err(|error| store_err(&error))?
+                {
+                    members.push(session.session_key);
+                }
             }
-        }
-        if let Some(stranger) = targets.iter().find(|target| !members.contains(target)) {
-            return Err(invalid_params(&format!(
-                "session {stranger:?} is not a member of channel {:?}",
-                channel.name
-            )));
+            if let Some(stranger) = targets.iter().find(|target| !members.contains(target)) {
+                return Err(invalid_params(&format!(
+                    "session {stranger:?} is not a member of channel {:?}",
+                    channel.name
+                )));
+            }
+        } else {
+            return Err(invalid_params(
+                "scope_key must be `session:<recipient>`, `broadcast:<id>` or `channel:<id>`",
+            ));
         }
     }
 
@@ -5353,6 +5375,16 @@ async fn execute_acp_action(
 }
 
 /// Map the pool's answer routing onto a receipt an operator can read.
+///
+/// `DELIVERED` here means HANDED OFF, and the detail says so. ACP defines no
+/// acknowledgement for a `session/request_permission` response: the answer is
+/// written to the adapter's pending JSON-RPC id and the protocol's next word on
+/// the subject is whatever the turn does afterwards. A daemon that dies between
+/// the hand-off and the pipe therefore loses a decision whose receipt already
+/// says delivered, and no wording can make that receipt mean "applied". What
+/// the vocabulary CAN do is stop implying an acknowledgement nobody sent, which
+/// is what an operator reading `DELIVERED` before a re-ask would otherwise
+/// conclude the daemon had.
 fn acp_permission_receipt(
     answer: crate::acp_pool::PermissionAnswer,
 ) -> (
@@ -5365,7 +5397,9 @@ fn acp_permission_receipt(
     match answer {
         PermissionAnswer::Delivered(option) => (
             ActionReceiptStatus::Delivered,
-            Some(format!("acp permission answered; option {option}")),
+            Some(format!(
+                "acp permission handed to the adapter; option {option} (hand-off, not an adapter ack: ACP defines none)"
+            )),
         ),
         PermissionAnswer::NotWaiting => (
             ActionReceiptStatus::Failed,

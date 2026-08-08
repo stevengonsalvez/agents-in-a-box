@@ -1157,10 +1157,14 @@ pub async fn reconcile_tmux_once(
     observed_at: i64,
 ) -> anyhow::Result<usize> {
     let sessions = discover_from_tmux().await?;
-    restore_tmux_transport(pool, events, &sessions, observed_at).await?;
+    let live_bindings = restore_tmux_transport(pool, events, &sessions, observed_at).await?;
     let registered = FleetRepo::snapshot(pool).await?.sessions;
     let mut discovered: std::collections::HashSet<String> =
         sessions.iter().map(|session| session.session_key.to_string()).collect();
+    // Union in the rows the restore pass found live by (target, fingerprint).
+    // Without this the two halves disagree about what "missing" means and an
+    // orphaned-key row churns forever — see `restore_tmux_transport`.
+    discovered.extend(live_bindings);
     let mut applied = 0;
     for session in sessions {
         if let Some(managed) = registered.iter().find(|row| {
@@ -1193,10 +1197,24 @@ pub async fn reconcile_tmux_once(
     }
     let snapshot = FleetRepo::snapshot(pool).await?;
     for row in snapshot.sessions {
-        if row.tmux_target.is_none()
-            || discovered.contains(&row.session_key)
-            || (row.lifecycle_state == "EXITED" && row.transport_health == "UNAVAILABLE")
-        {
+        // TRANSITION, NOT STATE. The guard keys off `transport_health` ALONE —
+        // the thing `tmux_missing_event` actually always writes.
+        //
+        // It used to also require `lifecycle_state == "EXITED"`, which the event
+        // only sets when `management_state != "MANAGED" && lifecycle_authority ==
+        // "inferred"`. Every hook-backed session is MANAGED and authoritative, so
+        // for those the conjunct could never become true, the row never reached
+        // the skip, and each one re-emitted `tmux_missing` on EVERY 3s tick —
+        // forever, with a timestamped `event_id` that dedup cannot collapse. That
+        // wrote 832,711 rows (76% of `fleet_event`, 197k/day) on one host before
+        // it was found. Same defect the discovery loop above already fixed via
+        // `lifecycle_settled`; this pass never got the equivalent guard.
+        //
+        // Keying on transport alone is self-healing: when tmux reappears the
+        // discovery loop puts the session in `discovered` and flips
+        // `transport_health` back to HEALTHY, so the next disappearance is a real
+        // transition and emits again.
+        if !needs_tmux_missing_event(&row, &discovered) {
             continue;
         }
         let event = tmux_missing_event(&row, observed_at);
@@ -1213,6 +1231,21 @@ pub async fn reconcile_tmux_once(
         }
     }
     Ok(applied)
+}
+
+/// Does this registered row need a fresh `tmux_missing` event this pass?
+///
+/// The loop's termination condition, split out so it is testable without a real
+/// tmux server. It must be the exact complement of what
+/// [`tmux_missing_event`]'s patch writes, or the emit never terminates — see the
+/// comment at the call site for the 832,711-row incident that proved it.
+fn needs_tmux_missing_event(
+    row: &FleetSessionRow,
+    discovered: &std::collections::HashSet<String>,
+) -> bool {
+    row.tmux_target.is_some()
+        && !discovered.contains(&row.session_key)
+        && row.transport_health != "UNAVAILABLE"
 }
 
 fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent {
@@ -1262,6 +1295,12 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
     tokio::spawn(async move {
         let clock = SystemClock;
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+        // One iteration does a full `FleetRepo::snapshot` plus per-session work,
+        // which on a large roster has been measured over 1s. Under tokio's default
+        // `Burst` a period that short turns every overrun into back-to-back
+        // catch-up ticks with no sleep at all — a hot loop that then makes its own
+        // queries slower. `Delay` re-bases the schedule on completion instead.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             let observed_at = clock.now_ms();
@@ -1278,6 +1317,116 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
             }
         }
     })
+}
+
+/// Demote dead sessions out of the visible roster on a slow clock.
+///
+/// Separate task, NOT folded into [`spawn_tmux_reconciler`]'s 3s loop: that
+/// loop already does a full snapshot plus per-session work per tick and was
+/// measured over 1s on a large roster. Archiving is pure cleanup with no
+/// deadline, so it gets its own timer and cannot contribute to that hot path.
+#[must_use]
+pub fn spawn_session_archiver(pool: SqlitePool, events: EventSink) -> tokio::task::JoinHandle<()> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    tokio::spawn(async move {
+        let clock = SystemClock;
+        // `interval` would fire its FIRST tick immediately, putting a batch of
+        // write transactions into the middle of daemon boot, which is already
+        // the busiest moment for the single SQLite writer. Nothing here is
+        // urgent — the rows have been dead for a day — so the first pass waits
+        // out the boot convergence.
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + SESSION_ARCHIVE_INTERVAL,
+            SESSION_ARCHIVE_INTERVAL,
+        );
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match archive_dead_sessions(&pool, &events, clock.now_ms()).await {
+                Ok(0) => {}
+                Ok(archived) => tracing::info!(archived, "fleet archived dead sessions"),
+                Err(error) => tracing::warn!(error = %error, "fleet session archive failed"),
+            }
+        }
+    })
+}
+
+/// How often [`archive_dead_sessions`] runs. Ten minutes drains a 1,440-row
+/// backlog at [`SESSION_ARCHIVE_BATCH`] per pass in half an hour, and costs
+/// one indexed candidate read per pass in the steady state.
+const SESSION_ARCHIVE_INTERVAL: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Rows demoted per pass. Each is its own transaction, so this bounds how long
+/// one pass can hold the single `SQLite` writer away from the reconciler.
+const SESSION_ARCHIVE_BATCH: i64 = 500;
+
+/// How long a retired session stays in the visible roster.
+///
+/// Deliberately much longer than [`SESSION_STALE_TTL_MS`] (15 min), which is
+/// the clock for marking a session `EXITED`. Those two are different questions:
+/// "is this session dead" is answered in minutes so the roster tells the truth,
+/// while "will anyone look at this dead session again today" is answered in
+/// hours so that closing and reopening a session in one working day never needs
+/// an unarchive. There is a revival path (`update_session`), but not needing it
+/// is cheaper than needing it.
+const SESSION_ARCHIVE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Demote long-dead sessions out of the visible roster.
+///
+/// Measured motivation: 1,440 of 1,472 `visible = 1` rows on a real profile
+/// were `EXITED` sessions that every `SESSION_SELECT_ALL` scanned on the 3s
+/// tick. `reap_stale_sessions` already stamps them `EXITED`; the missing half
+/// was the visibility demotion, so this is a demotion, not a new lifecycle
+/// state (`lifecycle_state` carries a `SQLite` CHECK that cannot be altered).
+///
+/// Nothing is deleted: the row keeps its identity and event history, stays
+/// reachable by key, and re-appears in `FleetRepo::list_archived`.
+///
+/// # Errors
+/// Propagates a store failure from reading candidates.
+pub async fn archive_dead_sessions(
+    pool: &SqlitePool,
+    events: &EventSink,
+    observed_at: i64,
+) -> Result<usize, FleetRepoError> {
+    let cutoff = observed_at.saturating_sub(SESSION_ARCHIVE_TTL_MS);
+    let candidates = FleetRepo::list_archivable(pool, cutoff, SESSION_ARCHIVE_BATCH).await?;
+    let mut archived = 0;
+    let mut head = None;
+    for session_key in candidates {
+        match FleetRepo::archive_session(pool, &session_key, observed_at).await {
+            // `None` means a hook revived the row between the candidate read
+            // and the transaction. Not an error: the row belongs on screen.
+            Ok(None) => {}
+            Ok(Some(revision)) => {
+                head = Some(revision);
+                archived += 1;
+            }
+            Err(error) => tracing::warn!(error = %error, session_key, "fleet archive failed"),
+        }
+    }
+    // ONE wakeup for the whole pass, carrying the highest revision it committed
+    // — never one per row.
+    //
+    // `spawn_fleet_forwarder` DISCARDS the broadcast value (`Ok(_revision) =>
+    // {}`) and uses it purely as a nudge to drain the durable log from its own
+    // cursor to head, so N sends carry exactly the information of one. They are
+    // not equally harmless: the fleet broadcast holds `CHANNEL_CAPACITY` = 256
+    // (`events.rs`), the forwarder only calls `recv()` after finishing a drain,
+    // and for the fleet stream alone `RecvError::Lagged` is TERMINAL — it emits
+    // `fleet/resync_required` and returns. So a pass emitting more than 256
+    // times could overrun a mid-drain subscriber and tear down every connected
+    // TUI's live stream, which on the measured 1,440-row backlog is precisely
+    // what a per-row emit would have done.
+    //
+    // Deliberately NOT fixed by shrinking `SESSION_ARCHIVE_BATCH` under 256:
+    // that batch size is tuned for how long one pass may hold the SQLite
+    // writer, and pinning it to an unrelated constant in another module would
+    // be a false coupling that the next person to tune either one would break.
+    if let Some(revision) = head {
+        events.emit_fleet_revision(revision);
+    }
+    Ok(archived)
 }
 
 /// How long a session may go unobserved before the reaper retires it.
@@ -1407,21 +1556,84 @@ pub async fn mark_tmux_unavailable(
     Ok(changed)
 }
 
+/// Returns every `session_key` whose tmux binding is LIVE by (target,
+/// fingerprint), whether or not this pass emitted an event for it.
+///
+/// The caller must union that set into its own `discovered` set. Both halves of
+/// the reconcile then agree on what "missing" means, which is the thing that was
+/// broken: this loop matches by (target, fingerprint) so a provider-qualified
+/// MANAGED row stays reachable, while the missing-sweep matches by `session_key`.
+/// When a pane's `session_key` changes but the pane does not, the orphaned
+/// predecessor row satisfies this loop and NOT the sweep's, so it flip-flopped —
+/// restored to HEALTHY here, marked UNAVAILABLE there, one applied event each,
+/// every tick, forever.
+///
+/// `0075_prune_tmux_flipflop.sql` one-time-pruned 41,200 rows of this and PR
+/// #554 added the `lifecycle_state == "EXITED"` skip below, which only covers an
+/// orphan that reached EXITED. An orphan stuck at RUNNING never does —
+/// authoritative lifecycle has no decay — so it kept churning. Measured again on
+/// 2026-08-08 at 40 events/min after the sweep-side guard alone was fixed:
+/// `tmux_available` and `tmux_missing` for one session, same timestamp, every 3s.
 async fn restore_tmux_transport(
     pool: &SqlitePool,
     events: &EventSink,
     discovered: &[FleetSession],
     observed_at: i64,
-) -> Result<(), FleetRepoError> {
+) -> Result<std::collections::HashSet<String>, FleetRepoError> {
     let snapshot = FleetRepo::snapshot(pool).await?;
+    let mut live_bindings = std::collections::HashSet::new();
+
+    // ONE row per pane may claim the binding: the most recently observed.
+    //
+    // A pane is a single thing, so at most one session row can really own it.
+    // When a pane's key changes but the pane does not, BOTH the old row and the
+    // new one match by (target, fingerprint), and reporting both live pinned the
+    // orphan HEALTHY forever — `reap_stale_sessions` skips any row that is not
+    // UNAVAILABLE, so it never reached EXITED and `archive_dead_sessions` never
+    // took it either. That left a ghost in the roster advertising an attachable
+    // pane that belongs to a different session. Claiming liveness for the winner
+    // only lets every loser fall through to the missing-sweep and retire, which
+    // is the behaviour that existed before the flip-flop fix and must survive it.
+    let mut owner_of_pane: std::collections::HashMap<(String, Option<String>), (i64, String)> =
+        std::collections::HashMap::new();
+    for row in &snapshot.sessions {
+        let Some(target) = row.tmux_target.clone() else {
+            continue;
+        };
+        let matches_live_pane = discovered.iter().any(|session| {
+            session.exact_tmux_target.as_deref() == Some(target.as_str())
+                && session.process_start_fingerprint == row.process_start_fingerprint
+        });
+        if !matches_live_pane {
+            continue;
+        }
+        let pane = (target, row.process_start_fingerprint.clone());
+        match owner_of_pane.get(&pane) {
+            Some((seen, _)) if *seen >= row.last_observed_at => {}
+            _ => {
+                owner_of_pane.insert(pane, (row.last_observed_at, row.session_key.clone()));
+            }
+        }
+    }
+    let owners: std::collections::HashSet<String> =
+        owner_of_pane.into_values().map(|(_, key)| key).collect();
+
     for row in snapshot.sessions {
         let Some(target) = row.tmux_target.as_deref() else {
             continue;
         };
-        let live = discovered.iter().any(|session| {
-            session.exact_tmux_target.as_deref() == Some(target)
-                && session.process_start_fingerprint == row.process_start_fingerprint
-        });
+        let live = owners.contains(&row.session_key)
+            && discovered.iter().any(|session| {
+                session.exact_tmux_target.as_deref() == Some(target)
+                    && session.process_start_fingerprint == row.process_start_fingerprint
+            });
+        // Report liveness BEFORE the emit guards below. A row can be live and
+        // still not need an event (already HEALTHY, or EXITED); it is just as
+        // not-missing in those cases, and reporting only the rows that emitted
+        // would leave exactly the steady state uncovered.
+        if live {
+            live_bindings.insert(row.session_key.clone());
+        }
         // An EXITED row is never restored, even when a pane still matches its
         // target and fingerprint. Matching here is by (target, fingerprint) —
         // deliberately, so a MANAGED row whose key is provider-qualified is still
@@ -1455,7 +1667,7 @@ async fn restore_tmux_transport(
             events.emit_fleet_revision(result.revision);
         }
     }
-    Ok(())
+    Ok(live_bindings)
 }
 
 fn with_tmux_capabilities(serialized: &str, available: bool) -> String {
@@ -1970,6 +2182,177 @@ mod tests {
         );
     }
 
+    /// The orphan that the EXITED skip above does NOT cover.
+    ///
+    /// Authoritative lifecycle has no decay, so an orphan whose last hook said
+    /// RUNNING never reaches EXITED and the skip never fires. Restore marked it
+    /// HEALTHY, the sweep saw a key it had not discovered and marked it
+    /// UNAVAILABLE, forever. Measured live on 2026-08-08 at 40 events/min with
+    /// `tmux_available` and `tmux_missing` carrying the SAME timestamp.
+    ///
+    /// The fix is agreement, not another skip: restore reports every live
+    /// binding by (target, fingerprint) and the sweep unions that into its
+    /// `discovered` set, so both halves decide "missing" the same way.
+    #[tokio::test]
+    async fn a_running_orphan_is_reported_live_so_the_sweep_skips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let target = "tmux_demo:2.2";
+        let fingerprint = "pane=%2;pid=202;session_started=1700000001";
+        let discovered = vec![FleetSession {
+            session_key: SessionKey::legacy(Provider::Claude, target, fingerprint),
+            provider: Provider::Claude,
+            provider_session_id: None,
+            cwd: "/repo".to_string(),
+            exact_tmux_target: Some(target.to_string()),
+            pane_pid: Some(202),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            lifecycle: LifecycleState::Running,
+            attention: AttentionState::None,
+            management: ManagementState::Degraded,
+            capabilities: ainb_fleet_core::types::Capabilities::degraded_tmux(),
+            provenance: std::collections::BTreeSet::from([
+                ainb_fleet_core::types::Provenance::Tmux,
+            ]),
+            confidence: ainb_fleet_core::types::Confidence::Inferred,
+            transport_health: ainb_fleet_core::types::TransportHealth::Healthy,
+            first_seen_ms: Some(1_700_000_001_000),
+            last_seen_ms: None,
+            version: 0,
+        }];
+
+        // Same pane, different key, and RUNNING rather than EXITED — the shape
+        // the previous guard could never retire.
+        let orphan_key = SessionKey::legacy(Provider::Unknown, target, fingerprint).to_string();
+        FleetRepo::apply_event(
+            pool,
+            &NewFleetEvent {
+                event_id: "seed:running-orphan".to_string(),
+                session_key: orphan_key.clone(),
+                observed_at: 1,
+                authority: ObservationAuthority::Authoritative,
+                event_type: "seed".to_string(),
+                payload: "{}".to_string(),
+                patch: FleetSessionPatch {
+                    tmux_target: Some(target.to_string()),
+                    process_start_fingerprint: Some(fingerprint.to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    transport_health: Some("UNAVAILABLE".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .expect("seed running orphan");
+
+        let live = restore_tmux_transport(pool, &sink, &discovered, 1_000).await.expect("restore");
+
+        assert!(
+            live.contains(&orphan_key),
+            "a live (target, fingerprint) binding must be reported so the sweep skips it"
+        );
+
+        // The sweep's own predicate, fed the unioned set, must now stay quiet.
+        let row = FleetRepo::get_session(pool, &orphan_key)
+            .await
+            .expect("get")
+            .expect("orphan present");
+        assert!(
+            !needs_tmux_missing_event(&row, &live),
+            "reporting the binding is what stops the 40/min flip-flop"
+        );
+    }
+
+    /// Only ONE row per pane may claim the binding, or the loser never retires.
+    ///
+    /// Both the orphan and its successor match the same pane by (target,
+    /// fingerprint). Reporting both live pinned the orphan HEALTHY forever:
+    /// `reap_stale_sessions` skips anything not UNAVAILABLE, so it never reached
+    /// EXITED and archiving never took it, leaving a ghost row advertising a pane
+    /// that belongs to someone else.
+    #[tokio::test]
+    async fn only_the_newest_row_for_a_pane_claims_the_live_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let target = "tmux_demo:3.3";
+        let fingerprint = "pane=%3;pid=303;session_started=1700000002";
+        let discovered = vec![FleetSession {
+            session_key: SessionKey::legacy(Provider::Claude, target, fingerprint),
+            provider: Provider::Claude,
+            provider_session_id: None,
+            cwd: "/repo".to_string(),
+            exact_tmux_target: Some(target.to_string()),
+            pane_pid: Some(303),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            lifecycle: LifecycleState::Running,
+            attention: AttentionState::None,
+            management: ManagementState::Degraded,
+            capabilities: ainb_fleet_core::types::Capabilities::degraded_tmux(),
+            provenance: std::collections::BTreeSet::from([
+                ainb_fleet_core::types::Provenance::Tmux,
+            ]),
+            confidence: ainb_fleet_core::types::Confidence::Inferred,
+            transport_health: ainb_fleet_core::types::TransportHealth::Healthy,
+            first_seen_ms: Some(1_700_000_002_000),
+            last_seen_ms: None,
+            version: 0,
+        }];
+
+        // Two rows, same pane. The successor was observed later. The orphan is
+        // seeded HEALTHY because that is the state the bug left it pinned in.
+        for (key, seen, health) in [
+            ("codex:pane-orphan", 100, "HEALTHY"),
+            ("codex:pane-owner", 900, "UNAVAILABLE"),
+        ] {
+            FleetRepo::apply_event(
+                pool,
+                &NewFleetEvent {
+                    event_id: format!("seed:{key}"),
+                    session_key: key.to_string(),
+                    observed_at: seen,
+                    authority: ObservationAuthority::Authoritative,
+                    event_type: "seed".to_string(),
+                    payload: "{}".to_string(),
+                    patch: FleetSessionPatch {
+                        tmux_target: Some(target.to_string()),
+                        process_start_fingerprint: Some(fingerprint.to_string()),
+                        lifecycle_state: Some("RUNNING".to_string()),
+                        transport_health: Some(health.to_string()),
+                        ..FleetSessionPatch::default()
+                    },
+                },
+            )
+            .await
+            .expect("seed");
+        }
+
+        let live = restore_tmux_transport(pool, &sink, &discovered, 1_000).await.expect("restore");
+
+        assert!(
+            live.contains("codex:pane-owner"),
+            "the newest row owns the pane"
+        );
+        assert!(
+            !live.contains("codex:pane-orphan"),
+            "the older row must NOT claim the pane, or it can never be retired"
+        );
+
+        let orphan = FleetRepo::get_session(pool, "codex:pane-orphan")
+            .await
+            .expect("get")
+            .expect("orphan present");
+        assert!(
+            needs_tmux_missing_event(&orphan, &live),
+            "the loser must fall through to the missing-sweep and retire"
+        );
+    }
+
     #[test]
     fn stop_with_background_work_remains_running() {
         let (lifecycle, attention) = states_for_hook(
@@ -2396,6 +2779,82 @@ mod tests {
         assert_eq!(missing.lifecycle_state, "RUNNING");
         assert_eq!(missing.lifecycle_authority, "authoritative");
         assert_eq!(missing.transport_health, "UNAVAILABLE");
+
+        // The row above is EXACTLY the shape that looped: hook-backed, so
+        // `tmux_missing_event` never patches `lifecycle_state` to EXITED, and the
+        // old guard required EXITED before it would stop. One more pass must now
+        // be a no-op — otherwise this session re-emits every 3s forever.
+        assert!(
+            !needs_tmux_missing_event(&missing, &std::collections::HashSet::new()),
+            "an authoritative session already marked UNAVAILABLE must not re-emit"
+        );
+    }
+
+    /// The emit loop must terminate for a hook-backed session: one transition in,
+    /// one event out, then silence until tmux actually comes back.
+    #[tokio::test]
+    async fn tmux_missing_emits_once_per_transition_not_once_per_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let payload = serde_json::json!({
+            "tmux_target": "codex-loop:0.0",
+            "process_start_fingerprint": "fp-loop"
+        });
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "loop-start".to_string(),
+                provider: "codex",
+                provider_session_id: "thread-loop",
+                cwd: "/repo",
+                event_type: "UserPromptSubmit",
+                payload: &payload,
+                observed_at: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+            .await
+            .unwrap()
+            .unwrap();
+        let nobody = std::collections::HashSet::new();
+
+        // Tmux has gone: the first pass is a real transition and must emit.
+        assert!(
+            needs_tmux_missing_event(&row, &nobody),
+            "a healthy session whose pane vanished must emit once"
+        );
+        FleetRepo::apply_event(store.pool(), &tmux_missing_event(&row, 200))
+            .await
+            .unwrap();
+
+        // Every subsequent pass sees the state it just wrote and must stay quiet.
+        for tick in 0..5 {
+            let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !needs_tmux_missing_event(&row, &nobody),
+                "tick {tick}: re-emitting is the 832k-row bug"
+            );
+        }
+
+        // Discovery seeing the pane again is what re-arms it.
+        let seen: std::collections::HashSet<String> =
+            std::iter::once("codex:thread-loop".to_string()).collect();
+        let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !needs_tmux_missing_event(&row, &seen),
+            "a discovered session is never missing"
+        );
     }
 
     #[tokio::test]
@@ -2858,5 +3317,136 @@ mod tests {
         assert!(restored.restart);
         assert!(restored.kill);
         assert!(restored.archive);
+    }
+
+    /// The reap-then-archive pipeline, end to end on its two real clocks: a
+    /// stranded session is retired at 15 min, stays visible all day, and only
+    /// then leaves the roster every snapshot scans.
+    #[tokio::test]
+    async fn a_reaped_session_leaves_the_roster_only_after_the_archive_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        apply_hook(
+            pool,
+            &sink,
+            HookObservation {
+                event_id: "hook-abandoned".to_string(),
+                provider: "claude",
+                provider_session_id: "sess-abandoned",
+                event_type: "Notification",
+                cwd: "/tmp/ephemeral",
+                payload: &serde_json::json!({}),
+                observed_at: 0,
+            },
+        )
+        .await
+        .expect("hook applies");
+
+        // Alive: nothing to archive, whatever the clock says.
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+                .await
+                .expect("archive"),
+            0,
+            "a session that was never retired must not be archived"
+        );
+
+        reap_stale_sessions(pool, &sink, SESSION_STALE_TTL_MS + 1).await.expect("reap");
+
+        // Retired, but well inside the archive TTL: still on screen, which is
+        // the point of the two clocks being different.
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_STALE_TTL_MS + 2)
+                .await
+                .expect("archive"),
+            0,
+            "a session retired minutes ago must stay visible"
+        );
+        assert_eq!(FleetRepo::snapshot(pool).await.unwrap().sessions.len(), 1);
+
+        let archived = archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+            .await
+            .expect("archive");
+
+        assert_eq!(archived, 1, "past the archive TTL the dead row is demoted");
+        assert!(
+            FleetRepo::snapshot(pool).await.unwrap().sessions.is_empty(),
+            "the 3s reconciler must stop scanning it"
+        );
+        assert_eq!(
+            FleetRepo::list_archived(pool, 50).await.unwrap().len(),
+            1,
+            "and it stays browsable"
+        );
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 3)
+                .await
+                .expect("archive"),
+            0,
+            "a second pass must be free"
+        );
+    }
+
+    /// An archive pass sends ONE broadcast wakeup, however many rows it moved.
+    ///
+    /// The fleet broadcast holds 256 and `spawn_fleet_forwarder` treats
+    /// `Lagged` as terminal — it emits `fleet/resync_required` and dies. A pass
+    /// that emitted per row would, on the measured 1,440-row backlog, tear down
+    /// every connected subscriber's live stream. The forwarder discards the
+    /// value and re-drains the durable log from its own cursor, so one send
+    /// carries exactly what N would.
+    ///
+    /// Seeds MORE dead sessions than the channel holds, so a per-row emit
+    /// cannot pass this by luck.
+    #[tokio::test]
+    async fn an_archive_pass_emits_one_wakeup_no_matter_how_many_rows_it_moves() {
+        const DEAD_SESSIONS: usize = 300;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let broker = EventBroker::new();
+        let sink = broker.sink();
+        let pool = store.pool();
+
+        for n in 0..DEAD_SESSIONS {
+            FleetRepo::apply_event(
+                pool,
+                &NewFleetEvent {
+                    event_id: format!("seed-{n}"),
+                    session_key: format!("claude:dead-{n:04}"),
+                    observed_at: 1,
+                    authority: ObservationAuthority::Authoritative,
+                    event_type: "observation".to_string(),
+                    payload: "{}".to_string(),
+                    patch: FleetSessionPatch {
+                        lifecycle_state: Some("EXITED".to_string()),
+                        ..FleetSessionPatch::default()
+                    },
+                },
+            )
+            .await
+            .expect("seed");
+        }
+
+        // Subscribe AFTER seeding, so the only sends counted are the pass's.
+        let mut rx = broker.subscribe_fleet();
+        let archived = archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+            .await
+            .expect("archive");
+
+        assert_eq!(archived, DEAD_SESSIONS, "the whole batch is archived");
+
+        let mut wakeups = 0;
+        while rx.try_recv().is_ok() {
+            wakeups += 1;
+        }
+        assert_eq!(
+            wakeups, 1,
+            "a bulk janitor pass must nudge subscribers once, not once per row \
+             — {DEAD_SESSIONS} sends would lag a 256-slot channel and kill the stream"
+        );
     }
 }

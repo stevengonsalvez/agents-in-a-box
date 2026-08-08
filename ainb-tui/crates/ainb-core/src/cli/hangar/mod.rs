@@ -9900,7 +9900,7 @@ fn template_to_json(t: &ainb_hangar_core::template::AgentTemplate) -> String {
 // ---- csv / markdown renderers ----------------------------------------------
 
 /// Quote a CSV field if it contains a comma, quote, or newline (RFC-4180).
-fn csv_field(s: &str) -> String {
+pub fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -9909,7 +9909,7 @@ fn csv_field(s: &str) -> String {
 }
 
 /// Escape a markdown table cell (only the pipe needs escaping).
-fn md_cell(s: &str) -> String {
+pub fn md_cell(s: &str) -> String {
     s.replace('|', "\\|")
 }
 
