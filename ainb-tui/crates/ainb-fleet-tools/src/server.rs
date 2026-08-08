@@ -54,6 +54,15 @@ impl FleetToolServer {
 
     /// Classify, then (only if automatic) execute. This is the whole contract of
     /// the crate in one function.
+    ///
+    /// PHASE BOUNDARY, stated so a green test is not read as a live guardrail:
+    /// a confirm verdict answers the MODEL with [`confirm_required`], it does
+    /// not mint an operator card. Minting is `ainb_hangar_daemon::copilot::gate`
+    /// (which calls [`project_arguments`] and parks), and nothing on the
+    /// production path calls it yet — this server is not handed to an ACP
+    /// session until the `session/new` `mcpServers` plumbing lands. The
+    /// behaviour is fail-closed either way: a destructive tool is refused
+    /// rather than run.
     pub async fn dispatch(&self, tool: &str, arguments: &JsonObject) -> CallToolResult {
         match self.guardrail().classify(tool, arguments) {
             Verdict::Refused(refusal) => refused(tool, &refusal),
