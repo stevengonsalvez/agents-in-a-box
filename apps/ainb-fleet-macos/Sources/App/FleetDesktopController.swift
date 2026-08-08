@@ -807,6 +807,16 @@ private struct FleetUsageView: View {
             .init(label: "Streak", value: stats.streakText, accent: false),
         ])
 
+        // Cache hit and cost per session need no wire change: the bucket
+        // already breaks out cache-read against fresh input tokens.
+        if let total = dash.totals {
+            FleetStatStrip(tiles: [
+                .init(label: "Cache hit", value: FleetUsageStats.cacheHitText(total), accent: false),
+                .init(label: "Cost / session", value: FleetUsageStats.costPerSessionText(total), accent: false),
+                .init(label: "Calls / session", value: FleetUsageStats.callsPerSessionText(total), accent: false),
+            ])
+        }
+
         if !dash.providers.isEmpty {
             FleetShareCard(
                 title: "Providers",
@@ -995,6 +1005,15 @@ private struct FleetUsageView: View {
                     Text("\(window.remainingPercent)%")
                         .font(.caption2.weight(.semibold))
                         .monospacedDigit()
+                    if window.estimated {
+                        // Inferred from local transcripts, not reported by the
+                        // provider. Presenting it identically to a measured
+                        // figure would overstate what we know.
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 8))
+                            .foregroundStyle(FleetNotchPalette.muted)
+                            .help("Estimated from local transcripts, not reported by the provider")
+                    }
                 }
                 FleetProgressBar(fraction: Double(window.remainingPercent) / 100.0)
             }
@@ -1544,6 +1563,24 @@ private struct FleetUsageStats {
             return "\u{2014}"
         }
         return FleetHeatmapLayout.weekdayLabel(best.offset)
+    }
+
+    /// Share of input that came from cache rather than fresh tokens.
+    static func cacheHitText(_ bucket: FleetUsageBucket) -> String {
+        let considered = bucket.inputTokens + bucket.cacheCreationTokens + bucket.cacheReadTokens
+        guard considered > 0 else { return "\u{2014}" }
+        let ratio = Double(bucket.cacheReadTokens) / Double(considered)
+        return "\(Int((ratio * 100).rounded()))%"
+    }
+
+    static func costPerSessionText(_ bucket: FleetUsageBucket) -> String {
+        guard bucket.sessionCount > 0, let cost = bucket.costUSD else { return "\u{2014}" }
+        return FleetFormat.compactCurrency(cost / Double(bucket.sessionCount))
+    }
+
+    static func callsPerSessionText(_ bucket: FleetUsageBucket) -> String {
+        guard bucket.sessionCount > 0 else { return "\u{2014}" }
+        return (bucket.callCount / bucket.sessionCount).formatted(.number)
     }
 
     private func value(_ cell: FleetHeatmapCell) -> Double { cell.costUSD ?? Double(cell.callCount) }

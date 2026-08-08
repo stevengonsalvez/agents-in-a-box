@@ -757,7 +757,12 @@ pub struct FleetUsageWeeklyBucket {
 /// One session usage bucket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetUsageSessionBucket {
-    /// Session identity (provider:project:session_id).
+    /// The BARE session id, not a composite.
+    ///
+    /// `provider` and `project` are separate fields below; a client that wants
+    /// the full identity joins the three itself. This once shipped as
+    /// `provider:project:session_id`, which no client could re-split because a
+    /// project label may contain a colon.
     pub session_id: String,
     /// Provider for this session.
     pub provider: String,
