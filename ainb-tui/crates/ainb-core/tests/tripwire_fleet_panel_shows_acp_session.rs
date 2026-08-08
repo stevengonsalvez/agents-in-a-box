@@ -136,7 +136,10 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         .as_str()
         .expect("a session_key")
         .to_string();
-    assert!(session_key.starts_with("acp:"), "unexpected key: {session_key}");
+    assert!(
+        session_key.starts_with("acp:"),
+        "unexpected key: {session_key}"
+    );
 
     let name = format!("ainb-acp-panel-{}", std::process::id());
     let tmux = ExactTmuxSession::create(name, "180", "50");
