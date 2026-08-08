@@ -2027,7 +2027,7 @@ Commands:
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
   runtime       Install the standalone Fleet daemon and provider hooks
-  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
   bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
   help          Print this message or the help of the given subcommand(s)
@@ -2409,11 +2409,11 @@ Options:
 
 ### `ainb fleet atc`
 
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 ```console
 $ ainb fleet atc --help
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 Usage: ainb fleet atc [OPTIONS] <COMMAND>
 
@@ -2421,6 +2421,7 @@ Commands:
   setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
+  repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
@@ -2486,6 +2487,25 @@ Arguments:
   <name>  
 
 Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet atc repair`
+
+Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+
+```console
+$ ainb fleet atc repair --help
+Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+
+Usage: ainb fleet atc repair [OPTIONS] <name>
+
+Arguments:
+  <name>  
+
+Options:
+      --dry-run          Report what repair would do without writing anything
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
 ```
