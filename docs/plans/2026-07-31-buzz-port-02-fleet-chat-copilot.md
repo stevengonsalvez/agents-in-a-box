@@ -114,6 +114,28 @@ Required work, in A1 and A2:
 
 Disclosure rule: every test comments real-adapter vs fixture, matching repo habit.
 
+### The operating-surface rule (added 2026-08-08, learned the hard way)
+
+Part 1 shipped a daemon and a CLI and called itself end-to-end proven. It was
+not: nothing ever opened the TUI, and the panel's ACP handling was one
+unmapped-token line away from degrading to `unknown` in silence. Stevie caught
+it by asking whether only the CLI had been tested.
+
+So for part 2, a phase is NOT done when its daemon methods and CLI verbs are
+green. Each phase ships proof on the surface an operator actually uses:
+
+- [ ] TUI: live tmux tripwires driving the REAL `ainb tui` binary, per journey,
+      not unit renders of the widget. Open the chat tab, send a message, watch a
+      reply arrive, answer a permission, see the transcript stream.
+- [ ] macOS: the Swift UI test path (`FleetUITestCase` + fixture daemon), same
+      journeys, so the two clients cannot drift apart in what they prove.
+- [ ] Recordings: full uncut vhs tapes per journey with frames EXTRACTED AND
+      READ, and the exact on-screen assertion text recorded in an
+      `EXPECTED-OUTCOMES.md`. A file existing is not evidence; nine zero-byte
+      GIFs reached main in part 1 before a CI gate was added for it.
+- [ ] The claim in any writeup names the surface it was proven on. "End to end"
+      without naming the surface is how part 1's gap survived four reviews.
+
 ## Phase 0: Contract reconciliation gate (blocks A/B/C)
 
 - [x] Read landed part 1 plan; diff its `fleet/message_*`/store/AgentPool surface against the draft; amend this file where they disagree (DONE 2026-07-31: thread_list removed, no second bump, permission split clarified, copilot scope via acp_session_create, per-session config delegated here, broadcast rides message_send; see Contract section)
