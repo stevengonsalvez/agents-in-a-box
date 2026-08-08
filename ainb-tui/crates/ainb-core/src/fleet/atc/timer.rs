@@ -11,7 +11,7 @@
 // are unit-tested; the install/teardown wrappers shell out to launchctl/systemctl
 // and are exercised end-to-end.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -221,24 +221,103 @@ pub fn install(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
     }
 }
 
+/// The unit file path(s) [`install`] writes for `name`, whether or not they
+/// exist yet. macOS: the launchd plist. Linux: the systemd `[service, timer]`
+/// pair, in that order.
+///
+/// `install` and [`install_would_change`] both derive their paths from here so
+/// "what would repair touch" can never drift from what install actually writes.
+pub fn unit_paths(name: &str) -> Result<Vec<PathBuf>> {
+    if cfg!(target_os = "macos") {
+        Ok(vec![launchd_plist_path(name)?])
+    } else {
+        Ok(vec![systemd_service_path(name)?, systemd_timer_path(name)?])
+    }
+}
+
+/// Health of the program the unit [`install`] WOULD write for `meta`, as
+/// opposed to the one currently on disk (that is [`installed_program_health`]).
+///
+/// The unit is built in memory from the CURRENT process env (`$AINB_BIN` /
+/// `$PATH`), which is exactly what makes a rewrite a repair: the answer here is
+/// "would a freshly written unit be able to fire from this shell".
+#[must_use]
+pub fn fresh_program_health(meta: &AtcMeta) -> ProgramHealth {
+    let unit = if cfg!(target_os = "macos") {
+        build_plist(meta)
+    } else {
+        build_systemd_service(meta)
+    };
+    unit_program_health(&unit)
+}
+
 /// `Some(warning)` when the unit `install` would write names a program that
 /// does not resolve, so setup can say so instead of reporting a success that
 /// can never fire. Pinning `current_exe()` used to make this true by
 /// construction; resolving at firing time does not, so it is checked.
 #[must_use]
 pub fn install_would_be_unrunnable(meta: &AtcMeta) -> Option<String> {
-    let unit = if cfg!(target_os = "macos") {
-        build_plist(meta)
-    } else {
-        build_systemd_service(meta)
-    };
-    match unit_program_health(&unit) {
+    match fresh_program_health(meta) {
         ProgramHealth::Missing(p) => Some(format!(
             "'{p}' is not on the PATH the timer will run with, so the heartbeat cannot fire. \
              Install ainb somewhere on PATH, or set AINB_BIN to its full path and re-run setup."
         )),
         _ => None,
     }
+}
+
+/// Whether the unit(s) [`install`] would write differ from what is on disk.
+/// True when nothing is installed.
+///
+/// Lets `repair` report honestly whether it actually moved anything instead of
+/// claiming a rewrite on every run. It is NOT a reason to skip `install`: the
+/// install path also re-loads the job with launchctl/systemctl, and a healthy
+/// unit whose job was unloaded is still a dead heartbeat.
+#[must_use]
+pub fn install_would_change(meta: &AtcMeta) -> bool {
+    if cfg!(target_os = "macos") {
+        let Ok(plist) = launchd_plist_path(&meta.name) else {
+            return true;
+        };
+        install_would_change_from(read_unit(&plist).as_deref(), &build_plist(meta))
+    } else {
+        let (Ok(service), Ok(timer)) = (
+            systemd_service_path(&meta.name),
+            systemd_timer_path(&meta.name),
+        ) else {
+            return true;
+        };
+        install_would_change_from(read_unit(&service).as_deref(), &build_systemd_service(meta))
+            || install_would_change_from(read_unit(&timer).as_deref(), &build_systemd_timer(meta))
+    }
+}
+
+/// The pure core of [`install_would_change`], per unit file. `None` means the
+/// unit is absent, which always counts as a change.
+fn install_would_change_from(existing: Option<&str>, fresh: &str) -> bool {
+    existing.is_none_or(|text| text != fresh)
+}
+
+fn read_unit(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// Whether to actually (un)load the unit with launchctl/systemctl after writing
+/// it. Off in containers and CI, where there is no user launchd domain or
+/// systemd session bus and the shell-out is a no-op that can still schedule a
+/// real job on a developer machine.
+fn activation_enabled() -> bool {
+    !matches!(
+        std::env::var("AINB_TIMER_SKIP_ACTIVATION").as_deref(),
+        Ok("1")
+    )
+}
+
+/// Whether unit activation is being skipped, so callers can avoid reporting a
+/// unit that was written but never loaded as a running timer.
+#[must_use]
+pub fn activation_is_skipped() -> bool {
+    !activation_enabled()
 }
 
 /// Remove the heartbeat timer for `name`. Safe when nothing is installed.
@@ -432,18 +511,23 @@ fn systemd_environment_path(unit: &str) -> Option<String> {
 }
 
 fn install_launchd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
-    let plist = launchd_plist_path(&meta.name)?;
+    let paths = unit_paths(&meta.name)?;
+    let plist = paths.first().context("no launchd unit path")?.clone();
     if let Some(parent) = plist.parent() {
         std::fs::create_dir_all(parent).context("creating LaunchAgents dir")?;
     }
     // Unload any prior version first so the reload picks up changes.
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist.display().to_string()])
-        .output();
+    if activation_enabled() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist.display().to_string()])
+            .output();
+    }
     std::fs::write(&plist, build_plist(meta)).context("writing launchd plist")?;
-    let _ = std::process::Command::new("launchctl")
-        .args(["load", &plist.display().to_string()])
-        .output();
+    if activation_enabled() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["load", &plist.display().to_string()])
+            .output();
+    }
     Ok(vec![plist])
 }
 
@@ -451,9 +535,11 @@ fn teardown_launchd(name: &str) -> Result<Vec<PathBuf>> {
     let plist = launchd_plist_path(name)?;
     let mut removed = Vec::new();
     if plist.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist.display().to_string()])
-            .output();
+        if activation_enabled() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &plist.display().to_string()])
+                .output();
+        }
         std::fs::remove_file(&plist).context("removing launchd plist")?;
         removed.push(plist);
     }
@@ -463,25 +549,30 @@ fn teardown_launchd(name: &str) -> Result<Vec<PathBuf>> {
 fn install_systemd(meta: &AtcMeta) -> Result<Vec<PathBuf>> {
     let dir = systemd_user_dir()?;
     std::fs::create_dir_all(&dir).context("creating systemd user dir")?;
-    let service = systemd_service_path(&meta.name)?;
-    let timer = systemd_timer_path(&meta.name)?;
+    let paths = unit_paths(&meta.name)?;
+    let service = paths.first().context("no systemd service path")?.clone();
+    let timer = paths.get(1).context("no systemd timer path")?.clone();
     std::fs::write(&service, build_systemd_service(meta)).context("writing systemd service")?;
     std::fs::write(&timer, build_systemd_timer(meta)).context("writing systemd timer")?;
     let stem = unit_stem(&meta.name);
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .output();
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", &format!("{stem}.timer")])
-        .output();
+    if activation_enabled() {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", &format!("{stem}.timer")])
+            .output();
+    }
     Ok(vec![service, timer])
 }
 
 fn teardown_systemd(name: &str) -> Result<Vec<PathBuf>> {
     let stem = unit_stem(name);
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", &format!("{stem}.timer")])
-        .output();
+    if activation_enabled() {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", &format!("{stem}.timer")])
+            .output();
+    }
     let mut removed = Vec::new();
     for path in [systemd_timer_path(name)?, systemd_service_path(name)?] {
         if path.exists() {
@@ -489,9 +580,11 @@ fn teardown_systemd(name: &str) -> Result<Vec<PathBuf>> {
             removed.push(path);
         }
     }
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .output();
+    if activation_enabled() {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+    }
     Ok(removed)
 }
 
@@ -853,6 +946,91 @@ mod tests {
             );
             assert!(health.program().is_none());
         }
+    }
+
+    /// `repair` reports `changed` from this, so it has to be honest in all
+    /// three states. An implementation that answered "a unit file exists"
+    /// fails the identical-bytes case; a hardcoded `false` fails the absent and
+    /// stale cases; a hardcoded `true` fails the identical-bytes case, which is
+    /// what makes `result: repaired, changed: false` a claim worth printing.
+    #[test]
+    fn install_would_change_is_true_only_when_the_bytes_actually_differ() {
+        let fresh = plist_for("ainb", "/new:/bin");
+
+        // Nothing installed: install would create the unit.
+        assert!(install_would_change_from(None, &fresh));
+
+        // Byte-identical: install would rewrite the same bytes.
+        assert!(!install_would_change_from(Some(&fresh), &fresh));
+
+        // Stale PATH baked into the on-disk unit: exactly the repair case.
+        assert!(install_would_change_from(
+            Some(&plist_for("ainb", "/old:/bin")),
+            &fresh
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn unit_paths_names_the_launchd_plist() {
+        let paths = unit_paths("x").expect("unit paths");
+        assert_eq!(paths.len(), 1, "macOS installs one unit: {paths:?}");
+        assert!(
+            paths[0].ends_with("com.agentsinabox.atc.x.plist"),
+            "unexpected plist path: {:?}",
+            paths[0]
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn unit_paths_names_the_systemd_service_and_timer() {
+        let paths = unit_paths("x").expect("unit paths");
+        assert_eq!(paths.len(), 2, "systemd installs a pair: {paths:?}");
+        assert!(
+            paths[0].ends_with("com.agentsinabox.atc.x.service"),
+            "unexpected service path: {:?}",
+            paths[0]
+        );
+        assert!(
+            paths[1].ends_with("com.agentsinabox.atc.x.timer"),
+            "unexpected timer path: {:?}",
+            paths[1]
+        );
+    }
+
+    /// The pre-write gate `repair` refuses on. It must judge the unit that
+    /// WOULD be written, not the one on disk.
+    ///
+    /// Asserting agreement with `install_would_be_unrunnable` proves nothing,
+    /// because that function is defined as a match on this one: the two move
+    /// together for every variant, so such a test passes even if this reads the
+    /// wrong unit entirely. The load-bearing property is that it never consults
+    /// the on-disk unit, and the cheapest way to pin that is an instance which
+    /// HAS no unit on disk: `installed_program_health` must answer `NoUnit`
+    /// there, so anything else proves the fresh unit was built in memory.
+    #[test]
+    fn fresh_program_health_ignores_the_unit_on_disk() {
+        let meta = AtcMeta::new("ainb-timer-test-instance-that-is-never-installed");
+        assert_eq!(
+            installed_program_health(&meta.name),
+            ProgramHealth::NoUnit,
+            "premise: this instance must have no unit on disk"
+        );
+        let fresh = fresh_program_health(&meta);
+        assert_ne!(
+            fresh,
+            ProgramHealth::NoUnit,
+            "fresh_program_health read the on-disk unit instead of the one install would write"
+        );
+        // And it judges a real program: the built unit always names one.
+        assert!(
+            matches!(
+                fresh,
+                ProgramHealth::Resolves(_) | ProgramHealth::Missing(_)
+            ),
+            "expected a verdict on a built unit, got {fresh:?}"
+        );
     }
 
     #[test]

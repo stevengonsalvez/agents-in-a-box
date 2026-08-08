@@ -2379,7 +2379,7 @@ fn build_atc_command() -> Command {
         );
 
     Command::new("atc")
-        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)")
+        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -2424,6 +2424,17 @@ fn build_atc_command() -> Command {
             Command::new("status")
                 .about("Report one ATC instance (meta + timer + session liveness)")
                 .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(
+            Command::new("repair")
+                .about("Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)")
+                .arg(clap::Arg::new("name").required(true))
+                .arg(
+                    clap::Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Report what repair would do without writing anything"),
+                ),
         )
         .subcommand(Command::new("list").about("List all provisioned ATC instances"))
         .subcommand(

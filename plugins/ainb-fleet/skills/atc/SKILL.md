@@ -95,6 +95,30 @@ ainb fleet atc list                    # all provisioned instances
 ainb --format json fleet atc status tower   # JSON for tooling
 ```
 
+## Repair a broken heartbeat
+
+When `status` reports `program MISSING (...)` or `list` shows `BROKEN`, the unit
+names a binary that no longer resolves on the PATH the timer carries (a
+cargo-to-homebrew move, a changed PATH). Rebuild just the scheduler:
+
+```bash
+ainb fleet atc repair tower            # rewrite the unit against the current PATH
+ainb fleet atc repair tower --dry-run  # report what it would do, write nothing
+AINB_BIN=/opt/homebrew/bin/ainb ainb fleet atc repair tower  # pin an explicit path
+```
+
+`repair` READS `meta.json` and never writes it, so a customised
+`--interval` / `--idle-pause` and a disabled heartbeat all survive. That is why
+it exists instead of "just re-run setup": `setup` rebuilds `meta.json` from
+defaults, rewrites `CLAUDE.md` and the `settings.json` hooks, and spawns a
+session.
+
+It refuses (non-zero exit, nothing written) when the rebuilt unit still could
+not fire, so it never overwrites a working unit with a dead one. `--dry-run`
+has identical exit codes, which makes it usable as a health gate. If the daemon
+is up it hands the heartbeat to the daemon cron and removes the local timer, so
+exactly one scheduler ever fires.
+
 ## Tear down
 
 ```bash
