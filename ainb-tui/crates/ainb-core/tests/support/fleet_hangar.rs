@@ -150,6 +150,23 @@ impl FleetHangar {
         })
     }
 
+    /// The fixture's own pool, for seeding rows no RPC can write and for
+    /// reading back what the TUI's RPCs stored.
+    pub fn pool(&self) -> &sqlx::SqlitePool {
+        self.store.pool()
+    }
+
+    /// The fixture's event sink, so a seeded row wakes live subscribers exactly
+    /// as a daemon-written one would.
+    pub fn events(&self) -> &EventSink {
+        &self.events
+    }
+
+    /// Run one future on the fixture's runtime.
+    pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
+
     pub fn session(&self, session_key: &str) -> Option<ainb_hangar_proto::fleet::FleetSession> {
         self.runtime
             .block_on(ainb_hangar_daemon::fleet::snapshot_wire(self.store.pool()))
