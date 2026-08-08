@@ -1032,7 +1032,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .unwrap_or("no attachment");
     frame.render_widget(
         Paragraph::new(format!(
-            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  B broadcast  q/Esc back"
+            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  m chat  B broadcast  q/Esc back"
         ))
         .style(Style::default().fg(MUTED_GRAY)),
         Rect::new(

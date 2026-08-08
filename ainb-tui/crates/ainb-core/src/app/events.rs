@@ -8925,12 +8925,22 @@ mod panel_back_tests {
             route(&mut state, KeyCode::Char('5')),
             Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
         ));
-        for legacy in ['f', 'o', 'm', 'd', 'l', 'x', 'v'] {
+        for legacy in ['f', 'o', 'd', 'l', 'x', 'v'] {
             assert!(
                 route(&mut state, KeyCode::Char(legacy)).is_none(),
                 "legacy Fleet filter key {legacy:?} must be unbound"
             );
         }
+        // `m` is the one legacy filter key deliberately re-bound: it opens the
+        // copilot chat, the sibling of `b` for broadcast. It is pinned here
+        // rather than dropped from the list, so re-using another old filter key
+        // still has to be an explicit decision rather than a silent one, and so
+        // the panel's help bar (which advertises `m chat`) cannot drift from
+        // what the router actually does.
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('m')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m')))
+        ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
