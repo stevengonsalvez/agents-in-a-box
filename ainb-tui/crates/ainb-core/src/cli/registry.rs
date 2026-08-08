@@ -2251,6 +2251,15 @@ impl CliCommand for FleetCommand {
                     .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
                     .arg(clap::Arg::new("key").long("key").required(true)),
             );
+        let archived = Command::new("archived")
+            .about("Sessions the daemon retired out of the live roster (still browsable)")
+            .arg(
+                clap::Arg::new("limit")
+                    .long("limit")
+                    .value_parser(clap::value_parser!(i64))
+                    .default_value("50")
+                    .help("Maximum rows to list, most recently observed first"),
+            );
         let cost = Command::new("cost")
             .about("Per-session / model / day / group spend rollups + budget caps")
             .arg(
@@ -2334,6 +2343,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(transcript)
                 .subcommand(sequence)
                 .subcommand(needs)
+                .subcommand(archived)
                 .subcommand(cost)
                 .subcommand(daemon)
                 .subcommand(daemons)
@@ -2768,7 +2778,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_sixteen_subcommands_including_the_chat_bus_verbs() {
+    fn fleet_exposes_seventeen_subcommands_including_the_chat_bus_verbs() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2787,6 +2797,7 @@ mod tests {
             [
                 "acp",
                 "approve",
+                "archived",
                 "atc",
                 "bridge",
                 "broadcast",
@@ -2806,8 +2817,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            16,
-            "expected 16 fleet subcommands, got {names:?}"
+            17,
+            "expected 17 fleet subcommands, got {names:?}"
         );
     }
 
