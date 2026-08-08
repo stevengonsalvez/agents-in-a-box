@@ -149,17 +149,35 @@ async fn start_server(dir: &std::path::Path) -> std::path::PathBuf {
     socket_path
 }
 
-/// `fleet/usage_dashboard` is reachable through dispatch, passes the
-/// `fleet.dashboard.read` capability guard, and returns a result that
-/// deserializes into the REAL proto type — not a hand-parsed subset of the
-/// JSON.
+// Every invariant that needs a live daemon shares ONE server.
+//
+// nextest runs each `#[test]` in its own PROCESS, so a test per invariant
+// meant a daemon per invariant. Five of them added enough concurrent socket
+// and CPU load on a two-core CI runner to starve a neighbouring notifyd
+// broker test in `ainb-core` until it blew past its timeout: that test hung
+// for 640s and failed on this branch twice, while a branch carrying the same
+// production change WITHOUT this file was green. The coverage below is
+// unchanged; it just costs one process instead of five.
+
+/// Drives every live-socket invariant against a single daemon.
 #[tokio::test]
-async fn fleet_usage_dashboard_is_reachable_and_deserializes_into_the_real_proto_type() {
+async fn the_usage_dashboard_endpoint_honours_its_wire_contract_over_a_real_socket() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = start_server(dir.path()).await;
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
+    reachable_and_deserializes_into_the_real_proto_type(&mut c).await;
+    empty_and_unexpected_params_both_ack(&mut c).await;
+    an_unscanned_daemon_reports_a_coherent_state_not_an_error(&mut c).await;
+    shipped_shell_commands_never_carry_a_raw_command_line(&mut c).await;
+    live_wire_keys_match_the_swift_clients_snake_case_contract(&mut c).await;
+}
+
+/// Reachable through dispatch, past the `fleet.dashboard.read` guard, and the
+/// result deserializes into the REAL proto type rather than a hand-parsed
+/// subset. An unexpected shape fails the decode instead of silently defaulting.
+async fn reachable_and_deserializes_into_the_real_proto_type(c: &mut Client) {
     let resp = c.usage_dashboard(serde_json::json!({})).await;
     assert!(
         resp["error"].is_null(),
@@ -169,28 +187,17 @@ async fn fleet_usage_dashboard_is_reachable_and_deserializes_into_the_real_proto
         .unwrap_or_else(|e| {
             panic!("result did not deserialize as FleetUsageDashboardResult: {e}\nraw: {resp}")
         });
-    // A round-trip through the real type is itself the proof: an unexpected
-    // shape (missing/renamed required field, wrong type) would have failed
-    // the `unwrap_or_else` above rather than silently producing a default.
     assert!(matches!(
         result.state,
         FleetUsageSummaryState::Scanning | FleetUsageSummaryState::Unavailable
     ));
 }
 
-/// Empty params parse, and so do unexpected/extra params — matching every
-/// other Fleet params struct's contract. Checked, not assumed: none of the
-/// param structs in `ainb_hangar_proto::fleet` carry
-/// `#[serde(deny_unknown_fields)]`, so `parse_params` tolerates unknown keys
-/// uniformly across the whole Fleet surface, and `fleet/usage_dashboard`
-/// must behave the same way rather than growing a stricter one-off contract.
-#[tokio::test]
-async fn empty_params_and_unexpected_extra_params_both_ack_without_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket_path = start_server(dir.path()).await;
-    let mut c = Client::connect(&socket_path).await;
-    c.auth_from_file(dir.path()).await;
-
+/// Empty params parse, and so do unexpected extras. Checked, not assumed: no
+/// params struct in `ainb_hangar_proto::fleet` carries
+/// `#[serde(deny_unknown_fields)]`, so this endpoint must not grow a stricter
+/// one-off contract than the rest of the Fleet surface.
+async fn empty_and_unexpected_params_both_ack(c: &mut Client) {
     let empty = c.usage_dashboard(serde_json::json!({})).await;
     assert!(empty["error"].is_null(), "empty params must ack: {empty}");
 
@@ -203,25 +210,16 @@ async fn empty_params_and_unexpected_extra_params_both_ack_without_error() {
         .await;
     assert!(
         with_extras["error"].is_null(),
-        "unexpected/extra params must still ack, matching every other fleet/* params struct: {with_extras}"
+        "unexpected params must still ack, matching every other fleet/* params struct: {with_extras}"
     );
-    // Both calls must have reached the SAME handler and produced the same
-    // shape of result — extras are ignored, not routed differently.
+    // Both reached the SAME handler: extras are ignored, not routed elsewhere.
     assert_eq!(empty["result"]["state"], with_extras["result"]["state"]);
 }
 
-/// On a daemon with no scan data (nothing has ever called
-/// `fleet_usage::install`), the response is a coherent state — `scanning` or
-/// `unavailable`, each carrying a `detail` string — never an RPC error and
-/// never a half-populated body (totals/weekly/heatmap/forecast stay empty
-/// together, not some populated and others not).
-#[tokio::test]
-async fn a_dashboard_request_on_a_daemon_with_no_scan_data_returns_a_coherent_state_not_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket_path = start_server(dir.path()).await;
-    let mut c = Client::connect(&socket_path).await;
-    c.auth_from_file(dir.path()).await;
-
+/// With nothing scanned, the answer is a coherent state carrying a `detail`,
+/// never an RPC error and never half-populated (some aggregates present while
+/// the state still claims scanning or unavailable).
+async fn an_unscanned_daemon_reports_a_coherent_state_not_an_error(c: &mut Client) {
     let resp = c.usage_dashboard(serde_json::json!({})).await;
     assert!(
         resp["error"].is_null(),
@@ -237,8 +235,6 @@ async fn a_dashboard_request_on_a_daemon_with_no_scan_data_returns_a_coherent_st
         result["detail"].as_str().is_some_and(|d| !d.is_empty()),
         "a non-ready state must explain itself: {resp}"
     );
-    // Half-populated would mean SOME of these carry data while the state
-    // still claims scanning/unavailable. Pin them all empty/absent together.
     assert!(result["totals"].is_null(), "totals must be absent: {resp}");
     assert_eq!(result["weekly"].as_array(), Some(&vec![]));
     assert_eq!(result["heatmap"].as_array(), Some(&vec![]));
@@ -248,36 +244,20 @@ async fn a_dashboard_request_on_a_daemon_with_no_scan_data_returns_a_coherent_st
     );
 }
 
-/// SECURITY invariant (regression guard for commit 7485cff3, "stop leaking
-/// shell commands and report honest cost"): the raw shell command line —
-/// full argv, which routinely carries absolute paths and can carry
-/// credentials — leaked onto the wire and into `fleet-usage.json` (mode
-/// 0644) once already. Only the program name may ship. This is the point of
-/// the whole exercise: assert, over the real socket response, that no
-/// shipped `shell_commands[].name` contains a space or a `/` — the two
-/// telltale signs of a full command line rather than a bare program name.
+/// SECURITY regression guard for commit 7485cff3. The full argv, which
+/// routinely carries absolute paths and can carry credentials, reached the
+/// wire and a mode-0644 `fleet-usage.json` once already; only the program name
+/// may ship.
 ///
-/// This hermetic daemon (no `fleet_usage::install` call, see module doc)
-/// always reports an empty `shell_commands` list, so this assertion holds
-/// vacuously today rather than against real sanitized data — it cannot be
-/// driven non-vacuously at the RPC layer without a live scan of real
-/// provider session logs under `$HOME` (`ProviderRoots::defaults()`), which
-/// is not something this suite can do hermetically. The non-vacuous proof
-/// that the sanitizer itself strips arguments lives in
-/// `fleet_usage::tests::shell_commands_ship_the_program_only_never_the_arguments`
-/// (`crates/ainb-hangar-daemon/src/fleet_usage.rs`). What THIS test pins is
-/// the wire contract: whatever ships in `shell_commands[].name`, in any
-/// future state this endpoint can reach, must never look like a command
-/// line — so a regression that reintroduces the leak by, say, bypassing
-/// `program_name()` in a new code path is still caught here once real data
-/// exists.
-#[tokio::test]
-async fn shipped_shell_commands_never_carry_a_raw_command_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket_path = start_server(dir.path()).await;
-    let mut c = Client::connect(&socket_path).await;
-    c.auth_from_file(dir.path()).await;
-
+/// Note honestly that this holds VACUOUSLY today: a hermetic daemon never
+/// calls `fleet_usage::install`, so `shell_commands` is always empty and the
+/// loop body never runs. Driving it non-vacuously needs a live scan of real
+/// `$HOME` provider logs, which this suite cannot do hermetically. The
+/// non-vacuous proof that arguments are stripped lives in
+/// `fleet_usage::tests::shell_commands_ship_the_program_only_never_the_arguments`.
+/// What this pins is the WIRE contract, so a future path that bypasses
+/// `program_name()` is caught here once real data exists.
+async fn shipped_shell_commands_never_carry_a_raw_command_line(c: &mut Client) {
     let resp = c.usage_dashboard(serde_json::json!({})).await;
     assert!(resp["error"].is_null(), "must ack: {resp}");
     let shell_commands = resp["result"]["shell_commands"]
@@ -293,31 +273,11 @@ async fn shipped_shell_commands_never_carry_a_raw_command_line() {
     }
 }
 
-/// The Swift client decodes this endpoint with hand-written snake_case
-/// `CodingKeys`; a silent Rust field rename is a cross-language break no
-/// compiler catches. Two legs:
-///
-/// 1. LIVE socket leg: the top-level keys that are guaranteed present in
-///    this daemon's uninitialized-state response (`cost_complete`,
-///    `shell_commands`, `mcp_servers`) are checked against the real wire
-///    bytes that came back over the socket.
-/// 2. TYPE-CONTRACT leg (not a socket exercise — see module doc comment on
-///    why real nested data can't be produced hermetically here): the
-///    remaining named keys (`week_start`, `call_count`,
-///    `projected_30d_cost_usd`) only ever appear nested inside populated
-///    `weekly[]` / `heatmap[]` / `forecast` entries, which this hermetic
-///    daemon never populates. Those are pinned by constructing the real
-///    proto type directly and inspecting its serialized keys — still a
-///    genuine regression guard against a silent rename, just not one that
-///    travels over this test's socket.
-#[tokio::test]
-async fn wire_key_names_match_the_swift_clients_snake_case_contract() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket_path = start_server(dir.path()).await;
-    let mut c = Client::connect(&socket_path).await;
-    c.auth_from_file(dir.path()).await;
-
-    // Leg 1: live socket bytes.
+/// The top-level keys guaranteed present in this state, checked against the
+/// real bytes that came back over the socket. The Swift client decodes with
+/// hand-written snake_case `CodingKeys`, so a silent Rust rename is a
+/// cross-language break no compiler catches.
+async fn live_wire_keys_match_the_swift_clients_snake_case_contract(c: &mut Client) {
     let resp = c.usage_dashboard(serde_json::json!({})).await;
     assert!(resp["error"].is_null(), "must ack: {resp}");
     let result = &resp["result"];
@@ -330,8 +290,13 @@ async fn wire_key_names_match_the_swift_clients_snake_case_contract() {
         "shell_commands: {resp}"
     );
     assert!(result.get("mcp_servers").is_some(), "mcp_servers: {resp}");
+}
 
-    // Leg 2: type-contract check for the nested-only keys.
+/// The nested-only keys never appear in an unscanned daemon's response, so
+/// they are pinned against the real proto type instead. This is a TYPE
+/// CONTRACT check, not a socket exercise, and it needs no daemon at all.
+#[test]
+fn nested_wire_keys_match_the_swift_clients_snake_case_contract() {
     let populated = FleetUsageDashboardResult {
         state: FleetUsageSummaryState::Ready,
         generated_at: Some(1_700_000_000_000),
