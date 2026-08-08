@@ -10,6 +10,7 @@ use crate::cli::OutputFormat;
 
 pub mod acp;
 pub mod approve;
+pub mod archived;
 pub mod atc;
 pub mod bridge;
 pub mod broadcast;
@@ -51,6 +52,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("atc", sub)) => atc::execute(sub, format).await,
         Some(("bridge", sub)) => bridge::execute(sub, format).await,
         Some(("enrich-cache", sub)) => enrich_cache::execute(sub, format).await,
+        Some(("archived", sub)) => archived::execute(sub, format).await,
         _ => bail!("unknown `ainb fleet` subcommand — try `ainb fleet --help`"),
     }
 }
