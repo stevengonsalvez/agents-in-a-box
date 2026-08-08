@@ -17,8 +17,25 @@
 //     "connected": true,                  // channel/peer health (daemon-specific)
 //     "channel": "Telegram (@mybot)",     // optional human label for the connection
 //     "last_error": "getUpdates timeout", // optional last error string
-//     "error_count": 0                    // monotonic error counter for this run
+//     "error_count": 0,                   // monotonic error counter for this run
+//     "last_attention_poll_at": 170000004000, // epoch ms of last OK attention poll
+//     "last_attention_error": "connect …",    // optional last attention-source error
+//     "last_delivery_error": "outbound push…" // optional undelivered proactive push
 //   }
+//
+// The two `attention` fields are the OUTBOUND liveness signal: a bridge that is
+// connected to its chat gateway can still be completely unable to reach the
+// daemon's attention inbox, in which case it pushes nothing to the phone while
+// looking perfectly healthy. Only the worker that actually polls the attention
+// source can prove otherwise, so it stamps these fields and `super::probe`
+// degrades the row when they say the poll is not happening.
+//
+// `last_delivery_error` covers the OTHER half of the same blind spot. Reaching
+// the attention source proves only that the bridge can READ the ask; the send to
+// Discord/Slack/Telegram can still fail (429, revoked token, DMs disabled) and
+// the human hears nothing. That failure is invisible in `last_error` alone
+// (`super::probe` never reads it), so it gets its own sticky field, cleared the
+// moment a poll finds nothing left undelivered.
 //
 // Heartbeats that already have a richer signal elsewhere (ATC's
 // `heartbeat-state.json`, notifyd's PID file + socket + DB) are READ in
@@ -88,6 +105,27 @@ pub struct DaemonHeartbeat {
     /// Monotonic count of errors observed since this daemon started.
     #[serde(default)]
     pub error_count: u64,
+    /// Epoch ms of the last SUCCESSFUL poll of the attention source (the hangar
+    /// daemon's open attention inbox). `None` means the outbound worker has
+    /// never completed a poll this run: either it is not running at all, or
+    /// every attempt has failed. Forward/backward compatible: an older
+    /// `bridge.json` without the key reads as `None`, which is exactly the
+    /// "never polled" state such a daemon is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attention_poll_at: Option<i64>,
+    /// The most recent attention-source failure this run (scrubbed), e.g. the
+    /// socket dial error. Carried into the health reason so the operator sees
+    /// WHAT is unreachable, not just that something is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attention_error: Option<String>,
+    /// The most recent PROACTIVE PUSH that did not reach the human (scrubbed):
+    /// the channel send failed, so an open ask is sitting undelivered. Sticky
+    /// until a poll finds nothing left undelivered, and read by `super::probe`
+    /// so the row degrades. Distinct from [`Self::last_attention_error`]: that
+    /// one means the bridge could not READ the ask, this one means it could not
+    /// DELIVER it, and the operator fix is different for each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_error: Option<String>,
 }
 
 impl DaemonHeartbeat {
@@ -105,6 +143,9 @@ impl DaemonHeartbeat {
             channel: None,
             last_error: None,
             error_count: 0,
+            last_attention_poll_at: None,
+            last_attention_error: None,
+            last_delivery_error: None,
         }
     }
 
@@ -145,6 +186,57 @@ impl DaemonHeartbeat {
     pub fn record_error(&mut self, message: impl Into<String>) {
         self.error_count = self.error_count.saturating_add(1);
         self.last_error = Some(crate::fleet::bridge::redact::scrub(&message.into()));
+        self.last_heartbeat_at = now_ms();
+    }
+
+    /// Record a SUCCESSFUL poll of the attention source: stamps
+    /// `last_attention_poll_at`, clears the sticky attention error, and
+    /// refreshes the liveness clock. This is the only thing that proves the
+    /// outbound half of the bridge can reach the daemon inbox.
+    pub fn record_attention_poll(&mut self) {
+        let now = now_ms();
+        self.last_attention_poll_at = Some(now);
+        self.last_attention_error = None;
+        self.last_heartbeat_at = now;
+    }
+
+    /// Record a FAILED attempt to reach the attention source. Unlike
+    /// [`Self::record_error`] this does NOT clear on the next tick: it stays
+    /// until a poll actually succeeds, so the health reason can name the cause.
+    /// Counts into `error_count` too: an outbound worker that cannot reach the
+    /// daemon is an error the operator must see, not a debug-level shrug.
+    ///
+    /// The message is scrubbed exactly like [`Self::record_error`]: it is
+    /// persisted and rendered, so a token-bearing diagnostic must never reach it.
+    pub fn record_attention_error(&mut self, message: impl Into<String>) {
+        let scrubbed = crate::fleet::bridge::redact::scrub(&message.into());
+        self.error_count = self.error_count.saturating_add(1);
+        self.last_attention_error = Some(scrubbed.clone());
+        self.last_error = Some(scrubbed);
+        self.last_heartbeat_at = now_ms();
+    }
+
+    /// Record a proactive push that did NOT reach the human. Sticky like
+    /// [`Self::record_attention_error`] and for the same reason: the operator
+    /// must be able to see that an ask is sitting undelivered, and the bridge
+    /// must not render as healthy while it is.
+    ///
+    /// Scrubbed on the way in, because a channel send error embeds the request
+    /// URL and this string is persisted and rendered.
+    pub fn record_delivery_error(&mut self, message: impl Into<String>) {
+        let scrubbed = crate::fleet::bridge::redact::scrub(&message.into());
+        self.error_count = self.error_count.saturating_add(1);
+        self.last_delivery_error = Some(scrubbed.clone());
+        self.last_error = Some(scrubbed);
+        self.last_heartbeat_at = now_ms();
+    }
+
+    /// Clear the sticky delivery verdict: nothing is outstanding any more,
+    /// because every open phone-routed ask has been delivered (or was answered
+    /// and closed). This is what lets a bridge recover from a transient channel
+    /// outage without a restart.
+    pub fn clear_delivery_error(&mut self) {
+        self.last_delivery_error = None;
         self.last_heartbeat_at = now_ms();
     }
 
@@ -371,6 +463,127 @@ mod tests {
             raw.contains("<redacted>"),
             "on-disk last_error not redacted: {raw}"
         );
+    }
+
+    #[test]
+    fn starting_has_never_polled_the_attention_source() {
+        let hb = DaemonHeartbeat::starting();
+        assert!(hb.last_attention_poll_at.is_none());
+        assert!(hb.last_attention_error.is_none());
+    }
+
+    #[test]
+    fn record_attention_poll_stamps_and_clears_the_error() {
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_attention_error("connect /tmp/hangar.sock: refused");
+        assert!(hb.last_attention_error.is_some());
+        hb.record_attention_poll();
+        assert!(hb.last_attention_poll_at.is_some());
+        assert_eq!(
+            hb.last_attention_error, None,
+            "a successful poll clears the sticky attention error"
+        );
+        assert_eq!(hb.last_attention_poll_at, Some(hb.last_heartbeat_at));
+    }
+
+    #[test]
+    fn record_attention_error_counts_and_sticks() {
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_attention_error("connect /tmp/hangar.sock: refused");
+        hb.record_attention_error("daemon timed out after 5s");
+        assert_eq!(
+            hb.error_count, 2,
+            "an unreachable attention source must count as an error"
+        );
+        assert_eq!(
+            hb.last_attention_error.as_deref(),
+            Some("daemon timed out after 5s")
+        );
+        assert_eq!(hb.last_error.as_deref(), Some("daemon timed out after 5s"));
+        assert!(hb.last_attention_poll_at.is_none());
+    }
+
+    #[test]
+    fn record_delivery_error_counts_sticks_and_clears() {
+        let mut hb = DaemonHeartbeat::starting();
+        assert!(hb.last_delivery_error.is_none());
+
+        hb.record_delivery_error("outbound push: Discord HTTP 429");
+        assert_eq!(hb.error_count, 1);
+        assert_eq!(
+            hb.last_delivery_error.as_deref(),
+            Some("outbound push: Discord HTTP 429")
+        );
+        assert_eq!(
+            hb.last_error.as_deref(),
+            Some("outbound push: Discord HTTP 429")
+        );
+
+        // A successful ATTENTION poll must not clear it: reaching the daemon
+        // says nothing about whether the human got the message. Conflating the
+        // two is the whole defect.
+        hb.record_attention_poll();
+        assert!(
+            hb.last_delivery_error.is_some(),
+            "a healthy poll must not erase an undelivered push"
+        );
+
+        hb.clear_delivery_error();
+        assert!(hb.last_delivery_error.is_none());
+    }
+
+    #[test]
+    fn record_delivery_error_scrubs_secrets() {
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_delivery_error(
+            "outbound push: error sending request for url \
+             (https://api.telegram.org/bot123456789:ABC-DEF_ghiJKLmnopqrstuvwxyz012345/sendMessage)",
+        );
+        let stored = hb.last_delivery_error.as_deref().unwrap();
+        assert!(
+            !stored.contains("ABC-DEF_ghiJKLmnopqrstuvwxyz012345"),
+            "token leaked into last_delivery_error: {stored}"
+        );
+        assert!(
+            stored.contains("<redacted>"),
+            "expected redaction: {stored}"
+        );
+    }
+
+    #[test]
+    fn record_attention_error_scrubs_secrets() {
+        let mut hb = DaemonHeartbeat::starting();
+        hb.record_attention_error(
+            "poll failed for https://api.telegram.org/bot123456789:ABC-DEF_ghiJKLmnopqrstuvwxyz012345/x",
+        );
+        let stored = hb.last_attention_error.as_deref().unwrap();
+        assert!(
+            !stored.contains("ABC-DEF_ghiJKLmnopqrstuvwxyz012345"),
+            "token leaked into last_attention_error: {stored}"
+        );
+        assert!(
+            stored.contains("<redacted>"),
+            "expected redaction: {stored}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_without_attention_keys_reads_as_never_polled() {
+        // Forward compatibility: a bridge.json written before the outbound
+        // liveness fields existed must still parse, and must read as "never
+        // polled", which is exactly what such a daemon was doing.
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(daemons_dir_in(home.path())).unwrap();
+        std::fs::write(
+            heartbeat_path_in(home.path(), "bridge"),
+            br#"{"pid":89585,"started_at":1786121049405,"last_heartbeat_at":1786125144422,
+                "connected":true,"channel":"Discord (gateway)","error_count":0}"#,
+        )
+        .unwrap();
+        let hb = DaemonHeartbeat::read_in(home.path(), "bridge").expect("legacy record parses");
+        assert!(hb.connected);
+        assert!(hb.last_attention_poll_at.is_none());
+        assert!(hb.last_attention_error.is_none());
     }
 
     #[test]

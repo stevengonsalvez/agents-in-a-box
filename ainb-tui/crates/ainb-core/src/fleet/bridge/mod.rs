@@ -7,6 +7,17 @@
 //   * Slack    (socket-mode WebSocket via tokio-tungstenite) — `slack.rs`
 //   * Discord  (raw Gateway WebSocket via tokio-tungstenite) — `discord.rs`
 //
+// The bridge is TWO-WAY. Inbound is the three channel runners above. Outbound is
+// `outbound.rs`: one worker that polls the hangar daemon's open attention inbox
+// and pushes each newly-open phone-routed ASK/escalation to every configured
+// channel. `run_with_config` spawns it alongside the channels. Without that
+// spawn the module is unreachable and the phone never hears from the fleet,
+// which is exactly how it shipped: fully implemented, fully unit-tested, never
+// called. The worker stamps its liveness onto the shared heartbeat so
+// `ainb fleet daemons` degrades when it cannot reach the daemon, instead of
+// reporting a green "running + connected" that only ever described the INBOUND
+// chat gateway.
+//
 // Both channels share ONE relay/routing core (`relay.rs`) over one transport
 // (`transport.rs`: discover via `ainb list`, deliver via tmux send-keys with the
 // `--` terminator, capture the reply from the JSONL transcript tail with the
@@ -70,6 +81,11 @@ pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
 
     let mut tasks = Vec::new();
 
+    // The OUTBOUND half. Built before the channels take ownership of their
+    // configs: one notifier per configured channel, fanned out from a single
+    // attention-inbox poll loop.
+    let outbound_notifier = build_outbound_notifier(&cfg);
+
     if let Some(tg) = cfg.telegram {
         let hb = heartbeat.clone();
         tasks.push(tokio::spawn(async move {
@@ -95,12 +111,81 @@ pub async fn run_with_config(cfg: BridgeConfig) -> Result<()> {
         }));
     }
 
+    // Spawn the outbound attention-push worker. Everything about this block is
+    // non-fatal by design: a bridge that cannot reach the daemon must still
+    // relay INBOUND messages. What it must NOT do is stay silent about it, so
+    // every failure path lands on the heartbeat and degrades
+    // `ainb fleet daemons` instead of leaving a green row.
+    if !cfg.outbound_enabled {
+        tracing::warn!(
+            "outbound attention push disabled by config ([fleet.bridge] outbound_enabled = false); \
+             nothing will be pushed to the phone"
+        );
+        heartbeat.record_attention_error(
+            "outbound push disabled by config ([fleet.bridge] outbound_enabled = false)",
+        );
+    } else if let Some(notifier) = outbound_notifier {
+        match daemon::DaemonClient::from_env() {
+            Ok(client) => {
+                let hb = heartbeat.clone();
+                let interval = std::time::Duration::from_secs(cfg.outbound_poll_secs);
+                tasks.push(tokio::spawn(async move {
+                    outbound::run(client, notifier, interval, hb).await;
+                }));
+            }
+            Err(e) => {
+                // No client means no push, ever. Record it so health degrades
+                // rather than reporting a bridge that is connected to chat and
+                // deaf to the fleet.
+                tracing::warn!(
+                    error = %e,
+                    "outbound attention push unavailable: could not build a hangar daemon client"
+                );
+                heartbeat.record_attention_error(format!("hangar daemon client: {e}"));
+            }
+        }
+    }
+
     // Wait for all channel tasks. Each channel loops forever internally, so this
     // only returns if a channel panics or its loop terminates.
     for task in tasks {
         let _ = task.await;
     }
     bail!("all bridge channels stopped");
+}
+
+/// Build the fan-out notifier the outbound worker pushes through: one entry per
+/// configured channel. Returns `None` when no channel could build a notifier, in
+/// which case there is nothing to spawn.
+///
+/// A channel whose notifier fails to build (e.g. its HTTP client) is logged and
+/// skipped rather than taking the bridge down: the other channels, and the
+/// entire inbound path, still work.
+/// A notifier takes no heartbeat handle: it REPORTS each delivery outcome to the
+/// outbound worker, which owns the single place that records what reached the
+/// human and what did not.
+fn build_outbound_notifier(cfg: &BridgeConfig) -> Option<outbound::Fanout> {
+    let mut notifiers: Vec<Box<dyn outbound::Notifier>> = Vec::new();
+    if let Some(tg) = cfg.telegram.as_ref() {
+        match telegram::TelegramNotifier::new(tg) {
+            Ok(n) => notifiers.push(Box::new(n)),
+            Err(e) => tracing::warn!(error = %e, "Telegram outbound notifier unavailable"),
+        }
+    }
+    if let Some(sl) = cfg.slack.as_ref() {
+        match slack::SlackNotifier::new(sl) {
+            Ok(n) => notifiers.push(Box::new(n)),
+            Err(e) => tracing::warn!(error = %e, "Slack outbound notifier unavailable"),
+        }
+    }
+    if let Some(dc) = cfg.discord.as_ref() {
+        match discord::DiscordNotifier::new(dc.clone()) {
+            Ok(n) => notifiers.push(Box::new(n)),
+            Err(e) => tracing::warn!(error = %e, "Discord outbound notifier unavailable"),
+        }
+    }
+    let fanout = outbound::Fanout::new(notifiers);
+    (!fanout.is_empty()).then_some(fanout)
 }
 
 /// Install the bridge as a launchd/systemd service (idempotent).

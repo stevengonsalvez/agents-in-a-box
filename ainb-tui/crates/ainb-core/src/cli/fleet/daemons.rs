@@ -90,6 +90,9 @@ pub fn render_text(rows: &[DaemonStatus], now_ms: i64) -> String {
 fn state_glyph(state: DaemonState) -> String {
     match state {
         DaemonState::Running => "● running".to_string(),
+        // Alive, but not doing the whole job. Its own glyph so a degraded row is
+        // never mistaken for a healthy one at a glance.
+        DaemonState::Degraded => "◐ degraded".to_string(),
         DaemonState::Stopped => "○ stopped".to_string(),
         DaemonState::Unknown => "? unknown".to_string(),
     }
@@ -100,8 +103,12 @@ fn state_glyph(state: DaemonState) -> String {
 /// heartbeat explanation) so a crash is legible at a glance.
 fn health_summary(r: &DaemonStatus) -> String {
     match (r.state, &r.channel) {
-        (DaemonState::Running, Some(ch)) if r.connected => format!("{ch} — {}", r.reason),
-        (DaemonState::Running, _) => r.reason.clone(),
+        // A degraded row keeps its channel label too: "Discord (gateway)" is
+        // exactly the thing the operator would otherwise read as proof of health,
+        // so it must sit right next to the reason that contradicts it.
+        (DaemonState::Running | DaemonState::Degraded, Some(ch)) if r.connected => {
+            format!("{ch} - {}", r.reason)
+        }
         _ => r.reason.clone(),
     }
 }
@@ -152,6 +159,8 @@ mod tests {
             last_activity_at: Some(0),
             error_count: 0,
             last_error: None,
+            last_attention_poll_at: None,
+            last_attention_error: None,
             reason: "running + connected".to_string(),
         }
     }
@@ -195,6 +204,34 @@ mod tests {
         assert!(txt.contains("○ stopped"));
         // Exactly header(2 lines) + 2 data rows.
         assert_eq!(txt.lines().count(), 4);
+    }
+
+    #[test]
+    fn render_text_shows_a_degraded_bridge_as_degraded_not_running() {
+        // The operator-facing half of the fix: the row that used to read
+        // "● running ... Discord (gateway), running + connected" while nothing
+        // reached the phone must now carry its own glyph and name the failure.
+        let now = 1_000_000;
+        let mut r = row(
+            DaemonKind::Bridge,
+            DaemonState::Degraded,
+            true,
+            Some("Discord (gateway)"),
+        );
+        r.reason = "running + connected, but outbound cannot reach the attention source \
+                    (hangar daemon attention/list): no successful attention/list poll in 3600s \
+                    (last error: connect /home/.agents-in-a-box/hangar.sock: refused)"
+            .to_string();
+        let txt = render_text(&[r], now);
+        assert!(txt.contains("◐ degraded"), "degraded glyph missing: {txt}");
+        assert!(
+            !txt.contains("● running"),
+            "a degraded bridge must not render the healthy glyph: {txt}"
+        );
+        // The channel label still shows, right next to the contradiction.
+        assert!(txt.contains("Discord (gateway)"), "{txt}");
+        assert!(txt.contains("hangar.sock"), "{txt}");
+        assert!(txt.contains("attention/list"), "{txt}");
     }
 
     #[test]

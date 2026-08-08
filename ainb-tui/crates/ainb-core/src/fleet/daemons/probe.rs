@@ -32,6 +32,20 @@ use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity};
 /// 30s long-poll cycle and the fleet daemon's 5s tick with headroom.
 pub const STALE_AFTER_MS: i64 = 90_000;
 
+/// The outbound-push staleness window for the bridge.
+///
+/// How long the bridge may go without a SUCCESSFUL poll of the attention source
+/// before its outbound (proactive phone push) half is considered broken. Three
+/// times the outbound worker's 15s default poll interval, so a single missed or
+/// slow tick never degrades the row while a genuinely unreachable daemon is
+/// caught within a minute.
+///
+/// This is a distinct clock from [`STALE_AFTER_MS`]: that one asks "is the
+/// process alive?", this one asks "can the process still do the job?". The
+/// bridge answered yes to the first and (silently) no to the second for its
+/// entire life, which is the blind spot this closes.
+pub const ATTENTION_STALE_AFTER_MS: i64 = 45_000;
+
 /// Which daemon a [`DaemonStatus`] describes. Stable wire strings for the JSON
 /// surface and stable display names for the text/TUI surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +98,12 @@ impl DaemonKind {
 pub enum DaemonState {
     /// Process alive and heartbeating (or native signals confirm it's serving).
     Running,
+    /// Process alive, but one of the jobs it exists to do is provably not
+    /// happening. The bridge case: the chat gateway is connected (inbound works)
+    /// while the outbound worker cannot reach the attention source, so nothing
+    /// is ever pushed to the phone. `Running` would be a lie and `Stopped` would
+    /// be one too; partial health needs its own word.
+    Degraded,
     /// Not running. The `reason` on [`DaemonStatus`] says whether it's a clean
     /// stop, a stale heartbeat from a crash, or never-configured.
     Stopped,
@@ -94,13 +114,14 @@ pub enum DaemonState {
 }
 
 impl DaemonState {
+    /// Is the daemon fully healthy?
+    ///
+    /// `Degraded` deliberately answers `false`: every caller that used to ask
+    /// `state == Running` to mean "all good" gets the honest answer without
+    /// having to learn the new variant.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Stopped => "stopped",
-            Self::Unknown => "unknown",
-        }
+    pub const fn is_healthy(self) -> bool {
+        matches!(self, Self::Running)
     }
 }
 
@@ -133,6 +154,13 @@ pub struct DaemonStatus {
     /// The most recent error string, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Epoch ms of the last SUCCESSFUL poll of the attention source by this
+    /// daemon's outbound worker (bridge only). `None` = never polled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attention_poll_at: Option<i64>,
+    /// The last attention-source failure, when known (bridge only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attention_error: Option<String>,
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
     pub reason: String,
@@ -150,8 +178,78 @@ impl DaemonStatus {
             last_activity_at: None,
             error_count: 0,
             last_error: None,
+            last_attention_poll_at: None,
+            last_attention_error: None,
             reason: reason.into(),
         }
+    }
+}
+
+/// The outbound (proactive phone push) verdict for one heartbeat. Separated from
+/// the process-liveness verdict because they answer different questions: a bridge
+/// can be perfectly alive and connected to Discord while pushing nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutboundVerdict {
+    /// This daemon has no outbound attention worker, so nothing to judge.
+    NotApplicable,
+    /// The worker exists but has not had time for its first poll yet.
+    Starting,
+    /// A successful attention poll happened inside the window.
+    Healthy,
+    /// The worker cannot reach the attention source. Carries the operator-facing
+    /// explanation, which always names WHAT is unreachable.
+    Unreachable(String),
+    /// The worker reaches the attention source fine, but a push did not reach
+    /// the human: the channel send failed and an ask is sitting undelivered.
+    /// Carries the (scrubbed) channel error.
+    Undelivered(String),
+}
+
+/// Judge the outbound half of a bridge heartbeat. Pure over its inputs so every
+/// arm is unit-testable without a socket, a daemon, or a clock.
+///
+/// Only the bridge is judged: it is the only daemon that owes the human a
+/// proactive push, and the only one whose outbound worker stamps
+/// `last_attention_poll_at`.
+fn classify_outbound(
+    kind: DaemonKind,
+    hb: &DaemonHeartbeat,
+    uptime_ms: i64,
+    now_ms: i64,
+) -> OutboundVerdict {
+    if kind != DaemonKind::Bridge {
+        return OutboundVerdict::NotApplicable;
+    }
+    // Ask the delivery question FIRST. A fresh `last_attention_poll_at` only
+    // proves the bridge can READ the fleet's asks; judging on it alone is how a
+    // bridge whose every Discord send 429'd still rendered "outbound push live"
+    // while the human got nothing. An undelivered push outranks a healthy poll.
+    if let Some(detail) = hb.last_delivery_error.as_deref() {
+        return OutboundVerdict::Undelivered(detail.to_string());
+    }
+    let cause = hb.last_attention_error.as_deref().map_or_else(
+        || "no error recorded, so the outbound push worker is probably not running".to_string(),
+        |e| format!("last error: {e}"),
+    );
+    match hb.last_attention_poll_at {
+        Some(last) => {
+            let age = now_ms.saturating_sub(last);
+            if age <= ATTENTION_STALE_AFTER_MS {
+                OutboundVerdict::Healthy
+            } else {
+                OutboundVerdict::Unreachable(format!(
+                    "last successful attention/list poll {}s ago ({cause})",
+                    age / 1000
+                ))
+            }
+        }
+        // Never polled. Give the worker one window to complete its first poll
+        // before calling it broken, then say so in the operator's words.
+        None if uptime_ms <= ATTENTION_STALE_AFTER_MS => OutboundVerdict::Starting,
+        None => OutboundVerdict::Unreachable(format!(
+            "no successful attention/list poll in {}s of uptime ({cause})",
+            uptime_ms / 1000
+        )),
     }
 }
 
@@ -175,7 +273,8 @@ pub fn classify_heartbeat(
     };
 
     let age = now_ms.saturating_sub(hb.last_heartbeat_at);
-    let uptime = Some(now_ms.saturating_sub(hb.started_at));
+    let uptime_ms = now_ms.saturating_sub(hb.started_at);
+    let uptime = Some(uptime_ms);
 
     // A dead OR recycled pid is the strongest possible signal: the process that
     // wrote this heartbeat is gone, so the heartbeat is a tombstone no matter
@@ -201,6 +300,8 @@ pub fn classify_heartbeat(
             last_activity_at: hb.last_activity_at,
             error_count: hb.error_count,
             last_error: hb.last_error,
+            last_attention_poll_at: hb.last_attention_poll_at,
+            last_attention_error: hb.last_attention_error,
             reason,
         };
     }
@@ -219,13 +320,59 @@ pub fn classify_heartbeat(
             last_activity_at: hb.last_activity_at,
             error_count: hb.error_count,
             last_error: hb.last_error,
+            last_attention_poll_at: hb.last_attention_poll_at,
+            last_attention_error: hb.last_attention_error,
             reason: format!("stale heartbeat — last beat {}s ago (wedged?)", age / 1000),
         };
     }
 
+    // The process is alive and beating. Now ask the SECOND question the old
+    // classifier never asked: is the work actually getting done? For the bridge
+    // that means the outbound worker reaching the daemon's attention inbox.
+    // "Connected" is only ever about the INBOUND chat gateway, so a bridge whose
+    // outbound push is absent used to read as fully healthy while 18 phone-routed
+    // asks sat undelivered.
+    let outbound = classify_outbound(kind, &hb, uptime_ms, now_ms);
+    let (state, reason) = match (&outbound, hb.connected) {
+        (OutboundVerdict::Unreachable(detail), connected) => (
+            DaemonState::Degraded,
+            format!(
+                "{}, but outbound cannot reach the attention source (hangar daemon attention/list): {detail}",
+                if connected {
+                    "running + connected"
+                } else {
+                    "running (connecting…)"
+                }
+            ),
+        ),
+        (OutboundVerdict::Undelivered(detail), connected) => (
+            DaemonState::Degraded,
+            format!(
+                "{}, but a proactive push did not reach the human (channel send failed): {detail}",
+                if connected {
+                    "running + connected"
+                } else {
+                    "running (connecting…)"
+                }
+            ),
+        ),
+        (_, false) => (DaemonState::Running, "running (connecting…)".to_string()),
+        (OutboundVerdict::Starting, true) => (
+            DaemonState::Running,
+            "running + connected (outbound push starting…)".to_string(),
+        ),
+        (OutboundVerdict::Healthy, true) => (
+            DaemonState::Running,
+            "running + connected (outbound push live)".to_string(),
+        ),
+        (OutboundVerdict::NotApplicable, true) => {
+            (DaemonState::Running, "running + connected".to_string())
+        }
+    };
+
     DaemonStatus {
         kind,
-        state: DaemonState::Running,
+        state,
         pid: Some(hb.pid),
         uptime_ms: uptime,
         connected: hb.connected,
@@ -233,11 +380,9 @@ pub fn classify_heartbeat(
         last_activity_at: hb.last_activity_at,
         error_count: hb.error_count,
         last_error: hb.last_error,
-        reason: if hb.connected {
-            "running + connected".to_string()
-        } else {
-            "running (connecting…)".to_string()
-        },
+        last_attention_poll_at: hb.last_attention_poll_at,
+        last_attention_error: hb.last_attention_error,
+        reason,
     }
 }
 
@@ -311,6 +456,8 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         last_activity_at: db_mtime_ms(&db_path),
         error_count: 0,
         last_error: None,
+        last_attention_poll_at: None,
+        last_attention_error: None,
         reason,
     }
     .with_now(now_ms)
@@ -340,14 +487,16 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
     // Socket is serving. Fold in the pending-waiter count when the list RPC
     // answers; a transient RPC error must not flip the row to Stopped (the
     // listener is provably up), so degrade to a countless "serving" reason.
-    let reason = match ainb_plugin_notifyd::broker::client_list(&socket_path) {
-        Ok(pending) => match pending.len() {
-            0 => "serving — no pending requests".to_string(),
-            1 => "serving — 1 pending request".to_string(),
-            n => format!("serving — {n} pending requests"),
+    let reason = ainb_plugin_notifyd::broker::client_list(&socket_path).map_or_else(
+        |_| "serving (pending count unavailable)".to_string(),
+        // A count with no verb is what made the queue feel un-inspectable, so
+        // every non-zero row names the exact command that shows it.
+        |pending| match pending.len() {
+            0 => "serving, no pending requests".to_string(),
+            1 => "serving, 1 pending request (see `ainb fleet approve`)".to_string(),
+            n => format!("serving, {n} pending requests (see `ainb fleet approve`)"),
         },
-        Err(_) => "serving (pending count unavailable)".to_string(),
-    };
+    );
     DaemonStatus {
         kind,
         state: DaemonState::Running,
@@ -358,6 +507,8 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
         last_activity_at: None,
         error_count: 0,
         last_error: None,
+        last_attention_poll_at: None,
+        last_attention_error: None,
         reason,
     }
     .with_now(now_ms)
@@ -479,6 +630,8 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         last_activity_at: hbs.last_active_ms,
         error_count: 0,
         last_error: None,
+        last_attention_poll_at: None,
+        last_attention_error: None,
         reason: format!("heartbeat alive — last beat {}m ago", age / 60_000),
     }
 }
@@ -568,6 +721,24 @@ mod tests {
             channel: Some("Telegram".into()),
             last_error: None,
             error_count: 0,
+            last_attention_poll_at: None,
+            last_attention_error: None,
+            last_delivery_error: None,
+        }
+    }
+
+    /// A bridge heartbeat whose outbound worker last reached the attention
+    /// source at `polled_at` (`None` = never).
+    fn bridge_hb(
+        started: i64,
+        last_beat: i64,
+        connected: bool,
+        polled_at: Option<i64>,
+    ) -> DaemonHeartbeat {
+        DaemonHeartbeat {
+            channel: Some("Discord (gateway)".into()),
+            last_attention_poll_at: polled_at,
+            ..hb(42, started, last_beat, connected)
         }
     }
 
@@ -592,7 +763,274 @@ mod tests {
         assert!(s.connected);
         assert_eq!(s.pid, Some(42));
         assert_eq!(s.uptime_ms, Some(5000));
+        // 5s of uptime is inside the first outbound poll window, so the row is
+        // healthy but says so honestly: the push has not proven itself yet.
+        assert_eq!(s.reason, "running + connected (outbound push starting…)");
+    }
+
+    // ── Outbound (proactive phone push) health ──────────────────────────────
+    //
+    // The defect these pin: `ainb fleet daemons` reported the phone bridge
+    // "● running ... Discord (gateway), running + connected" while its outbound
+    // worker had never once reached the attention source, so every phone-routed
+    // ask sat undelivered. `connected` is set by the INBOUND gateway handshake
+    // and can never answer the outbound question.
+
+    #[test]
+    fn bridge_that_never_polled_the_attention_source_is_degraded() {
+        let now = 1_000_000;
+        // Connected to Discord, beating happily, up for an hour, never polled.
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(now - 3_600_000, now - 1_000, true, None)),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "a bridge whose outbound worker has never polled must not read as healthy: {}",
+            s.reason
+        );
+        assert!(
+            !s.state.is_healthy(),
+            "Degraded must answer false to is_healthy"
+        );
+        assert!(
+            s.reason.contains("attention/list"),
+            "the reason must name what is unreachable: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("outbound cannot reach the attention source"),
+            "reason: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("outbound push worker is probably not running"),
+            "with no recorded error the reason must point at the missing worker: {}",
+            s.reason
+        );
+        // The gateway connection is still true. That is the whole point: the
+        // row is connected AND degraded at the same time.
+        assert!(s.connected);
+    }
+
+    #[test]
+    fn bridge_with_a_fresh_attention_poll_is_running() {
+        let now = 1_000_000;
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(
+                now - 3_600_000,
+                now - 1_000,
+                true,
+                Some(now - 5_000),
+            )),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(s.state, DaemonState::Running);
+        assert!(s.state.is_healthy());
+        assert_eq!(s.reason, "running + connected (outbound push live)");
+        assert_eq!(s.last_attention_poll_at, Some(now - 5_000));
+    }
+
+    #[test]
+    fn bridge_that_polled_fine_but_could_not_deliver_is_degraded() {
+        // The P1 shape: the attention poll is fresh (the bridge can READ the
+        // fleet's asks) and the chat gateway is connected, but the channel send
+        // failed, so the human got nothing. Judging on the poll alone rendered
+        // this exact heartbeat as "running + connected (outbound push live)".
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        h.last_delivery_error = Some("outbound push: Discord: HTTP 429 rate limited".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(!s.state.is_healthy());
+        assert!(
+            s.reason.contains("did not reach the human"),
+            "the reason must say the human missed it: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("HTTP 429"),
+            "the reason must name the channel failure: {}",
+            s.reason
+        );
+        // Connected AND degraded: the inbound gateway is genuinely fine.
+        assert!(s.connected);
+    }
+
+    #[test]
+    fn a_delivery_failure_degrades_a_bridge_that_is_still_connecting() {
+        // Not-yet-connected must not mask an undelivered push behind the
+        // benign "running (connecting…)" row.
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, false, Some(now - 5_000));
+        h.last_delivery_error = Some("outbound push: Telegram: HTTP 401".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(s.reason.contains("HTTP 401"), "reason: {}", s.reason);
+    }
+
+    #[test]
+    fn a_cleared_delivery_verdict_lets_the_bridge_go_green_again() {
+        let now = 1_000_000;
+        let h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        assert!(h.last_delivery_error.is_none());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Running);
+        assert_eq!(s.reason, "running + connected (outbound push live)");
+    }
+
+    #[test]
+    fn a_delivery_failure_on_a_non_bridge_daemon_is_not_judged() {
+        // Only the bridge owes the human a proactive push.
+        let now = 1_000_000;
+        let mut h = hb(42, now - 3_600_000, now - 1_000, true);
+        h.last_delivery_error = Some("outbound push: whatever".into());
+        let s = classify_heartbeat(DaemonKind::FleetDaemon, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Running);
+    }
+
+    #[test]
+    fn bridge_whose_last_attention_poll_went_stale_is_degraded() {
+        let now = 1_000_000;
+        let last_poll = now - (ATTENTION_STALE_AFTER_MS + 60_000);
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(last_poll));
+        h.last_attention_error = Some("connect /home/.agents-in-a-box/hangar.sock: refused".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(
+            s.reason.contains("last successful attention/list poll 105s ago"),
+            "reason must quantify the gap: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("hangar.sock"),
+            "the recorded cause must be carried into the reason: {}",
+            s.reason
+        );
+        assert_eq!(
+            s.last_attention_error.as_deref(),
+            Some("connect /home/.agents-in-a-box/hangar.sock: refused")
+        );
+    }
+
+    #[test]
+    fn bridge_poll_exactly_at_the_window_edge_is_still_running() {
+        let now = 1_000_000;
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(
+                now - 3_600_000,
+                now - 1_000,
+                true,
+                Some(now - ATTENTION_STALE_AFTER_MS),
+            )),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(
+            s.state,
+            DaemonState::Running,
+            "age == the window is not yet stale, so a punctual poll never flaps"
+        );
+    }
+
+    #[test]
+    fn freshly_started_bridge_gets_one_window_before_degrading() {
+        let now = 1_000_000;
+        // Up for 10s: the worker has not had its first poll yet. Degrading here
+        // would make every bridge restart look broken for a minute.
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(now - 10_000, now - 1_000, true, None)),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(s.state, DaemonState::Running);
+        assert!(s.reason.contains("starting"), "reason: {}", s.reason);
+
+        // One tick past the window with still no poll → degraded.
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(
+                now - (ATTENTION_STALE_AFTER_MS + 1_000),
+                now - 1_000,
+                true,
+                None,
+            )),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(
+            s.reason.contains("no successful attention/list poll in 46s of uptime"),
+            "reason: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn non_bridge_daemons_are_never_judged_on_outbound_push() {
+        // Only the bridge owes the human a proactive push. The fleet daemon has
+        // no outbound worker, so a `None` poll time must not degrade it.
+        let now = 1_000_000;
+        let s = classify_heartbeat(
+            DaemonKind::FleetDaemon,
+            Some(hb(42, now - 3_600_000, now - 1_000, true)),
+            PidCheck::Matched,
+            now,
+        );
+        assert_eq!(s.state, DaemonState::Running);
         assert_eq!(s.reason, "running + connected");
+    }
+
+    #[test]
+    fn a_degraded_bridge_is_still_degraded_not_stopped_when_the_pid_is_gone() {
+        // Precedence guard: a dead process is a STRONGER signal than a broken
+        // outbound worker. A crashed bridge must still read as stopped/crashed.
+        let now = 1_000_000;
+        let s = classify_heartbeat(
+            DaemonKind::Bridge,
+            Some(bridge_hb(now - 3_600_000, now - 1_000, true, None)),
+            PidCheck::Dead,
+            now,
+        );
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert!(s.reason.contains("crashed"), "reason: {}", s.reason);
+    }
+
+    #[test]
+    fn probe_reads_the_live_bridge_shape_and_degrades_it() {
+        // The exact on-disk record the live bridge was writing: connected to the
+        // Discord gateway, zero errors, no attention keys at all. This is the
+        // shape that rendered as fully healthy.
+        let home = TempDir::new().unwrap();
+        let started = super::super::heartbeat::process_start_ms(std::process::id())
+            .expect("self process start time readable");
+        // Read the row an hour into this process's life so the uptime is
+        // deterministic regardless of how long the test binary has been running.
+        let now = started + 3_600_000;
+        let mut h = DaemonHeartbeat::starting();
+        h.pid = std::process::id();
+        h.started_at = started;
+        h.last_heartbeat_at = now - 1_000;
+        h.connected = true;
+        h.channel = Some("Discord (gateway)".into());
+        h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
+
+        let s = probe_heartbeat_daemon(home.path(), DaemonKind::Bridge, now);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "the live bridge shape must degrade, not report healthy: {}",
+            s.reason
+        );
+        assert!(s.connected, "the gateway connection is unchanged");
+        assert!(s.reason.contains("attention/list"), "reason: {}", s.reason);
     }
 
     #[test]
@@ -667,10 +1105,16 @@ mod tests {
     #[test]
     fn beat_exactly_at_window_edge_is_still_running() {
         let now = 1_000_000;
-        // age == STALE_AFTER_MS is NOT > the window, so still running.
+        // age == STALE_AFTER_MS is NOT > the window, so still running. The
+        // outbound poll is fresh so this isolates the liveness edge.
         let s = classify_heartbeat(
             DaemonKind::Bridge,
-            Some(hb(7, now - 100_000, now - STALE_AFTER_MS, true)),
+            Some(bridge_hb(
+                now - 100_000,
+                now - STALE_AFTER_MS,
+                true,
+                Some(now - 1_000),
+            )),
             PidCheck::Matched,
             now,
         );
@@ -705,6 +1149,10 @@ mod tests {
         h.started_at = super::super::heartbeat::process_start_ms(std::process::id())
             .expect("self process start time readable");
         h.set_connected(true, Some("Telegram".into()));
+        // A healthy bridge is one whose outbound worker is also reaching the
+        // attention source; without this stamp the row would (correctly) degrade
+        // once the test binary has been alive longer than one poll window.
+        h.record_attention_poll();
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
         let s = probe_heartbeat_daemon(
             home.path(),
@@ -860,6 +1308,48 @@ mod tests {
             "empty pending list should read as no pending: {}",
             s.reason
         );
+    }
+
+    #[test]
+    fn probe_approve_broker_pending_reason_names_the_command_that_lists_them() {
+        // The count alone is what made the queue feel un-inspectable: the
+        // operator sees "1 pending request" and has nowhere to go. Any non-zero
+        // row MUST name the verb that renders the queue.
+        use std::io::{BufRead, BufReader, Write};
+        for (count, body) in [
+            (
+                1usize,
+                r#"{"pending":[{"session_id":"s1","tool":"Bash","context":"{}","waiting_ms":4200}]}"#,
+            ),
+            (
+                2usize,
+                r#"{"pending":[{"session_id":"s1","tool":"Bash","context":"{}","waiting_ms":4200},{"session_id":"s2","tool":"Write","context":"{}","waiting_ms":900}]}"#,
+            ),
+        ] {
+            let base = TempDir::new().unwrap();
+            let listener =
+                std::os::unix::net::UnixListener::bind(base.path().join("approve.sock")).unwrap();
+            let body = body.to_string();
+            std::thread::spawn(move || {
+                for conn in listener.incoming().flatten() {
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) > 0 {
+                        let mut w = conn;
+                        let _ = w.write_all(body.as_bytes());
+                        let _ = w.write_all(b"\n");
+                        let _ = w.flush();
+                    }
+                }
+            });
+            let s = probe_approve_broker(base.path(), super::super::heartbeat::now_ms());
+            assert_eq!(s.state, DaemonState::Running);
+            assert!(
+                s.reason.contains("ainb fleet approve"),
+                "a pending count must name the listing command ({count} pending): {}",
+                s.reason
+            );
+        }
     }
 
     #[test]
@@ -1037,6 +1527,9 @@ mod tests {
             .expect("self process start time readable");
         h.set_connected(true, Some("Telegram (@bot)".into()));
         h.record_activity();
+        // Healthy means BOTH halves work: gateway connected and the outbound
+        // worker reaching the attention source.
+        h.record_attention_poll();
         h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
         let rows = collect_in(
             home.path(),
