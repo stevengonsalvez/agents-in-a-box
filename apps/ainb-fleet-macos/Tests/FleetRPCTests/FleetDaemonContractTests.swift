@@ -343,11 +343,15 @@ final class FleetDaemonContractTests: XCTestCase {
         XCTAssertEqual(activity.activity.outcome, .unknown)
     }
 
-    /// Part 2 adds no capability to the advertised catalogue until its dispatch
-    /// arms land, so the REAL daemon must not offer any of them yet. This is
-    /// the client-side half of the Rust advertisement test: a UI that gates on
-    /// the catalogue stays dark rather than calling a -32601 method.
-    func testRealDaemonDoesNotYetAdvertisePartTwoCapabilities() async throws {
+    /// A part-2 capability is advertised exactly when its dispatch arm exists.
+    /// This is the client-side half of the Rust advertisement test, and it is
+    /// the assertion a UI depends on: gating a chat surface on the catalogue is
+    /// only safe if the catalogue never names a method that answers -32601.
+    ///
+    /// It asserted the NEGATIVE while the arms were unlanded. Flipping it is
+    /// the point rather than a chore: the day the arms land, this test is what
+    /// says the client may now offer the surface.
+    func testRealDaemonAdvertisesPartTwoCapabilitiesWithTheirArms() async throws {
         let fixture = try FixtureDaemon()
         defer { fixture.stop() }
         let connection = try await fixture.authenticatedConnection()
@@ -355,9 +359,9 @@ final class FleetDaemonContractTests: XCTestCase {
 
         let result = try await connection.negotiate()
         for capability in ["fleet.chat.write", "fleet.chat.read", "fleet.copilot.configure", "fleet.confirm.answer"] {
-            XCTAssertFalse(
+            XCTAssertTrue(
                 result.capabilityIDs.contains(capability),
-                "\(capability) is advertised but its methods still answer -32601"
+                "\(capability) has a dispatch arm but is not advertised, so a UI gating on the catalogue stays dark"
             )
         }
     }
