@@ -1881,6 +1881,67 @@ mod tests {
         );
     }
 
+    /// A call that moved no tokens is priced at zero, so it cannot blank the
+    /// headline cost.
+    ///
+    /// Claude Code emits `<synthetic>` assistant turns with no rate and a
+    /// zero-token usage block; 187 of 187 sampled on a real corpus moved zero
+    /// tokens. Completeness is an AND across a bucket, so leaving them unpriced
+    /// blanked the total, the week, the day and the forecast. Measured against
+    /// this machine's logs that hid roughly $34k of genuinely priced spend, and
+    /// the dashboard's hero number rendered as tokens with no dollars at all.
+    #[test]
+    fn a_free_call_does_not_blank_the_headline_cost() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mk = |id: u64, input: u64, output: u64, cost: Option<f64>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: if cost.is_none() && input == 0 {
+                "<synthetic>".into()
+            } else {
+                "claude-opus-5".into()
+            },
+            session_id: "s1".into(),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: input,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: output,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        };
+
+        let with_synthetic = dashboard_of(&[mk(1, 100, 50, Some(1.25)), mk(2, 0, 0, None)], now);
+        assert_eq!(
+            with_synthetic.totals.as_ref().and_then(|t| t.cost_usd),
+            Some(1.25),
+            "a zero-token call costs nothing and must not blank the total"
+        );
+        assert!(with_synthetic.cost_complete, "the window is fully priced");
+        assert!(
+            with_synthetic.forecast.and_then(|f| f.projected_30d_cost_usd).is_some(),
+            "the forecast must still quote dollars"
+        );
+
+        // A call that DID move tokens with no rate is genuinely unknown, and
+        // must keep blanking the total.
+        let with_unpriced = dashboard_of(&[mk(1, 100, 50, Some(1.25)), mk(3, 10, 10, None)], now);
+        assert_eq!(
+            with_unpriced.totals.as_ref().and_then(|t| t.cost_usd),
+            None,
+            "a real call with no rate still makes the total unknown"
+        );
+        assert!(!with_unpriced.cost_complete);
+    }
+
     #[test]
     fn mcp_tools_are_attributed_to_servers_and_leave_the_tool_list() {
         assert_eq!(
