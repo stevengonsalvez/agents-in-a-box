@@ -9,9 +9,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration as StdDuration, SystemTime};
 
 use ainb_hangar_proto::fleet::{
-    FLEET_USAGE_MAX_BREAKDOWN_BUCKETS, FLEET_USAGE_MAX_DAILY_BUCKETS, FleetUsageBucket,
-    FleetUsageDailyBucket, FleetUsageModelBucket, FleetUsagePeriod, FleetUsageProjectBucket,
-    FleetUsageProviderBucket, FleetUsageSummaryResult, FleetUsageSummaryState,
+    FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS, FLEET_DASHBOARD_MAX_HEATMAP_CELLS,
+    FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS, FLEET_USAGE_MAX_BREAKDOWN_BUCKETS,
+    FLEET_USAGE_MAX_DAILY_BUCKETS, FleetHeatmapCell, FleetUsageBranchBucket, FleetUsageBucket,
+    FleetUsageDailyBucket, FleetUsageDashboardResult, FleetUsageForecast, FleetUsageModelBucket,
+    FleetUsageNamedBucket, FleetUsagePeriod, FleetUsageProjectBucket, FleetUsageProviderBucket,
+    FleetUsageSessionBucket, FleetUsageSummaryResult, FleetUsageSummaryState,
+    FleetUsageWeeklyBucket,
 };
 use ainb_plugin_session_reader::scanner::{self, ProviderRoots};
 use ainb_plugin_types_sessions::{ProviderCall, TokenBucket, UsageData};
@@ -19,7 +23,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
 
 /// Durable, bounded snapshot. Raw provider calls never leave the scan worker
@@ -28,6 +32,8 @@ const REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
 struct CachedSummaries {
     version: u32,
     summaries: Vec<CachedSummary>,
+    #[serde(default)]
+    dashboard: Option<FleetUsageDashboardResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +69,48 @@ impl UsageService {
             cache_path,
             state: Mutex::new(State::default()),
         }
+    }
+
+    async fn dashboard(self: &Arc<Self>) -> FleetUsageDashboardResult {
+        let (dashboard, should_refresh) = {
+            let state = self.state.lock().await;
+            let cached = self.cached.lock().await;
+            let dashboard = cached.as_ref().and_then(|cache| {
+                let mut d = cache.dashboard.clone()?;
+                if state.refreshing || state.last_error.is_some() {
+                    d.state = FleetUsageSummaryState::Partial;
+                    d.detail = Some(match &state.last_error {
+                        Some(error) => format!("using last complete snapshot: {error}"),
+                        None => "refreshing usage in background".to_string(),
+                    });
+                }
+                Some(d)
+            });
+            let generated_at = dashboard.as_ref().and_then(|d| d.generated_at).unwrap_or(0);
+            let age_ms = Utc::now().timestamp_millis().saturating_sub(generated_at);
+            (
+                dashboard,
+                generated_at == 0 || age_ms >= REFRESH_INTERVAL.as_millis() as i64,
+            )
+        };
+        if should_refresh {
+            self.request_refresh().await;
+            if let Some(mut d) = dashboard {
+                d.state = FleetUsageSummaryState::Partial;
+                d.detail = Some(match d.detail {
+                    Some(detail) => format!("{detail}; refreshing usage in background"),
+                    None => "refreshing usage in background".to_string(),
+                });
+                return d;
+            }
+        }
+        dashboard.unwrap_or_else(|| {
+            let state = self.state.try_lock().ok();
+            match state.and_then(|state| state.last_error.clone()) {
+                Some(error) => dashboard_unavailable(error),
+                None => dashboard_scanning(),
+            }
+        })
     }
 
     async fn summary(self: &Arc<Self>, period: FleetUsagePeriod) -> FleetUsageSummaryResult {
@@ -187,6 +235,14 @@ pub async fn summary(period: FleetUsagePeriod) -> FleetUsageSummaryResult {
     }
 }
 
+/// Read the cached rich dashboard projection.
+pub async fn dashboard() -> FleetUsageDashboardResult {
+    match active_slot().read().await.clone() {
+        Some(service) => service.dashboard().await,
+        None => dashboard_unavailable("usage service is not initialized".to_string()),
+    }
+}
+
 fn load_cache(path: &Path) -> Option<CachedSummaries> {
     let bytes = std::fs::read(path).ok()?;
     let cached: CachedSummaries = serde_json::from_slice(&bytes).ok()?;
@@ -236,10 +292,62 @@ fn unavailable(detail: String) -> FleetUsageSummaryResult {
     }
 }
 
+fn dashboard_scanning() -> FleetUsageDashboardResult {
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Scanning,
+        generated_at: None,
+        start_at: None,
+        end_at: None,
+        cost_complete: false,
+        totals: None,
+        weekly: Vec::new(),
+        heatmap: Vec::new(),
+        forecast: None,
+        providers: Vec::new(),
+        models: Vec::new(),
+        projects: Vec::new(),
+        sessions: Vec::new(),
+        branches: Vec::new(),
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
+        shell_commands: Vec::new(),
+        detail: Some("building usage dashboard".to_string()),
+    }
+}
+
+fn dashboard_unavailable(detail: String) -> FleetUsageDashboardResult {
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Unavailable,
+        generated_at: None,
+        start_at: None,
+        end_at: None,
+        cost_complete: false,
+        totals: None,
+        weekly: Vec::new(),
+        heatmap: Vec::new(),
+        forecast: None,
+        providers: Vec::new(),
+        models: Vec::new(),
+        projects: Vec::new(),
+        sessions: Vec::new(),
+        branches: Vec::new(),
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
+        shell_commands: Vec::new(),
+        detail: Some(detail),
+    }
+}
+
 /// Scan canonical provider histories once, then derive every public window.
 ///
 /// The scanner owns provider parsing and rate lookup. This service stores only
 /// the bounded projections, never provider calls or their local paths.
+/// Number of days in the 53-week dashboard window.
+const DASHBOARD_DAYS: i64 = 371;
+
+/// Trailing window the 30-day forecast extrapolates from.
+const TRAILING_FORECAST_DAYS: i64 = 7;
+
 fn scan_all_summaries() -> Result<CachedSummaries, String> {
     let roots = ProviderRoots::defaults();
     if roots.claude_projects.is_none()
@@ -251,9 +359,22 @@ fn scan_all_summaries() -> Result<CachedSummaries, String> {
         return Err("provider history roots are unavailable".to_string());
     }
     let now = Utc::now();
-    let (start, _) = window(FleetUsagePeriod::Trailing30Days, now);
+    // Widen the scan window to 53 weeks (371 days) so the dashboard can
+    // project the full heatmap and weekly history. The summary windows
+    // (today / 7d / 30d) are subsets that filter within this data.
+    let dashboard_start =
+        now.date_naive().succ_opt().expect("valid UTC date") - Duration::days(DASHBOARD_DAYS);
     let since = SystemTime::UNIX_EPOCH
-        + StdDuration::from_millis(u64::try_from(start.timestamp_millis()).unwrap_or_default());
+        + StdDuration::from_millis(
+            u64::try_from(
+                dashboard_start
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight UTC")
+                    .and_utc()
+                    .timestamp_millis(),
+            )
+            .unwrap_or_default(),
+        );
     let usage = scanner::scan_since(&roots, since);
     Ok(CachedSummaries {
         version: CACHE_VERSION,
@@ -268,6 +389,7 @@ fn scan_all_summaries() -> Result<CachedSummaries, String> {
             summary: summary_from_usage(&usage, period, now),
         })
         .collect(),
+        dashboard: Some(dashboard_from_usage(&usage, now)),
     })
 }
 
@@ -371,6 +493,14 @@ struct CostCompleteness {
     daily: HashMap<NaiveDate, bool>,
     models: HashMap<String, bool>,
     projects: HashMap<String, bool>,
+    sessions: HashMap<String, bool>,
+    branches: HashMap<String, bool>,
+}
+
+/// Composite session key shared by the completeness map and the wire row, so a
+/// session's priced-ness is looked up under exactly the key it is reported as.
+fn session_key(provider: &str, project: &str, session_id: &str) -> String {
+    format!("{provider}:{project}:{session_id}")
 }
 
 fn completeness(calls: &[ProviderCall]) -> CostCompleteness {
@@ -380,6 +510,16 @@ fn completeness(calls: &[ProviderCall]) -> CostCompleteness {
         mark(&mut result.daily, call.timestamp.date_naive(), priced);
         mark(&mut result.models, call.model.clone(), priced);
         mark(&mut result.projects, call.project.clone(), priced);
+        mark(
+            &mut result.sessions,
+            session_key(call.provider.as_str(), &call.project, &call.session_id),
+            priced,
+        );
+        // The scanner only buckets non-empty branches; mirror that so a blank
+        // branch does not create a phantom completeness entry.
+        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+            mark(&mut result.branches, branch.to_string(), priced);
+        }
     }
     result
 }
@@ -432,6 +572,21 @@ fn bucket_from(bucket: &TokenBucket, complete_cost: bool) -> FleetUsageBucket {
 }
 
 fn sort_and_cap<T>(rows: &mut Vec<T>, bucket: impl Fn(&T) -> &FleetUsageBucket) {
+    sort_and_cap_n(rows, FLEET_USAGE_MAX_BREAKDOWN_BUCKETS, bucket);
+}
+
+/// Cap a chronologically ASCENDING series, keeping the most recent `cap` rows.
+///
+/// `Vec::truncate` keeps the front, which on a time series means keeping the
+/// oldest rows and discarding the present -- the opposite of what a dashboard
+/// wants.
+fn keep_newest<T>(rows: &mut Vec<T>, cap: usize) {
+    if rows.len() > cap {
+        rows.drain(..rows.len() - cap);
+    }
+}
+
+fn sort_and_cap_n<T>(rows: &mut Vec<T>, cap: usize, bucket: impl Fn(&T) -> &FleetUsageBucket) {
     rows.sort_by(|left, right| {
         let left_total = bucket(left).input_tokens
             + bucket(left).cache_creation_tokens
@@ -445,7 +600,259 @@ fn sort_and_cap<T>(rows: &mut Vec<T>, bucket: impl Fn(&T) -> &FleetUsageBucket) 
             + bucket(right).reasoning_tokens;
         right_total.cmp(&left_total)
     });
-    rows.truncate(FLEET_USAGE_MAX_BREAKDOWN_BUCKETS);
+    rows.truncate(cap);
+}
+
+// ---------------------------------------------------------------------------
+// fleet/usage_dashboard projection
+// ---------------------------------------------------------------------------
+
+fn dashboard_from_usage(usage: &UsageData, now: DateTime<Utc>) -> FleetUsageDashboardResult {
+    let end_day = now.date_naive().succ_opt().expect("valid UTC date");
+    let start_day = end_day - Duration::days(DASHBOARD_DAYS);
+    let start = start_day.and_hms_opt(0, 0, 0).expect("midnight UTC").and_utc();
+    let end = end_day.and_hms_opt(0, 0, 0).expect("midnight UTC").and_utc();
+
+    let calls: Vec<_> = usage
+        .calls
+        .iter()
+        .filter(|call| call.timestamp >= start && call.timestamp < end)
+        .cloned()
+        .collect();
+    let projected = scanner::aggregate(calls.clone());
+    let cost_complete = calls.iter().all(|call| call.cost_usd.is_some());
+
+    // Weekly buckets from scanner's pre-computed weekly aggregates.
+    let mut weekly: Vec<_> = projected
+        .weekly
+        .into_iter()
+        .map(|(week_start, bucket)| FleetUsageWeeklyBucket {
+            week_start: week_start.to_string(),
+            bucket: bucket_from(&bucket, cost_complete),
+        })
+        .collect();
+    // Ascending by week (scanner keys off a BTreeMap), and a 371-day window
+    // touches 54 ISO weeks whenever it does not open on a Monday. Cap from the
+    // FRONT so the week we drop is the oldest, never the current one.
+    keep_newest(&mut weekly, FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS);
+
+    // Heatmap: one cell per calendar day with call count and cost.
+    let mut daily_map: HashMap<NaiveDate, (u64, Option<f64>)> = HashMap::new();
+    for call in &calls {
+        let day = call.timestamp.date_naive();
+        let entry = daily_map.entry(day).or_insert((0, Some(0.0)));
+        entry.0 += 1;
+        match (entry.1, call.cost_usd) {
+            (Some(acc), Some(cost)) => entry.1 = Some(acc + cost),
+            _ => entry.1 = None,
+        }
+    }
+    let mut heatmap: Vec<_> = daily_map
+        .into_iter()
+        .map(|(date, (count, cost))| FleetHeatmapCell {
+            date: date.to_string(),
+            call_count: count,
+            cost_usd: cost,
+        })
+        .collect();
+    heatmap.sort_by_key(|cell| cell.date.clone());
+    keep_newest(&mut heatmap, FLEET_DASHBOARD_MAX_HEATMAP_CELLS);
+
+    // Forecast: linear extrapolation from trailing 7 days of daily data.
+    let forecast = build_forecast(&projected.daily, now);
+
+    // Provider / model / project breakdowns (reuse existing helpers).
+    let mut providers: Vec<_> = grouped_usage(&calls, |call| call.provider.as_str().to_string())
+        .into_iter()
+        .map(|(provider, gu)| FleetUsageProviderBucket {
+            bucket: bucket_from(&gu.bucket, gu.complete_cost),
+            provider,
+        })
+        .collect();
+    sort_and_cap(&mut providers, |row| &row.bucket);
+
+    let completeness = completeness(&calls);
+    let mut models: Vec<_> = projected
+        .models
+        .into_iter()
+        .map(|row| FleetUsageModelBucket {
+            bucket: bucket_from(
+                &row.bucket,
+                completeness.models.get(&row.model).copied().unwrap_or(true),
+            ),
+            model: row.model,
+        })
+        .collect();
+    sort_and_cap(&mut models, |row| &row.bucket);
+
+    let mut projects: Vec<_> = projected
+        .projects
+        .into_iter()
+        .map(|row| FleetUsageProjectBucket {
+            bucket: bucket_from(
+                &row.bucket,
+                completeness.projects.get(&row.name).copied().unwrap_or(true),
+            ),
+            project: row.name,
+            repo: row.repo,
+        })
+        .collect();
+    sort_and_cap(&mut projects, |row| &row.bucket);
+
+    // Session breakdowns.
+    let mut sessions: Vec<_> = projected
+        .sessions
+        .into_iter()
+        .map(|row| {
+            let key = session_key(row.provider.as_str(), &row.project, &row.session_id);
+            let priced = completeness.sessions.get(&key).copied().unwrap_or(true);
+            FleetUsageSessionBucket {
+                session_id: key,
+                provider: row.provider.as_str().to_string(),
+                project: row.project,
+                bucket: bucket_from(&row.bucket, priced),
+            }
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        let total = |s: &FleetUsageSessionBucket| {
+            s.bucket.input_tokens
+                + s.bucket.cache_creation_tokens
+                + s.bucket.cache_read_tokens
+                + s.bucket.output_tokens
+                + s.bucket.reasoning_tokens
+        };
+        total(b).cmp(&total(a))
+    });
+    sessions.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    // Branch breakdowns.
+    let mut branches: Vec<_> = projected
+        .branches
+        .into_iter()
+        .map(|row| {
+            let priced = completeness.branches.get(&row.branch).copied().unwrap_or(true);
+            FleetUsageBranchBucket {
+                bucket: bucket_from(&row.bucket, priced),
+                branch: row.branch,
+            }
+        })
+        .collect();
+    branches.sort_by(|a, b| {
+        let total = |s: &FleetUsageBranchBucket| {
+            s.bucket.input_tokens
+                + s.bucket.cache_creation_tokens
+                + s.bucket.cache_read_tokens
+                + s.bucket.output_tokens
+                + s.bucket.reasoning_tokens
+        };
+        total(b).cmp(&total(a))
+    });
+    branches.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    // Tool / MCP / shell named-count breakdowns.
+    let mut tools: Vec<_> = projected
+        .tools
+        .into_iter()
+        .map(|row| FleetUsageNamedBucket {
+            name: row.name,
+            call_count: u64::try_from(row.calls).unwrap_or(u64::MAX),
+        })
+        .collect();
+    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    tools.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    let mut mcp_servers: Vec<_> = projected
+        .mcp_servers
+        .into_iter()
+        .map(|row| FleetUsageNamedBucket {
+            name: row.name,
+            call_count: u64::try_from(row.calls).unwrap_or(u64::MAX),
+        })
+        .collect();
+    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    mcp_servers.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    let mut shell_commands: Vec<_> = projected
+        .shell_commands
+        .into_iter()
+        .map(|row| FleetUsageNamedBucket {
+            name: row.name,
+            call_count: u64::try_from(row.calls).unwrap_or(u64::MAX),
+        })
+        .collect();
+    shell_commands.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    shell_commands.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Ready,
+        generated_at: Some(now.timestamp_millis()),
+        start_at: Some(start.timestamp_millis()),
+        end_at: Some(end.timestamp_millis()),
+        cost_complete,
+        totals: Some(bucket_from(&projected.grand_total, cost_complete)),
+        weekly,
+        heatmap,
+        forecast,
+        providers,
+        models,
+        projects,
+        sessions,
+        branches,
+        tools,
+        mcp_servers,
+        shell_commands,
+        detail: None,
+    }
+}
+
+/// Trailing-7-day linear forecast.
+fn build_forecast(
+    daily: &[(NaiveDate, TokenBucket)],
+    now: DateTime<Utc>,
+) -> Option<FleetUsageForecast> {
+    let cutoff = now.date_naive() - Duration::days(TRAILING_FORECAST_DAYS);
+    let trailing: Vec<_> = daily.iter().filter(|(date, _)| *date > cutoff).collect();
+    let earliest = trailing.iter().map(|(date, _)| *date).min()?;
+
+    // Average over CALENDAR days, not days that happen to have data. The next 30
+    // days will contain idle days too, so dividing by active days only would
+    // quote an "every day is a working day" rate and overstate the projection --
+    // for someone who works two days a week, by roughly 3.5x.
+    //
+    // The span is capped at the 7-day window and floored at 1, so a brand-new
+    // user with a single day of history is not diluted by six days of absence
+    // they were never around for.
+    let span_days = (now.date_naive() - earliest).num_days() + 1;
+    let denominator = span_days.clamp(1, TRAILING_FORECAST_DAYS) as u64;
+
+    let total_tokens: u64 = trailing
+        .iter()
+        .map(|(_, b)| {
+            b.input_tokens
+                + b.cache_creation_tokens
+                + b.cache_read_tokens
+                + b.output_tokens
+                + b.reasoning_tokens
+        })
+        .sum();
+    let avg_daily_tokens = total_tokens / denominator;
+
+    let total_cost: Option<f64> =
+        trailing.iter().try_fold(0.0_f64, |acc, (_, b)| b.cost_usd.map(|c| acc + c));
+    let avg_daily_cost = total_cost.map(|c| c / denominator as f64);
+
+    Some(FleetUsageForecast {
+        projected_30d_cost_usd: avg_daily_cost.map(|c| c * 30.0),
+        // Saturating: a pathological token total must not wrap into a small
+        // number and quote a reassuring forecast.
+        projected_30d_tokens: avg_daily_tokens.saturating_mul(30),
+        avg_daily_cost_usd: avg_daily_cost,
+        avg_daily_tokens,
+        // Reports the DENOMINATOR, so the client's "avg/day (Nd sample)" label
+        // describes the divisor actually used.
+        sample_days: u32::try_from(denominator).unwrap_or(u32::MAX),
+    })
 }
 
 #[cfg(test)]
@@ -469,5 +876,332 @@ mod tests {
         };
         assert_eq!(bucket_from(&bucket, false).cost_usd, None);
         assert_eq!(bucket_from(&bucket, false).input_tokens, 10);
+    }
+
+    #[test]
+    fn dashboard_from_usage_projects_all_dimensions() {
+        use ainb_plugin_types_sessions::{
+            BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, SessionUsage,
+        };
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call_ts = now - Duration::hours(1);
+        let bucket = TokenBucket {
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 50,
+            output_tokens: 200,
+            reasoning_tokens: 0,
+            call_count: 1,
+            session_count: 1,
+            project_count: 1,
+            cost_usd: Some(0.005),
+        };
+        let call = ProviderCall {
+            id: 1,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: "s1".into(),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: call_ts,
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 50,
+            output_tokens: 200,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.005),
+            tools: vec!["Read".into()],
+            bash_commands: vec!["cargo test".into()],
+            user_message: "test".into(),
+            branch: Some("feat/dash".into()),
+        };
+        let usage = UsageData {
+            daily: vec![(call_ts.date_naive(), bucket)],
+            weekly: vec![(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), bucket)],
+            projects: vec![ProjectUsage {
+                name: "ainb".into(),
+                path: "/repo".into(),
+                bucket,
+                repo: Some("stevengonsalvez/agents-in-a-box".into()),
+            }],
+            grand_total: bucket,
+            calls: vec![call],
+            sessions: vec![SessionUsage {
+                provider: Provider::Claude,
+                project: "ainb".into(),
+                project_path: "/repo".into(),
+                session_id: "s1".into(),
+                first_timestamp: call_ts,
+                last_timestamp: call_ts,
+                bucket,
+            }],
+            models: vec![ModelUsage {
+                model: "claude-sonnet-4-5".into(),
+                bucket,
+            }],
+            activities: vec![],
+            tools: vec![NamedUsage {
+                name: "Read".into(),
+                calls: 1,
+            }],
+            mcp_servers: vec![],
+            shell_commands: vec![NamedUsage {
+                name: "cargo test".into(),
+                calls: 1,
+            }],
+            branches: vec![BranchUsage {
+                branch: "feat/dash".into(),
+                bucket,
+            }],
+            model_project_counts: vec![],
+        };
+
+        let result = dashboard_from_usage(&usage, now);
+
+        assert_eq!(result.state, FleetUsageSummaryState::Ready);
+        assert!(result.generated_at.is_some());
+        assert!(result.cost_complete);
+        assert!(result.totals.is_some());
+        // Heatmap should have the one day.
+        assert_eq!(result.heatmap.len(), 1);
+        assert_eq!(result.heatmap[0].call_count, 1);
+        // Weekly should have the one week.
+        assert_eq!(result.weekly.len(), 1);
+        assert_eq!(result.weekly[0].week_start, "2026-08-03");
+        // Forecast from 1 trailing day.
+        assert!(result.forecast.is_some());
+        let forecast = result.forecast.unwrap();
+        assert_eq!(forecast.sample_days, 1);
+        assert!(forecast.avg_daily_cost_usd.is_some());
+        // Dimension breakdowns.
+        assert_eq!(result.sessions.len(), 1);
+        assert!(result.sessions[0].session_id.contains("claude"));
+        assert_eq!(result.branches.len(), 1);
+        assert_eq!(result.branches[0].branch, "feat/dash");
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "Read");
+        assert_eq!(result.shell_commands.len(), 1);
+        assert_eq!(result.shell_commands[0].name, "cargo test");
+        assert_eq!(result.providers.len(), 1);
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.projects.len(), 1);
+    }
+
+    /// A 371-day window only aligns to exactly 53 ISO weeks when it starts on a
+    /// Monday; on the other six days it touches 54, and the extra one is the
+    /// CURRENT week. Capping must therefore drop the oldest week, never the
+    /// newest -- a dashboard that silently omits this week is worse than one
+    /// that omits a week from last year.
+    #[test]
+    fn weekly_cap_keeps_the_current_week() {
+        use ainb_plugin_types_sessions::Provider;
+        use chrono::Datelike;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        // end_day is tomorrow, so the window opens 371 days before that.
+        let start_day = now.date_naive().succ_opt().unwrap() - Duration::days(DASHBOARD_DAYS);
+        assert_ne!(
+            start_day.weekday(),
+            chrono::Weekday::Mon,
+            "fixture must exercise the unaligned case"
+        );
+
+        // One call per week across the whole window, plus one today. Stepping by
+        // 7 from a Friday lands on 2026-07-31 and stops, so today's call must be
+        // added explicitly -- without it the current ISO week is never populated
+        // and the test proves nothing.
+        let mut days: Vec<NaiveDate> = Vec::new();
+        let mut day = start_day;
+        while day <= now.date_naive() {
+            days.push(day);
+            day += Duration::days(7);
+        }
+        if days.last() != Some(&now.date_naive()) {
+            days.push(now.date_naive());
+        }
+
+        let mut calls: Vec<ProviderCall> = Vec::new();
+        let mut id = 0_u64;
+        for day in days {
+            id += 1;
+            calls.push(ProviderCall {
+                id,
+                provider: Provider::Claude,
+                model: "claude-sonnet-4-5".into(),
+                session_id: format!("s{id}"),
+                project: "ainb".into(),
+                project_path: "/repo".into(),
+                timestamp: day.and_hms_opt(12, 0, 0).unwrap().and_utc(),
+                input_tokens: 10,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                output_tokens: 10,
+                reasoning_tokens: 0,
+                cost_usd: Some(0.001),
+                tools: vec![],
+                bash_commands: vec![],
+                user_message: String::new(),
+                branch: None,
+            });
+        }
+
+        let usage = UsageData {
+            calls,
+            ..UsageData::default()
+        };
+        let result = dashboard_from_usage(&usage, now);
+
+        assert!(
+            result.weekly.len() <= FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS,
+            "weekly must stay within the wire cap"
+        );
+        let newest = result.weekly.last().expect("dashboard must report at least one week");
+        assert_eq!(
+            newest.week_start, "2026-08-03",
+            "capping dropped the current week instead of the oldest one"
+        );
+    }
+
+    /// Cost completeness is per-row, not global. One unpriced call in an
+    /// unrelated session must not blank the cost of every OTHER session and
+    /// branch -- over a 53-week window a single unknown model would otherwise
+    /// wipe cost off the entire dashboard.
+    #[test]
+    fn one_unpriced_call_only_blanks_its_own_session_and_branch() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, session: &str, branch: &str, cost: Option<f64>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: session.into(),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 10,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: Some(branch.into()),
+        };
+
+        let usage = UsageData {
+            calls: vec![
+                call(1, "priced", "feat/priced", Some(0.01)),
+                call(2, "unpriced", "feat/unpriced", None),
+            ],
+            ..UsageData::default()
+        };
+        let result = dashboard_from_usage(&usage, now);
+
+        let priced = result
+            .sessions
+            .iter()
+            .find(|s| s.session_id.ends_with(":priced"))
+            .expect("priced session present");
+        let unpriced = result
+            .sessions
+            .iter()
+            .find(|s| s.session_id.ends_with(":unpriced"))
+            .expect("unpriced session present");
+        assert_eq!(
+            priced.bucket.cost_usd,
+            Some(0.01),
+            "a fully priced session must keep its cost"
+        );
+        assert_eq!(
+            unpriced.bucket.cost_usd, None,
+            "an unpriced session must report no cost, never 0.0"
+        );
+
+        let priced_branch = result
+            .branches
+            .iter()
+            .find(|b| b.branch == "feat/priced")
+            .expect("priced branch present");
+        let unpriced_branch = result
+            .branches
+            .iter()
+            .find(|b| b.branch == "feat/unpriced")
+            .expect("unpriced branch present");
+        assert_eq!(priced_branch.bucket.cost_usd, Some(0.01));
+        assert_eq!(unpriced_branch.bucket.cost_usd, None);
+
+        // The dashboard as a whole is still honestly flagged incomplete.
+        assert!(!result.cost_complete);
+    }
+
+    /// The forecast answers "what will the next 30 days cost", and those 30 days
+    /// include idle days. Averaging only over days that HAVE data would quote a
+    /// working-day rate and overstate an intermittent user's projection.
+    #[test]
+    fn forecast_averages_over_calendar_days_not_active_days() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let spend = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+
+        // Worked 2 days out of a 7-day span: $10 total.
+        let forecast = build_forecast(&[(day(6), spend(5.0)), (day(0), spend(5.0))], now)
+            .expect("trailing data yields a forecast");
+
+        assert_eq!(
+            forecast.sample_days, 7,
+            "the divisor is the calendar span, and is what gets reported"
+        );
+        assert_eq!(
+            forecast.avg_daily_cost_usd,
+            Some(10.0 / 7.0),
+            "$10 over a 7-day span is a 7-day average, not a 2-day one"
+        );
+        // Guard the actual regression: the active-day divisor would have said $5/day.
+        assert!(
+            forecast.avg_daily_cost_usd < Some(5.0),
+            "averaging over active days only would overstate the rate"
+        );
+    }
+
+    /// A brand-new user has no idle days to average in yet; diluting their one
+    /// day of history across a week they were never present for would understate
+    /// the projection just as badly.
+    #[test]
+    fn forecast_does_not_dilute_a_single_day_of_history() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let bucket = TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(3.0),
+            ..TokenBucket::default()
+        };
+
+        let forecast = build_forecast(&[(now.date_naive(), bucket)], now).expect("forecast");
+
+        assert_eq!(forecast.sample_days, 1);
+        assert_eq!(forecast.avg_daily_cost_usd, Some(3.0));
+        assert_eq!(forecast.projected_30d_cost_usd, Some(90.0));
+    }
+
+    #[test]
+    fn forecast_requires_trailing_data() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        // Empty daily data yields no forecast.
+        assert!(build_forecast(&[], now).is_none());
+        // Data older than 7 days is excluded.
+        let old_date = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let bucket = TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(1.0),
+            ..TokenBucket::default()
+        };
+        assert!(build_forecast(&[(old_date, bucket)], now).is_none());
     }
 }
