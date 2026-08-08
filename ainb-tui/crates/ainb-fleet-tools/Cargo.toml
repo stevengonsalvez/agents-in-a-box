@@ -1,0 +1,51 @@
+[package]
+name = "ainb-fleet-tools"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The fleet copilot's MCP tool server: stdio MCP over rmcp, whose tools call BACK into the hangar daemon over hangar.sock so every copilot action rides the same receipts, ordering and guardrails a human client does."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "fleet", "mcp", "copilot", "guardrail"]
+
+[lib]
+name = "ainb_fleet_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-fleet-tools"
+path = "src/main.rs"
+
+[dependencies]
+# The MCP server side + its stdio transport. PINNED exactly, for the same
+# reason `ainb-acp` pins `agent-client-protocol`: this is a wire contract with
+# an adapter we do not control, and it must not move underneath us silently.
+# `default-features = false` drops the `#[tool]` macro layer — the tool table is
+# hand-written data here, because the guardrail class is part of the table and a
+# derive would hide it.
+rmcp = { version = "=3.1.2", default-features = false, features = [
+    "server",
+    "transport-io",
+] }
+# The ONE daemon client (auth/hello + Content-Length JSON-RPC). Every write tool
+# goes through it, so a copilot action is indistinguishable from an operator's.
+ainb-hangar-client = { path = "../ainb-hangar-client" }
+# Wire shapes + the `reprime` untrusted-text envelope every read tool wraps its
+# result in.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# ULID minting for the idempotent `request_id` each write carries.
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# The fake daemon binds a `UnixListener` in a temporary directory.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
