@@ -122,7 +122,7 @@ impl Client {
 
 /// Serialises every test that redirects the process-wide approve-socket
 /// override. Two tests each holding their OWN mutex around one global is not
-/// mutual exclusion — the loser answers into the winner's broker and its
+/// mutual exclusion: the loser answers into the winner's broker and its
 /// delivery silently fails.
 fn approve_socket_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -715,7 +715,7 @@ impl InterviewFixture {
         // Drive the REAL producer: append the hook line Claude's `PreToolUse`
         // writes when the picker opens, then run the attention ingest over it.
         // The previous fixture called `apply_hook` and then INSERTED the card it
-        // claimed the ingest would have raised — so it asserted the answer path
+        // claimed the ingest would have raised, so it asserted the answer path
         // against state it had constructed itself, and stayed green for months
         // while the producer raised nothing at all. Nothing here plants a
         // transcript: the ingest must mint the card off the hook payload.
@@ -878,7 +878,7 @@ async fn structured_answer_closes_the_open_attention_row() {
 async fn release_to_native_picker_closes_the_attention_row_as_native_claude() {
     // Releasing hands the waiter back to Claude's own picker, so the control
     // centre can no longer deliver an answer to it. Leaving the card open would
-    // advertise a route that no longer exists — and the `Notification` Claude
+    // advertise a route that no longer exists, and the `Notification` Claude
     // re-fires after a release is exactly what was seen minting duplicate rows.
     let fixture = InterviewFixture::open("release").await;
 

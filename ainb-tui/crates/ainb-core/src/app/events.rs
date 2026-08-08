@@ -3306,7 +3306,7 @@ impl EventHandler {
                 // Gated on Offline, not on `!online`: a merely Connecting
                 // subscription has not found anything wrong, and refusing there
                 // blocked every action on the first frame after opening Fleet.
-                // A genuinely dead daemon still fails loudly — the action RPC
+                // A genuinely dead daemon still fails loudly, the action RPC
                 // returns ActionFailed.
                 if action.is_high_risk() && state.fleet_panel_state.daemon_offline() {
                     Self::reduce_fleet_event(

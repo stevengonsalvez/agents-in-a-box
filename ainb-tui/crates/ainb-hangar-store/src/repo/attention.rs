@@ -185,12 +185,12 @@ impl AttentionRepo {
     /// returning `true` when THIS call raised the row.
     ///
     /// `request_key` (0080) is the stable identity of the request the row is
-    /// about — the same still-open question observed by a later hook firing
+    /// about: the same still-open question observed by a later hook firing
     /// derives the same key. Two duplicate shapes are absorbed here:
     ///
     /// - the SAME `id` (a replay of one durable hook line), and
     /// - a DIFFERENT `id` carrying the same `(session_id, request_key)` while a
-    ///   row for it is still `open` — the re-fired `Notification` for a question
+    ///   row for it is still `open`, the re-fired `Notification` for a question
     ///   nobody has answered yet, which is what turned one live question into
     ///   three cards.
     ///
@@ -206,7 +206,7 @@ impl AttentionRepo {
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] if the insert fails — e.g. a dangling
+    /// Returns a [`sqlx::Error`] if the insert fails: e.g. a dangling
     /// `workspace_id` FK violation.
     pub async fn insert_if_absent(
         pool: &SqlitePool,
@@ -469,21 +469,21 @@ impl AttentionRepo {
     /// answered, abandoned, or whose session exited long ago.
     ///
     /// A row is closed when NO `fleet_session` with its `session_id` reports a
-    /// non-`NONE` `attention_state` — covering both "the session is gone
+    /// non-`NONE` `attention_state`: covering both "the session is gone
     /// entirely" and "the session is here and says it needs nothing".
     ///
     /// Scoped to the three kinds the hook ingest raises. `escalation` (ATC
     /// paging a human), `approval`, and `codex_request_user` come from producers
     /// that own their own lifecycles and whose `session_id` need not appear in
-    /// `fleet_session` at all — an ATC escalation swept away because Fleet has
+    /// `fleet_session` at all: an ATC escalation swept away because Fleet has
     /// never heard of its session is a dropped page, not a cleaned-up card.
     ///
     /// Two further bounds keep this safe to run against a populated database:
     ///
-    /// - `older_than_ms` — rows newer than this are never touched. A card raised
+    /// - `older_than_ms`: rows newer than this are never touched. A card raised
     ///   seconds ago may legitimately lead its `fleet_session` projection, and
     ///   closing it would delete a live question.
-    /// - `limit` — caps one pass, so a pathological backlog cannot turn a boot
+    /// - `limit`: caps one pass, so a pathological backlog cannot turn a boot
     ///   into a multi-second stall.
     ///
     /// Every close is guarded by `state = 'open'`, so it can never clobber a

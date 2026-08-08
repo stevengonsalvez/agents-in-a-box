@@ -1151,8 +1151,8 @@ fn parse_attention(value: &str) -> ainb_hangar_proto::fleet::AttentionState {
 ///
 /// A cost split, not a correctness one. Correlating the discovered panes reads
 /// one snapshot and writes only where a pane resolved; the missing sweep walks
-/// every registered row. On the measured registry — 1,587 rows against 63 live
-/// panes — running the sweep on the 3s tick is tens of millions of row decodes
+/// every registered row. On the measured registry (1,587 rows against 63 live
+/// panes) running the sweep on the 3s tick is tens of millions of row decodes
 /// a day to re-notice panes that are already gone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReconcilePass {
@@ -1206,8 +1206,8 @@ async fn reconcile_discovered_panes(
     for (session, owner) in sessions.iter().zip(&owners) {
         if let Some(owner) = owner {
             // The pane already has its row. Collapse a duplicate written under
-            // the scan's own key ONLY when the snapshot in hand still shows one
-            // — `supersede_session` opens an IMMEDIATE transaction, so calling
+            // the scan's own key ONLY when the snapshot in hand still shows one:
+            // `supersede_session` opens an IMMEDIATE transaction, so calling
             // it speculatively would take the write lock once per live pane per
             // tick to discover there is nothing to do.
             if !registered.iter().any(|row| row.session_key == session.session_key.as_str()) {
@@ -1327,7 +1327,7 @@ fn exact_managed_row<'a>(
 /// The store decides "did this event change anything?" from authority and
 /// timestamp, not from value equality (`apply_patch` → `should_replace`), so an
 /// authoritative event ALWAYS bumps the row's version and `last_observed_at` and
-/// ALWAYS appends a `fleet_event` — even when every field it writes is already
+/// ALWAYS appends a `fleet_event`, even when every field it writes is already
 /// there. One such event per dead session per 3s tick is what produced 91,779
 /// `tmux_missing` and 58,679 `tmux_unavailable` rows in a single day against a
 /// ~17k/day baseline for the whole table.
@@ -1352,8 +1352,8 @@ fn tmux_transport_settled(row: &FleetSessionRow, available: bool) -> bool {
 ///
 /// Mirrors that event's patch exactly: transport plus the lifecycle demotion it
 /// applies only to an inferred, unmanaged row. This replaces the narrower
-/// `EXITED && UNAVAILABLE` skip, which let every MANAGED row — whose lifecycle
-/// this sweep deliberately never demotes — be re-asserted forever.
+/// `EXITED && UNAVAILABLE` skip, which let every MANAGED row (whose lifecycle
+/// this sweep deliberately never demotes) be re-asserted forever.
 fn tmux_missing_settled(row: &FleetSessionRow) -> bool {
     let demotes_lifecycle =
         row.management_state != "MANAGED" && row.lifecycle_authority == "inferred";
@@ -1387,7 +1387,7 @@ fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent 
 /// A tmux pane id is unique for the life of its server and `session_started`
 /// pins that server instance, so the pair identifies the physical pane exactly.
 /// `pid` is the pane's foreground process and does drift between the hook's
-/// read and this scan — observed live, where a hook wrote
+/// read and this scan: observed live, where a hook wrote
 /// `pane=%4257;pid=69099;session_started=1785436252` for the same pane the
 /// scanner reported as `pane=%4257;pid=68868;session_started=1785436252`.
 ///
@@ -1452,8 +1452,8 @@ fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
 /// How many 3s discovery ticks pass between full missing sweeps.
 ///
 /// A pane that has gone away is then noticed within 30s rather than 3s. Nothing
-/// routes on a sub-minute `transport_health` deadline — it gates capability
-/// flags and a banner, not a control path — and the tenfold cut applies to a
+/// routes on a sub-minute `transport_health` deadline (it gates capability
+/// flags and a banner, not a control path), and the tenfold cut applies to a
 /// full walk of every registered row, which is the whole cost of the pass.
 const MISSING_SWEEP_EVERY_N_TICKS: u32 = 10;
 
@@ -1471,7 +1471,7 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
         loop {
             // The breadcrumb keeps one coarse phase for the process, so a death
             // during the sleep must not still name the pass that already
-            // finished — see `observability::note_phase`.
+            // finished: see `observability::note_phase`.
             crate::observability::note_phase("fleet:tmux-idle");
             ticker.tick().await;
             let observed_at = clock.now_ms();
@@ -1606,7 +1606,7 @@ pub async fn mark_tmux_unavailable(
     for row in snapshot.sessions.into_iter().filter(|row| {
         // Already unavailable: nothing to say. Without this the downgrade wrote
         // one event for EVERY routed row on every discovery failure, whatever
-        // those rows already held — 58,679 `tmux_unavailable` rows in a day.
+        // those rows already held: 58,679 `tmux_unavailable` rows in a day.
         row.tmux_target.is_some() && !tmux_transport_settled(row, false)
     }) {
         let event = NewFleetEvent {
@@ -1642,7 +1642,7 @@ pub async fn mark_tmux_unavailable(
 /// which is what improved provider detection does, since the provider is part of
 /// `SessionKey::legacy`. Sharing the resolution removes the disagreement rather
 /// than patching around it, and it also restores a MANAGED row whose fingerprint
-/// `pid` merely drifted — the exact-match asymmetry that survived the
+/// `pid` merely drifted, the exact-match asymmetry that survived the
 /// duplicate-row fix.
 ///
 /// An EXITED row is still never restored: its lifecycle is terminal and only a
@@ -2106,8 +2106,8 @@ mod tests {
     ///
     /// `restore_tmux_transport` used to match by (target, fingerprint) while the
     /// missing-sweep matched by `session_key`. When a pane's key changes but the
-    /// pane does not — which is what happens when provider detection improves,
-    /// since the provider is part of `SessionKey::legacy` — the old row is
+    /// pane does not (which is what happens when provider detection improves,
+    /// since the provider is part of `SessionKey::legacy`) the old row is
     /// orphaned yet still matched by target+fingerprint. Restore then set it
     /// HEALTHY, the sweep's skip (which needs EXITED *and* UNAVAILABLE) missed,
     /// and it was marked UNAVAILABLE again: two applied events per row per tick,
@@ -3141,7 +3141,7 @@ mod tests {
     }
 
     /// One physical pane must occupy exactly one Fleet row, and it must be the
-    /// hook-written MANAGED one — the only row that ever carries
+    /// hook-written MANAGED one, the only row that ever carries
     /// `attention_state`/`current_request_fingerprint`, i.e. the ASK card and
     /// the `c Open in Claude` route.
     ///
@@ -3330,13 +3330,13 @@ mod tests {
     /// not value equality, so an authoritative event always bumps the row and
     /// always appends to `fleet_event` even when it writes what is already
     /// there. The sweep's only guard was `EXITED && UNAVAILABLE`, and this
-    /// sweep deliberately never demotes a MANAGED row's lifecycle — so every
+    /// sweep deliberately never demotes a MANAGED row's lifecycle, so every
     /// hook-backed session with a dead pane re-emitted `tmux_missing` every
     /// three seconds, forever. Measured live: 91,779 rows in one day against a
     /// ~17k/day baseline for the entire table.
     ///
     /// Worse, each re-emission refreshed `last_observed_at`, so
-    /// `reap_stale_sessions` — which retires on 15 minutes of silence — could
+    /// `reap_stale_sessions` (which retires on 15 minutes of silence) could
     /// never fire, and the loop kept itself alive.
     #[tokio::test]
     async fn a_missing_pane_emits_one_transition_then_nothing() {
@@ -3448,7 +3448,7 @@ mod tests {
     }
 
     /// A live pane that has not changed is not news. Repeated ticks against it
-    /// must write nothing at all — no transitions, no version bumps.
+    /// must write nothing at all: no transitions, no version bumps.
     #[tokio::test]
     async fn repeated_ticks_against_an_unchanged_live_pane_emit_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -3501,7 +3501,7 @@ mod tests {
     /// The pane's pid drifts between the hook's read and the scan. Wave 1 taught
     /// the duplicate check to see through that; the restore pass was left
     /// matching on the exact fingerprint, so a drifted MANAGED row could never
-    /// be brought back to HEALTHY by this loop — only by the next hook. Both
+    /// be brought back to HEALTHY by this loop, only by the next hook. Both
     /// passes now read one shared resolution, so the asymmetry is gone.
     #[tokio::test]
     async fn a_drifted_pid_row_is_restored_to_healthy_by_the_scan() {
@@ -3550,7 +3550,7 @@ mod tests {
 
     /// The discovery-failure downgrade must also be idempotent. It carried no
     /// state check at all and wrote one event for every routed row on every
-    /// failure — 58,679 `tmux_unavailable` rows in a day.
+    /// failure: 58,679 `tmux_unavailable` rows in a day.
     #[tokio::test]
     async fn a_repeated_discovery_failure_downgrades_a_route_once() {
         let dir = tempfile::tempdir().unwrap();

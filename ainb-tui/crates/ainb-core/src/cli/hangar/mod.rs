@@ -8404,8 +8404,8 @@ async fn run_daemon_run() -> Result<()> {
     // Same crash breadcrumbs the standalone binary lays down: this is the SAME
     // long-lived daemon process, just launched through `ainb`, and the launcher
     // picks this path whenever the sidecar binary is missing or stale. A
-    // heartbeat that only an observed exit removes is what turns a SIGKILL — a
-    // death that runs no user code, so no panic hook can catch it — into
+    // heartbeat that only an observed exit removes is what turns a SIGKILL (a
+    // death that runs no user code, so no panic hook can catch it) into
     // evidence.
     match ainb_hangar_daemon::hangar_dir() {
         Ok(dir) => {
@@ -8465,7 +8465,7 @@ pub fn ensure_hangar_daemon() {
 /// `ainb hangar logs tail` and the Daemons pane.
 const DAEMON_STDERR_LOG: &str = "hangar-daemon.stderr.log";
 
-/// Roll the stderr capture over at this size, keeping one previous generation —
+/// Roll the stderr capture over at this size, keeping one previous generation:
 /// so the file is bounded at ~2x this, forever, with no background rotator.
 const DAEMON_STDERR_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -8519,14 +8519,14 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     } else {
         format!("{} {}", bin.display(), args.join(" "))
     };
-    // A daemon that dies OUTSIDE `tracing` — a panic in the standalone binary,
-    // an `abort`, an OOM kill — writes its last words to stderr. Discarding
+    // A daemon that dies OUTSIDE `tracing` (a panic in the standalone binary,
+    // an `abort`, an OOM kill) writes its last words to stderr. Discarding
     // them is why two of the four observed deaths left no trace at all: no
     // ERROR line, no panic, the JSON log just stops mid-stream. Capture stderr
     // to a file; stdin/stdout stay null (the child must not inherit this
     // process's controlling terminal).
     //
-    // `log_dir` is not in scope here, but `pid_path` is — it resolves to
+    // `log_dir` is not in scope here, but `pid_path` is: it resolves to
     // <hangar_home>/hangar/daemon.pid, so the logs live in its parent's `logs/`.
     let stderr = pid_path
         .parent()
@@ -8594,7 +8594,7 @@ const DAEMON_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3)
 /// Block until `pid` is gone or `grace` elapses; `true` iff it exited.
 ///
 /// `stop` used to declare success the instant `SIGTERM` was delivered, which is
-/// not the same thing as the daemon being gone — and `restart` immediately
+/// not the same thing as the daemon being gone, and `restart` immediately
 /// spawned a replacement into a socket the old one still held.
 fn wait_for_pid_exit(pid: u32, grace: std::time::Duration) -> bool {
     /// 60 probes across the grace window: fast enough that a normal stop returns
@@ -8613,7 +8613,7 @@ fn wait_for_pid_exit(pid: u32, grace: std::time::Duration) -> bool {
 /// Record the daemon's exit on its behalf after a `stop`.
 ///
 /// `SIGTERM`'s default disposition runs NO user code in the target, so the
-/// daemon cannot write its own exit reason for this path — but the stopper knows
+/// daemon cannot write its own exit reason for this path, but the stopper knows
 /// exactly why it died. Without this, a deliberate `stop` would leave the same
 /// evidence as the SIGKILL/OOM deaths the breadcrumbs exist to catch: a stale
 /// heartbeat and no exit reason.
@@ -8642,7 +8642,7 @@ fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
 /// is cleaned up; an absent file is reported as "not running".
 ///
 /// Waits (bounded) for the process to actually exit, then records the exit
-/// breadcrumb on its behalf — see [`record_daemon_stop_breadcrumb`].
+/// breadcrumb on its behalf: see [`record_daemon_stop_breadcrumb`].
 fn run_daemon_stop() -> Result<()> {
     let pid_path = daemon_pid_path()?;
     // Drop the version record too — a stopped daemon has no running version, and
@@ -8664,7 +8664,7 @@ fn run_daemon_stop() -> Result<()> {
             } else {
                 // Keep the pid file: it still names a live daemon. Dropping it
                 // here (as this did unconditionally) would let the next `start`
-                // spawn a SECOND daemon onto the same SQLite file — new write
+                // spawn a SECOND daemon onto the same SQLite file: new write
                 // contention, which is the last thing this daemon needs.
                 println!(
                     "hangar daemon: SIGTERM sent to pid {pid}, still alive after {}s \

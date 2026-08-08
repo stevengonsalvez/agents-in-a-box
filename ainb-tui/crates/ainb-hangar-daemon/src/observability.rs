@@ -339,7 +339,7 @@ pub fn install(opts: ObservabilityOpts) -> anyhow::Result<Guard> {
 // ---------------------------------------------------------------------------
 //
 // `tracing` only records what user code gets to run. Four daemon deaths in one
-// day left two with no ERROR line and no panic — the JSON log simply stops
+// day left two with no ERROR line and no panic, the JSON log simply stops
 // mid-stream, which is the signature of SIGKILL / abort / an OOM kill, none of
 // which run a panic hook or any other user code.
 //
@@ -424,7 +424,7 @@ impl Breadcrumbs {
     }
 
     /// Rewrite the heartbeat file. Best-effort: an IO failure is logged once per
-    /// tick and never propagates — breadcrumb bookkeeping must not be able to
+    /// tick and never propagates, breadcrumb bookkeeping must not be able to
     /// stop the daemon it is watching.
     fn write_heartbeat(&self, ticks: u64) {
         let body = serde_json::json!({
@@ -469,7 +469,7 @@ fn phase() -> &'static str {
 /// Record the coarse phase the process is now in; it rides along in every
 /// subsequent heartbeat and in the exit reason.
 ///
-/// Today the daemon entry points report only `boot` and `shutdown` — enough to
+/// Today the daemon entry points report only `boot` and `shutdown`: enough to
 /// tell "died during migrations" from "died in the run loop". Finer, loop-level
 /// phases (`claim`, `sweep`, `reconcile`) are a matter of calling this from the
 /// loops themselves; this is the seam for that.
@@ -487,7 +487,7 @@ pub fn note_phase(phase: &'static str) {
 /// ticker thread.
 ///
 /// Best-effort and idempotent: a second call is a no-op, and every IO failure is
-/// logged and swallowed — mirroring [`crate::PidFile::register`], because pid
+/// logged and swallowed, mirroring [`crate::PidFile::register`], because pid
 /// and breadcrumb bookkeeping must never stop a daemon from booting.
 pub fn start_breadcrumbs(hangar_home: &Path) {
     let heartbeat = heartbeat_path_in(hangar_home);
@@ -555,7 +555,7 @@ fn run_ticker(crumbs: &Breadcrumbs) {
 /// Record an observed exit: write `daemon.exit-reason` naming `reason`, then
 /// remove `daemon.heartbeat` and stop the ticker.
 ///
-/// Order matters — the exit reason lands first, so there is never a window in
+/// Order matters: the exit reason lands first, so there is never a window in
 /// which neither file exists (which would read as "no daemon ever ran"). The
 /// first call wins; later ones are no-ops, and a call before
 /// [`start_breadcrumbs`] does nothing.
@@ -597,7 +597,7 @@ pub fn record_exit(reason: &str) {
 /// Record an exit on a daemon's behalf, from the process that ended it.
 ///
 /// `ainb hangar daemon stop` signals the daemon with `SIGTERM`, whose default
-/// disposition runs NO user code in the target — so the daemon itself cannot
+/// disposition runs NO user code in the target, so the daemon itself cannot
 /// write this breadcrumb. The stopper knows the reason and writes it here, once
 /// it has confirmed the pid is gone. Without this, a deliberate `stop` would be
 /// indistinguishable from the SIGKILL/OOM deaths these breadcrumbs exist to
@@ -632,7 +632,7 @@ pub fn record_external_exit(hangar_home: &Path, pid: u32, reason: &str) {
 /// reaches the JSON sink) *and* to stderr, then delegate to the previous hook.
 ///
 /// The `ainb` binary installs an equivalent hook in its own `main`, but the
-/// standalone `ainb-hangar-daemon` binary had none — and `resolve_daemon_launch_for`
+/// standalone `ainb-hangar-daemon` binary had none, and `resolve_daemon_launch_for`
 /// prefers that binary whenever it is fresh, so the daemon most likely to be
 /// running was the one with no hook at all.
 ///
@@ -692,7 +692,7 @@ mod tests {
     }
 
     /// Both breadcrumbs sit beside `daemon.pid` under `<hangar_home>/hangar/`,
-    /// and — critically — neither the heartbeat nor the exit reason is named
+    /// and, critically, neither the heartbeat nor the exit reason is named
     /// `daemon.*` inside the LOG dir, so they cannot be swept up by the
     /// `starts_with("daemon")` glob the log-tail surfaces use.
     #[test]
@@ -759,12 +759,12 @@ mod tests {
     }
 
     /// Full in-process lifecycle. `start_breadcrumbs` installs a process-global
-    /// (a `OnceLock`), so this is deliberately the ONE test that calls it —
+    /// (a `OnceLock`), so this is deliberately the ONE test that calls it:
     /// splitting it would make the second call a no-op and the assertions
     /// meaningless.
     ///
     /// The uncatchable-kill half of the invariant (heartbeat survives, exit
-    /// reason absent) cannot be asserted in-process — a test that `kill -9`s
+    /// reason absent) cannot be asserted in-process: a test that `kill -9`s
     /// itself has no one left to assert. It is covered by driving the real
     /// binary; what is proven here is that only an OBSERVED exit ever removes
     /// the heartbeat.

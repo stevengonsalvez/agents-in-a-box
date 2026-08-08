@@ -3910,7 +3910,7 @@ async fn latest_codex_turn_id(
 ///
 /// The `attention` table is the control centre's inbox; `fleet_session` is the
 /// Fleet screen's. Neither Fleet interview route wrote to the former, so an
-/// answered interview left its card open and answerable forever — 702 such rows
+/// answered interview left its card open and answerable forever: 702 such rows
 /// were measured live, the oldest 25 days old. Closing here is the cross-write
 /// the two representations never had.
 ///
@@ -4064,7 +4064,7 @@ async fn execute_claude_structured(
 }
 
 /// One-line render of a delivered interview answer for the attention row's audit
-/// `answer` column — what the control centre shows as "answered by fleet: …".
+/// `answer` column: what the control centre shows as "answered by fleet: …".
 fn answer_summary(answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer]) -> String {
     let rendered = answers
         .iter()
@@ -4227,7 +4227,7 @@ async fn execute_claude_structured_release(
             ..FleetSessionPatch::default()
         },
     };
-    // The control centre can no longer deliver an answer to this request — the
+    // The control centre can no longer deliver an answer to this request: the
     // broker handed the waiter back to Claude's own picker. Leaving the card open
     // would advertise an answer route that no longer exists, and the re-fired
     // `Notification` that follows a release is precisely what was observed

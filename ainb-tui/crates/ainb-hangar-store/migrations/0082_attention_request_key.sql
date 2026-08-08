@@ -17,7 +17,7 @@
 -- The ingest keys a row `att:<session>:<event_id>`, where `event_id` is a fresh
 -- UUID minted per hook invocation (`ainb fleet atc hook`). Claude re-fires its
 -- `Notification` hook while a session stays blocked, so ONE question produced N
--- rows — measured live as three rows, three UUIDs, one question. The
+-- rows: measured live as three rows, three UUIDs, one question. The
 -- check-then-insert on the row id cannot see that, because every firing carries
 -- a genuinely new id.
 --
@@ -31,7 +31,7 @@
 --
 -- NOT the same value as `fleet_session.current_request_fingerprint`, and NOT
 -- joinable to it. That column is fnv1a64 over the hook payload's
--- `{tool_use_id, tool_input}` — but the `Notification` hook line that raises most
+-- `{tool_use_id, tool_input}`, but the `Notification` hook line that raises most
 -- ASK rows carries NEITHER field (its payload is just
 -- `{message, notification_type, prompt_id, cwd, session_id, transcript_path}`),
 -- so that fingerprint is simply unavailable at ingest time. The attention key is

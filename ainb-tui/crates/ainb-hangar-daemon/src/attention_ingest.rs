@@ -45,7 +45,7 @@
 //!
 //! The event ID alone is NOT enough for an ASK, because Claude re-fires
 //! `Notification` while a session stays blocked and each firing is a genuinely
-//! new event — one live question was measured raising three cards. ASK rows
+//! new event: one live question was measured raising three cards. ASK rows
 //! therefore also carry a `request_key` ([`request_key_of`], migration 0081):
 //! every firing that observes the SAME still-open question derives the same key
 //! and collapses onto the first row. Once that row is closed the key is free
@@ -380,7 +380,7 @@ impl AttentionIngest {
         // An AskUserQuestion is classified from the hook line that ANNOUNCED it,
         // not from the transcript. Claude does not append the `tool_use` row for
         // the picker until the tool RESOLVES, so while the question is genuinely
-        // open the transcript cannot describe it — probed live at every lookback
+        // open the transcript cannot describe it: probed live at every lookback
         // window (20/40/80/160/320) against a blocked session: `None` at all
         // five. The transcript classifier therefore never fired for a live
         // interview and the `attention` table held zero ASK rows, ever. The hook
@@ -426,7 +426,7 @@ impl AttentionIngest {
         // turn is 5 minutes old. Acting on that reading would close the card the
         // payload producer raised seconds earlier AND stand a Waiting card up in
         // its place, while the hook is still blocked waiting for the answer. Fleet's
-        // own projection — written from this same hook line a few lines above —
+        // own projection (written from this same hook line a few lines above)
         // is the authority on whether the request is still live, so while it says
         // one is, this line yields no attention decision at all.
         if kind != AttentionKind::AskUserQuestion {
@@ -597,12 +597,12 @@ impl AttentionIngest {
     ///
     /// The `attention` table and `fleet_session.attention_state` are two
     /// independent records of "needs input" that never cross-write, so they
-    /// drift — measured live at 732 open rows against 7 sessions Fleet believed
+    /// drift: measured live at 732 open rows against 7 sessions Fleet believed
     /// were waiting, the oldest 25 days stale. Nothing else closes a `waiting`
     /// row at all, so this runs on a slow tick rather than once at boot: a
     /// one-shot pass would clear today's backlog and let it re-accumulate.
     ///
-    /// Best-effort — a store fault is logged and retried next interval.
+    /// Best-effort: a store fault is logged and retried next interval.
     async fn sweep_once(&self, now_ms: i64) {
         match AttentionRepo::close_unclaimed_open(
             &self.pool,
@@ -622,7 +622,7 @@ impl AttentionIngest {
 
     /// Spawn the tail loop: tick every [`TICK`], ingesting each pass and
     /// reconciling the open set every [`SWEEP_INTERVAL`]. Mirrors the inbox
-    /// aggregator — the returned handle is dropped by `boot()` (process exit
+    /// aggregator: the returned handle is dropped by `boot()` (process exit
     /// tears the task down); a future supervisor can keep it to stop cleanly.
     #[must_use]
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
@@ -671,24 +671,24 @@ fn session_from(line: &HookEventLine) -> Session {
 /// `payload.tool_input` is the SAME `{"questions":[…]}` object the transcript
 /// later stores as the `tool_use` block's `input`, and both are parsed by
 /// [`ask_data_from_tool_input`], so a hook-derived ask and a transcript-derived
-/// ask for one question produce byte-identical context — and therefore the same
+/// ask for one question produce byte-identical context, and therefore the same
 /// [`request_key_of`].
 ///
 /// Only the picker-OPEN event qualifies (`PreToolUse` for the AskUserQuestion
 /// tool, which the caller has already canonicalised to `AskUserQuestion`).
 /// Claude also re-announces a live picker as `PermissionRequest` +
-/// `Notification` — measured live, 15s after the open, when Fleet releases the
+/// `Notification`: measured live, 15s after the open, when Fleet releases the
 /// question back to Claude's own picker. Those describe the SAME picker, not a
 /// new one; `crate::fleet::apply_hook` makes exactly this call for the session
 /// projection (`duplicate_claude_structured_permission`) and the attention
 /// inbox must agree. Raising off them re-opened a card that the release had
 /// just closed as `native_claude`, advertising a Fleet answer route that no
-/// longer existed — observed live in the sandbox before this gate.
+/// longer existed: observed live in the sandbox before this gate.
 ///
 /// One case genuinely loses its only signal: when the hook cannot register with
 /// the broker at all it returns early WITHOUT appending the `PreToolUse` line,
 /// so a permission re-announcement is the only trace of the question. That is
-/// the right trade — with no broker there is no answer route for a card to
+/// the right trade: with no broker there is no answer route for a card to
 /// offer, and the session's `fleet_session` row still shows it needs a human.
 ///
 /// Claude-only, matching the producing hook and the reducer: the answer route a
@@ -714,14 +714,14 @@ fn ask_context_from_hook_payload(
 ///
 /// Claude re-fires `Notification` while a session stays blocked, and every
 /// firing carries a fresh hook `event_id`, so an event-keyed row id mints a new
-/// card per firing — one live question was measured producing three. The
+/// card per firing: one live question was measured producing three. The
 /// classifier reads the SAME still-open `AskUserQuestion` out of the transcript
 /// on every one of those firings, so a hash of the classified request collapses
 /// them onto one row (see migration 0080).
 ///
 /// Derived from the CLASSIFIED context, not the hook payload, because the
 /// `Notification` line that raises most ASK rows carries neither `tool_use_id`
-/// nor `tool_input` — the fields `fleet_session.current_request_fingerprint` is
+/// nor `tool_input`, the fields `fleet_session.current_request_fingerprint` is
 /// built from. The two values are therefore NOT comparable, which is why the
 /// column is `request_key` and not `request_fingerprint`.
 ///
@@ -913,7 +913,7 @@ mod tests {
         )
     }
 
-    /// One hook line carrying an EXPLICIT durable `event_id` — the shape the
+    /// One hook line carrying an EXPLICIT durable `event_id`, the shape the
     /// hook writes for every real firing (a fresh `Uuid::new_v4()` each time).
     fn hook_line_with_event_id(
         session: &str,
@@ -1122,7 +1122,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_open_question_survives_a_follow_on_hook_that_reads_idle() {
         // The stale-ASK reconcile closes every open ASK row for a session as soon
-        // as the transcript classifier returns anything but `Ask` — on the premise
+        // as the transcript classifier returns anything but `Ask`, on the premise
         // that "not asking any more" is observable from the transcript. This
         // producer's whole reason to exist is that the premise is FALSE while a
         // question is open: Claude withholds the tool_use row until the tool
@@ -1169,7 +1169,7 @@ mod tests {
         let row = AttentionRepo::get(store.pool(), ask_id).await.unwrap().unwrap();
         assert_eq!(
             row.state, "open",
-            "the live question must survive — the session is still blocked on it"
+            "the live question must survive: the session is still blocked on it"
         );
         let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
         assert_eq!(open.len(), 1, "and it must not be joined by a Waiting card");
@@ -1182,8 +1182,8 @@ mod tests {
         // Claude withholds the AskUserQuestion `tool_use` row from the transcript
         // until the tool resolves, so the transcript classifier returned None for
         // every live question and the ingest minted nothing. This test plants NO
-        // transcript at all — `transcript_path` points at a file that does not
-        // exist — so it passes ONLY if the hook payload is what raises the card.
+        // transcript at all (`transcript_path` points at a file that does not
+        // exist), so it passes ONLY if the hook payload is what raises the card.
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
         let events_jsonl = dir.path().join("events.jsonl");
@@ -1277,7 +1277,7 @@ mod tests {
         // Claude's own picker (card closed `native_claude`), and 15s later Claude
         // re-announced the SAME question as PermissionRequest:AskUserQuestion.
         // The close had freed the request key, so the re-announcement minted a
-        // fresh OPEN card — re-advertising a Fleet answer route that the release
+        // fresh OPEN card: re-advertising a Fleet answer route that the release
         // had just retired. A PermissionRequest describes the picker that is
         // already open, never a new one, so it must raise nothing.
         let dir = tempfile::tempdir().unwrap();
@@ -1328,7 +1328,7 @@ mod tests {
         );
         assert!(
             AttentionRepo::list_fleet(store.pool()).await.unwrap().is_empty(),
-            "the released question stays closed — Fleet can no longer answer it"
+            "the released question stays closed: Fleet can no longer answer it"
         );
         let row = AttentionRepo::get(store.pool(), "att:d39ec648:evt-open")
             .await

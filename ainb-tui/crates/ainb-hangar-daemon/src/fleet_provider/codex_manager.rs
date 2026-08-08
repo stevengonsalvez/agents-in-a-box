@@ -300,7 +300,7 @@ pub async fn active_handle() -> Option<CodexManagerHandle> {
 /// Health of the managed Codex transport, for the daemon's status surfaces.
 ///
 /// The service loop retries forever by design; without this record a wedged
-/// transport is invisible — the observed run reached attempt 225 over ~2h with
+/// transport is invisible: the observed run reached attempt 225 over ~2h with
 /// nothing but WARN lines to show for it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CodexTransportHealth {
@@ -321,7 +321,7 @@ pub struct CodexTransportHealth {
 /// signal is the ERROR log. `ainb fleet daemons` has no hangar-daemon row at all
 /// (`ainb_core::fleet::daemons::probe::DaemonKind` enumerates bridge, notifyd,
 /// approve-broker, ATC and fleet-daemon only), and this crate cannot depend on
-/// `ainb-core` to add one — the dependency runs the other way. Surfacing it needs a
+/// `ainb-core` to add one: the dependency runs the other way. Surfacing it needs a
 /// new `DaemonKind` plus a heartbeat writer in `ainb-core`, or a field on the daemon
 /// status RPC in `rpc/mod.rs`; both are outside this file.
 pub async fn transport_health() -> CodexTransportHealth {
@@ -931,7 +931,7 @@ fn is_codex_app_server(args: &str) -> bool {
 /// Socket of a `codex app-server --listen unix://<socket>` row.
 ///
 /// Takes the whole argv remainder, NOT the first token, because a Hangar home may
-/// contain spaces (`/Users/x/Home A/codex-app-server.sock` — the fixture covers it).
+/// contain spaces (`/Users/x/Home A/codex-app-server.sock`, the fixture covers it).
 /// That is only sound while the socket is the FINAL argument, which
 /// `codex::app_server_command` and `codex::proxy_command` both guarantee; the socket
 /// now feeds a filesystem lookup in [`adoption_is_credible`], so if a future `codex`
@@ -957,7 +957,7 @@ fn codex_proxy_socket(args: &str) -> Option<&str> {
 /// which treats `EPERM` as dead: that one decides whether to SHOW a daemon as
 /// running, where a false positive is the bad outcome. Here a wrong answer kills a
 /// process, so ambiguity must resolve to "alive". (The daemon crate cannot depend on
-/// `ainb-core` — the dependency runs the other way — so the two cannot share code.)
+/// `ainb-core`, the dependency runs the other way, so the two cannot share code.)
 fn pid_is_running(pid: u32) -> bool {
     i32::try_from(pid)
         .is_ok_and(|raw| raw > 0 && kill(Pid::from_raw(raw), None) != Err(Errno::ESRCH))
@@ -973,11 +973,11 @@ fn pid_is_running(pid: u32) -> bool {
 ///
 /// 1. **Not a Hangar home** (`<parent>/hangar` is not a directory): somebody else's
 ///    socket, e.g. a plugin broker's temp dir. We have no pidfile to judge it by, so
-///    we do not judge it — the spare stands. Widening kill authority to sockets this
+///    we do not judge it: the spare stands. Widening kill authority to sockets this
 ///    daemon never managed would trade a leak for a destroyed live session.
 /// 2. **A Hangar home**: the adopting daemon's registration is
 ///    `<home>/hangar/daemon.pid` (see [`crate::pid_path_in`]). Missing, unparseable,
-///    or dead means abandoned, not adopted — reap. `<home>/hangar/` itself survives
+///    or dead means abandoned, not adopted: reap. `<home>/hangar/` itself survives
 ///    a SIGKILL (it holds the store, the logs and the pid file), so a crashed home is
 ///    still reachable by judgement 2 rather than escaping through judgement 1.
 ///
@@ -1945,7 +1945,7 @@ mod tests {
     #[tokio::test]
     async fn sigterm_survivor_escalates_to_sigkill() {
         let mut processes = FakeProcesses::new(&[501, 777]);
-        // 777 ignores SIGTERM — the case the old code counted as reaped and never
+        // 777 ignores SIGTERM: the case the old code counted as reaped and never
         // looked at again, so it survived every 60s sweep.
         processes.ignores_term.insert(777);
 
@@ -2040,8 +2040,8 @@ mod tests {
     }
 
     /// End-to-end against the real kernel: a real ppid==1 fake app-server, backed by
-    /// a real live proxy, whose Hangar home is dead — the shape the old sparing rule
-    /// protected forever — is selected and actually killed, SIGKILL included.
+    /// a real live proxy, whose Hangar home is dead (the shape the old sparing rule
+    /// protected forever) is selected and actually killed, SIGKILL included.
     ///
     /// The fixtures are planted in the machine-wide process table, so a Hangar daemon
     /// running on the same host can select and kill them on its own sweep. The

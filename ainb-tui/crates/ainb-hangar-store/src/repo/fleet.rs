@@ -14,14 +14,14 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 /// The BEGIN statement every write transaction in this module opens with.
 ///
 /// `SQLite`'s default `BEGIN` is DEFERRED: it takes no lock until the first
-/// statement. Every apply here READS before it WRITES — it must see the prior
-/// event and the current session row to decide what to write — so a deferred
+/// statement. Every apply here READS before it WRITES (it must see the prior
+/// event and the current session row to decide what to write), so a deferred
 /// begin takes a read SNAPSHOT first and the later INSERT has to upgrade it. If
 /// any other connection commits in that window the upgrade fails with
 /// `SQLITE_BUSY` (5) or `SQLITE_BUSY_SNAPSHOT` (517), and `busy_timeout` does
 /// **not** cover either: the busy handler is deliberately never invoked while
 /// upgrading a read transaction, because waiting there could deadlock. The only
-/// valid response is rollback-and-retry — the same mechanism
+/// valid response is rollback-and-retry, the same mechanism
 /// [`BoardRepo::auto_move_on_state`](crate::repo::board::BoardRepo::auto_move_on_state)
 /// documents at length and [`crate::service::pull`] states generically.
 ///
@@ -72,8 +72,8 @@ where
 ///
 /// Matches on the EXTENDED result code sqlx surfaces: 5 `SQLITE_BUSY`,
 /// 6 `SQLITE_LOCKED`, 261 `SQLITE_BUSY_RECOVERY`, 262 `SQLITE_LOCKED_SHAREDCACHE`,
-/// 517 `SQLITE_BUSY_SNAPSHOT`. Everything else — constraint violations, decode
-/// faults, corruption — must surface unchanged on the first attempt.
+/// 517 `SQLITE_BUSY_SNAPSHOT`. Everything else (constraint violations, decode
+/// faults, corruption) must surface unchanged on the first attempt.
 fn is_lock_contention(error: &sqlx::Error) -> bool {
     let Some(database) = error.as_database_error() else {
         return false;
@@ -465,7 +465,7 @@ impl FleetRepo {
     /// One IMMEDIATE transaction around [`Self::apply_event_in_tx`].
     ///
     /// The write lock is taken at BEGIN, before the first SELECT, so this
-    /// transaction has no read snapshot to invalidate — see
+    /// transaction has no read snapshot to invalidate: see
     /// [`IMMEDIATE_TRANSACTION`] for why a DEFERRED begin here was the engine of
     /// the daemon's write storm.
     async fn apply_event_committed(
@@ -495,7 +495,7 @@ impl FleetRepo {
     /// WRITES. A caller that hands it a DEFERRED transaction with no prior write
     /// makes those reads take a snapshot that the later INSERT must upgrade,
     /// which `SQLite` refuses with `SQLITE_BUSY`/`SQLITE_BUSY_SNAPSHOT` the
-    /// moment any other connection commits in the window — uncovered by
+    /// moment any other connection commits in the window, uncovered by
     /// `busy_timeout`, see [`IMMEDIATE_TRANSACTION`]. Callers must therefore
     /// open with [`IMMEDIATE_TRANSACTION`] **or** issue their own write first.
     ///
@@ -612,8 +612,8 @@ impl FleetRepo {
 
     /// One IMMEDIATE transaction performing the supersession.
     ///
-    /// Same read-then-upgrade shape as [`Self::apply_event_committed`] — it
-    /// reads the prior event and both sessions' rows before it writes — so it
+    /// Same read-then-upgrade shape as [`Self::apply_event_committed`] (it
+    /// reads the prior event and both sessions' rows before it writes), so it
     /// takes the write lock at BEGIN for the same reason. Replaying it is safe:
     /// the `event_id` is derived from the two keys, so a retry after a rollback
     /// re-runs the identical guards and inserts the same single event.
@@ -698,7 +698,7 @@ impl FleetRepo {
     }
 
     /// Does this provider session still hold a request that is waiting on a
-    /// human — an `ASK`/`APPROVAL` attention state with an identified request?
+    /// human, an `ASK`/`APPROVAL` attention state with an identified request?
     ///
     /// The attention ingest's stale-ASK reconcile asks this before closing an
     /// open card. That reconcile infers "no longer asking" from the transcript,
@@ -1824,7 +1824,7 @@ mod tests {
     /// This is the daemon's real shape: the tmux reconciler, the hook ingest and
     /// the provider poller all call [`FleetRepo::apply_event`] on the same pool
     /// for different sessions. With a DEFERRED `BEGIN` this test fails within a
-    /// few dozen iterations with `(code: 517) database is locked` —
+    /// few dozen iterations with `(code: 517) database is locked`,
     /// `SQLITE_BUSY_SNAPSHOT`, raised when the sibling commits between this
     /// transaction's first SELECT and its first write, and NOT covered by
     /// `busy_timeout`. Every such failure is a dropped fleet event in production.

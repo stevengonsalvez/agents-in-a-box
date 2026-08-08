@@ -5,7 +5,7 @@
 //! (`$AINB_HANGAR_HOME`, else `$AINB_HOME`, else `~/.agents-in-a-box`). The
 //! daemon used to resolve it independently from `$AINB_HOME` alone, so any stack
 //! running under `$AINB_HANGAR_HOME` posted every Fleet interview answer to the
-//! DEFAULT home's broker — a broker that had never seen the session. The answer
+//! DEFAULT home's broker, a broker that had never seen the session. The answer
 //! came back unmatched, Fleet recorded `Claude request no longer waiting`, and
 //! the hook stayed blocked until its 600s timeout. Nothing caught it because
 //! every other test overrides the socket path instead of resolving it.

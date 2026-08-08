@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let guard = observability::install(opts)?;
 
     // This binary had NO panic hook, while the `ainb` binary that embeds the
-    // same daemon library has had one all along — and the launcher prefers this
+    // same daemon library has had one all along, and the launcher prefers this
     // binary whenever it is fresh. So the daemon most likely to be running was
     // the one whose panics reached nothing but a discarded stderr.
     observability::install_panic_hook();
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// The breadcrumbs are the half of the diagnosis a panic hook cannot provide:
 /// SIGKILL, `abort`, and an OOM kill run no user code at all, and two of the
-/// four observed daemon deaths left no ERROR line and no panic — just a JSON log
+/// four observed daemon deaths left no ERROR line and no panic, just a JSON log
 /// that stops mid-stream. A heartbeat file that is only ever removed on an
 /// exit we observed turns that silence into evidence.
 ///

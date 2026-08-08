@@ -1207,8 +1207,8 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
 /// Single source of truth for the reconcile precondition: [`reduce_browse_key`]
 /// refuses exactly when this returns `Some`, and [`available_action_labels`]
 /// advertises `r Reconcile` exactly when it returns `None`. They were separate
-/// predicates and drifted — the label guard checked neither the provider nor
-/// the request fingerprint — so the footer promised an action the reducer
+/// predicates and drifted (the label guard checked neither the provider nor
+/// the request fingerprint), so the footer promised an action the reducer
 /// declined. Keeping one function is what stops them diverging again.
 fn reconcile_blocked_reason(row: &FleetSessionRow) -> Option<&'static str> {
     if !row.provider.eq_ignore_ascii_case("claude") {
@@ -2359,7 +2359,7 @@ pub fn render_degraded_banner(buffer: &mut WireBuffer, area_width: u16, top: u16
 /// Overlay the pre-probe banner: the subscription is dialing, nothing failed.
 ///
 /// Separate from [`render_degraded_banner`] on purpose. An unprobed daemon is
-/// not an offline one, and the first frame of every Fleet screen is unprobed —
+/// not an offline one, and the first frame of every Fleet screen is unprobed:
 /// claiming "offline, high-risk actions disabled" there was a lie that only
 /// cleared on a manual refresh.
 pub fn render_connecting_banner(buffer: &mut WireBuffer, area_width: u16, top: u16) {
