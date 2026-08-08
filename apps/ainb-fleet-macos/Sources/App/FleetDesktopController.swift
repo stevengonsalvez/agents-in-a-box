@@ -684,10 +684,14 @@ private struct FleetUsageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
+                // Labels are hidden because the segment titles already say what
+                // they select. Shown, "Mode" gets squeezed by the width limit
+                // and wraps to "Mod / e" in the notch's narrow header.
                 Picker("Mode", selection: $mode) {
                     ForEach(UsageMode.allCases) { m in Text(m.label).tag(m) }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 .frame(maxWidth: 180)
 
                 if mode == .quick {
@@ -695,6 +699,8 @@ private struct FleetUsageView: View {
                         ForEach(FleetUsagePeriod.allCases) { option in Text(option.label).tag(option) }
                     }
                     .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 260)
                 }
 
                 Spacer()
@@ -745,21 +751,34 @@ private struct FleetUsageView: View {
     }
 
     @ViewBuilder private func usage(_ summary: FleetUsageSummaryResult) -> some View {
-        if let quotaSummary = store.quotaSummary {
-            quotaCard(quotaSummary)
-        }
         if let total = summary.totals {
-            totalsHero(total)
-
+            // EVERYTHING scrolls, including the quota card and the hero.
+            //
+            // The notch panel is pinned to a fixed height with `.top`
+            // alignment, so a column laid out beside a ScrollView takes its
+            // ideal height and is simply clipped: the ScrollView then receives
+            // its full content height and never has anything to scroll. The
+            // result was a panel whose lower half could not be reached at all.
+            // Making the scroll view the whole body, and letting it claim the
+            // remaining height, is what actually makes the content reachable.
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if let quotaSummary = store.quotaSummary {
+                        quotaCard(quotaSummary)
+                    }
+                    totalsHero(total)
                     if !summary.daily.isEmpty { section("Daily", rows: summary.daily.map { "\($0.date)  \(value($0.bucket))" }) }
                     if !summary.providers.isEmpty { section("Providers", rows: summary.providers.map { "\($0.provider.capitalized)  \(value($0.bucket))" }) }
                     if !summary.models.isEmpty { section("Models", rows: summary.models.map { "\($0.model)  \(value($0.bucket))" }) }
-                    if !summary.projects.isEmpty { section("Projects", rows: summary.projects.map { "\($0.repo ?? $0.project)  \(value($0.bucket))" }) }
+                    if !summary.projects.isEmpty { section("Projects", rows: summary.projects.map { "\(FleetProjectLabel.display($0.project, repo: $0.repo))  \(value($0.bucket))" }) }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+            if let quotaSummary = store.quotaSummary {
+                quotaCard(quotaSummary)
+            }
             VStack(spacing: 8) {
                 Image(systemName: "chart.bar.xaxis").font(.title2)
                 Text("Usage \(summary.state.rawValue)").font(.headline)
@@ -788,16 +807,19 @@ private struct FleetUsageView: View {
     }
 
     @ViewBuilder private func dashboardBody(_ dash: FleetUsageDashboardResult) -> some View {
-        if let quotaSummary = store.quotaSummary {
-            quotaCard(quotaSummary)
-        }
-
-        if let total = dash.totals {
-            totalsHero(total)
-        }
-
+        // The quota card and the hero scroll with the rest: see the note in
+        // `usage(_:)`. Kept outside, they consumed roughly half a 720pt panel
+        // and left the weekly trend and every breakdown unreachable.
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if let quotaSummary = store.quotaSummary {
+                    quotaCard(quotaSummary)
+                }
+
+                if let total = dash.totals {
+                    totalsHero(total)
+                }
+
                 // Forecast card
                 if let f = dash.forecast {
                     forecastCard(f)
@@ -816,8 +838,8 @@ private struct FleetUsageView: View {
                 // Dimension breakdowns
                 if !dash.providers.isEmpty { section("Providers", rows: dash.providers.map { "\($0.provider.capitalized)  \(value($0.bucket))" }) }
                 if !dash.models.isEmpty { section("Models", rows: dash.models.map { "\($0.model)  \(value($0.bucket))" }) }
-                if !dash.projects.isEmpty { section("Projects", rows: dash.projects.map { "\($0.repo ?? $0.project)  \(value($0.bucket))" }) }
-                if !dash.sessions.isEmpty { section("Sessions", rows: dash.sessions.map { "\($0.provider):\($0.project)  \(value($0.bucket))" }) }
+                if !dash.projects.isEmpty { section("Projects", rows: dash.projects.map { "\(FleetProjectLabel.display($0.project, repo: $0.repo))  \(value($0.bucket))" }) }
+                if !dash.sessions.isEmpty { section("Sessions", rows: dash.sessions.map { "\($0.provider)  \(FleetProjectLabel.display($0.project, repo: nil))  \(value($0.bucket))" }) }
                 if !dash.branches.isEmpty { section("Branches", rows: dash.branches.map { "\($0.branch)  \(value($0.bucket))" }) }
                 if !dash.tools.isEmpty { namedSection("Tools", rows: dash.tools) }
                 if !dash.mcpServers.isEmpty { namedSection("MCP Servers", rows: dash.mcpServers) }
@@ -832,7 +854,9 @@ private struct FleetUsageView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Shared components
@@ -996,7 +1020,7 @@ private struct FleetUsageView: View {
                 HStack {
                     Text(row.name).font(.caption)
                     Spacer()
-                    Text("\(row.callCount) calls").font(.caption).foregroundStyle(FleetNotchPalette.muted)
+                    Text(callCount(row.callCount)).font(.caption).foregroundStyle(FleetNotchPalette.muted)
                 }
             }
         }
@@ -1005,12 +1029,49 @@ private struct FleetUsageView: View {
         .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
+    private func callCount(_ count: UInt64) -> String {
+        "\(count.formatted(.number)) \(count == 1 ? "call" : "calls")"
+    }
+
     private func value(_ bucket: FleetUsageBucket) -> String {
         bucket.costUSD.map(currency) ?? tokens(bucket.totalTokens)
     }
 
     private func currency(_ value: Double) -> String { String(format: "$%.2f", value) }
     private func tokens(_ value: UInt64) -> String { value.formatted(.number.notation(.compactName)) + " tokens" }
+}
+
+/// Turns the scanner's project key into something readable in a narrow panel.
+///
+/// That key is the project's absolute path with the separators mangled to
+/// dashes, so it arrives looking like
+/// `Users-someone-.agents-in-a-box-worktrees-by-name-proj--f-thing--96da95da`.
+/// Rendered raw it is unreadable at panel width, every row shares a long
+/// identical prefix, and it puts the operator's username and whole directory
+/// layout on screen.
+///
+/// The client knows its OWN home directory, so it can mangle that the same way
+/// and strip it. What remains is the part that actually distinguishes one
+/// project from another. This is presentation only: the wire still carries the
+/// full key, which is tracked separately.
+enum FleetProjectLabel {
+    static func display(_ project: String, repo: String?, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String {
+        if let repo, !repo.isEmpty { return repo }
+
+        var text = project
+        // The mangled home, with and without the leading separator, longest first
+        // so the more specific prefix wins.
+        let mangledHome = home.path.replacingOccurrences(of: "/", with: "-")
+        for prefix in [mangledHome, String(mangledHome.dropFirst())].sorted(by: { $0.count > $1.count }) {
+            guard !prefix.isEmpty else { continue }
+            if text.hasPrefix(prefix) {
+                text.removeFirst(prefix.count)
+                break
+            }
+        }
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        return text.isEmpty ? project : text
+    }
 }
 
 /// Arranges flat daily cells into contribution-graph columns.
@@ -1042,6 +1103,15 @@ enum FleetHeatmapLayout {
         return formatter
     }()
 
+    /// Columns for a CONTINUOUS run of weeks, not just the weeks that have data.
+    ///
+    /// The daemon ships a sparse heatmap: only days with calls appear. Emitting
+    /// one column per populated week silently deletes idle time, so a real
+    /// two-month gap in this corpus (twelve absent weeks across November and
+    /// December) rendered as adjacent columns and read like unbroken activity.
+    /// The x-axis has to be a calendar for the grid to mean anything, so every
+    /// week between the first and last observed one gets a column, populated or
+    /// not.
     static func weekColumns(_ cells: [FleetHeatmapCell]) -> [Week] {
         var buckets: [Date: [Int: FleetHeatmapCell]] = [:]
         for cell in cells {
@@ -1050,17 +1120,26 @@ enum FleetHeatmapLayout {
             let weekday = calendar.component(.weekday, from: date)
             let row = (weekday + 5) % 7
             guard let monday = calendar.date(byAdding: .day, value: -row, to: date) else { continue }
-            let key = calendar.startOfDay(for: monday)
-            buckets[key, default: [:]][row] = cell
+            buckets[calendar.startOfDay(for: monday), default: [:]][row] = cell
         }
-        return buckets.keys.sorted().map { monday in
+        guard let first = buckets.keys.min(), let last = buckets.keys.max() else { return [] }
+
+        var weeks: [Week] = []
+        var monday = first
+        // Bounded by the wire cap so a malformed payload cannot spin here.
+        while monday <= last, weeks.count < FleetHeatmapLayout.maxWeeks {
             let byRow = buckets[monday] ?? [:]
-            return Week(
-                weekStart: formatter.string(from: monday),
-                days: (0..<7).map { byRow[$0] }
+            weeks.append(
+                Week(weekStart: formatter.string(from: monday), days: (0..<7).map { byRow[$0] })
             )
+            guard let next = calendar.date(byAdding: .day, value: 7, to: monday) else { break }
+            monday = next
         }
+        return weeks
     }
+
+    /// Matches the daemon's 53-week window.
+    static let maxWeeks = 53
 }
 
 private struct FleetRuntimeSettingsView: View {
