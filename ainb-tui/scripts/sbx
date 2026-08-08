@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# sbx - run a fully sandboxed ainb stack (hangar daemon + notifyd + Claude session)
+# that cannot clash with the developer's live one.
+#
+# WHY THIS EXISTS
+# ---------------
+# On 2026-08-08 an end-to-end interview test against the live stack went wrong in
+# four separate ways. Each is now designed out here:
+#
+#   1. A leftover watchdog SIGKILLed every ppid==1 hangar daemon every ~121s.
+#      -> sbx names every process it starts and only ever kills by exact PID.
+#   2. `ainb notifyd restart` reaped the developer's REAL notifyd, because the
+#      reap enumerates every user/home but resolves "live" from one home.
+#      -> sbx NEVER calls `notifyd restart`. It spawns directly and stops by PID.
+#   3. `AINB_HANGAR_HOME=... claude` did NOT reach the hook subprocess, so hook
+#      events landed in the developer's real home.
+#      -> the home is baked INTO the hook command in a sandbox-local
+#         .claude/settings.json, not inherited through the environment.
+#   4. A long home path broke the Unix socket (SUN_LEN is 104 bytes) and the
+#      daemon logged `hangar rpc bind failed`.
+#      -> SBX_HOME is deliberately short and length-checked.
+#
+# Also: AINB_CODEX_MANAGED=0 everywhere, because the codex reaper scans the whole
+# process table and would SIGKILL the developer's codex app-servers.
+
+set -uo pipefail
+
+SBX_HOME="${SBX_HOME:-/tmp/sbx}"
+SBX_WORK="${SBX_WORK:-/tmp/sbxwork}"
+TMUX_PREFIX="sbx-"
+
+# Resolve the branch binaries. Override with SBX_BIN_DIR.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_DIR="${SBX_BIN_DIR:-$REPO_ROOT/target/debug}"
+AINB="$BIN_DIR/ainb"
+
+die() { echo "sbx: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+# --- guards -----------------------------------------------------------------
+guard() {
+  local real="$HOME/.agents-in-a-box"
+  [ "$SBX_HOME" = "$real" ] && die "refusing to use the REAL home ($real)"
+  case "$SBX_HOME" in "$real"/*) die "refusing to nest inside the real home";; esac
+  # SUN_LEN: the socket path is <home>/hangar.sock and must stay under 104 bytes.
+  local slen=$(( ${#SBX_HOME} + 12 ))
+  [ "$slen" -ge 100 ] && die "SBX_HOME too long ($slen bytes with socket) - Unix sockets cap at 104"
+  [ -x "$AINB" ] || die "no ainb binary at $AINB (build first: cargo build -p ainb --bin ainb)"
+}
+
+sbx_env() { echo "AINB_HANGAR_HOME=$SBX_HOME AINB_CODEX_MANAGED=0"; }
+
+# --- the sandbox project ----------------------------------------------------
+# Hooks resolve their home from THEIR OWN env, which a parent export does not
+# reach. Baking it into the command is the only reliable route.
+write_settings() {
+  mkdir -p "$SBX_WORK/.claude"
+  local hook="AINB_HANGAR_HOME=$SBX_HOME AINB_AGENT=claude \${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh"
+  local ev
+  {
+    echo '{'
+    echo '  "hooks": {'
+    local first=1
+    for ev in SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop MessageDisplay; do
+      [ $first -eq 0 ] && echo ','
+      first=0
+      printf '    "%s": [{"matcher": "", "hooks": [{"type": "command", "command": "%s", "timeout": 3600}]}]' "$ev" "$hook"
+    done
+    echo
+    echo '  }'
+    echo '}'
+  } > "$SBX_WORK/.claude/settings.json"
+}
+
+# --- commands ---------------------------------------------------------------
+cmd_up() {
+  guard
+  mkdir -p "$SBX_HOME/hangar/logs" "$SBX_WORK"
+  # Fresh DB on purpose: a snapshot of the live DB carries sibling-branch
+  # migrations (80, 81) whose files this branch does not have, and sqlx then
+  # refuses to open it. A fresh DB is built from THIS branch's migrations only.
+  [ -d "$SBX_WORK/.git" ] || { git -C "$SBX_WORK" init -q; : > "$SBX_WORK/README.md"; }
+  write_settings
+
+  info "home    $SBX_HOME"
+  info "project $SBX_WORK"
+  env $(sbx_env) "$AINB" hangar daemon start 2>&1 | sed 's/^/  /'
+  # notifyd: spawn directly, never `restart` (see header note 2).
+  if [ ! -S "$SBX_HOME/notify.sock" ]; then
+    env $(sbx_env) nohup "$AINB" notifyd run >"$SBX_HOME/hangar/logs/notifyd.log" 2>&1 &
+    echo $! > "$SBX_HOME/notifyd.sbxpid"
+    sleep 3
+    info "notifyd pid $(cat "$SBX_HOME/notifyd.sbxpid")"
+  fi
+  cmd_status
+}
+
+cmd_status() {
+  guard
+  local dpid npid
+  dpid=$(cat "$SBX_HOME/hangar/daemon.pid" 2>/dev/null | tr -d '[:space:]')
+  npid=$(cat "$SBX_HOME/notifyd.sbxpid" 2>/dev/null | tr -d '[:space:]')
+  printf '  %-14s %s\n' "hangar daemon" "$( [ -n "$dpid" ] && ps -p "$dpid" >/dev/null 2>&1 && echo "running ($dpid)" || echo "stopped")"
+  printf '  %-14s %s\n' "notifyd"       "$( [ -n "$npid" ] && ps -p "$npid" >/dev/null 2>&1 && echo "running ($npid)" || echo "stopped")"
+  for s in hangar notify approve; do
+    printf '  %-14s %s\n' "$s.sock" "$( [ -S "$SBX_HOME/$s.sock" ] && echo bound || echo absent)"
+  done
+  printf '  %-14s %s\n' "tmux" "$(tmux ls 2>/dev/null | grep -c "^${TMUX_PREFIX}") session(s)"
+}
+
+cmd_down() {
+  guard
+  local dpid npid
+  dpid=$(cat "$SBX_HOME/hangar/daemon.pid" 2>/dev/null | tr -d '[:space:]')
+  npid=$(cat "$SBX_HOME/notifyd.sbxpid" 2>/dev/null | tr -d '[:space:]')
+  # Exact PIDs only. Never pkill/killall - that is how the real notifyd died.
+  [ -n "$dpid" ] && kill "$dpid" 2>/dev/null && info "stopped daemon $dpid"
+  [ -n "$npid" ] && kill "$npid" 2>/dev/null && info "stopped notifyd $npid"
+  tmux ls 2>/dev/null | grep "^${TMUX_PREFIX}" | cut -d: -f1 | while read -r s; do
+    tmux kill-session -t "$s" && info "killed tmux $s"   # exact name, never a wildcard
+  done
+  sleep 1
+  rm -rf "$SBX_HOME" "$SBX_WORK"
+  info "removed $SBX_HOME and $SBX_WORK"
+}
+
+cmd_claude() {
+  guard
+  local name="${TMUX_PREFIX}claude"
+  tmux kill-session -t "$name" 2>/dev/null
+  tmux new-session -d -s "$name" -x 200 -y 50 -c "$SBX_WORK"
+  tmux send-keys -t "$name" -l "cd $SBX_WORK && $(sbx_env) claude"
+  tmux send-keys -t "$name" C-m
+  info "claude starting in tmux session: $name"
+  info "attach with: tmux attach -t $name"
+}
+
+# Fire an interview and assert it reaches the sandbox Fleet.
+cmd_interview() {
+  guard
+  local marker="${1:-SBX-$$}"
+  local name="${TMUX_PREFIX}claude"
+  tmux has-session -t "$name" 2>/dev/null || die "no sandbox claude session; run: sbx claude"
+  tmux send-keys -t "$name" -l "Call AskUserQuestion right now with exactly one question: header $marker, question text 'sandbox route? $marker', options 'Alpha' and 'Bravo'. Nothing else afterwards."
+  sleep 1; tmux send-keys -t "$name" C-m
+  info "fired $marker, waiting for it to reach Fleet..."
+  local n=0
+  while [ $n -lt 30 ]; do
+    sleep 5; n=$((n+1))
+    if sqlite3 -readonly "$SBX_HOME/hangar.db" \
+        "SELECT 1 FROM attention WHERE payload LIKE '%$marker%' AND kind='ask_user_question' LIMIT 1;" 2>/dev/null | grep -q 1; then
+      echo "  PASS  card raised in sandbox Fleet after $((n*5))s"
+      env $(sbx_env) "$AINB" fleet needs --format json 2>/dev/null \
+        | grep -o "\"question\":[^,]*$marker[^,]*" | head -1
+      return 0
+    fi
+    # Capture the VISIBLE screen only - scrollback holds old answers and gives
+    # false positives (learned the hard way).
+    tmux capture-pane -p -t "$name" 2>/dev/null | grep -q 'Enter to select' && {
+      echo "  FAIL  native picker opened - Fleet did not hold the interview"; return 1; }
+  done
+  echo "  FAIL  card never reached Fleet in 150s"; return 1
+}
+
+cmd_tui() {
+  guard
+  local name="${TMUX_PREFIX}tui"
+  tmux kill-session -t "$name" 2>/dev/null
+  tmux new-session -d -s "$name" -x 210 -y 52
+  tmux send-keys -t "$name" -l "$(sbx_env) $AINB tui"
+  tmux send-keys -t "$name" C-m
+  info "sandbox TUI in tmux session: $name (attach: tmux attach -t $name)"
+}
+
+# The macOS Fleet app reads AINB_HANGAR_HOME from its own environment
+# (Sources/FleetRPC/HangarLocation.swift) and derives hangar.sock from it.
+# Finder/`open` cannot pass env, so launch the bundle executable directly.
+# AINB_FLEET_TEST_ISOLATE_DEFAULTS=1 keeps the sandbox instance from writing the
+# real app's UserDefaults - without it the two instances share preferences.
+cmd_macos() {
+  guard
+  local app="${SBX_MACOS_APP:-$REPO_ROOT/../apps/ainb-fleet-macos/build/Debug/AINBFleet.app}"
+  local exe="$app/Contents/MacOS/AINBFleet"
+  [ -x "$exe" ] || die "no app binary at $exe
+  build it first:
+    xcodebuild -project apps/ainb-fleet-macos/AINBFleet.xcodeproj \\
+      -scheme AINBFleet -configuration Debug build CODE_SIGNING_ALLOWED=NO
+  or set SBX_MACOS_APP=/path/to/AINBFleet.app"
+  info "launching Fleet app against $SBX_HOME"
+  env $(sbx_env) AINB_FLEET_TEST_ISOLATE_DEFAULTS=1 "$exe" \
+    >"$SBX_HOME/hangar/logs/macos-app.log" 2>&1 &
+  echo $! > "$SBX_HOME/macos.sbxpid"
+  info "pid $(cat "$SBX_HOME/macos.sbxpid") (log: $SBX_HOME/hangar/logs/macos-app.log)"
+  info "it will talk to $SBX_HOME/hangar.sock, never the real one"
+}
+
+case "${1:-}" in
+  up)        cmd_up ;;
+  down)      cmd_down ;;
+  status)    cmd_status ;;
+  claude)    cmd_claude ;;
+  tui)       cmd_tui ;;
+  macos)     cmd_macos ;;
+  interview) shift; cmd_interview "$@" ;;
+  *) cat <<EOF
+sbx - sandboxed ainb stack that cannot clash with your live one
+
+  sbx up                 start sandbox daemon + notifyd on \$SBX_HOME
+  sbx claude             launch a sandboxed Claude session in tmux
+  sbx tui                launch the sandbox ainb TUI in tmux
+  sbx macos              launch the macOS Fleet app against the sandbox
+  sbx interview [MARKER] fire an interview, assert it reaches sandbox Fleet
+  sbx status             show what is running
+  sbx down               stop everything (exact PIDs only) and remove the home
+
+env: SBX_HOME=$SBX_HOME  SBX_WORK=$SBX_WORK  SBX_BIN_DIR=$BIN_DIR
+EOF
+    ;;
+esac
