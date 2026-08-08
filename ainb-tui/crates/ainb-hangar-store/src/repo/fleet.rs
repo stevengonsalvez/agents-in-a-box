@@ -6,7 +6,92 @@
 //! groups keep separate authority and timestamps so an inferred tmux sample
 //! cannot replace an authoritative provider or hook value.
 
+use std::future::Future;
+use std::time::Duration;
+
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+
+/// The BEGIN statement every write transaction in this module opens with.
+///
+/// `SQLite`'s default `BEGIN` is DEFERRED: it takes no lock until the first
+/// statement. Every apply here READS before it WRITES — it must see the prior
+/// event and the current session row to decide what to write — so a deferred
+/// begin takes a read SNAPSHOT first and the later INSERT has to upgrade it. If
+/// any other connection commits in that window the upgrade fails with
+/// `SQLITE_BUSY` (5) or `SQLITE_BUSY_SNAPSHOT` (517), and `busy_timeout` does
+/// **not** cover either: the busy handler is deliberately never invoked while
+/// upgrading a read transaction, because waiting there could deadlock. The only
+/// valid response is rollback-and-retry — the same mechanism
+/// [`BoardRepo::auto_move_on_state`](crate::repo::board::BoardRepo::auto_move_on_state)
+/// documents at length and [`crate::service::pull`] states generically.
+///
+/// This path is where it bit hardest. The daemon's tmux reconciler, hook ingest
+/// and provider pollers all drive [`FleetRepo::apply_event`] against one pool,
+/// so under load most applies lost the race; the caller then saw the session
+/// state unchanged and re-enqueued the same observation, which is a
+/// self-sustaining write storm (`fleet hook reduce failed` and hundreds of
+/// `database is locked` lines per daemon log).
+///
+/// `BEGIN IMMEDIATE` takes the write lock at BEGIN, so there is no snapshot to
+/// invalidate and ordinary contention IS covered by the pool's 10s
+/// `busy_timeout`.
+const IMMEDIATE_TRANSACTION: &str = "BEGIN IMMEDIATE";
+
+/// How many times a write transaction is replayed before its error escapes.
+///
+/// Belt and braces to [`IMMEDIATE_TRANSACTION`]: taking the lock up front makes
+/// the busy handler apply, and this covers the residue where even a 10s
+/// `busy_timeout` expires. Five attempts spend under 100ms of backoff.
+const WRITE_LOCK_ATTEMPTS: u32 = 5;
+
+/// Run one write transaction, replaying it while `SQLite` reports lock
+/// contention.
+///
+/// `attempt_once` must be self-contained (begin, write, commit): a rolled-back
+/// transaction's reads are void, so a retry has to redo them, not just the write.
+async fn with_write_lock_retry<F, Fut, T>(mut attempt_once: F) -> Result<T, FleetRepoError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, FleetRepoError>>,
+{
+    let mut attempts: u32 = 0;
+    loop {
+        let outcome = attempt_once().await;
+        let Err(FleetRepoError::Sql(error)) = &outcome else {
+            return outcome;
+        };
+        attempts += 1;
+        if attempts >= WRITE_LOCK_ATTEMPTS || !is_lock_contention(error) {
+            return outcome;
+        }
+        tokio::time::sleep(retry_backoff(attempts)).await;
+    }
+}
+
+/// Whether an error is transient lock contention rather than a real fault.
+///
+/// Matches on the EXTENDED result code sqlx surfaces: 5 `SQLITE_BUSY`,
+/// 6 `SQLITE_LOCKED`, 261 `SQLITE_BUSY_RECOVERY`, 262 `SQLITE_LOCKED_SHAREDCACHE`,
+/// 517 `SQLITE_BUSY_SNAPSHOT`. Everything else — constraint violations, decode
+/// faults, corruption — must surface unchanged on the first attempt.
+fn is_lock_contention(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    let Some(code) = database.code() else {
+        return false;
+    };
+    matches!(code.as_ref(), "5" | "6" | "261" | "262" | "517")
+}
+
+/// Jittered backoff before replaying a rolled-back write.
+///
+/// Doubles from 2ms; the jitter is what stops two contending daemon loops
+/// re-colliding in lockstep on every attempt.
+fn retry_backoff(attempt: u32) -> Duration {
+    let base_ms = 1_u64 << attempt.min(5);
+    Duration::from_millis(base_ms + rand::random::<u64>() % base_ms)
+}
 
 /// Authority of one normalized observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,7 +458,22 @@ impl FleetRepo {
         event: &NewFleetEvent,
         expected_version: Option<i64>,
     ) -> Result<ApplyFleetEventResult, FleetRepoError> {
-        let mut tx = pool.begin().await?;
+        with_write_lock_retry(move || Self::apply_event_committed(pool, event, expected_version))
+            .await
+    }
+
+    /// One IMMEDIATE transaction around [`Self::apply_event_in_tx`].
+    ///
+    /// The write lock is taken at BEGIN, before the first SELECT, so this
+    /// transaction has no read snapshot to invalidate — see
+    /// [`IMMEDIATE_TRANSACTION`] for why a DEFERRED begin here was the engine of
+    /// the daemon's write storm.
+    async fn apply_event_committed(
+        pool: &SqlitePool,
+        event: &NewFleetEvent,
+        expected_version: Option<i64>,
+    ) -> Result<ApplyFleetEventResult, FleetRepoError> {
+        let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
         let result = Self::apply_event_in_tx(&mut tx, event, expected_version).await?;
         tx.commit().await?;
         Ok(result)
@@ -388,6 +488,22 @@ impl FleetRepo {
     /// (`repo/fleet_acp_session.rs`), and a crash between two separate
     /// transactions would leave either a Fleet session no pool can drive or an
     /// ACP row the snapshot cannot see.
+    ///
+    /// # Caller contract: the transaction must already hold the write lock
+    ///
+    /// This function READS (`event_by_id`, `session_by_key_tx`) before it
+    /// WRITES. A caller that hands it a DEFERRED transaction with no prior write
+    /// makes those reads take a snapshot that the later INSERT must upgrade,
+    /// which `SQLite` refuses with `SQLITE_BUSY`/`SQLITE_BUSY_SNAPSHOT` the
+    /// moment any other connection commits in the window — uncovered by
+    /// `busy_timeout`, see [`IMMEDIATE_TRANSACTION`]. Callers must therefore
+    /// open with [`IMMEDIATE_TRANSACTION`] **or** issue their own write first.
+    ///
+    /// [`FleetAcpSessionRepo::insert_with_fleet_session`](crate::repo::fleet_acp_session::FleetAcpSessionRepo::insert_with_fleet_session)
+    /// satisfies the contract the second way: its transaction's FIRST statement
+    /// is the `fleet_acp_session` INSERT, so the write lock is already held by
+    /// the time this runs and there is no snapshot to upgrade. That is why it is
+    /// left on a plain `begin()` rather than converted here.
     pub(crate) async fn apply_event_in_tx(
         tx: &mut Transaction<'_, Sqlite>,
         event: &NewFleetEvent,
@@ -488,8 +604,27 @@ impl FleetRepo {
         managed_key: &str,
         observed_at: i64,
     ) -> Result<Option<i64>, FleetRepoError> {
+        with_write_lock_retry(move || {
+            Self::supersede_session_committed(pool, legacy_key, managed_key, observed_at)
+        })
+        .await
+    }
+
+    /// One IMMEDIATE transaction performing the supersession.
+    ///
+    /// Same read-then-upgrade shape as [`Self::apply_event_committed`] — it
+    /// reads the prior event and both sessions' rows before it writes — so it
+    /// takes the write lock at BEGIN for the same reason. Replaying it is safe:
+    /// the `event_id` is derived from the two keys, so a retry after a rollback
+    /// re-runs the identical guards and inserts the same single event.
+    async fn supersede_session_committed(
+        pool: &SqlitePool,
+        legacy_key: &str,
+        managed_key: &str,
+        observed_at: i64,
+    ) -> Result<Option<i64>, FleetRepoError> {
         let event_id = format!("fleet-supersede:{legacy_key}:{managed_key}");
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
         if let Some(prior) = event_by_id(&mut tx, &event_id).await? {
             tx.commit().await?;
             return Ok(Some(prior.revision));
@@ -1653,5 +1788,152 @@ mod tests {
             projection.sessions[0].current_request.as_ref().unwrap()["request"],
             "current"
         );
+    }
+
+    /// Two concurrent writers on ONE `Store` must never surface a lock error.
+    ///
+    /// This is the daemon's real shape: the tmux reconciler, the hook ingest and
+    /// the provider poller all call [`FleetRepo::apply_event`] on the same pool
+    /// for different sessions. With a DEFERRED `BEGIN` this test fails within a
+    /// few dozen iterations with `(code: 517) database is locked` —
+    /// `SQLITE_BUSY_SNAPSHOT`, raised when the sibling commits between this
+    /// transaction's first SELECT and its first write, and NOT covered by
+    /// `busy_timeout`. Every such failure is a dropped fleet event in production.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_never_surface_a_lock_error() {
+        /// Enough loops that the read-to-write window is crossed by the sibling
+        /// many times over; the deferred version fails long before the end.
+        const ITERATIONS: i64 = 150;
+
+        let (_dir, store) = store().await;
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let pool = store.pool().clone();
+                tokio::spawn(async move {
+                    let mut errors = Vec::new();
+                    for i in 0..ITERATIONS {
+                        let lifecycle = if i % 2 == 0 { "RUNNING" } else { "IDLE" };
+                        let input = event(
+                            &format!("e-{writer}-{i}"),
+                            &format!("claude:contended-{writer}"),
+                            100 + i,
+                            ObservationAuthority::Authoritative,
+                            FleetSessionPatch {
+                                provider: Some("claude".to_string()),
+                                lifecycle_state: Some(lifecycle.to_string()),
+                                ..FleetSessionPatch::default()
+                            },
+                        );
+                        if let Err(error) = FleetRepo::apply_event(&pool, &input).await {
+                            errors.push(format!("writer {writer} iteration {i}: {error}"));
+                        }
+                    }
+                    errors
+                })
+            })
+            .collect();
+
+        let mut errors = Vec::new();
+        for writer in writers {
+            errors.extend(writer.await.unwrap());
+        }
+        assert!(
+            errors.is_empty(),
+            "{} of {} concurrent applies failed: {errors:#?}",
+            errors.len(),
+            ITERATIONS * 2
+        );
+
+        // The writes really landed: no silent no-op run that would pass trivially.
+        for writer in 0..2 {
+            let events =
+                FleetRepo::events_for_session(store.pool(), &format!("claude:contended-{writer}"))
+                    .await
+                    .unwrap();
+            assert_eq!(events.len(), usize::try_from(ITERATIONS).unwrap());
+        }
+    }
+
+    /// A `SQLite` error carrying one extended result code, so the retry ladder
+    /// is testable without racing a real database into a lock it no longer takes.
+    #[derive(Debug)]
+    struct CodedError(&'static str);
+
+    impl std::fmt::Display for CodedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "(code: {}) database is locked", self.0)
+        }
+    }
+
+    impl std::error::Error for CodedError {}
+
+    impl sqlx::error::DatabaseError for CodedError {
+        fn message(&self) -> &str {
+            "database is locked"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    fn coded(code: &'static str) -> FleetRepoError {
+        FleetRepoError::Sql(sqlx::Error::Database(Box::new(CodedError(code))))
+    }
+
+    #[tokio::test]
+    async fn write_lock_retry_replays_contention_then_gives_up() {
+        for code in ["5", "6", "261", "262", "517"] {
+            let mut attempts = 0_u32;
+            let outcome: Result<(), _> = with_write_lock_retry(|| {
+                attempts += 1;
+                async move { Err(coded(code)) }
+            })
+            .await;
+            assert_eq!(
+                attempts, WRITE_LOCK_ATTEMPTS,
+                "code {code} must be replayed"
+            );
+            assert!(outcome.is_err(), "the last error still escapes");
+        }
+    }
+
+    #[tokio::test]
+    async fn write_lock_retry_stops_on_the_first_success_and_never_replays_a_real_fault() {
+        let mut attempts = 0_u32;
+        let recovered = with_write_lock_retry(|| {
+            attempts += 1;
+            let contended = attempts < 3;
+            async move {
+                if contended {
+                    Err(coded("517"))
+                } else {
+                    Ok(attempts)
+                }
+            }
+        })
+        .await;
+        assert_eq!(recovered.unwrap(), 3, "the third attempt commits");
+
+        // A constraint violation is a bug, not contention: it must surface at once.
+        let mut faults = 0_u32;
+        let outcome: Result<(), _> = with_write_lock_retry(|| {
+            faults += 1;
+            async move { Err(coded("1555")) }
+        })
+        .await;
+        assert_eq!(faults, 1, "a non-lock error is never replayed");
+        assert!(outcome.is_err());
     }
 }
