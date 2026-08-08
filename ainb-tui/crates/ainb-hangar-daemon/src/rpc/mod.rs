@@ -1701,6 +1701,38 @@ async fn message_send_inner(
         return Err(invalid_params("targets must name at least one session"));
     }
 
+    // A supplied scope must be CONSISTENT with the recipients it claims to
+    // address. Without this, `--target session:B --scope session:A` prompts B
+    // while filing the message in A's timeline: cross-session contamination
+    // from caller-controlled input, not a routing preference. The grammar is
+    // the plan's (Scope + threading rules) and this fails CLOSED, so the
+    // channel scopes part 2 mints have to be allowed here deliberately.
+    if let Some(scope) = params.scope_key.as_deref().map(str::trim) {
+        if let Some(named) = scope.strip_prefix("session:") {
+            if targets.len() > 1 {
+                return Err(invalid_params(
+                    "a session scope cannot carry a multi-target send; omit scope_key and the \
+                     daemon mints the broadcast scope",
+                ));
+            }
+            if !targets.iter().any(|target| target == named) {
+                return Err(invalid_params(
+                    "scope_key names a session that is not a recipient of this send",
+                ));
+            }
+        } else if scope.strip_prefix("broadcast:").is_some() {
+            if targets.len() < 2 {
+                return Err(invalid_params(
+                    "a broadcast scope needs more than one recipient",
+                ));
+            }
+        } else {
+            return Err(invalid_params(
+                "scope_key must be `session:<recipient>` or `broadcast:<id>`",
+            ));
+        }
+    }
+
     // The fingerprint hashes the REQUEST as the client wrote it, so a retry
     // that omits scope_key (and would mint a fresh broadcast ulid) still
     // replays instead of being rejected as a different message.
