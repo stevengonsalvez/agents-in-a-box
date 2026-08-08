@@ -493,6 +493,16 @@ const MAX_TAIL_ROWS: usize = 320;
 /// byte ceiling is the point.
 const MAX_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Ceiling on the grow-and-retry when a single row does not fit
+/// [`MAX_TAIL_BYTES`].
+///
+/// Returning no rows is worse than reading more: every probe in this module
+/// goes blind, so a session blocked on an AskUserQuestion silently stops
+/// appearing in `ainb fleet needs`. Escalating trades that for a bounded read.
+/// Still far below the 137 MB transcripts this function exists to avoid
+/// slurping, so the guarantee it was written for survives.
+const MAX_TAIL_ESCALATION_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The last `max_rows` complete lines of `path`, read from the END.
 ///
 /// Every consumer in this module walks backward from the newest row and stops
@@ -510,25 +520,49 @@ fn read_tail_lines(path: &Path, max_rows: usize) -> Option<Vec<String>> {
 
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.seek(SeekFrom::End(0)).ok()?;
-    let want = len.min(MAX_TAIL_BYTES);
-    let mut buf = vec![0u8; usize::try_from(want).ok()?];
-    file.seek(SeekFrom::Start(len - want)).ok()?;
-    file.read_exact(&mut buf).ok()?;
+    let mut want = len.min(MAX_TAIL_BYTES);
 
-    // Assemble the whole window before decoding: a backward seek can land inside
-    // a multi-byte char, and slicing bytes as UTF-8 would panic. `from_utf8_lossy`
-    // over the complete buffer confines any damage to the leading fragment, which
-    // the `started_mid_file` trim then drops anyway.
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let started_mid_file = want < len;
-    if started_mid_file && !lines.is_empty() {
-        lines.drain(..1);
+    loop {
+        let start = len - want;
+        let mut buf = vec![0u8; usize::try_from(want).ok()?];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+
+        // Ask the file whether we landed on a row boundary instead of assuming we
+        // did not. Guessing costs a real row: a window that happens to begin
+        // exactly after a newline has a COMPLETE first line, and dropping it
+        // silently discards the oldest row of the lookback.
+        let opened_on_boundary = start == 0 || {
+            let mut prev = [0u8; 1];
+            file.seek(SeekFrom::Start(start - 1)).ok()?;
+            file.read_exact(&mut prev).ok()?;
+            prev[0] == b'\n'
+        };
+
+        // Assemble the whole window before decoding: a backward seek can land
+        // inside a multi-byte char, and slicing bytes as UTF-8 would panic.
+        // `from_utf8_lossy` over the complete buffer confines any damage to the
+        // leading fragment, which the trim below then drops anyway.
+        let text = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        if !opened_on_boundary && !lines.is_empty() {
+            lines.drain(..1);
+        }
+
+        // A single row can exceed the whole window — a tool_result carrying a big
+        // file read or base64 image. Then the window holds one fragment, the trim
+        // empties it, and every probe goes blind: an open AskUserQuestion emitted
+        // just before such a row would never raise its badge. Grow and retry
+        // rather than report "no rows", but stay bounded, because the entire point
+        // of this function is that a 137 MB transcript is never read whole.
+        if !lines.is_empty() || want == len || want >= MAX_TAIL_ESCALATION_BYTES {
+            if lines.len() > max_rows {
+                lines.drain(..lines.len() - max_rows);
+            }
+            return Some(lines);
+        }
+        want = want.saturating_mul(4).min(len).min(MAX_TAIL_ESCALATION_BYTES);
     }
-    if lines.len() > max_rows {
-        lines.drain(..lines.len() - max_rows);
-    }
-    Some(lines)
 }
 
 /// Fallback ERR detection from the transcript. Reverse-scans the newest
@@ -910,6 +944,67 @@ mod tests {
                 serde_json::from_str::<Value>(row)
                     .expect("every returned row must be a COMPLETE line, never a fragment");
             }
+        });
+    }
+
+    /// A row bigger than the whole window must not blind the probe.
+    ///
+    /// The window holds one fragment of that row, the mid-file trim empties it,
+    /// and every caller returns None — so a session blocked on an ask emitted
+    /// just before a huge tool_result silently vanishes from `ainb fleet needs`.
+    #[test]
+    fn a_row_larger_than_the_window_still_yields_the_newest_rows() {
+        let mut rows: Vec<String> = (0..5)
+            .map(|i| format!(r#"{{"n":{i},"pad":"{}"}}"#, "x".repeat(512 * 1024)))
+            .collect();
+        // The newest row on its own is bigger than MAX_TAIL_BYTES.
+        rows.push(format!(
+            r#"{{"n":"huge","pad":"{}"}}"#,
+            "y".repeat(5 * 1024 * 1024)
+        ));
+        with_transcript("oversized", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            assert!(
+                !tail.is_empty(),
+                "an oversized newest row must not blind the probe"
+            );
+            let newest: Value = serde_json::from_str(tail.last().unwrap())
+                .expect("the newest row must come back COMPLETE, not as a fragment");
+            assert_eq!(newest["n"], "huge");
+        });
+    }
+
+    /// A window that opens exactly after a newline has a COMPLETE first row.
+    /// Dropping it on the assumption that it is a fragment silently loses the
+    /// oldest row of the lookback.
+    #[test]
+    fn a_window_opening_on_a_row_boundary_keeps_its_first_row() {
+        // Rows sized so the 4 MiB window lands exactly on a newline: each row is
+        // exactly 65_536 bytes including its newline, so 4 MiB tiles into 64 of
+        // them. Scaffolding measured rather than hardcoded.
+        const ROW: usize = 65_536;
+        // Zero-padded so every row is the same width; quoted because JSON has no
+        // leading zeros.
+        let scaffold = format!(r#"{{"i":"{:03}","p":""}}"#, 0).len();
+        let body = "z".repeat(ROW - 1 - scaffold);
+        let rows: Vec<String> =
+            (0..80).map(|i| format!(r#"{{"i":"{i:03}","p":"{body}"}}"#)).collect();
+        assert_eq!(
+            rows[0].len() + 1,
+            ROW,
+            "fixture must tile the window exactly"
+        );
+        with_transcript("boundary", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            for row in &tail {
+                serde_json::from_str::<Value>(row)
+                    .expect("every row must be complete, including the first");
+            }
+            assert_eq!(
+                tail.len(),
+                64,
+                "a boundary-aligned window loses no row to the trim"
+            );
         });
     }
 
