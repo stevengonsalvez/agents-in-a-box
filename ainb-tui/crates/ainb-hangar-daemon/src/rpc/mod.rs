@@ -2963,13 +2963,15 @@ async fn execute_fleet_action(
                     answers,
                     ..
                 } if session.provider == "claude" => {
-                    execute_claude_structured(pool, &session, request_fingerprint, answers).await
+                    execute_claude_structured(pool, events, &session, request_fingerprint, answers)
+                        .await
                 }
                 ControlAction::DismissStructured {
                     request_fingerprint,
                     ..
                 } if session.provider == "claude" => {
-                    execute_claude_structured_dismiss(&session, request_fingerprint).await
+                    execute_claude_structured_dismiss(pool, events, &session, request_fingerprint)
+                        .await
                 }
                 ControlAction::ReleaseStructured {
                     request_fingerprint,
@@ -3895,8 +3897,66 @@ async fn latest_codex_turn_id(
     }))
 }
 
+/// Close every open `ask_user_question` row a session still carries, once its
+/// interview has left the control centre for good.
+///
+/// The `attention` table is the control centre's inbox; `fleet_session` is the
+/// Fleet screen's. Neither Fleet interview route wrote to the former, so an
+/// answered interview left its card open and answerable forever — 702 such rows
+/// were measured live, the oldest 25 days old. Closing here is the cross-write
+/// the two representations never had.
+///
+/// A Claude session blocks on one interview at a time, so every open ASK row it
+/// carries belongs to the request just resolved; rows raised by the re-fired
+/// `Notification` for that same question close with it.
+///
+/// Each close goes through the same first-answer-wins flip the answer router
+/// uses, so a human answering the card at the same instant is never clobbered,
+/// and each one that flips emits an `AttentionAnswered` nudge so live surfaces
+/// drop the card without waiting for a re-pull. Best-effort: this runs AFTER a
+/// confirmed delivery, so a store fault must not turn a delivered answer into a
+/// failed receipt.
+async fn close_session_ask_attention(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    answered_by: &str,
+    answer: &str,
+) {
+    use ainb_hangar_store::repo::attention::AttentionRepo;
+
+    let Some(session_id) = session.provider_session_id.as_deref().filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let ids = match AttentionRepo::open_ask_ids_for_session(pool, session_id).await {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(error = %error, "fleet interview: open attention lookup failed");
+            return;
+        }
+    };
+    let now_ms = SystemClock.now_ms();
+    for id in ids {
+        match AttentionRepo::mark_answered_if_open(pool, &id, answered_by, answer, now_ms).await {
+            Ok(1) => {
+                events.emit_attention(ainb_hangar_proto::events::HangarEvent::AttentionAnswered {
+                    attention_id: id,
+                    by: answered_by.to_string(),
+                })
+            }
+            // Another surface won the race; it already owns the close.
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "fleet interview: attention close failed");
+            }
+        }
+    }
+}
+
 async fn execute_claude_structured(
     pool: &SqlitePool,
+    events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
     request_fingerprint: &str,
     answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
@@ -3974,10 +4034,14 @@ async fn execute_claude_structured(
     })
     .await
     {
-        Ok(Ok(ack)) if ack.matched => (
-            ActionReceiptStatus::Delivered,
-            Some("claude structured hook broker".to_string()),
-        ),
+        Ok(Ok(ack)) if ack.matched => {
+            close_session_ask_attention(pool, events, session, "fleet", &answer_summary(answers))
+                .await;
+            (
+                ActionReceiptStatus::Delivered,
+                Some("claude structured hook broker".to_string()),
+            )
+        }
         Ok(Ok(ack)) if ack.stale => (
             ActionReceiptStatus::Failed,
             Some("Claude structured request is stale".to_string()),
@@ -3991,7 +4055,31 @@ async fn execute_claude_structured(
     }
 }
 
+/// One-line render of a delivered interview answer for the attention row's audit
+/// `answer` column — what the control centre shows as "answered by fleet: …".
+fn answer_summary(answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer]) -> String {
+    let rendered = answers
+        .iter()
+        .map(|answer| {
+            let mut values = answer.selected_options.clone();
+            if let Some(text) = answer.text.as_deref().filter(|text| !text.is_empty()) {
+                values.push(text.to_string());
+            }
+            values.join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if rendered.is_empty() {
+        "answered from Fleet".to_string()
+    } else {
+        rendered
+    }
+}
+
 async fn execute_claude_structured_dismiss(
+    pool: &SqlitePool,
+    events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
     request_fingerprint: &str,
 ) -> (
@@ -4015,10 +4103,17 @@ async fn execute_claude_structured_dismiss(
     })
     .await
     {
-        Ok(Ok(ack)) if ack.matched => (
-            ActionReceiptStatus::Delivered,
-            Some("claude structured rejection broker".to_string()),
-        ),
+        // A rejection resolves the request just as an answer does: the waiter is
+        // released and nothing can be delivered to it any more. The third
+        // resolution path had the same open-card leak as the other two.
+        Ok(Ok(ack)) if ack.matched => {
+            close_session_ask_attention(pool, events, session, "fleet", "dismissed from Fleet")
+                .await;
+            (
+                ActionReceiptStatus::Delivered,
+                Some("claude structured rejection broker".to_string()),
+            )
+        }
         Ok(Ok(ack)) if ack.stale => (
             ActionReceiptStatus::Failed,
             Some("Claude structured request is stale".to_string()),
@@ -4124,6 +4219,24 @@ async fn execute_claude_structured_release(
             ..FleetSessionPatch::default()
         },
     };
+    // The control centre can no longer deliver an answer to this request — the
+    // broker handed the waiter back to Claude's own picker. Leaving the card open
+    // would advertise an answer route that no longer exists, and the re-fired
+    // `Notification` that follows a release is precisely what was observed
+    // minting the second and third duplicate rows.
+    //
+    // `fleet_session.attention_state` deliberately stays `ASK`: the session still
+    // needs a human, just at its own terminal rather than here. The two states
+    // are consistent, not contradictory.
+    close_session_ask_attention(
+        pool,
+        events,
+        session,
+        "native_claude",
+        "released to Claude native picker",
+    )
+    .await;
+
     match FleetRepo::apply_event(pool, &event).await {
         Ok(result) => {
             if !result.duplicate {

@@ -120,6 +120,17 @@ impl Client {
     }
 }
 
+/// Serialises every test that redirects the process-wide approve-socket
+/// override. Two tests each holding their OWN mutex around one global is not
+/// mutual exclusion — the loser answers into the winner's broker and its
+/// delivery silently fails.
+fn approve_socket_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store, EventSink) {
     let store = Store::open_in(dir).await.unwrap();
     rpc::auth::ensure_socket_token(store.pool(), dir)
@@ -399,8 +410,7 @@ async fn claude_structured_action_delivers_exact_complete_answer_once() {
     };
     use tokio::net::UnixListener;
 
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _env_guard = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+    let _env_guard = approve_socket_guard();
     let dir = tempfile::tempdir().unwrap();
     let approve_socket = dir.path().join("approve.sock");
     rpc::set_approve_socket_for_test(Some(approve_socket.clone()));
@@ -652,4 +662,264 @@ async fn negotiate_refuses_v1_only_client_on_both_legs() {
         .await;
     assert_eq!(current["result"]["read_compatible"], true);
     assert_eq!(current["result"]["write_compatible"], true);
+}
+
+/// A live broker + Fleet server holding ONE intercepted Claude interview, with
+/// the `attention` card the ingest would have raised for it already open.
+///
+/// Returns everything the caller needs to drive the interview to a close. The
+/// broker task and the socket override are torn down by [`InterviewFixture::finish`].
+struct InterviewFixture {
+    dir: tempfile::TempDir,
+    socket: std::path::PathBuf,
+    store: Store,
+    fingerprint: String,
+    attention_id: String,
+    broker_task: tokio::task::JoinHandle<()>,
+    waiter: tokio::task::JoinHandle<ainb_plugin_notifyd::broker::StructuredResolution>,
+    _env_guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl InterviewFixture {
+    const SESSION_ID: &'static str = "interview-session";
+
+    async fn open(tag: &str) -> Self {
+        use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+        use ainb_plugin_notifyd::broker::{
+            BrokerState, client_await_structured, client_list, request_fingerprint,
+        };
+        use tokio::net::UnixListener;
+
+        let env_guard = approve_socket_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let approve_socket = dir.path().join("approve.sock");
+        rpc::set_approve_socket_for_test(Some(approve_socket.clone()));
+        let listener = UnixListener::bind(&approve_socket).unwrap();
+        let broker_task = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            BrokerState::with_timeout(Duration::from_secs(10)),
+        ));
+        let (socket, store, sink) = start_server(dir.path()).await;
+
+        let tool_input = serde_json::json!({
+            "questions": [{
+                "id": "q-1",
+                "question": "Ship it?",
+                "options": [{"label": "yes"}, {"label": "no"}]
+            }]
+        });
+        let request_identity = serde_json::json!({
+            "tool_use_id": format!("toolu-{tag}"),
+            "tool_input": tool_input,
+        });
+        let fingerprint = request_fingerprint(&request_identity);
+        let hook = serde_json::json!({
+            "matcher": "AskUserQuestion",
+            "payload": {
+                "tool_use_id": request_identity["tool_use_id"],
+                "tool_input": request_identity["tool_input"],
+            }
+        });
+        apply_hook(
+            &store,
+            &sink,
+            &format!("claude-interview-{tag}"),
+            "claude",
+            Self::SESSION_ID,
+            "AskUserQuestion",
+            &hook,
+            220,
+        )
+        .await;
+
+        // The card the attention ingest raises off the same hook line. Its
+        // session_id is the PROVIDER session id, which is how the answer path
+        // correlates it back.
+        let attention_id = format!("att:{}:evt-{tag}", Self::SESSION_ID);
+        AttentionRepo::insert(
+            store.pool(),
+            &NewAttention {
+                id: attention_id.clone(),
+                session_id: Self::SESSION_ID.to_string(),
+                cwd: "/work/shared".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::AskUserQuestion,
+                payload: r#"{"question":"Ship it?"}"#.to_string(),
+                degraded: false,
+                created_at: 220,
+                raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
+            },
+        )
+        .await
+        .unwrap();
+
+        let waiter_socket = approve_socket.clone();
+        let waiter_fingerprint = fingerprint.clone();
+        let questions = request_identity["tool_input"]["questions"].as_array().unwrap().clone();
+        let waiter = tokio::task::spawn_blocking(move || {
+            client_await_structured(
+                &waiter_socket,
+                Self::SESSION_ID,
+                &waiter_fingerprint,
+                &questions,
+                Duration::from_secs(5),
+            )
+        });
+        for _ in 0..100 {
+            let socket = approve_socket.clone();
+            let registered = tokio::task::spawn_blocking(move || client_list(&socket))
+                .await
+                .unwrap()
+                .unwrap_or_default()
+                .iter()
+                .any(|pending| pending.session_id == Self::SESSION_ID);
+            if registered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        Self {
+            dir,
+            socket,
+            store,
+            fingerprint,
+            attention_id,
+            broker_task,
+            waiter,
+            _env_guard: env_guard,
+        }
+    }
+
+    async fn client(&self) -> Client {
+        let mut client = Client::connect(&self.socket).await;
+        client.auth_from_file(self.dir.path()).await;
+        client
+    }
+
+    async fn session_version(&self, client: &mut Client) -> i64 {
+        let snapshot = client.call(methods::FLEET_SNAPSHOT, serde_json::json!({})).await;
+        snapshot["result"]["sessions"][0]["version"].as_i64().unwrap()
+    }
+
+    async fn attention_row(&self) -> ainb_hangar_store::repo::attention::AttentionRow {
+        ainb_hangar_store::repo::attention::AttentionRepo::get(
+            self.store.pool(),
+            &self.attention_id,
+        )
+        .await
+        .unwrap()
+        .expect("the attention row survives the interview")
+    }
+
+    fn finish(self) {
+        self.broker_task.abort();
+        self.waiter.abort();
+        rpc::set_approve_socket_for_test(None);
+    }
+}
+
+#[tokio::test]
+async fn structured_answer_closes_the_open_attention_row() {
+    // The control centre's `attention` inbox and Fleet's own view of "needs
+    // input" never cross-wrote: an interview answered through Fleet left its card
+    // open and answerable forever (702 such rows measured live, oldest 25 days).
+    let fixture = InterviewFixture::open("answer").await;
+    assert_eq!(
+        fixture.attention_row().await.state,
+        "open",
+        "the card starts open"
+    );
+
+    let mut client = fixture.client().await;
+    let version = fixture.session_version(&mut client).await;
+    let response = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": format!("claude:{}", InterviewFixture::SESSION_ID),
+                "expected_version": version,
+                "request_id": "answer-closes-card",
+                "action": {
+                    "action": "structured_answer",
+                    "request_fingerprint": fixture.fingerprint,
+                    "answers": [{"question_id": "q-1", "selected_options": ["yes"]}]
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        response["result"]["receipt"]["status"], "DELIVERED",
+        "the answer must reach the session: {response}"
+    );
+
+    let row = fixture.attention_row().await;
+    assert_eq!(row.state, "answered", "a delivered answer closes the card");
+    assert_eq!(row.answered_by.as_deref(), Some("fleet"));
+    assert_eq!(row.answer.as_deref(), Some("yes"));
+    assert!(row.answered_at.is_some());
+    assert!(
+        ainb_hangar_store::repo::attention::AttentionRepo::list_fleet(fixture.store.pool())
+            .await
+            .unwrap()
+            .is_empty(),
+        "the closed card leaves the control centre feed"
+    );
+
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn release_to_native_picker_closes_the_attention_row_as_native_claude() {
+    // Releasing hands the waiter back to Claude's own picker, so the control
+    // centre can no longer deliver an answer to it. Leaving the card open would
+    // advertise a route that no longer exists — and the `Notification` Claude
+    // re-fires after a release is exactly what was seen minting duplicate rows.
+    let fixture = InterviewFixture::open("release").await;
+
+    let mut client = fixture.client().await;
+    let version = fixture.session_version(&mut client).await;
+    let response = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": format!("claude:{}", InterviewFixture::SESSION_ID),
+                "expected_version": version,
+                "request_id": "release-closes-card",
+                "action": {
+                    "action": "release_structured",
+                    "request_fingerprint": fixture.fingerprint
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        response["result"]["receipt"]["status"], "DELIVERED",
+        "the release must be accepted: {response}"
+    );
+
+    let row = fixture.attention_row().await;
+    assert_eq!(
+        row.state, "answered",
+        "a released interview closes the card"
+    );
+    assert_eq!(row.answered_by.as_deref(), Some("native_claude"));
+    assert_eq!(
+        row.answer.as_deref(),
+        Some("released to Claude native picker")
+    );
+
+    // Fleet deliberately still reports ASK: the session needs a human, just at
+    // its own terminal rather than here. The two records are consistent.
+    let session = ainb_hangar_store::repo::fleet::FleetRepo::get_session(
+        fixture.store.pool(),
+        &format!("claude:{}", InterviewFixture::SESSION_ID),
+    )
+    .await
+    .unwrap()
+    .expect("session row");
+    assert_eq!(session.attention_state, "ASK");
+
+    fixture.finish();
 }
