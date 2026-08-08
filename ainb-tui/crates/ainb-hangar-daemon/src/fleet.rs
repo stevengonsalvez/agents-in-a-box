@@ -1156,7 +1156,19 @@ pub async fn reconcile_tmux_once(
     events: &EventSink,
     observed_at: i64,
 ) -> anyhow::Result<usize> {
-    let sessions = discover_from_tmux().await?;
+    reconcile_discovered_panes(pool, events, discover_from_tmux().await?, observed_at).await
+}
+
+/// Fold one discovery sample into the registry.
+///
+/// Split from [`reconcile_tmux_once`] so pane-to-row correlation is testable
+/// without a live tmux server.
+async fn reconcile_discovered_panes(
+    pool: &SqlitePool,
+    events: &EventSink,
+    sessions: Vec<FleetSession>,
+    observed_at: i64,
+) -> anyhow::Result<usize> {
     restore_tmux_transport(pool, events, &sessions, observed_at).await?;
     let registered = FleetRepo::snapshot(pool).await?.sessions;
     let mut discovered: std::collections::HashSet<String> =
@@ -1169,6 +1181,27 @@ pub async fn reconcile_tmux_once(
                 && row.process_start_fingerprint == session.process_start_fingerprint
         }) {
             discovered.insert(managed.session_key.clone());
+            continue;
+        }
+        // The exact match above misses whenever the fingerprint's `pid` field
+        // has drifted between the hook's read and this scan, which leaves the
+        // pane keyed under `SessionKey::legacy` in a second row that can never
+        // carry interview actions. Correlate on the stable half of the
+        // fingerprint instead, and collapse any duplicate already written.
+        if let Some(managed) = correlated_managed_row(&registered, &session) {
+            discovered.insert(managed.session_key.clone());
+            match FleetRepo::supersede_session(
+                pool,
+                session.session_key.as_str(),
+                &managed.session_key,
+                observed_at,
+            )
+            .await
+            {
+                Ok(Some(revision)) => events.emit_fleet_revision(revision),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(error = %error, "fleet legacy supersede failed"),
+            }
             continue;
         }
         let prior = FleetRepo::get_session(pool, session.session_key.as_str()).await?;
@@ -1232,6 +1265,57 @@ fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent 
             ..FleetSessionPatch::default()
         },
     }
+}
+
+/// Correlate a discovered pane to the MANAGED row a provider hook already wrote
+/// for it, when only the volatile part of the fingerprint has drifted.
+///
+/// `process_start_fingerprint` is `pane=<pane-id>;pid=<pid>;session_started=<ts>`.
+/// A tmux pane id is unique for the life of its server and `session_started`
+/// pins that server instance, so the pair identifies the physical pane exactly.
+/// `pid` is the pane's foreground process and does drift between the hook's
+/// read and this scan — observed live, where a hook wrote
+/// `pane=%4257;pid=69099;session_started=1785436252` for the same pane the
+/// scanner reported as `pane=%4257;pid=68868;session_started=1785436252`.
+///
+/// Without this the scanner keys that pane under `SessionKey::legacy(...)` and
+/// creates a second row, which by construction never receives `attention_state`
+/// or `current_request_fingerprint` and so cannot carry interview actions.
+///
+/// The scanner infers the provider from the pane's process tree and often
+/// yields `unknown`, so an unknown provider correlates to any managed row for
+/// the pane; a confidently different provider does not.
+fn correlated_managed_row<'a>(
+    registered: &'a [FleetSessionRow],
+    session: &FleetSession,
+) -> Option<&'a FleetSessionRow> {
+    let target = session.exact_tmux_target.as_deref()?;
+    let pane = pane_identity(session.process_start_fingerprint.as_deref()?)?;
+    let provider = session.provider.as_str();
+    registered
+        .iter()
+        .filter(|row| {
+            row.management_state == "MANAGED"
+                && row.tmux_target.as_deref() == Some(target)
+                && row.process_start_fingerprint.as_deref().and_then(pane_identity) == Some(pane)
+                && (provider == Provider::Unknown.as_str() || row.provider == provider)
+        })
+        // One pane holds a succession of provider sessions over time (a resumed
+        // Claude writes a fresh row under the same pane). The live one is the
+        // one observed most recently.
+        .max_by_key(|row| row.last_observed_at)
+}
+
+/// The stable half of a `process_start_fingerprint`: pane id and session start.
+///
+/// `None` for any fingerprint not in the `pane=…;pid=…;session_started=…` shape,
+/// which keeps correlation opt-in rather than guessing at unfamiliar formats.
+fn pane_identity(fingerprint: &str) -> Option<(&str, &str)> {
+    let mut fields = fingerprint.split(';');
+    let pane = fields.next()?.strip_prefix("pane=")?;
+    let _pid = fields.next()?;
+    let session_started = fields.next()?.strip_prefix("session_started=")?;
+    (!pane.is_empty() && !session_started.is_empty()).then_some((pane, session_started))
 }
 
 fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
@@ -2858,5 +2942,206 @@ mod tests {
         assert!(restored.restart);
         assert!(restored.kill);
         assert!(restored.archive);
+    }
+
+    /// A tmux pane as `discover_from_tmux` would report it.
+    fn scanned_pane(target: &str, fingerprint: &str, provider: Provider) -> FleetSession {
+        FleetSession {
+            session_key: SessionKey::legacy(provider, target, fingerprint),
+            provider,
+            provider_session_id: None,
+            cwd: "/work/interview".to_string(),
+            exact_tmux_target: Some(target.to_string()),
+            pane_pid: Some(4242),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            lifecycle: LifecycleState::Running,
+            attention: AttentionState::None,
+            management: ManagementState::Degraded,
+            capabilities: ainb_fleet_core::types::Capabilities::degraded_tmux(),
+            provenance: std::collections::BTreeSet::from([
+                ainb_fleet_core::types::Provenance::Tmux,
+            ]),
+            confidence: Confidence::Inferred,
+            transport_health: TransportHealth::Healthy,
+            first_seen_ms: Some(0),
+            last_seen_ms: None,
+            version: 0,
+        }
+    }
+
+    /// One physical pane must occupy exactly one Fleet row, and it must be the
+    /// hook-written MANAGED one — the only row that ever carries
+    /// `attention_state`/`current_request_fingerprint`, i.e. the ASK card and
+    /// the `c Open in Claude` route.
+    ///
+    /// The scanner and the hook read the pane's `pid` at different instants, so
+    /// their `process_start_fingerprint`s disagree on that field while the pane
+    /// id and session start agree. The exact-match correlation missed on that
+    /// drift and wrote a second `SessionKey::legacy` row.
+    #[tokio::test]
+    async fn a_drifted_pane_pid_collapses_onto_the_hook_row_instead_of_duplicating() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let target = "tmux_interview:1.1";
+        let scanned_fingerprint = "pane=%4257;pid=68868;session_started=1785436252";
+        let hook_fingerprint = "pane=%4257;pid=69099;session_started=1785436252";
+
+        // 1. The scanner sees the pane before any hook fires: a legacy row.
+        let scanned = scanned_pane(target, scanned_fingerprint, Provider::Unknown);
+        let legacy_key = scanned.session_key.to_string();
+        reconcile_discovered_panes(pool, &sink, vec![scanned.clone()], 1_000)
+            .await
+            .expect("first scan");
+        assert!(
+            FleetRepo::get_session(pool, &legacy_key).await.unwrap().is_some(),
+            "the pre-hook scan must register the pane"
+        );
+
+        // 2. Claude's hook lands with a live interview and a drifted pane pid.
+        apply_hook(
+            pool,
+            &sink,
+            HookObservation {
+                event_id: "hook-ask".to_string(),
+                provider: "claude",
+                provider_session_id: "sess-interview",
+                event_type: "AskUserQuestion",
+                cwd: "/work/interview",
+                payload: &serde_json::json!({
+                    "tmux_target": target,
+                    "process_start_fingerprint": hook_fingerprint,
+                }),
+                observed_at: 2_000,
+            },
+        )
+        .await
+        .expect("hook applies");
+
+        // 3. The next scan must collapse the duplicate rather than keep it.
+        reconcile_discovered_panes(pool, &sink, vec![scanned], 3_000)
+            .await
+            .expect("second scan");
+
+        let visible = FleetRepo::snapshot(pool).await.unwrap().sessions;
+        assert_eq!(
+            visible.len(),
+            1,
+            "one pane must leave one row, got {:?}",
+            visible.iter().map(|row| row.session_key.clone()).collect::<Vec<_>>()
+        );
+        let row = &visible[0];
+        assert_eq!(row.session_key, "claude:sess-interview");
+        assert_eq!(row.management_state, "MANAGED");
+        assert_eq!(
+            row.attention_state, "ASK",
+            "the surviving row must carry the interview"
+        );
+        assert!(
+            row.current_request_fingerprint.is_some(),
+            "the surviving row must carry the request fingerprint the ASK card needs"
+        );
+
+        // 4. Idempotent: a third scan neither resurrects nor re-supersedes.
+        let version = row.version;
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            vec![scanned_pane(target, scanned_fingerprint, Provider::Unknown)],
+            4_000,
+        )
+        .await
+        .expect("third scan");
+        let after = FleetRepo::snapshot(pool).await.unwrap().sessions;
+        assert_eq!(after.len(), 1, "collapse must not oscillate");
+        assert_eq!(
+            after[0].version, version,
+            "a settled pane must not be rewritten every tick"
+        );
+    }
+
+    /// Correlation is on the pane, not the pane's pid. A genuinely different
+    /// pane that merely reuses a recycled tmux target must stay its own row.
+    #[test]
+    fn correlation_matches_a_drifted_pid_but_not_a_different_pane() {
+        let managed = FleetSessionRow {
+            session_key: "claude:sess-1".to_string(),
+            management_state: "MANAGED".to_string(),
+            provider: "claude".to_string(),
+            tmux_target: Some("tmux_x:1.1".to_string()),
+            process_start_fingerprint: Some(
+                "pane=%4257;pid=69099;session_started=1785436252".to_string(),
+            ),
+            ..blank_row()
+        };
+        let registered = vec![managed];
+
+        let drifted_pid = scanned_pane(
+            "tmux_x:1.1",
+            "pane=%4257;pid=68868;session_started=1785436252",
+            Provider::Unknown,
+        );
+        assert_eq!(
+            correlated_managed_row(&registered, &drifted_pid).map(|row| row.session_key.as_str()),
+            Some("claude:sess-1"),
+            "a drifted pid on the same pane is the same session"
+        );
+
+        let other_pane = scanned_pane(
+            "tmux_x:1.1",
+            "pane=%31;pid=48071;session_started=1784795572",
+            Provider::Unknown,
+        );
+        assert!(
+            correlated_managed_row(&registered, &other_pane).is_none(),
+            "a recycled tmux target on a different pane is a different session"
+        );
+
+        let other_provider = scanned_pane(
+            "tmux_x:1.1",
+            "pane=%4257;pid=68868;session_started=1785436252",
+            Provider::Codex,
+        );
+        assert!(
+            correlated_managed_row(&registered, &other_provider).is_none(),
+            "a confidently different provider must not be absorbed"
+        );
+    }
+
+    fn blank_row() -> FleetSessionRow {
+        FleetSessionRow {
+            session_key: String::new(),
+            provider: String::new(),
+            provider_session_id: None,
+            tmux_target: None,
+            process_start_fingerprint: None,
+            cwd: String::new(),
+            display_name: None,
+            lifecycle_state: "UNKNOWN".to_string(),
+            active_work_count: 0,
+            workload_updated_at: 0,
+            workload_authority: "inferred".to_string(),
+            attention_state: "NONE".to_string(),
+            current_request_fingerprint: None,
+            management_state: "DEGRADED".to_string(),
+            transport_health: "HEALTHY".to_string(),
+            capabilities: "{}".to_string(),
+            provenance: "tmux".to_string(),
+            confidence: "INFERRED".to_string(),
+            discovered_at: 0,
+            last_observed_at: 0,
+            metadata_updated_at: 0,
+            metadata_authority: "inferred".to_string(),
+            lifecycle_updated_at: 0,
+            lifecycle_authority: "inferred".to_string(),
+            attention_updated_at: 0,
+            attention_authority: "inferred".to_string(),
+            transport_updated_at: 0,
+            transport_authority: "inferred".to_string(),
+            version: 1,
+            updated_revision: 1,
+        }
     }
 }
