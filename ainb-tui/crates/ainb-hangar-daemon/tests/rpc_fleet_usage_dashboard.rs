@@ -11,12 +11,12 @@
 //! (installed once by `fleet_usage::install(home)`, which spawns a REAL
 //! filesystem scan of `$HOME`'s provider session logs). None of these tests
 //! call `install`, so every request here hits the daemon in its natural
-//! "usage service is not initialized" state — the same coherent
+//! "usage service is not initialized" state, the same coherent
 //! not-an-error response a freshly booted daemon gives before its first
 //! scan completes. That keeps the suite hermetic and deterministic; it also
 //! means `weekly` / `heatmap` / `forecast` / `shell_commands` stay empty in
 //! every response here, so a couple of assertions below are noted as
-//! type-level checks rather than "the daemon really shipped this value" —
+//! type-level checks rather than "the daemon really shipped this value":
 //! see the doc comment on each for exactly which is which.
 
 use std::time::{Duration, Instant};
@@ -124,7 +124,7 @@ impl Client {
 }
 
 /// Bind + serve the real listener over a freshly opened store, returning the
-/// socket path (mirrors `boot()`'s wiring, minus `fleet_usage::install` — see
+/// socket path (mirrors `boot()`'s wiring, minus `fleet_usage::install`, see
 /// the module doc comment for why that is deliberate).
 async fn start_server(dir: &std::path::Path) -> std::path::PathBuf {
     let store = Store::open_in(dir).await.unwrap();
@@ -226,10 +226,14 @@ async fn an_unscanned_daemon_reports_a_coherent_state_not_an_error(c: &mut Clien
         "an uninitialized usage service must be a coherent read, not an error: {resp}"
     );
     let result = &resp["result"];
-    let state = result["state"].as_str().expect("state string");
-    assert!(
-        state == "scanning" || state == "unavailable",
-        "expected scanning or unavailable, got {state}: {resp}"
+    // Pinned exactly, not as an OR across both non-ready states: an
+    // uninitialized service is deterministically `unavailable`, so accepting
+    // either would not notice a regression that swapped them, and the client
+    // renders a different empty state for each.
+    assert_eq!(
+        result["state"].as_str(),
+        Some("unavailable"),
+        "an uninitialized usage service reports unavailable: {resp}"
     );
     assert!(
         result["detail"].as_str().is_some_and(|d| !d.is_empty()),
