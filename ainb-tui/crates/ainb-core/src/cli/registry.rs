@@ -2213,6 +2213,131 @@ impl CliCommand for FleetCommand {
                          DURING the turn, not after it",
                 ),
             );
+        // Part 2's chat surface: channels, the copilot's per-session config,
+        // the guardrail confirm cards and the activity feed. Every one of these
+        // is the CLI leg of a `fleet/*` method that landed with it, per the
+        // repo's CLI-parity rule.
+        let channel = Command::new("channel")
+            .about("Chat channels: a named scope with a recipient set")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("create")
+                    .about("Mint a channel and its channel:<id> scope")
+                    .arg(
+                        clap::Arg::new("kind")
+                            .long("kind")
+                            .value_parser(["copilot", "broadcast"])
+                            .default_value("broadcast")
+                            .help("copilot (an ACP session answers on it) or broadcast"),
+                    )
+                    .arg(
+                        clap::Arg::new("name")
+                            .long("name")
+                            .required(true)
+                            // A channel name may LEAD with a dash ("#-ops"),
+                            // and clap would otherwise read it as an unknown
+                            // flag: the same trap `msg send --text` hit.
+                            .allow_hyphen_values(true)
+                            .help("Human-readable channel name"),
+                    )
+                    .arg(
+                        clap::Arg::new("recipient")
+                            .long("recipient")
+                            .action(clap::ArgAction::Append)
+                            .help("Member session_key (repeat); none for a copilot channel"),
+                    ),
+            )
+            .subcommand(Command::new("list").about("List channels and their members"));
+        let copilot = Command::new("copilot")
+            .about("The fleet copilot session's per-session adapter config")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("configure")
+                    .about("Set the copilot's provider, model, reasoning effort and persona")
+                    .arg(
+                        clap::Arg::new("provider")
+                            .long("provider")
+                            .required(true)
+                            .value_parser(["claude", "codex"])
+                            .help("Adapter family"),
+                    )
+                    .arg(clap::Arg::new("model").long("model").help("Adapter model id"))
+                    .arg(
+                        clap::Arg::new("reasoning-effort")
+                            .long("reasoning-effort")
+                            .help("Adapter reasoning-effort token"),
+                    )
+                    .arg(
+                        clap::Arg::new("persona-file")
+                            .long("persona-file")
+                            .help("File holding the copilot system prompt"),
+                    )
+                    // Named in the help because it is the setting an operator
+                    // will most plausibly reach for, and the daemon REFUSES it
+                    // rather than dropping it silently.
+                    .after_help(
+                        "There is no permission-mode flag. The mode is daemon config, pinned at \
+                         session/new and re-asserted after load; a per-session override would be \
+                         a remote off-switch for the whole permission surface.",
+                    ),
+            );
+        let confirm = Command::new("confirm")
+            .about("Guardrail confirm cards: copilot tool calls held for a human")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("list")
+                    .about("List the open cards, oldest first")
+                    .arg(clap::Arg::new("scope").long("scope").help("Filter to one scope key")),
+            )
+            .subcommand(
+                Command::new("answer")
+                    .about("Answer one card: approve (default), --deny, or --edit")
+                    .arg(clap::Arg::new("confirm_id").required(true).help("The card to answer"))
+                    .arg(
+                        clap::Arg::new("deny")
+                            .long("deny")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Refuse; the suspended tool result resolves as denied"),
+                    )
+                    .arg(
+                        clap::Arg::new("edit")
+                            .long("edit")
+                            // A JSON object can begin with a dash-prefixed value
+                            // once quoting is involved; free text takes the same
+                            // negation every other free-text argument here does.
+                            .allow_hyphen_values(true)
+                            .help("Approve with these JSON arguments INSTEAD of the proposed ones"),
+                    )
+                    .after_help(
+                        "A card is single-use: answering an already-answered or already-expired \
+                         card exits 1, and never runs the tool a second time.",
+                    ),
+            );
+        let activity = Command::new("activity")
+            .about("The append-only copilot activity feed")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("list")
+                    .about("Page the feed by its commit-ordered seq, oldest first")
+                    .arg(clap::Arg::new("scope").long("scope").help("Filter to one scope key"))
+                    .arg(
+                        clap::Arg::new("after")
+                            .long("after")
+                            .value_parser(clap::value_parser!(i64))
+                            .help("Return rows strictly after this seq"),
+                    )
+                    .arg(
+                        clap::Arg::new("limit")
+                            .long("limit")
+                            .value_parser(clap::value_parser!(u32))
+                            .default_value("50")
+                            .help("Page size (clamped to the daemon's maximum)"),
+                    ),
+            );
         let sequence = Command::new("sequence")
             .about("Ordered prompts with ack between steps")
             .arg(
@@ -2339,6 +2464,10 @@ impl CliCommand for FleetCommand {
                 .subcommand(msg)
                 .subcommand(acp)
                 .subcommand(transcript)
+                .subcommand(channel)
+                .subcommand(copilot)
+                .subcommand(confirm)
+                .subcommand(activity)
                 .subcommand(sequence)
                 .subcommand(needs)
                 .subcommand(cost)
@@ -2775,7 +2904,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_sixteen_subcommands_including_the_chat_bus_verbs() {
+    fn fleet_exposes_twenty_subcommands_including_the_chat_bus_verbs() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2793,10 +2922,14 @@ mod tests {
             names,
             [
                 "acp",
+                "activity",
                 "approve",
                 "atc",
                 "bridge",
                 "broadcast",
+                "channel",
+                "confirm",
+                "copilot",
                 "cost",
                 "daemon",
                 "daemons",
@@ -2813,8 +2946,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            16,
-            "expected 16 fleet subcommands, got {names:?}"
+            20,
+            "expected 20 fleet subcommands, got {names:?}"
         );
     }
 
