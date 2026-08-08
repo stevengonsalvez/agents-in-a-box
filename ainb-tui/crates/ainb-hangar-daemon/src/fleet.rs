@@ -1319,6 +1319,94 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
     })
 }
 
+/// Demote dead sessions out of the visible roster on a slow clock.
+///
+/// Separate task, NOT folded into [`spawn_tmux_reconciler`]'s 3s loop: that
+/// loop already does a full snapshot plus per-session work per tick and was
+/// measured over 1s on a large roster. Archiving is pure cleanup with no
+/// deadline, so it gets its own timer and cannot contribute to that hot path.
+#[must_use]
+pub fn spawn_session_archiver(pool: SqlitePool, events: EventSink) -> tokio::task::JoinHandle<()> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    tokio::spawn(async move {
+        let clock = SystemClock;
+        // `interval` would fire its FIRST tick immediately, putting a batch of
+        // write transactions into the middle of daemon boot, which is already
+        // the busiest moment for the single SQLite writer. Nothing here is
+        // urgent — the rows have been dead for a day — so the first pass waits
+        // out the boot convergence.
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + SESSION_ARCHIVE_INTERVAL,
+            SESSION_ARCHIVE_INTERVAL,
+        );
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match archive_dead_sessions(&pool, &events, clock.now_ms()).await {
+                Ok(0) => {}
+                Ok(archived) => tracing::info!(archived, "fleet archived dead sessions"),
+                Err(error) => tracing::warn!(error = %error, "fleet session archive failed"),
+            }
+        }
+    })
+}
+
+/// How often [`archive_dead_sessions`] runs. Ten minutes drains a 1,440-row
+/// backlog at [`SESSION_ARCHIVE_BATCH`] per pass in half an hour, and costs
+/// one indexed candidate read per pass in the steady state.
+const SESSION_ARCHIVE_INTERVAL: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Rows demoted per pass. Each is its own transaction, so this bounds how long
+/// one pass can hold the single `SQLite` writer away from the reconciler.
+const SESSION_ARCHIVE_BATCH: i64 = 500;
+
+/// How long a retired session stays in the visible roster.
+///
+/// Deliberately much longer than [`SESSION_STALE_TTL_MS`] (15 min), which is
+/// the clock for marking a session `EXITED`. Those two are different questions:
+/// "is this session dead" is answered in minutes so the roster tells the truth,
+/// while "will anyone look at this dead session again today" is answered in
+/// hours so that closing and reopening a session in one working day never needs
+/// an unarchive. There is a revival path (`update_session`), but not needing it
+/// is cheaper than needing it.
+const SESSION_ARCHIVE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Demote long-dead sessions out of the visible roster.
+///
+/// Measured motivation: 1,440 of 1,472 `visible = 1` rows on a real profile
+/// were `EXITED` sessions that every `SESSION_SELECT_ALL` scanned on the 3s
+/// tick. `reap_stale_sessions` already stamps them `EXITED`; the missing half
+/// was the visibility demotion, so this is a demotion, not a new lifecycle
+/// state (`lifecycle_state` carries a `SQLite` CHECK that cannot be altered).
+///
+/// Nothing is deleted: the row keeps its identity and event history, stays
+/// reachable by key, and re-appears in `FleetRepo::list_archived`.
+///
+/// # Errors
+/// Propagates a store failure from reading candidates.
+pub async fn archive_dead_sessions(
+    pool: &SqlitePool,
+    events: &EventSink,
+    observed_at: i64,
+) -> Result<usize, FleetRepoError> {
+    let cutoff = observed_at.saturating_sub(SESSION_ARCHIVE_TTL_MS);
+    let candidates = FleetRepo::list_archivable(pool, cutoff, SESSION_ARCHIVE_BATCH).await?;
+    let mut archived = 0;
+    for session_key in candidates {
+        match FleetRepo::archive_session(pool, &session_key, observed_at).await {
+            // `None` means a hook revived the row between the candidate read
+            // and the transaction. Not an error: the row belongs on screen.
+            Ok(None) => {}
+            Ok(Some(revision)) => {
+                events.emit_fleet_revision(revision);
+                archived += 1;
+            }
+            Err(error) => tracing::warn!(error = %error, session_key, "fleet archive failed"),
+        }
+    }
+    Ok(archived)
+}
+
 /// How long a session may go unobserved before the reaper retires it.
 ///
 /// Generous on purpose. A false retire is self-healing — the next hook is
@@ -3083,5 +3171,76 @@ mod tests {
         assert!(restored.restart);
         assert!(restored.kill);
         assert!(restored.archive);
+    }
+
+    /// The reap-then-archive pipeline, end to end on its two real clocks: a
+    /// stranded session is retired at 15 min, stays visible all day, and only
+    /// then leaves the roster every snapshot scans.
+    #[tokio::test]
+    async fn a_reaped_session_leaves_the_roster_only_after_the_archive_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        apply_hook(
+            pool,
+            &sink,
+            HookObservation {
+                event_id: "hook-abandoned".to_string(),
+                provider: "claude",
+                provider_session_id: "sess-abandoned",
+                event_type: "Notification",
+                cwd: "/tmp/ephemeral",
+                payload: &serde_json::json!({}),
+                observed_at: 0,
+            },
+        )
+        .await
+        .expect("hook applies");
+
+        // Alive: nothing to archive, whatever the clock says.
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+                .await
+                .expect("archive"),
+            0,
+            "a session that was never retired must not be archived"
+        );
+
+        reap_stale_sessions(pool, &sink, SESSION_STALE_TTL_MS + 1).await.expect("reap");
+
+        // Retired, but well inside the archive TTL: still on screen, which is
+        // the point of the two clocks being different.
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_STALE_TTL_MS + 2)
+                .await
+                .expect("archive"),
+            0,
+            "a session retired minutes ago must stay visible"
+        );
+        assert_eq!(FleetRepo::snapshot(pool).await.unwrap().sessions.len(), 1);
+
+        let archived = archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+            .await
+            .expect("archive");
+
+        assert_eq!(archived, 1, "past the archive TTL the dead row is demoted");
+        assert!(
+            FleetRepo::snapshot(pool).await.unwrap().sessions.is_empty(),
+            "the 3s reconciler must stop scanning it"
+        );
+        assert_eq!(
+            FleetRepo::list_archived(pool, 50).await.unwrap().len(),
+            1,
+            "and it stays browsable"
+        );
+        assert_eq!(
+            archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 3)
+                .await
+                .expect("archive"),
+            0,
+            "a second pass must be free"
+        );
     }
 }

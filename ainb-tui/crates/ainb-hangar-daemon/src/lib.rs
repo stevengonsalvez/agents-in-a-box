@@ -99,6 +99,8 @@ pub mod fleet;
 pub mod fleet_provider;
 /// Bounded live provider-quota projection for the public Fleet RPC.
 pub mod fleet_quota;
+/// Hourly `fleet_event` retention: payload eviction, row delete, byte ceiling.
+pub mod fleet_retention;
 /// Bounded canonical Usage projection for the public Fleet RPC.
 pub mod fleet_usage;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
@@ -494,6 +496,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // Tmux reconciliation keeps unhooked and standalone provider sessions in
     // the canonical Fleet roster as degraded rows with exact pane identity.
     let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
+
+    // Two slow janitors, each on its OWN clock rather than folded into the 3s
+    // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
+    // sessions were dead EXITED rows that every snapshot scanned, and
+    // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
+    // Both are pure cleanup with no deadline, so neither belongs on a hot path.
+    let _fleet_archiver = crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
+    let _fleet_retention = crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
 
     // Managed Codex transport starts independently from daemon readiness. A
     // missing or incompatible Codex binary leaves hook and tmux observation
