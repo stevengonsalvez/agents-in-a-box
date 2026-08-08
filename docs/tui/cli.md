@@ -2423,7 +2423,6 @@ Usage: ainb fleet atc [OPTIONS] <COMMAND>
 Commands:
   setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
   teardown  Remove an ATC instance's heartbeat timer + session
-  repair    Reinstall an ATC instance's heartbeat unit from the CURRENT PATH
   status    Report one ATC instance (meta + timer + session liveness)
   repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
   list      List all provisioned ATC instances
@@ -2477,34 +2476,6 @@ Options:
   -h, --help             Print help
 ```
 
-#### `ainb fleet atc repair`
-
-Rebuild and reload the local heartbeat unit for an instance whose program no longer resolves. Touches ONLY the timer unit: it reuses the instance's existing meta and leaves policy, hooks, the daemon cron and the session alone, which is what makes it safe to run on a live instance. Use this when `atc status` reports `program MISSING`.
-
-```console
-$ ainb fleet atc repair --help
-Rebuild and reload the local heartbeat unit for an instance whose program no longer resolves. Touches ONLY the timer unit: it reuses the instance's existing meta and leaves policy, hooks, the daemon cron and the session alone, which is what makes it safe to run on a live instance. Use this when `atc status` reports `program MISSING`.
-
-Usage: ainb fleet atc repair [OPTIONS] <name>
-
-Arguments:
-  <name>
-          Instance name
-
-Options:
-      --force
-          Reinstall even when the current unit's program resolves
-
-      --format <format>
-          Output format
-          
-          [default: text]
-          [possible values: text, json, csv, markdown]
-
-  -h, --help
-          Print help (see a summary with '-h')
-```
-
 #### `ainb fleet atc status`
 
 Report one ATC instance (meta + timer + session liveness)
@@ -2525,21 +2496,34 @@ Options:
 
 #### `ainb fleet atc repair`
 
-Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+Rebuild the heartbeat scheduler for an instance whose timer can no longer fire, typically because the binary moved and the unit's program no longer resolves. Use it when `atc status` reports `program MISSING` or `atc list` shows BROKEN.
 
 ```console
 $ ainb fleet atc repair --help
-Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+Rebuild the heartbeat scheduler for an instance whose timer can no longer fire, typically because the binary moved and the unit's program no longer resolves. Use it when `atc status` reports `program MISSING` or `atc list` shows BROKEN.
+
+It READS meta.json and never writes it, so a customised interval or idle-pause and a disabled heartbeat all survive; policy, hooks and the session are untouched. That is what makes it safe on a live instance, and why it exists instead of re-running setup, which rebuilds meta.json from defaults and spawns a session.
+
+It refuses (non-zero exit, nothing written) rather than replacing a unit with an equally dead one, and leaves exactly one scheduler active: the daemon cron or the local timer, never both.
 
 Usage: ainb fleet atc repair [OPTIONS] <name>
 
 Arguments:
-  <name>  
+  <name>
+          
 
 Options:
-      --dry-run          Report what repair would do without writing anything
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -h, --help             Print help
+      --dry-run
+          Report what repair would do without writing anything
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb fleet atc list`
