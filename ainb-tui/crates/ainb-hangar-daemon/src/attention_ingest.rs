@@ -73,6 +73,7 @@ use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, classify};
 use ainb_fleet_core::types::{Session, SessionSource};
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+use ainb_hangar_store::repo::fleet::FleetRepo;
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventRepo, NewFleetProviderEvent,
 };
@@ -385,7 +386,7 @@ impl AttentionIngest {
         // interview and the `attention` table held zero ASK rows, ever. The hook
         // payload carries the full `tool_input` at open time, so it is the only
         // producer that can see the question while it still needs an answer.
-        let context = match ask_context_from_hook_payload(semantic_event, &payload) {
+        let context = match ask_context_from_hook_payload(&line.agent, semantic_event, &payload) {
             Some(ask) => ask,
             // Every other signal (Stop/Notification/an ask observed after the
             // fact, and every non-Claude producer) still classifies from the
@@ -417,7 +418,27 @@ impl AttentionIngest {
         // BEFORE raising this follow-on card, or the stale ASK sits open + answerable
         // beside the new Waiting/Idle/Err card, duplicating the session's attention
         // signal (and a hangar surface could try to answer an already-answered ask).
+        //
+        // But a non-Ask classification is only trustworthy once the session has
+        // actually stopped asking. It comes from the transcript, which cannot see
+        // an AskUserQuestion until the tool RESOLVES, so a session still blocked on
+        // a live question reads IDLE off its last FINISHED turn as soon as that
+        // turn is 5 minutes old. Acting on that reading would close the card the
+        // payload producer raised seconds earlier AND stand a Waiting card up in
+        // its place, while the hook is still blocked waiting for the answer. Fleet's
+        // own projection — written from this same hook line a few lines above —
+        // is the authority on whether the request is still live, so while it says
+        // one is, this line yields no attention decision at all.
         if kind != AttentionKind::AskUserQuestion {
+            match FleetRepo::provider_session_holds_open_request(&self.pool, &line.session_id).await
+            {
+                Ok(true) => return LineOutcome::Processed,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "attention ingest: live-request check failed");
+                    return LineOutcome::Retry;
+                }
+            }
             self.reconcile_stale_asks(&line.session_id, now_ms).await;
         }
 
@@ -663,11 +684,22 @@ fn session_from(line: &HookEventLine) -> Session {
 /// inbox must agree. Raising off them re-opened a card that the release had
 /// just closed as `native_claude`, advertising a Fleet answer route that no
 /// longer existed — observed live in the sandbox before this gate.
+///
+/// One case genuinely loses its only signal: when the hook cannot register with
+/// the broker at all it returns early WITHOUT appending the `PreToolUse` line,
+/// so a permission re-announcement is the only trace of the question. That is
+/// the right trade — with no broker there is no answer route for a card to
+/// offer, and the session's `fleet_session` row still shows it needs a human.
+///
+/// Claude-only, matching the producing hook and the reducer: the answer route a
+/// card advertises is the Claude structured broker, so another provider that
+/// happened to name a tool `AskUserQuestion` must not mint one.
 fn ask_context_from_hook_payload(
+    agent: &str,
     semantic_event: &str,
     envelope: &serde_json::Value,
 ) -> Option<NeedsContext> {
-    if semantic_event != "AskUserQuestion" {
+    if agent != "claude" || semantic_event != "AskUserQuestion" {
         return None;
     }
     let payload = envelope.get("payload")?;
@@ -1061,10 +1093,87 @@ mod tests {
         question: &str,
         tool_use_id: Option<&str>,
     ) -> String {
+        live_ask_hook_line_in(
+            "d39ec648",
+            "/private/tmp/sbxwork",
+            event_id,
+            hook_event,
+            question,
+            tool_use_id,
+        )
+    }
+
+    /// The same captured line, re-homed onto a caller-chosen session + cwd so a
+    /// planted transcript can be reached through the normal cwd→project lookup.
+    fn live_ask_hook_line_in(
+        session: &str,
+        cwd: &str,
+        event_id: &str,
+        hook_event: &str,
+        question: &str,
+        tool_use_id: Option<&str>,
+    ) -> String {
         let id = tool_use_id.map(|id| format!(r#","tool_use_id":"{id}""#)).unwrap_or_default();
         format!(
-            r#"{{"event_id":"{event_id}","ts":1786222389057,"session_id":"d39ec648","cwd":"/private/tmp/sbxwork","transcript_path":"/no/such/transcript.jsonl","agent":"claude","event_type":"{hook_event}","matcher":"AskUserQuestion","parent":null,"tmux_target":"sbx-claude:1.1","process_start_fingerprint":"pane=%5853;pid=39567","payload":{{"session_id":"d39ec648","cwd":"/private/tmp/sbxwork","permission_mode":"bypassPermissions","hook_event_name":"{hook_event}","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"question":"{question}","header":"XRAY","options":[{{"label":"Alpha","description":"Route Alpha."}},{{"label":"Bravo","description":"Route Bravo."}}],"multiSelect":false}}]}}{id}}}}}"#
+            r#"{{"event_id":"{event_id}","ts":1786222389057,"session_id":"{session}","cwd":"{cwd}","transcript_path":"","agent":"claude","event_type":"{hook_event}","matcher":"AskUserQuestion","parent":null,"tmux_target":"sbx-claude:1.1","process_start_fingerprint":"pane=%5853;pid=39567","payload":{{"session_id":"{session}","cwd":"{cwd}","permission_mode":"bypassPermissions","hook_event_name":"{hook_event}","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"question":"{question}","header":"XRAY","options":[{{"label":"Alpha","description":"Route Alpha."}},{{"label":"Bravo","description":"Route Bravo."}}],"multiSelect":false}}]}}{id}}}}}"#
         )
+    }
+
+    #[tokio::test]
+    async fn a_live_open_question_survives_a_follow_on_hook_that_reads_idle() {
+        // The stale-ASK reconcile closes every open ASK row for a session as soon
+        // as the transcript classifier returns anything but `Ask` — on the premise
+        // that "not asking any more" is observable from the transcript. This
+        // producer's whole reason to exist is that the premise is FALSE while a
+        // question is open: Claude withholds the tool_use row until the tool
+        // resolves, so a still-blocked session reads IDLE off its last finished
+        // turn. Left ungated, the reconcile would delete the very card that was
+        // raised seconds earlier and replace it with a Waiting card, while the
+        // hook is still blocked waiting for the answer.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        // The last FINISHED turn, well past the 5-minute idle threshold. The open
+        // question that followed it is invisible to the transcript.
+        let fx = plant_idle_transcript("still-open", base_ms);
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n",
+                live_ask_hook_line_in(
+                    "sid-open",
+                    &fx.cwd,
+                    "evt-ask",
+                    "PreToolUse",
+                    "still waiting on you",
+                    Some("toolu-open"),
+                )
+            ),
+        )
+        .unwrap();
+        assert_eq!(ingest.ingest_once(base_ms + 10 * 60_000).await, 1);
+        let ask_id = "att:sid-open:evt-ask";
+
+        // A later hook line for the SAME session while the question is still open.
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&events_jsonl).unwrap();
+            writeln!(f, "{}", hook_line("sid-open", &fx.cwd, "Notification")).unwrap();
+        }
+        ingest.ingest_once(base_ms + 11 * 60_000).await;
+
+        let row = AttentionRepo::get(store.pool(), ask_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.state, "open",
+            "the live question must survive — the session is still blocked on it"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1, "and it must not be joined by a Waiting card");
+        assert_eq!(open[0].kind, AttentionKind::AskUserQuestion);
     }
 
     #[tokio::test]

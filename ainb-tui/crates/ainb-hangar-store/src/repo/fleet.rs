@@ -697,6 +697,35 @@ impl FleetRepo {
         row.as_ref().map(session_from_row).transpose()
     }
 
+    /// Does this provider session still hold a request that is waiting on a
+    /// human — an `ASK`/`APPROVAL` attention state with an identified request?
+    ///
+    /// The attention ingest's stale-ASK reconcile asks this before closing an
+    /// open card. That reconcile infers "no longer asking" from the transcript,
+    /// which cannot see an AskUserQuestion until the tool resolves, so on its own
+    /// it would close a question the session is still blocked on. Fleet's own
+    /// projection is the authority on whether a request is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn provider_session_holds_open_request(
+        pool: &SqlitePool,
+        provider_session_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT 1 FROM fleet_session \
+             WHERE provider_session_id = ? \
+               AND attention_state IN ('ASK', 'APPROVAL') \
+               AND current_request_fingerprint IS NOT NULL \
+             LIMIT 1",
+        )
+        .bind(provider_session_id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Validate optimistic concurrency and optional structured request identity.
     pub async fn validate_action_target(
         pool: &SqlitePool,
