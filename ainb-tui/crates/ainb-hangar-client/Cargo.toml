@@ -19,6 +19,9 @@ ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 # Hangar home resolution (`hangar_home`) for the socket + token file paths.
 ainb-hangar-core = { path = "../ainb-hangar-core" }
 tokio = { workspace = true }
+# `Serialize`/`DeserializeOwned` bound `call_typed`, so a caller has to name the
+# proto types rather than hand-build JSON for an arbitrary method.
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

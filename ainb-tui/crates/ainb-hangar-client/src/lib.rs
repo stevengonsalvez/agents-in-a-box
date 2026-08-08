@@ -20,6 +20,10 @@
 //! so nothing below it can depend back. `ainb-core::fleet::bridge::daemon`
 //! re-exports this module, so every existing call site is unchanged.
 
+/// The part-2 chat and copilot calls, in their own file so two parallel
+/// landings dedup across a boundary instead of inside one `impl` list.
+mod chat;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -509,6 +513,30 @@ impl DaemonClient {
             });
         }
         Ok((reader, writer))
+    }
+
+    /// Issue one authenticated JSON-RPC call, encoding the params and decoding
+    /// the result through the proto's own types.
+    ///
+    /// This is the generic escape hatch for a method with no typed helper here,
+    /// which is how part 2's chat methods reach the CLI without a near-identical
+    /// wrapper each. It is deliberately NOT a `Value` in, `Value` out call: that
+    /// shape lets any caller invoke any method with any hand-built JSON, and the
+    /// typed surface is the thing that keeps the TUI, the CLI and the macOS
+    /// client honest about one contract. Naming `P` and `R` costs a caller one
+    /// turbofish and buys a compile error when the wire changes under it.
+    ///
+    /// `method` should be a [`ainb_hangar_proto::methods`] const.
+    pub async fn call_typed<P, R>(&self, method: &str, params: &P) -> Result<R, DaemonError>
+    where
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        let params = serde_json::to_value(params)
+            .map_err(|source| DaemonError::Decode(format!("encoding {method} params: {source}")))?;
+        let result = self.call(method, params).await?;
+        serde_json::from_value(result)
+            .map_err(|source| DaemonError::Decode(format!("decoding {method}: {source}")))
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, DaemonError> {

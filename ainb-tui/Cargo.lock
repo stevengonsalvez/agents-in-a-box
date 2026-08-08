@@ -332,6 +332,7 @@ version = "0.1.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -365,6 +366,7 @@ dependencies = [
  "agent-client-protocol",
  "ainb-acp",
  "ainb-fleet-core",
+ "ainb-fleet-tools",
  "ainb-hangar-core",
  "ainb-hangar-daemon",
  "ainb-hangar-proto",
