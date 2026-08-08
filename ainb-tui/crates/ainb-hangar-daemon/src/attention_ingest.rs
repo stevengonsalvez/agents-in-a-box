@@ -18,6 +18,12 @@
 //! WAIT), and — when it fires — inserts a durable `attention` row and emits an
 //! `AttentionRaised` nudge on the fleet-wide stream.
 //!
+//! The one exception is a Claude AskUserQuestion, which is read from the hook
+//! payload instead ([`ask_context_from_hook_payload`]): Claude withholds the
+//! picker's `tool_use` row from the transcript until the tool RESOLVES, so a
+//! transcript read while the question is open finds nothing and no interview
+//! could ever raise a card.
+//!
 //! ## Idempotency
 //!
 //! The attention id uses the hook's durable event ID:
@@ -62,6 +68,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use ainb_fleet_core::read::jsonl_tail::ask_data_from_tool_input;
 use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, classify};
 use ainb_fleet_core::types::{Session, SessionSource};
 use ainb_hangar_proto::events::HangarEvent;
@@ -369,19 +376,38 @@ impl AttentionIngest {
             return LineOutcome::Processed;
         }
 
-        // Classify off the async runtime: `classify` reads the JSONL transcript +
-        // does blocking fs I/O, so it must not run inline on a tokio worker.
-        let session = session_from(&line);
-        let Some(row) = tokio::task::spawn_blocking(move || {
-            classify(ClassifyInput::from_env(session, None, now_ms))
-        })
-        .await
-        .ok()
-        .flatten() else {
-            return LineOutcome::Processed;
+        // An AskUserQuestion is classified from the hook line that ANNOUNCED it,
+        // not from the transcript. Claude does not append the `tool_use` row for
+        // the picker until the tool RESOLVES, so while the question is genuinely
+        // open the transcript cannot describe it — probed live at every lookback
+        // window (20/40/80/160/320) against a blocked session: `None` at all
+        // five. The transcript classifier therefore never fired for a live
+        // interview and the `attention` table held zero ASK rows, ever. The hook
+        // payload carries the full `tool_input` at open time, so it is the only
+        // producer that can see the question while it still needs an answer.
+        let context = match ask_context_from_hook_payload(semantic_event, &payload) {
+            Some(ask) => ask,
+            // Every other signal (Stop/Notification/an ask observed after the
+            // fact, and every non-Claude producer) still classifies from the
+            // transcript exactly as before.
+            None => {
+                // Classify off the async runtime: `classify` reads the JSONL
+                // transcript + does blocking fs I/O, so it must not run inline on
+                // a tokio worker.
+                let session = session_from(&line);
+                let Some(row) = tokio::task::spawn_blocking(move || {
+                    classify(ClassifyInput::from_env(session, None, now_ms))
+                })
+                .await
+                .ok()
+                .flatten() else {
+                    return LineOutcome::Processed;
+                };
+                row.context
+            }
         };
 
-        let kind = kind_of(&row.context);
+        let kind = kind_of(&context);
 
         // Stale-ASK reconcile (spec P2 open/close ordering). A session that is no
         // longer asking (the classifier returned anything but Ask) may still carry
@@ -406,7 +432,7 @@ impl AttentionIngest {
         // on the same decision.
         let channels = crate::notify::resolve_channels(&self.pool, kind, None).await;
 
-        let context = serde_json::to_value(&row.context)
+        let context = serde_json::to_value(&context)
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
         let request_key = request_key_of(kind, &context);
         let payload = context.to_string();
@@ -616,6 +642,39 @@ fn session_from(line: &HookEventLine) -> Session {
         summary: None,
         last_seen_ms: None,
     }
+}
+
+/// The open `AskUserQuestion` a Claude hook line OPENS, read straight off the
+/// payload the hook already carries, or `None` when the line does not open one.
+///
+/// `payload.tool_input` is the SAME `{"questions":[…]}` object the transcript
+/// later stores as the `tool_use` block's `input`, and both are parsed by
+/// [`ask_data_from_tool_input`], so a hook-derived ask and a transcript-derived
+/// ask for one question produce byte-identical context — and therefore the same
+/// [`request_key_of`].
+///
+/// Only the picker-OPEN event qualifies (`PreToolUse` for the AskUserQuestion
+/// tool, which the caller has already canonicalised to `AskUserQuestion`).
+/// Claude also re-announces a live picker as `PermissionRequest` +
+/// `Notification` — measured live, 15s after the open, when Fleet releases the
+/// question back to Claude's own picker. Those describe the SAME picker, not a
+/// new one; `crate::fleet::apply_hook` makes exactly this call for the session
+/// projection (`duplicate_claude_structured_permission`) and the attention
+/// inbox must agree. Raising off them re-opened a card that the release had
+/// just closed as `native_claude`, advertising a Fleet answer route that no
+/// longer existed — observed live in the sandbox before this gate.
+fn ask_context_from_hook_payload(
+    semantic_event: &str,
+    envelope: &serde_json::Value,
+) -> Option<NeedsContext> {
+    if semantic_event != "AskUserQuestion" {
+        return None;
+    }
+    let payload = envelope.get("payload")?;
+    if payload.get("tool_name").and_then(serde_json::Value::as_str) != Some("AskUserQuestion") {
+        return None;
+    }
+    ask_data_from_tool_input(payload.get("tool_input")?).map(NeedsContext::Ask)
 }
 
 /// The stable identity of the request an ASK row is about, or `None` for kinds
@@ -989,6 +1048,215 @@ mod tests {
         assert_eq!(
             open[0].id, "att:sid-refire:f489417c-7995-41d4-af9c-5a5b12c9df48",
             "the FIRST firing owns the card, so its wait time is the real one"
+        );
+    }
+
+    /// A VERBATIM hook line captured from a live Claude interview, retyped only
+    /// in the fields the assertion needs. `event_id`, the question text and the
+    /// `tool_use_id` vary per firing; everything else is exactly what
+    /// `ainb-hooks` wrote to `events.jsonl` on 2026-08-08.
+    fn live_ask_hook_line(
+        event_id: &str,
+        hook_event: &str,
+        question: &str,
+        tool_use_id: Option<&str>,
+    ) -> String {
+        let id = tool_use_id.map(|id| format!(r#","tool_use_id":"{id}""#)).unwrap_or_default();
+        format!(
+            r#"{{"event_id":"{event_id}","ts":1786222389057,"session_id":"d39ec648","cwd":"/private/tmp/sbxwork","transcript_path":"/no/such/transcript.jsonl","agent":"claude","event_type":"{hook_event}","matcher":"AskUserQuestion","parent":null,"tmux_target":"sbx-claude:1.1","process_start_fingerprint":"pane=%5853;pid=39567","payload":{{"session_id":"d39ec648","cwd":"/private/tmp/sbxwork","permission_mode":"bypassPermissions","hook_event_name":"{hook_event}","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"question":"{question}","header":"XRAY","options":[{{"label":"Alpha","description":"Route Alpha."}},{{"label":"Bravo","description":"Route Bravo."}}],"multiSelect":false}}]}}{id}}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn live_interview_hook_raises_an_ask_row_without_any_transcript() {
+        // THE defect: `attention` held zero rows across every real interview.
+        // Claude withholds the AskUserQuestion `tool_use` row from the transcript
+        // until the tool resolves, so the transcript classifier returned None for
+        // every live question and the ingest minted nothing. This test plants NO
+        // transcript at all — `transcript_path` points at a file that does not
+        // exist — so it passes ONLY if the hook payload is what raises the card.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n",
+                live_ask_hook_line(
+                    "66a17c06-4952-422e-ba13-e63b1562ed23",
+                    "PreToolUse",
+                    "pick a route XRAY",
+                    Some("toolu_01L1eKD2ietPMh89c34SgbeK"),
+                )
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        assert_eq!(
+            ingest.ingest_once(5000).await,
+            1,
+            "the PreToolUse that OPENS the picker must raise the card"
+        );
+
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].kind, AttentionKind::AskUserQuestion);
+        assert_eq!(open[0].session_id, "d39ec648");
+        assert!(
+            open[0].payload.contains("pick a route XRAY"),
+            "the card carries the real question: {}",
+            open[0].payload
+        );
+        assert!(
+            open[0].payload.contains("Alpha") && open[0].payload.contains("Bravo"),
+            "the card carries the answerable options: {}",
+            open[0].payload
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_openings_of_one_still_open_question_collapse_onto_one_card() {
+        // The migration-0082 `request_key` collapse, on the payload producer: two
+        // picker-open firings carrying the SAME question but a fresh `event_id`
+        // (a re-announced tool call, or a replay after a log rotation) are one
+        // need, so they must share one card rather than mint two.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n{}\n",
+                live_ask_hook_line(
+                    "66a17c06-4952-422e-ba13-e63b1562ed23",
+                    "PreToolUse",
+                    "pick a route XRAY",
+                    Some("toolu_01L1eKD2ietPMh89c34SgbeK"),
+                ),
+                // No `tool_use_id`: the key must come from the QUESTION, not the
+                // tool call, or a re-announcement would not collapse.
+                live_ask_hook_line(
+                    "d614a4ba-5588-45ce-95c4-39d6e031baa1",
+                    "PreToolUse",
+                    "pick a route XRAY",
+                    None,
+                ),
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        assert_eq!(
+            ingest.ingest_once(5000).await,
+            1,
+            "two firings of one open question raise ONE card"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1, "one question is one card");
+        assert_eq!(
+            open[0].id, "att:d39ec648:66a17c06-4952-422e-ba13-e63b1562ed23",
+            "the FIRST firing owns the card, so its wait time is the real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_reannouncement_never_resurrects_a_released_question() {
+        // Observed live in the sandbox: Fleet released an open interview to
+        // Claude's own picker (card closed `native_claude`), and 15s later Claude
+        // re-announced the SAME question as PermissionRequest:AskUserQuestion.
+        // The close had freed the request key, so the re-announcement minted a
+        // fresh OPEN card — re-advertising a Fleet answer route that the release
+        // had just retired. A PermissionRequest describes the picker that is
+        // already open, never a new one, so it must raise nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n",
+                live_ask_hook_line(
+                    "evt-open",
+                    "PreToolUse",
+                    "route check ECHO2",
+                    Some("t-echo")
+                )
+            ),
+        )
+        .unwrap();
+        assert_eq!(ingest.ingest_once(5000).await, 1);
+
+        // Fleet hands the question back to Claude's picker.
+        AttentionRepo::mark_answered_if_open(
+            store.pool(),
+            "att:d39ec648:evt-open",
+            "native_claude",
+            "released to Claude native picker",
+            6000,
+        )
+        .await
+        .unwrap();
+
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&events_jsonl).unwrap();
+            writeln!(
+                f,
+                "{}",
+                live_ask_hook_line("evt-perm", "PermissionRequest", "route check ECHO2", None)
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            ingest.ingest_once(7000).await,
+            0,
+            "the permission re-announcement must not raise a card"
+        );
+        assert!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().is_empty(),
+            "the released question stays closed — Fleet can no longer answer it"
+        );
+        let row = AttentionRepo::get(store.pool(), "att:d39ec648:evt-open")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.answered_by.as_deref(), Some("native_claude"));
+    }
+
+    #[tokio::test]
+    async fn a_second_distinct_question_raises_its_own_card() {
+        // The dedupe must collapse RE-FIRINGS, not distinct interviews. Two
+        // different questions in one session are two separate needs.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n{}\n",
+                live_ask_hook_line("evt-xray", "PreToolUse", "pick a route XRAY", Some("t-1")),
+                live_ask_hook_line(
+                    "evt-yankee",
+                    "PreToolUse",
+                    "pick a route YANKEE",
+                    Some("t-2")
+                ),
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        assert_eq!(ingest.ingest_once(5000).await, 2);
+        assert_eq!(
+            AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
+            2,
+            "two different questions are two cards"
         );
     }
 

@@ -684,7 +684,6 @@ impl InterviewFixture {
     const SESSION_ID: &'static str = "interview-session";
 
     async fn open(tag: &str) -> Self {
-        use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
         use ainb_plugin_notifyd::broker::{
             BrokerState, client_await_structured, client_list, request_fingerprint,
         };
@@ -713,46 +712,51 @@ impl InterviewFixture {
             "tool_input": tool_input,
         });
         let fingerprint = request_fingerprint(&request_identity);
-        let hook = serde_json::json!({
-            "matcher": "AskUserQuestion",
-            "payload": {
-                "tool_use_id": request_identity["tool_use_id"],
-                "tool_input": request_identity["tool_input"],
-            }
-        });
-        apply_hook(
-            &store,
-            &sink,
-            &format!("claude-interview-{tag}"),
-            "claude",
-            Self::SESSION_ID,
-            "AskUserQuestion",
-            &hook,
-            220,
+        // Drive the REAL producer: append the hook line Claude's `PreToolUse`
+        // writes when the picker opens, then run the attention ingest over it.
+        // The previous fixture called `apply_hook` and then INSERTED the card it
+        // claimed the ingest would have raised — so it asserted the answer path
+        // against state it had constructed itself, and stayed green for months
+        // while the producer raised nothing at all. Nothing here plants a
+        // transcript: the ingest must mint the card off the hook payload.
+        let event_id = format!("evt-{tag}");
+        let events_jsonl = dir.path().join("events.jsonl");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "event_id": event_id,
+                    "ts": 220,
+                    "session_id": Self::SESSION_ID,
+                    "cwd": "/work/shared",
+                    "transcript_path": "/no/such/transcript.jsonl",
+                    "agent": "claude",
+                    "event_type": "PreToolUse",
+                    "matcher": "AskUserQuestion",
+                    "payload": {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "AskUserQuestion",
+                        "tool_use_id": request_identity["tool_use_id"],
+                        "tool_input": request_identity["tool_input"],
+                    }
+                })
+            ),
         )
-        .await;
-
-        // The card the attention ingest raises off the same hook line. Its
-        // session_id is the PROVIDER session id, which is how the answer path
-        // correlates it back.
-        let attention_id = format!("att:{}:evt-{tag}", Self::SESSION_ID);
-        AttentionRepo::insert(
-            store.pool(),
-            &NewAttention {
-                id: attention_id.clone(),
-                session_id: Self::SESSION_ID.to_string(),
-                cwd: "/work/shared".to_string(),
-                workspace_id: None,
-                kind: AttentionKind::AskUserQuestion,
-                payload: r#"{"question":"Ship it?"}"#.to_string(),
-                degraded: false,
-                created_at: 220,
-                raise_transcript: None,
-                channels: ainb_hangar_core::channel::ChannelSet::NONE,
-            },
-        )
-        .await
         .unwrap();
+        let raised = ainb_hangar_daemon::attention_ingest::AttentionIngest::new(
+            store.pool().clone(),
+            sink.clone(),
+            events_jsonl,
+            dir.path().join("attention_ingest.offset"),
+        )
+        .ingest_once(220)
+        .await;
+        assert_eq!(raised, 1, "the live interview hook must raise its own card");
+
+        // The id the ingest mints. Its session_id is the PROVIDER session id,
+        // which is how the answer path correlates it back.
+        let attention_id = format!("att:{}:{event_id}", Self::SESSION_ID);
 
         let waiter_socket = approve_socket.clone();
         let waiter_fingerprint = fingerprint.clone();
