@@ -78,6 +78,8 @@
   tr:last-child td { border-bottom: none; }
   td code { font-size: 12px; }
   .pass { color: var(--olive); font-weight: 600; }
+  .dl { font-family: var(--mono); font-size: 11.5px; color: var(--gray-500); }
+  .dl:hover { color: var(--slate); }
 </style>
 </head>
 <body>
@@ -89,6 +91,7 @@
     <a href="#what">What shipped</a>
     <a href="#arch">How it works</a>
     <a href="#proof">The proof</a>
+    <a href="#recordings">All recordings</a>
     <a href="#proof" class="l2">j1 bus on tmux</a>
     <a href="#proof" class="l2">j2 ACP streaming</a>
     <a href="#proof" class="l2">j3 resume</a>
@@ -112,9 +115,9 @@
       <h1>The ainb chat bus: built, proven, recorded</h1>
       <div class="tldr" id="tldr">
         <b>TL;DR</b> ainb can now hold a conversation. Messages go to running tmux sessions AND to
-        headless ACP agents (Claude, Codex) through one bus, with receipts per recipient, live
+        headless ACP agents through one bus, with receipts per recipient, live
         execution transcripts, actionable permission prompts, and resume across a daemon crash. Six
-        phases, seven merged PRs, sixteen named invariants, and nine live journeys recorded end to
+        phases, five merged PRs, sixteen named invariants, and nine live journeys recorded end to
         end against real processes. Every recording below is an uncut run, and every frame was read
         to confirm it shows the assertion it claims.
       </div>
@@ -177,16 +180,22 @@
     <h2 id="proof">The proof</h2>
     <p>Every recording is one uncut run of <code>ainb-tui/scripts/chat-bus-smoke.sh</code>. Each run
       builds a scratch world: its own hangar home, a real daemon, the real <code>ainb</code> binary,
-      three real tmux sessions, and an ACP adapter. Nothing is mocked at the edges, and nothing is
-      cut. Frames were extracted from every tape and read; the assertion text quoted under each
-      recording is text that was actually on screen.</p>
+      three real tmux sessions, and an ACP adapter. Frames were extracted from every tape and read;
+      the assertion text quoted under each recording is text that was actually on screen.</p>
+    <p><b>What is real and what is not, precisely.</b> The daemon, the store, the CLI, the tmux
+      sessions and the protocol traffic are real: these runs speak the same wire the TUI and the
+      macOS app speak. The ACP agent on the far end is a scripted fixture that implements the
+      protocol, not a live Claude or Codex process, because no adapter is installed on this
+      machine. Every tape says so in its own banner (<code>adapter mode: fixture</code>). The
+      adapters themselves were measured by hand against the real thing when the protocol behaviour
+      was pinned, and the real-adapter tests are written and skip until an adapter is present.</p>
 
     <figure>
       <img src="https://robust-rocket-8zjr.here.now/media/j1.gif" alt="Journey 1: one message reaching three real tmux panes verbatim">
       <figcaption><b>j1 . the bus on tmux.</b> One <code>msg send</code> to three targets, three
         DELIVERED receipts, the payload verbatim in every pane, and a follower that was already
         streaming when it happened.<br>
-        <span class="assert">RECEIVED:[j1 ...] hello fleet, deliver me verbatim &middot; 3/3 DELIVERED &middot; 3/3 panes verbatim &middot; follower saw it</span></figcaption>
+        <span class="assert">RECEIVED:[j1 ...] hello fleet, deliver me verbatim &middot; 3/3 DELIVERED &middot; 3/3 panes verbatim &middot; follower saw it</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j1.mp4">download the full j1 run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -194,7 +203,7 @@
       <figcaption><b>j2 . ACP with live transcript.</b> A chunk is readable while the delivery is
         still PENDING, which is the whole point of the side channel, and the timeline gets exactly
         one message against seven transcript chunks.<br>
-        <span class="assert">7 transcript chunks &middot; 1 timeline reply &middot; first chunk line 3 &lt; turn end line 8</span></figcaption>
+        <span class="assert">7 transcript chunks &middot; 1 timeline reply &middot; first chunk line 3 &lt; turn end line 8</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j2.mp4">download the full j2 run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -202,8 +211,9 @@
       <figcaption><b>j3 . resume across a daemon SIGKILL.</b> The daemon is killed mid-turn and
         restarted; the conversation continues on the same session key, through the adapter's own
         <code>session/load</code> rather than the fallback, with the interrupted leg converged and no
-        ghost approval rows left behind.<br>
-        <span class="assert">resumed via [loaded] on the same session_key &middot; 2 agent replies &middot; 0 ghost attention rows</span></figcaption>
+        ghost approval rows left behind. The journey asserts the path is <code>loaded</code>, so a
+        daemon that silently fell back to re-priming fails this rather than passing quietly.<br>
+        <span class="assert">resumed via [loaded] on the same session_key &middot; 2 agent replies &middot; 0 ghost attention rows</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j3.mp4">download the full j3 run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -211,7 +221,7 @@
       <figcaption><b>j4 . the adapter dies, the daemon lives.</b> The in-flight leg converges with an
         enumerated reason, the daemon pid is unchanged, and the same scope accepts the next message
         with no restart. Before this work the honest answer was "restart the daemon".<br>
-        <span class="assert">converged UNKNOWN/adapter_exit &middot; same daemon pid &middot; next message DELIVERED</span></figcaption>
+        <span class="assert">converged UNKNOWN/adapter_exit &middot; same daemon pid &middot; next message DELIVERED</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j4.mp4">download the full j4 run (mp4)</a></figcaption>
     </figure>
 
     <h2 id="faults">The fault matrix</h2>
@@ -222,14 +232,14 @@
       <figcaption><b>j5a . bounded queue.</b> Prompts pile up behind a wedged turn until one is
         refused, rather than the queue growing without bound. The depth is discovered from the
         running pool, not hard-coded in the test.<br>
-        <span class="assert">queue accepted 32 prompts, then REJECTED/queue_full</span></figcaption>
+        <span class="assert">queue accepted 32 prompts, then REJECTED/queue_full</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5a.mp4">download the full j5a run (mp4)</a></figcaption>
     </figure>
 
     <figure>
       <img src="https://robust-rocket-8zjr.here.now/media/j5b.gif" alt="Turn deadline converges a hung adapter">
       <figcaption><b>j5b . turn deadline.</b> An adapter that never ends its turn cannot hold a scope
         forever: the deadline cancels that session only, and the scope is immediately reusable.<br>
-        <span class="assert">converged UNKNOWN/turn_deadline after the deadline &middot; scope reusable</span></figcaption>
+        <span class="assert">converged UNKNOWN/turn_deadline after the deadline &middot; scope reusable</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5b.mp4">download the full j5b run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -237,7 +247,7 @@
       <figcaption><b>j5c . idempotency.</b> The same request id twice delivers once. The same id with
         different text is refused with a typed error and a distinct exit code, and never reaches the
         pane.<br>
-        <span class="assert">one delivery for two identical sends &middot; exit 5 on the conflicting third</span></figcaption>
+        <span class="assert">one delivery for two identical sends &middot; exit 5 on the conflicting third</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5c.mp4">download the full j5c run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -246,15 +256,39 @@
         the option ids and the pending request id, an operator approves over the same wire the TUI
         uses, and the adapter gets a real answer rather than the "transport is not active" shrug the
         pre-port code returned.<br>
-        <span class="assert">attention row -&gt; fleet/action approve -&gt; DELIVERED, row closed</span></figcaption>
+        <span class="assert">attention row -&gt; fleet/action approve -&gt; DELIVERED, row closed</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5d.mp4">download the full j5d run (mp4)</a></figcaption>
     </figure>
 
     <figure>
       <img src="https://robust-rocket-8zjr.here.now/media/j5e.gif" alt="Unknown target rejected per delivery">
       <figcaption><b>j5e . unknown target.</b> One bad recipient in a broadcast is rejected on its own
         leg with a reason; the request itself still succeeds and the message is still persisted.<br>
-        <span class="assert">DELIVERED + REJECTED/target_unknown in one request, message persisted</span></figcaption>
+        <span class="assert">DELIVERED + REJECTED/target_unknown in one request, message persisted</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">download the full j5e run (mp4)</a></figcaption>
     </figure>
+
+    <h2 id="recordings">All recordings</h2>
+    <p>Nine tapes, one per journey, each an uncut run. They live in the repo at
+      <code>explainers/recordings/chat-bus/</code> next to
+      <code>EXPECTED-OUTCOMES.md</code>, which names the exact frame text each one must
+      show. There is deliberately no whole-suite tape: three attempts to capture the
+      fifteen minute run died mid-recording, and a tape that stops after four journeys
+      looks like evidence without being any. Run the suite yourself instead, it is one
+      command.</p>
+
+    <table>
+      <thead><tr><th>Journey</th><th>What it proves</th><th>Files</th></tr></thead>
+      <tbody>
+        <tr><td><code>j1</code></td><td>the bus on tmux, three panes</td><td><a href="https://robust-rocket-8zjr.here.now/media/j1.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j1.mp4">mp4</a></td></tr>
+        <tr><td><code>j2</code></td><td>ACP with live transcript</td><td><a href="https://robust-rocket-8zjr.here.now/media/j2.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j2.mp4">mp4</a></td></tr>
+        <tr><td><code>j3</code></td><td>resume across a daemon SIGKILL</td><td><a href="https://robust-rocket-8zjr.here.now/media/j3.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j3.mp4">mp4</a></td></tr>
+        <tr><td><code>j4</code></td><td>adapter dies, daemon lives</td><td><a href="https://robust-rocket-8zjr.here.now/media/j4.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j4.mp4">mp4</a></td></tr>
+        <tr><td><code>j5a</code></td><td>bounded queue overflow</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5a.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5a.mp4">mp4</a></td></tr>
+        <tr><td><code>j5b</code></td><td>turn deadline</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5b.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5b.mp4">mp4</a></td></tr>
+        <tr><td><code>j5c</code></td><td>idempotency replay</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5c.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5c.mp4">mp4</a></td></tr>
+        <tr><td><code>j5d</code></td><td>permission round trip</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5d.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5d.mp4">mp4</a></td></tr>
+        <tr><td><code>j5e</code></td><td>unknown target</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5e.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">mp4</a></td></tr>
+      </tbody>
+    </table>
 
     <h2 id="caught">What the reviews caught</h2>
     <p>Every phase was built by one agent, reviewed adversarially by another, then reviewed again
