@@ -136,6 +136,23 @@ green. Each phase ships proof on the surface an operator actually uses:
 - [ ] The claim in any writeup names the surface it was proven on. "End to end"
       without naming the surface is how part 1's gap survived four reviews.
 
+### Two pool invariants part 2 inherits (added 2026-08-08)
+
+The peer review of part 1 hardened the multiplexed pool in two ways that are now
+contracts, not implementation details. Part 2 attaches sessions and issues turns,
+so it can break both without any test going red.
+
+- **Every attach goes through `make_room` and holds its guard for the whole
+  attach.** Occupancy counts sessions still attaching, not just those holding a
+  route, which is what stops two racing arrivals from overshooting the cap. A
+  second attach path that skips the reservation makes the reservation meaningless.
+- **Nothing goes between the replay drain and the prompt in `start_turn`.** The
+  suppression seam closes there deliberately, as late as possible, because the
+  supervisor forwards adapter notifications on a different task. Code inserted
+  between those two lines reopens the window where replayed history is ingested
+  as live output, and no test will catch it: the fixture's timing is what makes
+  the current test bite.
+
 ## Phase 0: Contract reconciliation gate (blocks A/B/C)
 
 - [x] Read landed part 1 plan; diff its `fleet/message_*`/store/AgentPool surface against the draft; amend this file where they disagree (DONE 2026-07-31: thread_list removed, no second bump, permission split clarified, copilot scope via acp_session_create, per-session config delegated here, broadcast rides message_send; see Contract section)
