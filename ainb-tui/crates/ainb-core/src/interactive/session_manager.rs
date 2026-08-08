@@ -2159,6 +2159,10 @@ mod tests {
         let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
 
         let home = tempfile::tempdir().expect("tempdir");
+        // Save and restore rather than blindly removing: a runner that sets
+        // AINB_HOME itself would otherwise have it deleted by this test, and
+        // every later test in the process would resolve against the wrong home.
+        let prior_home = std::env::var_os("AINB_HOME");
         std::env::set_var("AINB_HOME", home.path());
 
         // `atc_root()` is `$AINB_HOME/atc`. Note this is NOT the same
@@ -2221,7 +2225,31 @@ mod tests {
             "nanoclaw"
         );
 
-        std::env::remove_var("AINB_HOME");
+        // The canonical-path fallback: a symlinked home is the shape tempdir
+        // fixtures produce on macOS (/tmp -> /private/tmp), and the literal
+        // parent comparison misses it. Point AINB_HOME at a symlink but ask
+        // about the REAL path, so only the canonicalize retry can answer.
+        #[cfg(unix)]
+        {
+            let link = home.path().parent().unwrap().join(format!(
+                "atc-symlink-{}",
+                home.path().file_name().unwrap().to_string_lossy()
+            ));
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(home.path(), &link).expect("symlink");
+            std::env::set_var("AINB_HOME", &link);
+            assert_eq!(
+                InteractiveSessionManager::workspace_name_for(&instance),
+                "atc:main",
+                "the canonicalize fallback did not resolve a symlinked AINB_HOME"
+            );
+            let _ = std::fs::remove_file(&link);
+        }
+
+        match prior_home {
+            Some(v) => std::env::set_var("AINB_HOME", v),
+            None => std::env::remove_var("AINB_HOME"),
+        }
     }
 
     // ── Real git fixtures ───────────────────────────────────────────────

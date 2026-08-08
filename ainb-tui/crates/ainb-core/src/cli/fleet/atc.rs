@@ -807,7 +807,11 @@ fn print_repair_text(
                     "repaired"
                 }
             );
-            println!("  scheduler: local timer (daemon not reachable)");
+            // Not "daemon not reachable": this branch is taken whenever
+            // registration returned false, which also covers a daemon that
+            // answered and declined. Naming a cause we did not establish sends
+            // an operator to debug the wrong thing.
+            println!("  scheduler: local timer (the daemon did not take this heartbeat)");
             let units = timer_units
                 .iter()
                 .map(|p| p.display().to_string())
