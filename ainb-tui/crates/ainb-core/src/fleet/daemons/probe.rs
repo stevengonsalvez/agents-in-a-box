@@ -161,6 +161,18 @@ pub struct DaemonStatus {
     /// The last attention-source failure, when known (bridge only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attention_error: Option<String>,
+    /// How many INBOUND chat channels the daemon started (bridge only). `0` for
+    /// a daemon that makes no inbound claim.
+    #[serde(default)]
+    pub inbound_expected: u32,
+    /// How many of those are still running. Reported alongside
+    /// [`Self::last_attention_poll_at`], never folded into it: the operator has
+    /// to be able to see which HALF of the bridge is broken.
+    #[serde(default)]
+    pub inbound_live: u32,
+    /// Why the last inbound channel stopped, when known (bridge only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inbound_error: Option<String>,
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
     pub reason: String,
@@ -180,6 +192,9 @@ impl DaemonStatus {
             last_error: None,
             last_attention_poll_at: None,
             last_attention_error: None,
+            inbound_expected: 0,
+            inbound_live: 0,
+            last_inbound_error: None,
             reason: reason.into(),
         }
     }
@@ -203,6 +218,123 @@ enum OutboundVerdict {
     /// the human: the channel send failed and an ask is sitting undelivered.
     /// Carries the (scrubbed) channel error.
     Undelivered(String),
+}
+
+/// The inbound (chat gateway the human TALKS to) verdict for one heartbeat.
+///
+/// Deliberately a separate type from [`OutboundVerdict`], and never folded into
+/// it: the two halves fail independently, they fail for different reasons, and
+/// the operator's fix is different for each, so the health line has to be able
+/// to name which one is down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InboundVerdict {
+    /// This daemon runs no inbound chat channel, or its heartbeat predates the
+    /// inbound accounting, so there is no claim to judge.
+    NotApplicable,
+    /// Every channel the daemon started is still running. Carries the `live/expected`
+    /// tally so a healthy row can SHOW the inbound half rather than imply it.
+    Healthy(String),
+    /// Some, but not all, channels have stopped. The phone can still reach the
+    /// fleet on the survivors, which is exactly why this must not be silent.
+    Partial(String),
+    /// Every channel has stopped: nothing the human sends from the phone can
+    /// reach the fleet any more, however healthy the outbound push looks.
+    Dead(String),
+}
+
+/// Judge the inbound half of a bridge heartbeat: how many chat channels are
+/// still running out of the number the daemon started.
+///
+/// Pure over its inputs. `inbound_expected == 0` is the "no claim" case (a
+/// non-bridge daemon, or a `bridge.json` written before the fields existed) and
+/// must never degrade a row, or every pre-existing heartbeat would read as
+/// broken the moment it is upgraded.
+fn classify_inbound(kind: DaemonKind, hb: &DaemonHeartbeat) -> InboundVerdict {
+    if kind != DaemonKind::Bridge || hb.inbound_expected == 0 {
+        return InboundVerdict::NotApplicable;
+    }
+    let expected = hb.inbound_expected;
+    // A live count above the declared total would be nonsense on disk; clamp so
+    // a hand-edited or truncated record can never read as more-than-healthy.
+    let live = hb.inbound_live.min(expected);
+    let tally = format!("{live}/{expected} chat channels running");
+    if live == expected {
+        return InboundVerdict::Healthy(tally);
+    }
+    let cause = hb.last_inbound_error.as_deref().map_or_else(
+        || "no exit reason recorded".to_string(),
+        |e| format!("last exit: {e}"),
+    );
+    let detail = format!("{tally}, {cause}");
+    if live == 0 {
+        InboundVerdict::Dead(detail)
+    } else {
+        InboundVerdict::Partial(detail)
+    }
+}
+
+/// Turn the two half-verdicts into the row's state + operator-facing reason.
+///
+/// EITHER half being broken degrades the row, and the reason names which one (or
+/// both), because "the bridge is degraded" without saying whether the human
+/// cannot be TOLD or cannot ANSWER sends the operator to the wrong place.
+fn health_verdict(
+    inbound: &InboundVerdict,
+    outbound: &OutboundVerdict,
+    connected: bool,
+) -> (DaemonState, String) {
+    let head = if connected {
+        "running + connected"
+    } else {
+        "running (connecting…)"
+    };
+
+    let mut faults: Vec<String> = Vec::new();
+    match inbound {
+        InboundVerdict::Dead(detail) => faults.push(format!(
+            "the INBOUND chat gateway is dead, so nothing from the phone can reach the fleet ({detail})"
+        )),
+        InboundVerdict::Partial(detail) => {
+            faults.push(format!("an INBOUND chat channel has stopped ({detail})"));
+        }
+        InboundVerdict::Healthy(_) | InboundVerdict::NotApplicable => {}
+    }
+    match outbound {
+        OutboundVerdict::Unreachable(detail) => faults.push(format!(
+            "outbound cannot reach the attention source (hangar daemon attention/list): {detail}"
+        )),
+        OutboundVerdict::Undelivered(detail) => faults.push(format!(
+            "a proactive push did not reach the human (channel send failed): {detail}"
+        )),
+        OutboundVerdict::Healthy | OutboundVerdict::Starting | OutboundVerdict::NotApplicable => {}
+    }
+    if !faults.is_empty() {
+        return (
+            DaemonState::Degraded,
+            format!("{head}, but {}", faults.join(", and ")),
+        );
+    }
+
+    // Nothing is broken. A not-yet-connected gateway is still the benign
+    // starting state, and says nothing more than that.
+    if !connected {
+        return (DaemonState::Running, "running (connecting…)".to_string());
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if let InboundVerdict::Healthy(tally) = inbound {
+        notes.push(format!("inbound {tally}"));
+    }
+    match outbound {
+        OutboundVerdict::Starting => notes.push("outbound push starting…".to_string()),
+        OutboundVerdict::Healthy => notes.push("outbound push live".to_string()),
+        _ => {}
+    }
+    let reason = if notes.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head} ({})", notes.join(", "))
+    };
+    (DaemonState::Running, reason)
 }
 
 /// Judge the outbound half of a bridge heartbeat. Pure over its inputs so every
@@ -302,6 +434,9 @@ pub fn classify_heartbeat(
             last_error: hb.last_error,
             last_attention_poll_at: hb.last_attention_poll_at,
             last_attention_error: hb.last_attention_error,
+            inbound_expected: hb.inbound_expected,
+            inbound_live: hb.inbound_live,
+            last_inbound_error: hb.last_inbound_error,
             reason,
         };
     }
@@ -322,6 +457,9 @@ pub fn classify_heartbeat(
             last_error: hb.last_error,
             last_attention_poll_at: hb.last_attention_poll_at,
             last_attention_error: hb.last_attention_error,
+            inbound_expected: hb.inbound_expected,
+            inbound_live: hb.inbound_live,
+            last_inbound_error: hb.last_inbound_error,
             reason: format!("stale heartbeat — last beat {}s ago (wedged?)", age / 1000),
         };
     }
@@ -333,42 +471,13 @@ pub fn classify_heartbeat(
     // outbound push is absent used to read as fully healthy while 18 phone-routed
     // asks sat undelivered.
     let outbound = classify_outbound(kind, &hb, uptime_ms, now_ms);
-    let (state, reason) = match (&outbound, hb.connected) {
-        (OutboundVerdict::Unreachable(detail), connected) => (
-            DaemonState::Degraded,
-            format!(
-                "{}, but outbound cannot reach the attention source (hangar daemon attention/list): {detail}",
-                if connected {
-                    "running + connected"
-                } else {
-                    "running (connecting…)"
-                }
-            ),
-        ),
-        (OutboundVerdict::Undelivered(detail), connected) => (
-            DaemonState::Degraded,
-            format!(
-                "{}, but a proactive push did not reach the human (channel send failed): {detail}",
-                if connected {
-                    "running + connected"
-                } else {
-                    "running (connecting…)"
-                }
-            ),
-        ),
-        (_, false) => (DaemonState::Running, "running (connecting…)".to_string()),
-        (OutboundVerdict::Starting, true) => (
-            DaemonState::Running,
-            "running + connected (outbound push starting…)".to_string(),
-        ),
-        (OutboundVerdict::Healthy, true) => (
-            DaemonState::Running,
-            "running + connected (outbound push live)".to_string(),
-        ),
-        (OutboundVerdict::NotApplicable, true) => {
-            (DaemonState::Running, "running + connected".to_string())
-        }
-    };
+    // And the THIRD question, which `connected` cannot answer either: are the
+    // chat channels the human talks to still running? `connected` is stamped
+    // once at each channel's handshake and never reset when that channel's task
+    // dies, so a bridge that can no longer hear the phone at all reported
+    // "running + connected" for as long as the process lived.
+    let inbound = classify_inbound(kind, &hb);
+    let (state, reason) = health_verdict(&inbound, &outbound, hb.connected);
 
     DaemonStatus {
         kind,
@@ -382,6 +491,9 @@ pub fn classify_heartbeat(
         last_error: hb.last_error,
         last_attention_poll_at: hb.last_attention_poll_at,
         last_attention_error: hb.last_attention_error,
+        inbound_expected: hb.inbound_expected,
+        inbound_live: hb.inbound_live,
+        last_inbound_error: hb.last_inbound_error,
         reason,
     }
 }
@@ -458,6 +570,9 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         last_error: None,
         last_attention_poll_at: None,
         last_attention_error: None,
+        inbound_expected: 0,
+        inbound_live: 0,
+        last_inbound_error: None,
         reason,
     }
     .with_now(now_ms)
@@ -509,6 +624,9 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
         last_error: None,
         last_attention_poll_at: None,
         last_attention_error: None,
+        inbound_expected: 0,
+        inbound_live: 0,
+        last_inbound_error: None,
         reason,
     }
     .with_now(now_ms)
@@ -632,6 +750,9 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         last_error: None,
         last_attention_poll_at: None,
         last_attention_error: None,
+        inbound_expected: 0,
+        inbound_live: 0,
+        last_inbound_error: None,
         reason: format!("heartbeat alive — last beat {}m ago", age / 60_000),
     }
 }
@@ -724,11 +845,18 @@ mod tests {
             last_attention_poll_at: None,
             last_attention_error: None,
             last_delivery_error: None,
+            inbound_expected: 0,
+            inbound_live: 0,
+            last_inbound_error: None,
         }
     }
 
     /// A bridge heartbeat whose outbound worker last reached the attention
     /// source at `polled_at` (`None` = never).
+    ///
+    /// Declares ONE inbound chat channel, still live: the shape a healthy live
+    /// bridge writes. Tests that want the dead-inbound shape override
+    /// `inbound_live`.
     fn bridge_hb(
         started: i64,
         last_beat: i64,
@@ -738,6 +866,8 @@ mod tests {
         DaemonHeartbeat {
             channel: Some("Discord (gateway)".into()),
             last_attention_poll_at: polled_at,
+            inbound_expected: 1,
+            inbound_live: 1,
             ..hb(42, started, last_beat, connected)
         }
     }
@@ -832,8 +962,197 @@ mod tests {
         );
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.state.is_healthy());
-        assert_eq!(s.reason, "running + connected (outbound push live)");
+        // A green row SHOWS both halves rather than implying them: the operator
+        // can see the chat channel is up as well as the push.
+        assert_eq!(
+            s.reason,
+            "running + connected (inbound 1/1 chat channels running, outbound push live)"
+        );
         assert_eq!(s.last_attention_poll_at, Some(now - 5_000));
+    }
+
+    // ── Inbound (the chat gateway the human TALKS to) health ────────────────
+    //
+    // The mirror of the outbound defect, and the one the outbound fix made
+    // permanent: the outbound worker's poll keeps the liveness clock fresh
+    // forever, so the process never exits and never goes stale, while
+    // `connected` still reads true from a handshake that happened before the
+    // channel task died. The result is a bridge that pushes asks to the phone
+    // and can no longer receive a single answer, rendering as "● running".
+
+    #[test]
+    fn bridge_whose_only_chat_channel_died_is_degraded_and_names_the_inbound_half() {
+        let now = 1_000_000;
+        // The exact record: gateway handshake succeeded an hour ago, the idle
+        // ticker and the outbound poll are both fresh, and the one channel task
+        // has since exited.
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        h.inbound_live = 0;
+        h.last_inbound_error = Some("Telegram channel stopped: building HTTP client failed".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "a bridge that can no longer hear the phone must not read healthy: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("INBOUND"),
+            "the reason must name WHICH half is dead: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("0/1 chat channels running"),
+            "the reason must quantify the loss: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("building HTTP client failed"),
+            "the recorded exit cause must be carried into the reason: {}",
+            s.reason
+        );
+        assert!(
+            !s.reason.contains("attention/list"),
+            "the OUTBOUND half is fine and must not be blamed: {}",
+            s.reason
+        );
+        // The gateway flag and the outbound stamps are untouched: the row is
+        // connected, pushing fine, AND degraded, all at once.
+        assert!(s.connected);
+        assert_eq!(s.last_attention_poll_at, Some(now - 5_000));
+        assert_eq!(s.inbound_expected, 1);
+        assert_eq!(s.inbound_live, 0);
+        assert!(s.last_inbound_error.is_some());
+    }
+
+    #[test]
+    fn one_dead_channel_of_three_degrades_without_claiming_the_gateway_is_gone() {
+        // Two channels still relay, so the phone is not cut off, but a silent
+        // partial loss is exactly how a channel stays dead for a week.
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        h.inbound_expected = 3;
+        h.inbound_live = 2;
+        h.last_inbound_error = Some("Slack channel stopped: socket closed".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(
+            s.reason.contains("2/3 chat channels running"),
+            "reason: {}",
+            s.reason
+        );
+        assert!(
+            !s.reason.contains("dead, so nothing from the phone"),
+            "two channels still work; the reason must not claim total loss: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn both_halves_broken_names_both_not_just_the_first() {
+        // The operator's fix differs per half, so a row that has lost both must
+        // say so rather than picking a winner.
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, None);
+        h.inbound_live = 0;
+        h.last_inbound_error = Some("Discord channel stopped: gateway closed".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(s.reason.contains("INBOUND"), "reason: {}", s.reason);
+        assert!(
+            s.reason.contains("outbound cannot reach the attention source"),
+            "reason: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn a_dead_inbound_half_degrades_a_bridge_that_is_still_connecting() {
+        // Not-yet-connected must not mask a dead channel behind the benign
+        // "running (connecting…)" row (the same trap the delivery verdict had).
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, false, Some(now - 5_000));
+        h.inbound_live = 0;
+        h.last_inbound_error = Some("Telegram channel stopped: getMe 401".into());
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(s.reason.contains("INBOUND"), "reason: {}", s.reason);
+        assert!(s.reason.contains("401"), "reason: {}", s.reason);
+    }
+
+    #[test]
+    fn a_legacy_heartbeat_that_makes_no_inbound_claim_is_not_degraded() {
+        // Back-compat: a bridge.json written before the inbound accounting has
+        // `inbound_expected == 0`. That is "nothing to judge", NOT "every
+        // channel died", otherwise every upgraded bridge would flip to
+        // degraded on first read.
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        h.inbound_expected = 0;
+        h.inbound_live = 0;
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Running);
+        assert_eq!(s.reason, "running + connected (outbound push live)");
+    }
+
+    #[test]
+    fn a_non_bridge_daemon_is_never_judged_on_inbound_channels() {
+        // Only the bridge runs chat channels. The fleet daemon declaring none
+        // must never be read as having lost them.
+        let now = 1_000_000;
+        let mut h = hb(42, now - 3_600_000, now - 1_000, true);
+        h.inbound_expected = 2;
+        h.inbound_live = 0;
+        h.last_inbound_error = Some("not a bridge signal".into());
+        let s = classify_heartbeat(DaemonKind::FleetDaemon, Some(h), PidCheck::Matched, now);
+        assert_eq!(s.state, DaemonState::Running);
+        assert_eq!(s.reason, "running + connected");
+    }
+
+    #[test]
+    fn a_dead_inbound_half_still_reads_stopped_when_the_pid_is_gone() {
+        // Precedence guard, mirroring the outbound one: a crashed process is a
+        // stronger signal than a dead channel inside a live process.
+        let now = 1_000_000;
+        let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(now - 5_000));
+        h.inbound_live = 0;
+        let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Dead, now);
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert!(s.reason.contains("crashed"), "reason: {}", s.reason);
+        assert_eq!(s.inbound_live, 0, "the counters still ride the row");
+    }
+
+    #[test]
+    fn probe_reads_a_dead_inbound_half_off_disk() {
+        // End-to-end through the on-disk record the bridge actually writes.
+        let home = TempDir::new().unwrap();
+        let started = super::super::heartbeat::process_start_ms(std::process::id())
+            .expect("self process start time readable");
+        let now = started + 3_600_000;
+        let mut h = DaemonHeartbeat::starting();
+        h.pid = std::process::id();
+        h.started_at = started;
+        h.last_heartbeat_at = now - 1_000;
+        h.connected = true;
+        h.channel = Some("Discord (gateway)".into());
+        h.last_attention_poll_at = Some(now - 5_000);
+        h.set_inbound_expected(1);
+        h.record_inbound_exit("Discord channel stopped: gateway closed");
+        // set_inbound_expected/record_inbound_exit stamp the liveness clock, so
+        // restore the intended read instant before writing.
+        h.last_heartbeat_at = now - 1_000;
+        h.write_in(home.path(), DaemonKind::Bridge.id()).unwrap();
+
+        let s = probe_heartbeat_daemon(home.path(), DaemonKind::Bridge, now);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "the dead-inbound record must degrade off disk: {}",
+            s.reason
+        );
+        assert!(s.reason.contains("INBOUND"), "reason: {}", s.reason);
+        assert!(s.reason.contains("gateway closed"), "reason: {}", s.reason);
     }
 
     #[test]
@@ -881,7 +1200,10 @@ mod tests {
         assert!(h.last_delivery_error.is_none());
         let s = classify_heartbeat(DaemonKind::Bridge, Some(h), PidCheck::Matched, now);
         assert_eq!(s.state, DaemonState::Running);
-        assert_eq!(s.reason, "running + connected (outbound push live)");
+        assert_eq!(
+            s.reason,
+            "running + connected (inbound 1/1 chat channels running, outbound push live)"
+        );
     }
 
     #[test]

@@ -104,6 +104,27 @@ impl BridgeHeartbeat {
         self.mutate(|hb| hb.record_error(message));
     }
 
+    /// Declare how many INBOUND chat channels this bridge is starting, and mark
+    /// them all live. Called ONCE, before the channel tasks are spawned.
+    ///
+    /// This is the claim the daemon is then held to: without it, `connected`
+    /// (stamped once per channel at its handshake, never reset when the task
+    /// dies) is the only inbound signal there is, and it cannot tell a relaying
+    /// bridge from one whose channels have all exited.
+    pub fn set_inbound_expected(&self, channels: u32) {
+        self.mutate(|hb| hb.set_inbound_expected(channels));
+    }
+
+    /// Record that one inbound chat channel has STOPPED, with the reason.
+    ///
+    /// Terminal: nothing restarts a channel task, so this only ever walks the
+    /// live count down. Scrubbed on the way in like every other persisted
+    /// diagnostic (the heartbeat scrubs again, defense in depth).
+    pub fn record_inbound_exit(&self, message: impl Into<String>) {
+        let message = super::redact::scrub_secrets(&message.into());
+        self.mutate(|hb| hb.record_inbound_exit(message));
+    }
+
     /// Record a SUCCESSFUL poll of the daemon's attention inbox by the outbound
     /// worker. This is the ONLY proof that the proactive-push half of the bridge
     /// is alive: the chat gateway being connected says nothing about it.

@@ -20,7 +20,10 @@
 //     "error_count": 0,                   // monotonic error counter for this run
 //     "last_attention_poll_at": 170000004000, // epoch ms of last OK attention poll
 //     "last_attention_error": "connect …",    // optional last attention-source error
-//     "last_delivery_error": "outbound push…" // optional undelivered proactive push
+//     "last_delivery_error": "outbound push…",// optional undelivered proactive push
+//     "inbound_expected": 1,                  // chat channels this daemon started
+//     "inbound_live": 0,                      // how many are still running
+//     "last_inbound_error": "Telegram …"      // why the last one stopped
 //   }
 //
 // The two `attention` fields are the OUTBOUND liveness signal: a bridge that is
@@ -29,6 +32,17 @@
 // looking perfectly healthy. Only the worker that actually polls the attention
 // source can prove otherwise, so it stamps these fields and `super::probe`
 // degrades the row when they say the poll is not happening.
+//
+// The three `inbound_*` fields are the INBOUND liveness signal, and they exist
+// for the mirror-image reason. `connected` is set ONCE per chat channel at its
+// handshake and is never reset when that channel's task dies, while the idle
+// ticker and the outbound poll both keep `last_heartbeat_at` fresh forever. So a
+// bridge whose Telegram/Slack/Discord task has exited kept reporting
+// "running + connected": the human could still be pushed asks and had no way to
+// answer any of them. Counting the channels that were STARTED against the ones
+// still RUNNING is the only thing that can tell those apart, and it is kept
+// deliberately separate from the outbound fields so the health reason can name
+// WHICH half is broken instead of collapsing both into one verdict.
 //
 // `last_delivery_error` covers the OTHER half of the same blind spot. Reaching
 // the attention source proves only that the bridge can READ the ask; the send to
@@ -126,6 +140,26 @@ pub struct DaemonHeartbeat {
     /// DELIVER it, and the operator fix is different for each.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery_error: Option<String>,
+    /// How many INBOUND chat channels this daemon STARTED (bridge only).
+    ///
+    /// `0` means the daemon makes no inbound claim at all: every non-bridge
+    /// daemon, and any `bridge.json` written before these fields existed. The
+    /// probe treats that as "nothing to judge", so an older record can never be
+    /// mistaken for a bridge whose channels all died.
+    #[serde(default)]
+    pub inbound_expected: u32,
+    /// How many of those channels are STILL running. Decremented the moment a
+    /// channel task returns, which is the only proof that the phone can no
+    /// longer reach the fleet through it.
+    #[serde(default)]
+    pub inbound_live: u32,
+    /// Why the last inbound channel stopped (scrubbed). Carried into the health
+    /// reason so the operator sees WHICH channel died and why, not just that the
+    /// count dropped. Distinct from [`Self::last_attention_error`] and
+    /// [`Self::last_delivery_error`]: those describe the outbound half, and the
+    /// operator fix for each of the three is different.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inbound_error: Option<String>,
 }
 
 impl DaemonHeartbeat {
@@ -146,6 +180,9 @@ impl DaemonHeartbeat {
             last_attention_poll_at: None,
             last_attention_error: None,
             last_delivery_error: None,
+            inbound_expected: 0,
+            inbound_live: 0,
+            last_inbound_error: None,
         }
     }
 
@@ -237,6 +274,31 @@ impl DaemonHeartbeat {
     /// outage without a restart.
     pub fn clear_delivery_error(&mut self) {
         self.last_delivery_error = None;
+        self.last_heartbeat_at = now_ms();
+    }
+
+    /// Declare how many INBOUND chat channels this daemon started, and mark all
+    /// of them live. Called once, before the channel tasks are spawned: from
+    /// that moment the record carries a claim the daemon can be held to, and
+    /// [`Self::record_inbound_exit`] is the only thing that walks it back.
+    pub fn set_inbound_expected(&mut self, channels: u32) {
+        self.inbound_expected = channels;
+        self.inbound_live = channels;
+        self.last_heartbeat_at = now_ms();
+    }
+
+    /// Record that one inbound chat channel has STOPPED: decrement the live
+    /// count, store why, and count it as an error.
+    ///
+    /// A channel task that returns is terminal (nothing restarts it), so this is
+    /// a one-way move. Scrubbed on the way in like every other persisted
+    /// diagnostic, because a channel's exit error can embed its request URL.
+    pub fn record_inbound_exit(&mut self, message: impl Into<String>) {
+        let scrubbed = crate::fleet::bridge::redact::scrub(&message.into());
+        self.inbound_live = self.inbound_live.saturating_sub(1);
+        self.error_count = self.error_count.saturating_add(1);
+        self.last_inbound_error = Some(scrubbed.clone());
+        self.last_error = Some(scrubbed);
         self.last_heartbeat_at = now_ms();
     }
 
@@ -565,6 +627,91 @@ mod tests {
             stored.contains("<redacted>"),
             "expected redaction: {stored}"
         );
+    }
+
+    #[test]
+    fn inbound_exit_decrements_the_live_count_and_says_why() {
+        let mut hb = DaemonHeartbeat::starting();
+        // Nothing declared yet: no inbound claim to hold the daemon to.
+        assert_eq!(hb.inbound_expected, 0);
+        assert_eq!(hb.inbound_live, 0);
+
+        hb.set_inbound_expected(2);
+        assert_eq!((hb.inbound_expected, hb.inbound_live), (2, 2));
+        assert!(hb.last_inbound_error.is_none());
+
+        hb.record_inbound_exit("Telegram channel stopped: building HTTP client failed");
+        assert_eq!(
+            (hb.inbound_expected, hb.inbound_live),
+            (2, 1),
+            "one channel died, the other is still relaying"
+        );
+        assert_eq!(hb.error_count, 1);
+        assert!(hb.last_inbound_error.as_deref().unwrap().contains("Telegram"));
+
+        hb.record_inbound_exit("Slack channel stopped: socket closed");
+        assert_eq!(hb.inbound_live, 0, "no channel is left to hear the phone");
+        assert_eq!(hb.error_count, 2);
+
+        // A stopped channel is never restarted, so the count can only fall, and
+        // must never wrap below zero.
+        hb.record_inbound_exit("Slack channel stopped again (impossible)");
+        assert_eq!(hb.inbound_live, 0);
+    }
+
+    #[test]
+    fn inbound_exit_does_not_touch_the_outbound_verdicts() {
+        // The two halves must stay separately observable: a dead chat channel
+        // says nothing about whether the outbound push worker is fine.
+        let mut hb = DaemonHeartbeat::starting();
+        hb.set_inbound_expected(1);
+        hb.record_attention_poll();
+        hb.record_inbound_exit("Discord channel stopped: gateway closed");
+        assert!(
+            hb.last_attention_poll_at.is_some(),
+            "the outbound poll stamp survives an inbound death"
+        );
+        assert!(hb.last_attention_error.is_none());
+        assert!(hb.last_delivery_error.is_none());
+        assert!(hb.last_inbound_error.is_some());
+    }
+
+    #[test]
+    fn record_inbound_exit_scrubs_secrets() {
+        let mut hb = DaemonHeartbeat::starting();
+        hb.set_inbound_expected(1);
+        hb.record_inbound_exit(
+            "Telegram channel stopped: error sending request for url \
+             (https://api.telegram.org/bot123456789:ABC-DEF_ghiJKLmnopqrstuvwxyz012345/getUpdates)",
+        );
+        let stored = hb.last_inbound_error.as_deref().unwrap();
+        assert!(
+            !stored.contains("ABC-DEF_ghiJKLmnopqrstuvwxyz012345"),
+            "token leaked into last_inbound_error: {stored}"
+        );
+        assert!(
+            stored.contains("<redacted>"),
+            "expected redaction: {stored}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_without_inbound_keys_makes_no_inbound_claim() {
+        // Forward compatibility: a bridge.json written before the inbound
+        // liveness fields existed must still parse, and must read as "no claim"
+        // rather than as a bridge whose every channel just died.
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(daemons_dir_in(home.path())).unwrap();
+        std::fs::write(
+            heartbeat_path_in(home.path(), "bridge"),
+            br#"{"pid":89585,"started_at":1786121049405,"last_heartbeat_at":1786125144422,
+                "connected":true,"channel":"Discord (gateway)","error_count":0}"#,
+        )
+        .unwrap();
+        let hb = DaemonHeartbeat::read_in(home.path(), "bridge").expect("legacy record parses");
+        assert_eq!(hb.inbound_expected, 0);
+        assert_eq!(hb.inbound_live, 0);
+        assert!(hb.last_inbound_error.is_none());
     }
 
     #[test]

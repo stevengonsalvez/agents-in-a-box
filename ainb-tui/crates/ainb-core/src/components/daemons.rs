@@ -278,6 +278,9 @@ mod tests {
             last_error: None,
             last_attention_poll_at: None,
             last_attention_error: None,
+            inbound_expected: 0,
+            inbound_live: 0,
+            last_inbound_error: None,
             reason: if connected {
                 "running + connected".to_string()
             } else {
