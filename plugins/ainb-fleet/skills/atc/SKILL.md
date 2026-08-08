@@ -95,6 +95,44 @@ ainb fleet atc list                    # all provisioned instances
 ainb --format json fleet atc status tower   # JSON for tooling
 ```
 
+## Repair a broken heartbeat
+
+When `status` reports `program MISSING (...)` or `list` shows `BROKEN`, the unit
+names a binary that no longer resolves on the PATH the timer carries (a
+cargo-to-homebrew move, a changed PATH). Rebuild just the scheduler:
+
+```bash
+ainb fleet atc repair tower            # rewrite the unit against the current PATH
+ainb fleet atc repair tower --dry-run  # report what it would do, write nothing
+AINB_BIN=/opt/homebrew/bin/ainb ainb fleet atc repair tower  # pin an explicit path
+```
+
+`repair` READS `meta.json` and never writes it, so a customised
+`--interval` / `--idle-pause` and a disabled heartbeat all survive. That is why
+it exists instead of "just re-run setup": `setup` rebuilds `meta.json` from
+defaults, rewrites `CLAUDE.md` and the `settings.json` hooks, and spawns a
+session.
+
+It refuses (non-zero exit, nothing written) when the rebuilt unit still could
+not fire, so it never overwrites a working unit with a dead one. If the daemon
+takes the heartbeat it removes the local timer, and if it does not it clears any
+stale daemon registration, so exactly one scheduler ever fires.
+
+`--dry-run` writes nothing and is safe as a health gate, with one property
+stated precisely: it is **never greener than a real run**, rather than
+bit-identical to one. Whether a real run hands the heartbeat to the daemon
+depends on registration SUCCEEDING, which a read-only preview cannot determine
+(registration also fails on generation conflicts, proto skew, and store
+errors). So dry-run does not guess: it reports `daemon_registered` /
+`daemon_unregistered` as `null` and previews the local-timer path, which is the
+conservative branch and the one that can refuse. A green `--dry-run` therefore
+implies a real run would not hit the refusal gate; a red one may still be
+repairable if the daemon would have taken it.
+
+The JSON surface carries `activation_skipped`, so a run under
+`AINB_TIMER_SKIP_ACTIVATION=1` (which writes the unit but never loads it) cannot
+be mistaken for a live heartbeat by an agent or CI job reading the payload.
+
 ## Tear down
 
 ```bash

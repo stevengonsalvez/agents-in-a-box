@@ -2014,8 +2014,8 @@ Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / d
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
-  approve       Approve a session's pending permission request (no arg: list waiters)
-  deny          Deny a session's pending permission request (no arg: list waiters)
+  approve       Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
+  deny          Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   msg           Chat bus: persisted messages with per-recipient delivery receipts
@@ -2028,7 +2028,7 @@ Commands:
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
   runtime       Install the standalone Fleet daemon and provider hooks
-  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
   bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
   help          Print this message or the help of the given subcommand(s)
@@ -2047,17 +2047,18 @@ EXAMPLES:
   ainb fleet transcript <key> --follow  Stream one session's execution log
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
+  ainb fleet approve --full        Same listing, untruncated tool input + cwd
   ainb fleet approve <session-id>  Approve that session's pending permission request
   ainb fleet deny <session-id> --reason "not now"   Deny it, with a reason
 ```
 
 ### `ainb fleet approve`
 
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet approve --help
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet approve [OPTIONS] [session-id]
 
@@ -2067,16 +2068,17 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 
 ### `ainb fleet deny`
 
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet deny --help
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet deny [OPTIONS] [session-id]
 
@@ -2086,6 +2088,7 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 
@@ -2426,11 +2429,11 @@ Options:
 
 ### `ainb fleet atc`
 
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 ```console
 $ ainb fleet atc --help
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 Usage: ainb fleet atc [OPTIONS] <COMMAND>
 
@@ -2438,6 +2441,7 @@ Commands:
   setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
+  repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
@@ -2505,6 +2509,46 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb fleet atc repair`
+
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
+
+```console
+$ ainb fleet atc repair --help
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
+
+It READS meta.json and never writes it, so a customised interval or idle-pause survives, and it leaves policy, CLAUDE.md, the hooks and the session alone. That is what makes it safe on a live instance, and why it exists instead of re-running setup, which rebuilds meta.json from defaults and spawns a session.
+
+It leaves exactly one scheduler active, the daemon cron or the local timer, never both, and refuses rather than reaching a state it cannot vouch for. Note what that means per branch:
+
+- heartbeat ENABLED, daemon takes it: the local timer unit is REMOVED.
+- heartbeat ENABLED, daemon does not: the local unit is rebuilt against the current PATH. It refuses without writing anything if the rebuilt unit still could not fire, or if a reachable daemon will not release the cron.
+- heartbeat DISABLED in meta.json: this is destructive. The local timer unit is DELETED and the daemon cron is unregistered, because a disabled heartbeat with a live scheduler is the state repair exists to resolve.
+
+Non-zero exit does not always mean nothing changed: the pre-write refusals leave the instance untouched, but a failure verifying the unit after install, or a daemon that refuses the unregister after the units were removed, exits non-zero with the change already made. The message says which.
+
+--dry-run writes nothing and is never GREENER than a real run: it previews the conservative local-timer path and reports the daemon fields as unknown, because whether the daemon would take the heartbeat depends on registration succeeding, which a read-only preview cannot determine.
+
+Usage: ainb fleet atc repair [OPTIONS] <name>
+
+Arguments:
+  <name>
+          Instance name
+
+Options:
+      --dry-run
+          Report what repair would do without writing anything
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb fleet atc list`

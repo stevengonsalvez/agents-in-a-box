@@ -672,11 +672,36 @@ pub struct UsageRow {
     pub complete_cost: bool,
 }
 
+/// One session's aggregate.
+///
+/// Separate from [`UsageRow`] because a session is identified by three
+/// fields, not one key, and a consumer needs them apart: the composite
+/// cannot be re-split, since a project label may itself contain a colon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRow {
+    /// Source provider.
+    pub provider: Provider,
+    /// Project label this session belongs to.
+    pub project: String,
+    /// Provider-assigned session id.
+    pub session_id: String,
+    /// Tokens, counts and coalesced cost for this session.
+    pub bucket: TokenBucket,
+    /// `true` when every call in this session carried a published price.
+    pub complete_cost: bool,
+}
+
 /// One window's bounded aggregate.
 ///
 /// Deliberately carries no [`ProviderCall`]: this is the whole point of
-/// [`scan_windows`]. Rows arrive in [`emit`]'s order (dates ascending);
-/// ranking and capping belong to the consumer.
+/// [`scan_windows`].
+///
+/// Rows arrive in [`emit`]'s order: dates ascending, everything else
+/// ranked. Capping belongs to the consumer.
+///
+/// Every cost-bearing row carries its own `complete_cost` because cost
+/// coalesces during accumulation and completeness must not. See
+/// [`UsageRow`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowUsage {
     /// Whole-window totals, with distinct session/project counts.
@@ -685,12 +710,31 @@ pub struct WindowUsage {
     pub totals_complete_cost: bool,
     /// One row per UTC day present, ascending; `key` is the ISO date.
     pub daily: Vec<UsageRow>,
+    /// One row per ISO week present, ascending; `key` is the Monday's
+    /// ISO date, matching [`week_start`].
+    pub weekly: Vec<UsageRow>,
     /// One row per model.
     pub models: Vec<UsageRow>,
     /// One row per project.
     pub projects: Vec<UsageRow>,
     /// One row per provider.
     pub providers: Vec<UsageRow>,
+    /// One row per branch. Only calls carrying a non-empty branch
+    /// contribute, mirroring [`fold`].
+    pub branches: Vec<UsageRow>,
+    /// One row per session, most recently active first.
+    pub sessions: Vec<SessionRow>,
+    /// Tool-name call counts. No cost, so no completeness.
+    pub tools: Vec<NamedUsage>,
+    /// MCP-server call counts. Always empty for now: [`emit`] leaves
+    /// mcp attribution to the consumer (see this module's header).
+    pub mcp_servers: Vec<NamedUsage>,
+    /// Shell-command call counts, keyed on the RAW `input.command`.
+    ///
+    /// A command line carries absolute paths and can carry credentials,
+    /// so a consumer that publishes this MUST reduce it first. The
+    /// daemon's fleet-usage projection ships only the program name.
+    pub shell_commands: Vec<NamedUsage>,
 }
 
 /// Per-dimension "was every call priced" tracking. Separate from the
@@ -699,20 +743,51 @@ pub struct WindowUsage {
 struct CompletenessAcc {
     overall: Option<bool>,
     daily: BTreeMap<NaiveDate, bool>,
+    weekly: BTreeMap<NaiveDate, bool>,
     models: BTreeMap<String, bool>,
     projects: BTreeMap<String, bool>,
     providers: BTreeMap<&'static str, bool>,
+    branches: BTreeMap<String, bool>,
+    /// Keyed by [`session_key`], the same composite [`fold`] buckets
+    /// sessions under.
+    sessions: BTreeMap<String, bool>,
+    /// Scratch buffer the session key is formatted into, so the hot path
+    /// allocates only when a session is seen for the first time. Same
+    /// reason [`and_into_str`] exists.
+    session_key_buf: String,
 }
 
 impl CompletenessAcc {
     fn ingest(&mut self, call: &ProviderCall) {
         let priced = call.cost_usd.is_some();
+        let day = call.timestamp.date_naive();
         *self.overall.get_or_insert(true) &= priced;
-        and_into(&mut self.daily, call.timestamp.date_naive(), priced);
+        and_into(&mut self.daily, day, priced);
+        and_into(&mut self.weekly, week_start(day), priced);
         and_into_str(&mut self.models, &call.model, priced);
         and_into_str(&mut self.projects, &call.project, priced);
         and_into(&mut self.providers, call.provider.as_str(), priced);
+        // Mirror `fold`: a blank branch is not bucketed, so it must not
+        // create a phantom completeness entry either.
+        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+            and_into_str(&mut self.branches, branch, priced);
+        }
+        write_session_key(
+            &mut self.session_key_buf,
+            call.provider,
+            &call.project,
+            &call.session_id,
+        );
+        and_into_str(&mut self.sessions, &self.session_key_buf, priced);
     }
+}
+
+/// The composite key [`fold`] buckets sessions under. Written into a
+/// caller-owned buffer so the per-call path does not allocate.
+fn write_session_key(buf: &mut String, provider: Provider, project: &str, session_id: &str) {
+    use std::fmt::Write as _;
+    buf.clear();
+    let _ = write!(buf, "{}:{project}:{session_id}", provider.as_str());
 }
 
 fn and_into<K: Ord>(map: &mut BTreeMap<K, bool>, key: K, priced: bool) {
@@ -810,6 +885,7 @@ impl WindowAcc {
         let mut emitted = emit(whole);
         emitted.grand_total.call_count = calls_seen;
 
+        let mut session_key = String::new();
         WindowUsage {
             totals: emitted.grand_total,
             totals_complete_cost: completeness.overall.unwrap_or(true),
@@ -820,6 +896,15 @@ impl WindowAcc {
                     key: date.to_string(),
                     bucket,
                     complete_cost: complete(completeness.daily.get(&date)),
+                })
+                .collect(),
+            weekly: emitted
+                .weekly
+                .into_iter()
+                .map(|(week, bucket)| UsageRow {
+                    key: week.to_string(),
+                    bucket,
+                    complete_cost: complete(completeness.weekly.get(&week)),
                 })
                 .collect(),
             models: emitted
@@ -841,8 +926,52 @@ impl WindowAcc {
                 })
                 .collect(),
             providers,
+            branches: emitted
+                .branches
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: complete(completeness.branches.get(&row.branch)),
+                    key: row.branch,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            sessions: emitted
+                .sessions
+                .into_iter()
+                .map(|row| {
+                    write_session_key(
+                        &mut session_key,
+                        row.provider,
+                        &row.project,
+                        &row.session_id,
+                    );
+                    SessionRow {
+                        complete_cost: complete(completeness.sessions.get(&session_key)),
+                        provider: row.provider,
+                        project: row.project,
+                        session_id: row.session_id,
+                        bucket: row.bucket,
+                    }
+                })
+                .collect(),
+            tools: emitted.tools,
+            mcp_servers: emitted.mcp_servers,
+            shell_commands: emitted.shell_commands,
         }
     }
+}
+
+/// Aggregate an in-memory call set into one window, without touching disk.
+///
+/// The pure core of [`scan_windows`], with the same accumulators and the
+/// same completeness rules, exposed for callers that already hold their calls
+/// and for tests that need to drive the real projection rather than a
+/// hand-built fixture. The windowed analogue of [`aggregate`].
+#[must_use]
+pub fn window_usage(calls: &[ProviderCall], window: UsageWindow) -> WindowUsage {
+    let mut acc = WindowAcc::new(window);
+    acc.ingest(calls);
+    acc.finish()
 }
 
 /// Merge `calls` into `state` and immediately drop the retained vector.
@@ -1878,6 +2007,57 @@ mod tests {
                 })
                 .collect(),
             providers,
+            weekly: projected
+                .weekly
+                .into_iter()
+                .map(|(week, bucket)| UsageRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| week_start(c.timestamp.date_naive()) == week)
+                            .collect::<Vec<_>>(),
+                    ),
+                    key: week.to_string(),
+                    bucket,
+                })
+                .collect(),
+            branches: projected
+                .branches
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| c.branch.as_deref() == Some(row.branch.as_str()))
+                            .collect::<Vec<_>>(),
+                    ),
+                    key: row.branch,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            sessions: projected
+                .sessions
+                .into_iter()
+                .map(|row| SessionRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| {
+                                c.provider == row.provider
+                                    && c.project == row.project
+                                    && c.session_id == row.session_id
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    provider: row.provider,
+                    project: row.project,
+                    session_id: row.session_id,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            tools: projected.tools,
+            mcp_servers: projected.mcp_servers,
+            shell_commands: projected.shell_commands,
         }
     }
 
@@ -2103,6 +2283,125 @@ mod tests {
             }
         }
         accs.into_iter().map(WindowAcc::finish).collect()
+    }
+
+    /// Completeness must AND across a key, not take the last call's answer.
+    ///
+    /// This is the hazard that makes `complete_cost` exist at all: costs
+    /// accumulate through `add_cost_nanos`, which coalesces `None`, so a key
+    /// holding one priced call among unpriced ones still reports `Some` for its
+    /// bucket. Only the AND-accumulator distinguishes "this really cost $X"
+    /// from "this cost at least $X and we cannot see the rest".
+    ///
+    /// Every fixture here deliberately MIXES priced and unpriced calls under a
+    /// single key. A test whose keys are internally homogeneous passes just as
+    /// well against a plain `insert`, which is exactly the blind spot this
+    /// closes.
+    ///
+    /// BOTH orderings are exercised. "Last call wins" happens to agree with the
+    /// AND whenever the unpriced call comes last, so a single ordering leaves
+    /// the bug alive in one direction.
+    #[test]
+    fn a_mixed_key_reports_a_coalesced_cost_but_never_claims_it_is_complete() {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day);
+        let priced = call(
+            Provider::Claude,
+            "alpha",
+            "s1",
+            base + 60,
+            10,
+            20,
+            Some(0.5),
+        );
+        let unpriced = call(Provider::Claude, "alpha", "s1", base + 120, 10, 20, None);
+
+        // One session, one branch, one day, one week, either way round.
+        for (order, calls) in [
+            ("priced first", vec![priced.clone(), unpriced.clone()]),
+            ("unpriced first", vec![unpriced, priced]),
+        ] {
+            let got = window_usage(
+                &calls,
+                UsageWindow {
+                    start: DateTime::from_timestamp(base, 0).unwrap(),
+                    end: DateTime::from_timestamp(base + day, 0).unwrap(),
+                },
+            );
+
+            let session = got.sessions.first().expect("one session");
+            assert_eq!(
+                session.bucket.cost_usd,
+                Some(0.5),
+                "{order}: the bucket really does coalesce to a partial sum, \
+                 which is why the flag is needed"
+            );
+            assert!(
+                !session.complete_cost,
+                "{order}: a session mixing priced and unpriced calls must not \
+                 claim a complete cost"
+            );
+
+            for (label, rows) in [
+                ("daily", &got.daily),
+                ("weekly", &got.weekly),
+                ("branches", &got.branches),
+                ("models", &got.models),
+                ("projects", &got.projects),
+                ("providers", &got.providers),
+            ] {
+                let row = rows.first().unwrap_or_else(|| panic!("{order}: one {label} row"));
+                assert!(
+                    !row.complete_cost,
+                    "{order}/{label}: an unpriced call anywhere under a key must \
+                     clear its completeness"
+                );
+            }
+            assert!(
+                !got.totals_complete_cost,
+                "{order}: the whole-window flag must fall too"
+            );
+        }
+    }
+
+    /// The mirror: an all-priced key must still report complete, or the gate
+    /// above would be satisfied by hard-coding `false` everywhere.
+    #[test]
+    fn a_fully_priced_key_still_reports_a_complete_cost() {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day);
+        let calls = vec![
+            call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                base + 60,
+                10,
+                20,
+                Some(0.5),
+            ),
+            call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                base + 120,
+                10,
+                20,
+                Some(0.25),
+            ),
+        ];
+        let got = window_usage(
+            &calls,
+            UsageWindow {
+                start: DateTime::from_timestamp(base, 0).unwrap(),
+                end: DateTime::from_timestamp(base + day, 0).unwrap(),
+            },
+        );
+
+        assert!(got.sessions.first().expect("one session").complete_cost);
+        assert!(got.weekly.first().expect("one week").complete_cost);
+        assert!(got.branches.first().expect("one branch").complete_cost);
+        assert!(got.totals_complete_cost);
     }
 
     /// End-to-end over a real corpus on disk: `scan_windows` must agree with

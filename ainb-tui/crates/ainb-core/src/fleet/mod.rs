@@ -24,6 +24,7 @@ pub mod control;
 pub mod daemons;
 pub mod plumbing;
 pub mod read;
+pub mod unit_program;
 
 pub use ainb_fleet_core::fleet::{discover, enrich_cache, send, types};
 

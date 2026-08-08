@@ -2421,11 +2421,23 @@ fn home_state_label(session: &FleetSessionRow) -> &'static str {
     }
 }
 
+/// The on-screen label for a row's provider token.
+///
+/// This is the SECOND mapping of the same fact: `FleetSessionRow::from`
+/// turns a `FleetProvider` into a wire token, and this turns that token
+/// into what the operator reads. A provider added to one and not the
+/// other degrades to `UNKNOWN` on screen with nothing failing, which is
+/// how `acp` and `copilot` shipped invisible. `every_wire_provider_has_a_label`
+/// is what keeps the two in step.
 fn provider_label(provider: &str) -> &'static str {
     if provider.eq_ignore_ascii_case("claude") {
         "CLAUDE"
     } else if provider.eq_ignore_ascii_case("codex") {
         "CODEX"
+    } else if provider.eq_ignore_ascii_case("copilot") {
+        "COPILOT"
+    } else if provider.eq_ignore_ascii_case("acp") {
+        "ACP"
     } else {
         "UNKNOWN"
     }
@@ -5330,6 +5342,74 @@ mod tests {
         assert!(flags.contains("text_send"));
         assert!(!flags.contains("kill"));
         assert!(json.contains("verified_picker"));
+    }
+
+    /// The panel maps a provider TWICE: `FleetSessionRow::from` produces the
+    /// wire token, `provider_label` turns that token into what the operator
+    /// reads. `acp` shipped with only the first half, so a chat session
+    /// rendered as UNKNOWN on the one screen an operator actually looks at,
+    /// and every daemon-level and CLI-level test stayed green. This walks a
+    /// provider through BOTH mappings so the halves cannot drift apart again.
+    #[test]
+    fn every_wire_provider_renders_a_label_operators_can_read() {
+        use ainb_hangar_proto::fleet::{
+            AttentionState, FleetCapabilities as ProtoCapabilities, FleetConfidence,
+            FleetProvenance, FleetProvider, FleetSession, LifecycleState, ManagementState,
+            TransportHealth,
+        };
+
+        // Exhaustive on purpose: a new `FleetProvider` variant must fail to
+        // compile here rather than quietly degrade to UNKNOWN on the panel.
+        fn operators_should_recognise(provider: FleetProvider) -> bool {
+            match provider {
+                FleetProvider::Claude
+                | FleetProvider::Codex
+                | FleetProvider::Copilot
+                | FleetProvider::Acp => true,
+                FleetProvider::Unknown => false,
+            }
+        }
+
+        for provider in [
+            FleetProvider::Claude,
+            FleetProvider::Codex,
+            FleetProvider::Copilot,
+            FleetProvider::Acp,
+            FleetProvider::Unknown,
+        ] {
+            let row = FleetSessionRow::from(FleetSession {
+                session_key: "provider:1".into(),
+                provider,
+                provider_session_id: None,
+                tmux_target: None,
+                process_start_fingerprint: None,
+                cwd: "/work".into(),
+                display_name: None,
+                lifecycle: LifecycleState::Idle,
+                attention: AttentionState::None,
+                current_request_fingerprint: None,
+                current_request: None,
+                management: ManagementState::Managed,
+                transport_health: TransportHealth::Healthy,
+                capabilities: ProtoCapabilities::default(),
+                provenance: FleetProvenance::Authoritative,
+                confidence: FleetConfidence::High,
+                discovered_at: 0,
+                last_observed_at: 0,
+                lifecycle_updated_at: 0,
+                attention_updated_at: 0,
+                active_work_count: 0,
+                version: 1,
+                updated_revision: 1,
+            });
+            let label = provider_label(&row.provider);
+            assert_eq!(
+                label != "UNKNOWN",
+                operators_should_recognise(provider),
+                "{provider:?} reaches the panel as wire token `{}` and renders as `{label}`",
+                row.provider
+            );
+        }
     }
 
     #[test]

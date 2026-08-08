@@ -569,9 +569,16 @@ struct FleetUsageSummaryParams: Codable, Equatable {
     let period: FleetUsagePeriod
 }
 
-enum FleetUsageSummaryState: String, Codable, Equatable {
+enum FleetUsageSummaryState: String, Encodable, Equatable {
     case scanning, ready, partial, unavailable
 }
+
+// Usage state gates a whole panel, and both the summary and the dashboard embed
+// it. Left as a plain synthesized `Codable` it threw on any value this build did
+// not know, so a daemon adding one state blanked the entire panel rather than
+// degrading it. Unknown degrades to `.unavailable`: the panel then renders its
+// explanatory empty state instead of over-promising `.ready` with no data.
+extension FleetUsageSummaryState: TolerantWireEnum { static var wireFallback: Self { .unavailable } }
 
 struct FleetUsageBucket: Codable, Equatable {
     let inputTokens: UInt64
@@ -640,6 +647,110 @@ struct FleetUsageSummaryResult: Codable, Equatable {
         case startAt = "start_at"
         case endAt = "end_at"
         case totals, daily, providers, models, projects, detail
+    }
+}
+
+// MARK: - fleet/usage_dashboard
+
+struct FleetUsageDashboardParams: Codable, Equatable { init() {} }
+
+struct FleetHeatmapCell: Codable, Equatable {
+    let date: String
+    let callCount: UInt64
+    let costUSD: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case callCount = "call_count"
+        case costUSD = "cost_usd"
+    }
+}
+
+struct FleetUsageWeeklyBucket: Codable, Equatable {
+    let weekStart: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case weekStart = "week_start"
+        case bucket
+    }
+}
+
+struct FleetUsageSessionBucket: Codable, Equatable {
+    let sessionID: String
+    let provider: String
+    let project: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case provider, project, bucket
+    }
+}
+
+struct FleetUsageBranchBucket: Codable, Equatable {
+    let branch: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageNamedBucket: Codable, Equatable {
+    let name: String
+    let callCount: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case callCount = "call_count"
+    }
+}
+
+struct FleetUsageForecast: Codable, Equatable {
+    let projected30dCostUSD: Double?
+    let projected30dTokens: UInt64
+    let avgDailyCostUSD: Double?
+    let avgDailyTokens: UInt64
+    let sampleDays: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case projected30dCostUSD = "projected_30d_cost_usd"
+        case projected30dTokens = "projected_30d_tokens"
+        case avgDailyCostUSD = "avg_daily_cost_usd"
+        case avgDailyTokens = "avg_daily_tokens"
+        case sampleDays = "sample_days"
+    }
+}
+
+struct FleetUsageDashboardResult: Codable, Equatable {
+    let state: FleetUsageSummaryState
+    let generatedAt: Int64?
+    let startAt: Int64?
+    let endAt: Int64?
+    let costComplete: Bool
+    let totals: FleetUsageBucket?
+    let weekly: [FleetUsageWeeklyBucket]
+    let heatmap: [FleetHeatmapCell]
+    let forecast: FleetUsageForecast?
+    let providers: [FleetUsageProviderBucket]
+    let models: [FleetUsageModelBucket]
+    let projects: [FleetUsageProjectBucket]
+    let sessions: [FleetUsageSessionBucket]
+    let branches: [FleetUsageBranchBucket]
+    let tools: [FleetUsageNamedBucket]
+    let mcpServers: [FleetUsageNamedBucket]
+    let shellCommands: [FleetUsageNamedBucket]
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case generatedAt = "generated_at"
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case costComplete = "cost_complete"
+        case totals, weekly, heatmap, forecast
+        case providers, models, projects, sessions, branches
+        case tools
+        case mcpServers = "mcp_servers"
+        case shellCommands = "shell_commands"
+        case detail
     }
 }
 

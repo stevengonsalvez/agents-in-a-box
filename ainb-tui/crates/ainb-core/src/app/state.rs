@@ -1075,10 +1075,7 @@ pub(crate) fn daemons_sync_probe() -> (
                 &paths.base,
                 crate::fleet::daemons::heartbeat::now_ms(),
             );
-            (
-                s.state == crate::fleet::daemons::DaemonState::Running,
-                s.reason,
-            )
+            (s.state.is_healthy(), s.reason)
         }
         Err(e) => (false, format!("home unresolved: {e}")),
     };

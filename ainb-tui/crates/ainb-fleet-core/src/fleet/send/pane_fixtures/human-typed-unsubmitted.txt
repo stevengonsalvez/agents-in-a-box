@@ -1,0 +1,50 @@
+
+
+⏺ ACK
+
+✻ Cooked for 2s
+
+❯ test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else.
+  test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing
+  else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing
+  else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do
+  nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do
+  nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and
+  do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and
+  do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK
+  and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK
+  and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word
+  ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word
+  ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single
+  word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single
+  word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the
+  single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the
+  single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with
+  the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with
+  the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply
+  with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply
+  with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload,
+  reply with the single word ACK and do nothing else. test payload, reply with the single word
+
+⏺ ACK
+
+✻ Crunched for 2s
+
+❯ test payload, reply with the single word ACK and do nothing else
+
+⏺ ACK
+
+✻ Baked for 2s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ fix the login bug
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   …/scratchpad/qfix-cwd  ⚠200 /reflect:errors-ack  🪨 ⛏ 155.8k                                                                                                                                  /rc
+  opus-5·1m · eff high · 🟢 16/50 · ctx [░░░░░░] 8% · 5h [█░░░░░] 25% ↻ 22:00 · wk [░░░░░░] 2% ↻ Aug 14 18:00 · $1.66
+  TOK: ·····················███   MEM: ························   REC: ▂▆█▆▁▂▆▅▁▂·▃··▁·▁▁▅▇▅███
+  UNC: ·····················█▁▅   DRN: ·▁·▁·▁▂▁·▁·▁·▁·▁·▁▁▂▁▂▄█   ING: ························
+  CHR: ·····················███   AGT: ······▁·················   COM: ························
+  OUT: ·····················▁▁▁   THR: ·····················▁··   ERR: ························
+  legend: █ TOK cache≥70%  █ 30-70%  █ <30% (uncached spike)  ▌ THR = cache invalidation
+  ↑ col 1 tokens (TOK/UNC/CHR/OUT) · col 2 ops + THR · col 3 REC/ING/COM/ERR · click label / --explain TOK
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

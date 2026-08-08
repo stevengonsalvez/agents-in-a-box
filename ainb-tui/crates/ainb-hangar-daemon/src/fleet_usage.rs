@@ -3,22 +3,27 @@
 //! Provider logs and canonical model-rate parsing stay behind this module. The
 //! public RPC receives only aggregates, never paths, transcripts, or calls.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration as StdDuration;
 
 use ainb_hangar_proto::fleet::{
-    FLEET_USAGE_MAX_BREAKDOWN_BUCKETS, FLEET_USAGE_MAX_DAILY_BUCKETS, FleetUsageBucket,
-    FleetUsageDailyBucket, FleetUsageModelBucket, FleetUsagePeriod, FleetUsageProjectBucket,
-    FleetUsageProviderBucket, FleetUsageSummaryResult, FleetUsageSummaryState,
+    FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS, FLEET_DASHBOARD_MAX_HEATMAP_CELLS,
+    FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS, FLEET_USAGE_MAX_BREAKDOWN_BUCKETS,
+    FLEET_USAGE_MAX_DAILY_BUCKETS, FleetHeatmapCell, FleetUsageBranchBucket, FleetUsageBucket,
+    FleetUsageDailyBucket, FleetUsageDashboardResult, FleetUsageForecast, FleetUsageModelBucket,
+    FleetUsageNamedBucket, FleetUsagePeriod, FleetUsageProjectBucket, FleetUsageProviderBucket,
+    FleetUsageSessionBucket, FleetUsageSummaryResult, FleetUsageSummaryState,
+    FleetUsageWeeklyBucket,
 };
 use ainb_plugin_session_reader::scanner::{self, ProviderRoots};
-use ainb_plugin_types_sessions::TokenBucket;
-use chrono::{DateTime, Duration, Utc};
+use ainb_plugin_types_sessions::{NamedUsage, TokenBucket};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
 
 /// Floor between the START of one scan and the start of the next.
@@ -83,6 +88,8 @@ fn failure_retry_gap_ms() -> i64 {
 struct CachedSummaries {
     version: u32,
     summaries: Vec<CachedSummary>,
+    #[serde(default)]
+    dashboard: Option<FleetUsageDashboardResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +157,48 @@ impl UsageService {
             cache_path,
             state: Mutex::new(State::default()),
         }
+    }
+
+    async fn dashboard(self: &Arc<Self>) -> FleetUsageDashboardResult {
+        let (dashboard, should_refresh) = {
+            let state = self.state.lock().await;
+            let cached = self.cached.lock().await;
+            let dashboard = cached.as_ref().and_then(|cache| {
+                let mut d = cache.dashboard.clone()?;
+                if state.refreshing || state.last_error.is_some() {
+                    d.state = FleetUsageSummaryState::Partial;
+                    d.detail = Some(match &state.last_error {
+                        Some(error) => format!("using last complete snapshot: {error}"),
+                        None => "refreshing usage in background".to_string(),
+                    });
+                }
+                Some(d)
+            });
+            let generated_at = dashboard.as_ref().and_then(|d| d.generated_at).unwrap_or(0);
+            let age_ms = Utc::now().timestamp_millis().saturating_sub(generated_at);
+            (
+                dashboard,
+                generated_at == 0 || age_ms >= REFRESH_INTERVAL.as_millis() as i64,
+            )
+        };
+        if should_refresh {
+            self.request_refresh().await;
+            if let Some(mut d) = dashboard {
+                d.state = FleetUsageSummaryState::Partial;
+                d.detail = Some(match d.detail {
+                    Some(detail) => format!("{detail}; refreshing usage in background"),
+                    None => "refreshing usage in background".to_string(),
+                });
+                return d;
+            }
+        }
+        dashboard.unwrap_or_else(|| {
+            let state = self.state.try_lock().ok();
+            match state.and_then(|state| state.last_error.clone()) {
+                Some(error) => dashboard_unavailable(error),
+                None => dashboard_scanning(),
+            }
+        })
     }
 
     async fn summary(self: &Arc<Self>, period: FleetUsagePeriod) -> FleetUsageSummaryResult {
@@ -281,10 +330,23 @@ pub async fn summary(period: FleetUsagePeriod) -> FleetUsageSummaryResult {
     }
 }
 
+/// Read the cached rich dashboard projection.
+pub async fn dashboard() -> FleetUsageDashboardResult {
+    match active_slot().read().await.clone() {
+        Some(service) => service.dashboard().await,
+        None => dashboard_unavailable("usage service is not initialized".to_string()),
+    }
+}
+
 fn load_cache(path: &Path) -> Option<CachedSummaries> {
     let bytes = std::fs::read(path).ok()?;
     let cached: CachedSummaries = serde_json::from_slice(&bytes).ok()?;
-    (cached.version == CACHE_VERSION).then_some(cached)
+    // Accept OLDER caches, not just the current version. `CachedSummary` is
+    // unchanged across the v1 to v2 bump and `dashboard` defaults to None, so a
+    // v1 file still answers fleet/usage_summary correctly while the dashboard
+    // fills in on the next refresh. Rejecting it would drop the stable endpoint
+    // to SCANNING until a cold rescan of the whole corpus finished.
+    (cached.version <= CACHE_VERSION).then_some(cached)
 }
 
 fn write_cache(path: &Path, cached: &CachedSummaries) -> std::io::Result<()> {
@@ -330,18 +392,101 @@ fn unavailable(detail: String) -> FleetUsageSummaryResult {
     }
 }
 
-/// Every window the public contract exposes. `scan_all_summaries` zips this
-/// against the scanner's results, so the order is load-bearing.
+fn dashboard_scanning() -> FleetUsageDashboardResult {
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Scanning,
+        generated_at: None,
+        start_at: None,
+        end_at: None,
+        cost_complete: false,
+        totals: None,
+        weekly: Vec::new(),
+        heatmap: Vec::new(),
+        forecast: None,
+        providers: Vec::new(),
+        models: Vec::new(),
+        projects: Vec::new(),
+        sessions: Vec::new(),
+        branches: Vec::new(),
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
+        shell_commands: Vec::new(),
+        detail: Some("building usage dashboard".to_string()),
+    }
+}
+
+fn dashboard_unavailable(detail: String) -> FleetUsageDashboardResult {
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Unavailable,
+        generated_at: None,
+        start_at: None,
+        end_at: None,
+        cost_complete: false,
+        totals: None,
+        weekly: Vec::new(),
+        heatmap: Vec::new(),
+        forecast: None,
+        providers: Vec::new(),
+        models: Vec::new(),
+        projects: Vec::new(),
+        sessions: Vec::new(),
+        branches: Vec::new(),
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
+        shell_commands: Vec::new(),
+        detail: Some(detail),
+    }
+}
+
+/// Every summary window the public contract exposes. `scan_all_summaries`
+/// zips this against the scanner's results, so the order is load-bearing.
 const PERIODS: [FleetUsagePeriod; 3] = [
     FleetUsagePeriod::Today,
     FleetUsagePeriod::Trailing7Days,
     FleetUsagePeriod::Trailing30Days,
 ];
 
-/// Scan canonical provider histories once, then derive every public window.
+/// Number of days in the 53-week dashboard window.
+const DASHBOARD_DAYS: i64 = 371;
+
+/// Trailing window the 30-day forecast extrapolates from.
+const TRAILING_FORECAST_DAYS: i64 = 7;
+
+/// Every window one scan pass must produce: the three summary periods in
+/// [`PERIODS`] order, then the 53-week dashboard.
 ///
-/// The scanner owns provider parsing and rate lookup. This service stores only
-/// the bounded projections, never provider calls or their local paths.
+/// `scan_windows` returns one result per window in the order given, and
+/// `scan_all_summaries` pops the dashboard off the back and zips the rest
+/// against `PERIODS`. Both halves of that depend on this order, and a
+/// misalignment would publish 30 days of data under the `Today` label:
+/// numerically plausible, and therefore invisible without a test.
+///
+/// One pass over four windows rather than two scans: `scan_windows` folds each
+/// file into every window containing it and releases the calls immediately, so
+/// the 371-day window costs more files READ but does not grow peak memory the
+/// way materialising a year of `ProviderCall`s would.
+fn scan_window_list(now: DateTime<Utc>) -> Vec<scanner::UsageWindow> {
+    let mut windows: Vec<scanner::UsageWindow> = PERIODS
+        .iter()
+        .map(|period| {
+            let (start, end) = window(*period, now);
+            scanner::UsageWindow { start, end }
+        })
+        .collect();
+    windows.push(dashboard_window(now));
+    windows
+}
+
+/// The 53-week dashboard window, aligned to UTC midnight like [`window`].
+fn dashboard_window(now: DateTime<Utc>) -> scanner::UsageWindow {
+    let end_day = now.date_naive().succ_opt().expect("valid UTC date");
+    let start_day = end_day - Duration::days(DASHBOARD_DAYS);
+    scanner::UsageWindow {
+        start: start_day.and_hms_opt(0, 0, 0).expect("midnight UTC").and_utc(),
+        end: end_day.and_hms_opt(0, 0, 0).expect("midnight UTC").and_utc(),
+    }
+}
+
 fn scan_all_summaries() -> Result<CachedSummaries, String> {
     let roots = ProviderRoots::defaults();
     if roots.claude_projects.is_none()
@@ -353,17 +498,12 @@ fn scan_all_summaries() -> Result<CachedSummaries, String> {
         return Err("provider history roots are unavailable".to_string());
     }
     let now = Utc::now();
-    let windows: Vec<scanner::UsageWindow> = PERIODS
-        .iter()
-        .map(|period| {
-            let (start, end) = window(*period, now);
-            scanner::UsageWindow { start, end }
-        })
-        .collect();
-    let scanned = scanner::scan_windows(&roots, &windows);
-    if scanned.len() != PERIODS.len() {
+    let windows = scan_window_list(now);
+    let mut scanned = scanner::scan_windows(&roots, &windows);
+    if scanned.len() != windows.len() {
         return Err("usage scan returned the wrong number of windows".to_string());
     }
+    let dashboard = scanned.pop().expect("length checked against a non-empty window list");
     Ok(CachedSummaries {
         version: CACHE_VERSION,
         summaries: PERIODS
@@ -374,6 +514,7 @@ fn scan_all_summaries() -> Result<CachedSummaries, String> {
                 summary: summary_from_window(&usage, *period, now),
             })
             .collect(),
+        dashboard: Some(dashboard_from_window(&dashboard, now)),
     })
 }
 
@@ -459,6 +600,26 @@ fn window(period: FleetUsagePeriod, now: DateTime<Utc>) -> (DateTime<Utc>, DateT
     )
 }
 
+/// Reduce a shell command line to just its program name.
+///
+/// The dashboard reports WHICH programs an operator runs, never the arguments
+/// they ran them with. Arguments are where absolute paths and credentials live,
+/// and this value reaches both the wire and a world-readable cache file.
+///
+/// Leading `VAR=value` assignments are skipped rather than reported, since an
+/// inline `API_KEY=...` would otherwise become the bucket name and defeat the
+/// whole point. A basename is taken so `/usr/local/bin/foo` and `foo` agree and
+/// no install prefix leaks. Anything unrecognisable degrades to `"other"`
+/// rather than falling back to the raw string.
+fn program_name(command: &str) -> String {
+    command
+        .split_whitespace()
+        .find(|token| !token.contains('='))
+        .and_then(|token| token.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| "other".to_string(), ToString::to_string)
+}
+
 fn bucket_from(bucket: &TokenBucket, complete_cost: bool) -> FleetUsageBucket {
     FleetUsageBucket {
         input_tokens: bucket.input_tokens,
@@ -474,6 +635,21 @@ fn bucket_from(bucket: &TokenBucket, complete_cost: bool) -> FleetUsageBucket {
 }
 
 fn sort_and_cap<T>(rows: &mut Vec<T>, bucket: impl Fn(&T) -> &FleetUsageBucket) {
+    sort_and_cap_n(rows, FLEET_USAGE_MAX_BREAKDOWN_BUCKETS, bucket);
+}
+
+/// Cap a chronologically ASCENDING series, keeping the most recent `cap` rows.
+///
+/// `Vec::truncate` keeps the front, which on a time series means keeping the
+/// oldest rows and discarding the present -- the opposite of what a dashboard
+/// wants.
+fn keep_newest<T>(rows: &mut Vec<T>, cap: usize) {
+    if rows.len() > cap {
+        rows.drain(..rows.len() - cap);
+    }
+}
+
+fn sort_and_cap_n<T>(rows: &mut Vec<T>, cap: usize, bucket: impl Fn(&T) -> &FleetUsageBucket) {
     rows.sort_by(|left, right| {
         let left_total = bucket(left).input_tokens
             + bucket(left).cache_creation_tokens
@@ -487,12 +663,309 @@ fn sort_and_cap<T>(rows: &mut Vec<T>, bucket: impl Fn(&T) -> &FleetUsageBucket) 
             + bucket(right).reasoning_tokens;
         right_total.cmp(&left_total)
     });
-    rows.truncate(FLEET_USAGE_MAX_BREAKDOWN_BUCKETS);
+    rows.truncate(cap);
+}
+
+// ---------------------------------------------------------------------------
+// fleet/usage_dashboard projection
+// ---------------------------------------------------------------------------
+
+/// Project the 53-week window onto the dashboard contract.
+///
+/// Every row arrives pre-aggregated and pre-gated from `scanner::scan_windows`,
+/// so this only renames, ranks and caps. Crucially, `complete_cost` travels ON
+/// each row rather than being recomputed here from a call set: cost coalesces
+/// during accumulation, so a `Some` cost never implies every call behind it was
+/// priced, and the only place that distinction still exists is inside the
+/// scanner's per-window AND-accumulator.
+fn dashboard_from_window(
+    usage: &scanner::WindowUsage,
+    now: DateTime<Utc>,
+) -> FleetUsageDashboardResult {
+    let scanner::UsageWindow { start, end } = dashboard_window(now);
+    let cost_complete = usage.totals_complete_cost;
+
+    // Weekly buckets from the scanner's pre-computed weekly aggregates.
+    //
+    // Priced-ness is per week, not the whole-window flag: costs sum with None
+    // coalescing, so a week containing one unpriced call would otherwise report
+    // a partial sum as if it were the whole week's spend.
+    let mut weekly: Vec<_> = usage
+        .weekly
+        .iter()
+        .map(|row| FleetUsageWeeklyBucket {
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+            week_start: row.key.clone(),
+        })
+        .collect();
+    // Ascending by week (scanner keys off a BTreeMap), and a 371-day window
+    // touches 54 ISO weeks whenever it does not open on a Monday. Cap from the
+    // FRONT so the week we drop is the oldest, never the current one.
+    keep_newest(&mut weekly, FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS);
+
+    // Heatmap: one cell per calendar day with call count and cost. The daily
+    // rows arrive ascending and already gated, so a day holding an unpriced
+    // call renders null rather than a partial sum.
+    let mut heatmap: Vec<_> = usage
+        .daily
+        .iter()
+        .map(|row| FleetHeatmapCell {
+            date: row.key.clone(),
+            call_count: u64::try_from(row.bucket.call_count).unwrap_or(u64::MAX),
+            cost_usd: row.complete_cost.then_some(row.bucket.cost_usd).flatten(),
+        })
+        .collect();
+    keep_newest(&mut heatmap, FLEET_DASHBOARD_MAX_HEATMAP_CELLS);
+
+    // Forecast: linear extrapolation from trailing 7 days of daily data.
+    //
+    // Gated on per-day completeness. Costs coalesce None when a day is summed,
+    // so an ungated forecast would quote a confident dollar figure built from a
+    // partial sum, counting every unpriced call as free, while the totals beside
+    // it correctly render null.
+    let (forecast_daily, day_completeness) = forecast_input(&usage.daily);
+    let forecast = build_forecast(&forecast_daily, &day_completeness, now);
+
+    // Provider / model / project breakdowns.
+    let mut providers: Vec<_> = usage
+        .providers
+        .iter()
+        .map(|row| FleetUsageProviderBucket {
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+            provider: row.key.clone(),
+        })
+        .collect();
+    sort_and_cap(&mut providers, |row| &row.bucket);
+
+    let mut models: Vec<_> = usage
+        .models
+        .iter()
+        .map(|row| FleetUsageModelBucket {
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+            model: row.key.clone(),
+        })
+        .collect();
+    sort_and_cap(&mut models, |row| &row.bucket);
+
+    let mut projects: Vec<_> = usage
+        .projects
+        .iter()
+        .map(|row| FleetUsageProjectBucket {
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+            project: row.key.clone(),
+            // The scanner does not resolve an upstream remote for a project
+            // key, so there is nothing honest to put here.
+            repo: None,
+        })
+        .collect();
+    sort_and_cap(&mut projects, |row| &row.bucket);
+
+    // Session breakdowns.
+    let mut sessions: Vec<_> = usage
+        .sessions
+        .iter()
+        .map(|row| FleetUsageSessionBucket {
+            // The BARE session id. provider, project and session_id are
+            // already three fields on this struct, so a composite would add
+            // nothing a client could use: it cannot even be re-split, since
+            // a project label may itself contain a colon.
+            session_id: row.session_id.clone(),
+            provider: row.provider.as_str().to_string(),
+            project: row.project.clone(),
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        let total = |s: &FleetUsageSessionBucket| {
+            s.bucket.input_tokens
+                + s.bucket.cache_creation_tokens
+                + s.bucket.cache_read_tokens
+                + s.bucket.output_tokens
+                + s.bucket.reasoning_tokens
+        };
+        total(b).cmp(&total(a))
+    });
+    sessions.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    // Branch breakdowns.
+    let mut branches: Vec<_> = usage
+        .branches
+        .iter()
+        .map(|row| FleetUsageBranchBucket {
+            bucket: bucket_from(&row.bucket, row.complete_cost),
+            branch: row.key.clone(),
+        })
+        .collect();
+    branches.sort_by(|a, b| {
+        let total = |s: &FleetUsageBranchBucket| {
+            s.bucket.input_tokens
+                + s.bucket.cache_creation_tokens
+                + s.bucket.cache_read_tokens
+                + s.bucket.output_tokens
+                + s.bucket.reasoning_tokens
+        };
+        total(b).cmp(&total(a))
+    });
+    branches.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    // Tool / MCP / shell named-count breakdowns.
+    let mut tools = named_buckets(&usage.tools);
+    tools.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    tools.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    let mut mcp_servers = named_buckets(&usage.mcp_servers);
+    mcp_servers.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    mcp_servers.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    // Only the PROGRAM name leaves this module, never the command line. The
+    // scanner keys these on the verbatim `input.command`, which routinely
+    // carries absolute paths and can carry credentials, and this result is both
+    // sent over the wire and written to a world-readable cache file. Shipping a
+    // program name matches how `tools` ships a tool name and keeps the promise
+    // in this module's header.
+    let mut by_program: HashMap<String, u64> = HashMap::new();
+    for row in &usage.shell_commands {
+        *by_program.entry(program_name(&row.name)).or_default() +=
+            u64::try_from(row.calls).unwrap_or(u64::MAX);
+    }
+    let mut shell_commands: Vec<_> = by_program
+        .into_iter()
+        .map(|(name, call_count)| FleetUsageNamedBucket { name, call_count })
+        .collect();
+    // Tie-break by name so a cap boundary is deterministic across scans.
+    shell_commands
+        .sort_by(|a, b| b.call_count.cmp(&a.call_count).then_with(|| a.name.cmp(&b.name)));
+    shell_commands.truncate(FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS);
+
+    FleetUsageDashboardResult {
+        state: FleetUsageSummaryState::Ready,
+        generated_at: Some(now.timestamp_millis()),
+        start_at: Some(start.timestamp_millis()),
+        end_at: Some(end.timestamp_millis()),
+        cost_complete,
+        totals: Some(bucket_from(&usage.totals, cost_complete)),
+        weekly,
+        heatmap,
+        forecast,
+        providers,
+        models,
+        projects,
+        sessions,
+        branches,
+        tools,
+        mcp_servers,
+        shell_commands,
+        detail: None,
+    }
+}
+
+fn named_buckets(rows: &[NamedUsage]) -> Vec<FleetUsageNamedBucket> {
+    rows.iter()
+        .map(|row| FleetUsageNamedBucket {
+            name: row.name.clone(),
+            call_count: u64::try_from(row.calls).unwrap_or(u64::MAX),
+        })
+        .collect()
+}
+
+/// Split the scanner's daily rows into the two shapes [`build_forecast`] reads.
+///
+/// The rows already carry their own `complete_cost`; the forecast wants it as a
+/// lookup because it samples by date rather than walking the rows in order. A
+/// row whose key is not an ISO date cannot be a day and is dropped rather than
+/// guessed at.
+fn forecast_input(
+    daily: &[scanner::UsageRow],
+) -> (Vec<(NaiveDate, TokenBucket)>, HashMap<NaiveDate, bool>) {
+    let mut buckets = Vec::with_capacity(daily.len());
+    let mut completeness = HashMap::with_capacity(daily.len());
+    for row in daily {
+        let Ok(date) = row.key.parse::<NaiveDate>() else {
+            continue;
+        };
+        buckets.push((date, row.bucket));
+        completeness.insert(date, row.complete_cost);
+    }
+    (buckets, completeness)
+}
+
+/// Trailing-7-day linear forecast.
+///
+/// `day_completeness` gates the cost leg only; the token projection is always
+/// exact and does not depend on pricing.
+fn build_forecast(
+    daily: &[(NaiveDate, TokenBucket)],
+    day_completeness: &HashMap<NaiveDate, bool>,
+    now: DateTime<Utc>,
+) -> Option<FleetUsageForecast> {
+    let cutoff = now.date_naive() - Duration::days(TRAILING_FORECAST_DAYS);
+    let trailing: Vec<_> = daily.iter().filter(|(date, _)| *date > cutoff).collect();
+    let earliest = trailing.iter().map(|(date, _)| *date).min()?;
+
+    // Average over CALENDAR days, not days that happen to have data. The next 30
+    // days will contain idle days too, so dividing by active days only would
+    // quote an "every day is a working day" rate and overstate the projection --
+    // for someone who works two days a week, by roughly 3.5x.
+    //
+    // Shortening the window to the observed span is ONLY right for an account
+    // with no earlier history: a long-time user who happened to be idle for six
+    // days and worked today would otherwise be divided by 1 and projected at 30x
+    // a single day. Any activity at or before the cutoff proves the account is
+    // not new, so the full window is the honest divisor.
+    let has_earlier_history = daily.iter().any(|(date, _)| *date <= cutoff);
+    let denominator = if has_earlier_history {
+        TRAILING_FORECAST_DAYS as u64
+    } else {
+        let span_days = (now.date_naive() - earliest).num_days() + 1;
+        span_days.clamp(1, TRAILING_FORECAST_DAYS) as u64
+    };
+
+    let total_tokens: u64 = trailing
+        .iter()
+        .map(|(_, b)| {
+            b.input_tokens
+                + b.cache_creation_tokens
+                + b.cache_read_tokens
+                + b.output_tokens
+                + b.reasoning_tokens
+        })
+        .sum();
+    let avg_daily_tokens = total_tokens / denominator;
+
+    // A sampled day whose cost is only partially known makes the whole
+    // projection unknowable. The scanner coalesces None when summing a day, so
+    // without this gate an unpriced call silently counts as $0 and the forecast
+    // reads as confident and cheap.
+    let all_sampled_days_priced = trailing
+        .iter()
+        .all(|(date, _)| day_completeness.get(date).copied().unwrap_or(false));
+    let total_cost: Option<f64> = all_sampled_days_priced
+        .then(|| trailing.iter().try_fold(0.0_f64, |acc, (_, b)| b.cost_usd.map(|c| acc + c)))
+        .flatten();
+    let avg_daily_cost = total_cost.map(|c| c / denominator as f64);
+
+    Some(FleetUsageForecast {
+        projected_30d_cost_usd: avg_daily_cost.map(|c| c * 30.0),
+        // Saturating: a pathological token total must not wrap into a small
+        // number and quote a reassuring forecast.
+        projected_30d_tokens: avg_daily_tokens.saturating_mul(30),
+        avg_daily_cost_usd: avg_daily_cost,
+        avg_daily_tokens,
+        // Reports the DENOMINATOR, so the client's "avg/day (Nd sample)" label
+        // describes the divisor actually used.
+        sample_days: u32::try_from(denominator).unwrap_or(u32::MAX),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `ProviderCall` is a TEST-only type here. The projection above is fed
+    // pre-aggregated windows and never sees a call, which is the whole point of
+    // `scanner::scan_windows`; the fixtures below still start from calls so they
+    // drive the real accumulator rather than a hand-built aggregate.
+    use ainb_plugin_types_sessions::ProviderCall;
 
     #[test]
     fn usage_windows_are_bounded_and_utc_aligned() {
@@ -640,7 +1113,9 @@ mod tests {
         }
     }
 
-    fn window_usage(rows: Vec<scanner::UsageRow>) -> scanner::WindowUsage {
+    /// A `WindowUsage` built by hand, for the summary projection's ranking and
+    /// gating tests where the rows themselves are the fixture.
+    fn window_of_rows(rows: Vec<scanner::UsageRow>) -> scanner::WindowUsage {
         scanner::WindowUsage {
             totals: TokenBucket {
                 input_tokens: rows.iter().map(|r| r.bucket.input_tokens).sum(),
@@ -648,10 +1123,24 @@ mod tests {
             },
             totals_complete_cost: rows.iter().all(|r| r.complete_cost),
             daily: Vec::new(),
+            weekly: Vec::new(),
             models: rows.clone(),
             projects: rows.clone(),
             providers: rows,
+            branches: Vec::new(),
+            sessions: Vec::new(),
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+            shell_commands: Vec::new(),
         }
+    }
+
+    /// Project a call set through the REAL windowed accumulator, exactly as
+    /// `scan_all_summaries` does for the dashboard. Hand-building a
+    /// `WindowUsage` here would let the fixture disagree with what the scanner
+    /// actually produces, which is precisely what these tests exist to catch.
+    fn dashboard_of(calls: &[ProviderCall], now: DateTime<Utc>) -> FleetUsageDashboardResult {
+        dashboard_from_window(&scanner::window_usage(calls, dashboard_window(now)), now)
     }
 
     /// Each period must be stamped with its OWN bounds. `scan_all_summaries`
@@ -667,7 +1156,7 @@ mod tests {
             FleetUsagePeriod::Trailing30Days,
         ] {
             let (start, end) = window(period, now);
-            let summary = summary_from_window(&window_usage(Vec::new()), period, now);
+            let summary = summary_from_window(&window_of_rows(Vec::new()), period, now);
             assert_eq!(
                 summary.start_at,
                 Some(start.timestamp_millis()),
@@ -681,13 +1170,65 @@ mod tests {
         }
     }
 
+    /// `scan_all_summaries` pops the LAST scanned window as the dashboard and
+    /// zips the remainder against `PERIODS`. Both depend on this list's order,
+    /// and getting it wrong would label 371 days of data as `Today`: a wrong
+    /// number that still looks like a number, so nothing else would catch it.
+    #[test]
+    fn the_scan_asks_for_each_summary_period_then_the_dashboard() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let windows = scan_window_list(now);
+
+        assert_eq!(
+            windows.len(),
+            PERIODS.len() + 1,
+            "one window per summary period, plus the dashboard"
+        );
+        for (period, scanned) in PERIODS.iter().zip(&windows) {
+            let (start, end) = window(*period, now);
+            assert_eq!(scanned.start, start, "{period:?} start");
+            assert_eq!(scanned.end, end, "{period:?} end");
+        }
+        let dashboard = windows.last().expect("dashboard window is appended last");
+        assert_eq!(
+            *dashboard,
+            dashboard_window(now),
+            "the dashboard window must be the one popped off the back"
+        );
+        assert_eq!(
+            (dashboard.end - dashboard.start).num_days(),
+            DASHBOARD_DAYS,
+            "the dashboard reads 53 weeks, not a summary period"
+        );
+    }
+
+    /// The 53-week history is served by ANOTHER `UsageWindow` in the same
+    /// single pass, never by widening a scan back into a full-corpus call
+    /// vector. This module holds no `ProviderCall` outside its fixtures, and
+    /// that is what keeps the daemon's peak RSS flat as history grows.
+    #[test]
+    fn the_dashboard_window_is_scanned_alongside_the_summaries_not_separately() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let windows = scan_window_list(now);
+        let dashboard = *windows.last().expect("dashboard window");
+
+        // Every summary window is contained by the dashboard window, which is
+        // exactly why one pass can serve both.
+        for scanned in &windows[..PERIODS.len()] {
+            assert!(
+                scanned.start >= dashboard.start && scanned.end <= dashboard.end,
+                "a summary window outside the dashboard window would force a second scan"
+            );
+        }
+    }
+
     /// A bucket whose calls were not all priced must publish no cost at all,
     /// on every breakdown as well as the totals. Publishing the partial sum
     /// would understate spend without saying so.
     #[test]
     fn a_partially_priced_window_publishes_no_cost_anywhere() {
         let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let usage = window_usage(vec![
+        let usage = window_of_rows(vec![
             row("priced", 10, Some(1.0), true),
             row("unpriced", 20, Some(2.0), false),
         ]);
@@ -721,7 +1262,7 @@ mod tests {
         let rows: Vec<_> = (0..(FLEET_USAGE_MAX_BREAKDOWN_BUCKETS as u64 + 5))
             .map(|i| row(&format!("k{i}"), i, Some(1.0), true))
             .collect();
-        let summary = summary_from_window(&window_usage(rows), FleetUsagePeriod::Today, now);
+        let summary = summary_from_window(&window_of_rows(rows), FleetUsagePeriod::Today, now);
 
         assert_eq!(
             summary.models.len(),
@@ -750,5 +1291,482 @@ mod tests {
         };
         assert_eq!(bucket_from(&bucket, false).cost_usd, None);
         assert_eq!(bucket_from(&bucket, false).input_tokens, 10);
+    }
+
+    #[test]
+    fn the_dashboard_projects_every_dimension() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call_ts = now - Duration::hours(1);
+        let call = ProviderCall {
+            id: 1,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: "s1".into(),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: call_ts,
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 50,
+            output_tokens: 200,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.005),
+            tools: vec!["Read".into()],
+            bash_commands: vec!["cargo test".into()],
+            user_message: "test".into(),
+            branch: Some("feat/dash".into()),
+        };
+
+        let result = dashboard_of(&[call], now);
+
+        assert_eq!(result.state, FleetUsageSummaryState::Ready);
+        assert!(result.generated_at.is_some());
+        assert!(result.cost_complete);
+        assert!(result.totals.is_some());
+        // Heatmap should have the one day.
+        assert_eq!(result.heatmap.len(), 1);
+        assert_eq!(result.heatmap[0].call_count, 1);
+        // Weekly should have the one week.
+        assert_eq!(result.weekly.len(), 1);
+        assert_eq!(result.weekly[0].week_start, "2026-08-03");
+        // Forecast from 1 trailing day.
+        assert!(result.forecast.is_some());
+        let forecast = result.forecast.unwrap();
+        assert_eq!(forecast.sample_days, 1);
+        assert!(forecast.avg_daily_cost_usd.is_some());
+        // Dimension breakdowns.
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(
+            result.sessions[0].session_id, "s1",
+            "the bare session id ships, not a composite"
+        );
+        assert_eq!(result.sessions[0].provider, "claude");
+        assert_eq!(result.branches.len(), 1);
+        assert_eq!(result.branches[0].branch, "feat/dash");
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "Read");
+        assert_eq!(result.shell_commands.len(), 1);
+        assert_eq!(
+            result.shell_commands[0].name, "cargo",
+            "only the program name leaves the daemon"
+        );
+        assert_eq!(result.providers.len(), 1);
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.projects.len(), 1);
+    }
+
+    /// A 371-day window only aligns to exactly 53 ISO weeks when it starts on a
+    /// Monday; on the other six days it touches 54, and the extra one is the
+    /// CURRENT week. Capping must therefore drop the oldest week, never the
+    /// newest -- a dashboard that silently omits this week is worse than one
+    /// that omits a week from last year.
+    #[test]
+    fn weekly_cap_keeps_the_current_week() {
+        use ainb_plugin_types_sessions::Provider;
+        use chrono::Datelike;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        // end_day is tomorrow, so the window opens 371 days before that.
+        let start_day = now.date_naive().succ_opt().unwrap() - Duration::days(DASHBOARD_DAYS);
+        assert_ne!(
+            start_day.weekday(),
+            chrono::Weekday::Mon,
+            "fixture must exercise the unaligned case"
+        );
+
+        // One call per week across the whole window, plus one today. Stepping by
+        // 7 from a Friday lands on 2026-07-31 and stops, so today's call must be
+        // added explicitly -- without it the current ISO week is never populated
+        // and the test proves nothing.
+        let mut days: Vec<NaiveDate> = Vec::new();
+        let mut day = start_day;
+        while day <= now.date_naive() {
+            days.push(day);
+            day += Duration::days(7);
+        }
+        if days.last() != Some(&now.date_naive()) {
+            days.push(now.date_naive());
+        }
+
+        let mut calls: Vec<ProviderCall> = Vec::new();
+        let mut id = 0_u64;
+        for day in days {
+            id += 1;
+            calls.push(ProviderCall {
+                id,
+                provider: Provider::Claude,
+                model: "claude-sonnet-4-5".into(),
+                session_id: format!("s{id}"),
+                project: "ainb".into(),
+                project_path: "/repo".into(),
+                timestamp: day.and_hms_opt(12, 0, 0).unwrap().and_utc(),
+                input_tokens: 10,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                output_tokens: 10,
+                reasoning_tokens: 0,
+                cost_usd: Some(0.001),
+                tools: vec![],
+                bash_commands: vec![],
+                user_message: String::new(),
+                branch: None,
+            });
+        }
+
+        let result = dashboard_of(&calls, now);
+
+        assert!(
+            result.weekly.len() <= FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS,
+            "weekly must stay within the wire cap"
+        );
+        let newest = result.weekly.last().expect("dashboard must report at least one week");
+        assert_eq!(
+            newest.week_start, "2026-08-03",
+            "capping dropped the current week instead of the oldest one"
+        );
+    }
+
+    /// Cost completeness is per-row, not global. One unpriced call in an
+    /// unrelated session must not blank the cost of every OTHER session and
+    /// branch -- over a 53-week window a single unknown model would otherwise
+    /// wipe cost off the entire dashboard.
+    #[test]
+    fn one_unpriced_call_only_blanks_its_own_session_and_branch() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, session: &str, branch: &str, cost: Option<f64>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: session.into(),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 10,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: Some(branch.into()),
+        };
+
+        let result = dashboard_of(
+            &[
+                call(1, "priced", "feat/priced", Some(0.01)),
+                call(2, "unpriced", "feat/unpriced", None),
+            ],
+            now,
+        );
+
+        let priced = result
+            .sessions
+            .iter()
+            .find(|s| s.session_id == "priced")
+            .expect("priced session present");
+        let unpriced = result
+            .sessions
+            .iter()
+            .find(|s| s.session_id == "unpriced")
+            .expect("unpriced session present");
+        assert_eq!(
+            priced.bucket.cost_usd,
+            Some(0.01),
+            "a fully priced session must keep its cost"
+        );
+        assert_eq!(
+            unpriced.bucket.cost_usd, None,
+            "an unpriced session must report no cost, never 0.0"
+        );
+
+        let priced_branch = result
+            .branches
+            .iter()
+            .find(|b| b.branch == "feat/priced")
+            .expect("priced branch present");
+        let unpriced_branch = result
+            .branches
+            .iter()
+            .find(|b| b.branch == "feat/unpriced")
+            .expect("unpriced branch present");
+        assert_eq!(priced_branch.bucket.cost_usd, Some(0.01));
+        assert_eq!(unpriced_branch.bucket.cost_usd, None);
+
+        // The dashboard as a whole is still honestly flagged incomplete.
+        assert!(!result.cost_complete);
+    }
+
+    /// The forecast answers "what will the next 30 days cost", and those 30 days
+    /// include idle days. Averaging only over days that HAVE data would quote a
+    /// working-day rate and overstate an intermittent user's projection.
+    #[test]
+    fn forecast_averages_over_calendar_days_not_active_days() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let spend = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+
+        // Worked 2 days out of a 7-day span: $10 total.
+        let priced_days = HashMap::from([(day(6), true), (day(0), true)]);
+        let forecast = build_forecast(
+            &[(day(6), spend(5.0)), (day(0), spend(5.0))],
+            &priced_days,
+            now,
+        )
+        .expect("trailing data yields a forecast");
+
+        assert_eq!(
+            forecast.sample_days, 7,
+            "the divisor is the calendar span, and is what gets reported"
+        );
+        assert_eq!(
+            forecast.avg_daily_cost_usd,
+            Some(10.0 / 7.0),
+            "$10 over a 7-day span is a 7-day average, not a 2-day one"
+        );
+        // Guard the actual regression: the active-day divisor would have said $5/day.
+        assert!(
+            forecast.avg_daily_cost_usd < Some(5.0),
+            "averaging over active days only would overstate the rate"
+        );
+    }
+
+    /// A brand-new user has no idle days to average in yet; diluting their one
+    /// day of history across a week they were never present for would understate
+    /// the projection just as badly.
+    #[test]
+    fn forecast_does_not_dilute_a_single_day_of_history() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let bucket = TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(3.0),
+            ..TokenBucket::default()
+        };
+
+        let priced_days = HashMap::from([(now.date_naive(), true)]);
+        let forecast =
+            build_forecast(&[(now.date_naive(), bucket)], &priced_days, now).expect("forecast");
+
+        assert_eq!(forecast.sample_days, 1);
+        assert_eq!(forecast.avg_daily_cost_usd, Some(3.0));
+        assert_eq!(forecast.projected_30d_cost_usd, Some(90.0));
+    }
+
+    /// Command ARGUMENTS are where absolute paths and credentials live, and this
+    /// result reaches both the wire and a world-readable cache file. Only the
+    /// program name may leave the daemon.
+    #[test]
+    fn shell_commands_ship_the_program_only_never_the_arguments() {
+        assert_eq!(program_name("cargo test --workspace"), "cargo");
+        // An absolute install prefix must not leak, and must fold together with
+        // the bare invocation of the same program.
+        assert_eq!(
+            program_name("/usr/local/bin/rg --hidden /Users/someone/src"),
+            "rg"
+        );
+        // A leading inline assignment is skipped: reporting it would make the
+        // secret itself the bucket name.
+        assert_eq!(
+            program_name("API_KEY=sk-live-abc123 ./deploy.sh --prod"),
+            "deploy.sh"
+        );
+        assert_eq!(program_name(""), "other");
+        assert_eq!(program_name("FOO=1 BAR=2"), "other");
+
+        // Nothing resembling an argument survives the full projection, and
+        // variants of one program collapse into a single counted row.
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, cmd: &str| ProviderCall {
+            id,
+            provider: ainb_plugin_types_sessions::Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: now - Duration::hours(1),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.01),
+            tools: vec![],
+            bash_commands: vec![cmd.to_string()],
+            user_message: String::new(),
+            branch: None,
+        };
+        let result = dashboard_of(
+            &[
+                call(1, "git commit -m 'secret /Users/someone/private'"),
+                call(2, "git push origin main"),
+                call(
+                    3,
+                    "curl -H 'Authorization: Bearer sk-live-xyz' https://api.example.com",
+                ),
+            ],
+            now,
+        );
+
+        let git = result.shell_commands.iter().find(|r| r.name == "git").expect("git row");
+        assert_eq!(git.call_count, 2, "both git invocations fold into one row");
+        for row in &result.shell_commands {
+            assert!(
+                !row.name.contains(' ') && !row.name.contains('/'),
+                "a bare program name cannot carry arguments or paths, got {:?}",
+                row.name
+            );
+        }
+        let shipped = format!("{:?}", result.shell_commands);
+        for leaked in ["Bearer", "sk-live", "/Users/", "secret", "origin"] {
+            assert!(
+                !shipped.contains(leaked),
+                "{leaked} must never reach the wire"
+            );
+        }
+    }
+
+    /// A week containing one unpriced call must report no cost rather than a
+    /// partial sum. The scanner coalesces None when summing, so the partial
+    /// figure would otherwise read as the whole week's spend.
+    #[test]
+    fn one_unpriced_call_only_blanks_its_own_week() {
+        use ainb_plugin_types_sessions::Provider;
+
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let call = |id: u64, day: NaiveDate, cost: Option<f64>| ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            session_id: format!("s{id}"),
+            project: "ainb".into(),
+            project_path: "/repo".into(),
+            timestamp: day.and_hms_opt(12, 0, 0).unwrap().and_utc(),
+            input_tokens: 10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 10,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        };
+        // This week (Mon 2026-08-03) is fully priced; last week has one gap.
+        let this_week = NaiveDate::from_ymd_opt(2026, 8, 4).unwrap();
+        let last_week = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        let result = dashboard_of(
+            &[
+                call(1, this_week, Some(0.02)),
+                call(2, last_week, Some(0.05)),
+                call(3, last_week, None),
+            ],
+            now,
+        );
+
+        let priced =
+            result.weekly.iter().find(|w| w.week_start == "2026-08-03").expect("this week");
+        let partial =
+            result.weekly.iter().find(|w| w.week_start == "2026-07-27").expect("last week");
+        assert_eq!(
+            priced.bucket.cost_usd,
+            Some(0.02),
+            "a fully priced week keeps its cost"
+        );
+        assert_eq!(
+            partial.bucket.cost_usd, None,
+            "a week with an unpriced call must not report the partial sum as its total"
+        );
+    }
+
+    /// The forecast is the only cost surface that does not flow through
+    /// `bucket_from`, so it needs its own gate: quoting a confident dollar
+    /// projection built from partial day sums is the exact failure the
+    /// never-zero rule exists to prevent.
+    #[test]
+    fn forecast_reports_no_cost_when_a_sampled_day_is_unpriced() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let bucket = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+        let daily = [(day(1), bucket(5.0)), (day(0), bucket(5.0))];
+
+        // Day 0's cost is a partial sum, so the projection is unknowable.
+        let gapped = HashMap::from([(day(1), true), (day(0), false)]);
+        let forecast = build_forecast(&daily, &gapped, now).expect("forecast");
+        assert_eq!(
+            forecast.projected_30d_cost_usd, None,
+            "an unpriced sampled day must blank the cost projection, not count it as free"
+        );
+        assert_eq!(forecast.avg_daily_cost_usd, None);
+        // Tokens are exact regardless of pricing, so they must still be reported.
+        assert!(
+            forecast.projected_30d_tokens > 0,
+            "the token projection does not depend on price"
+        );
+
+        let complete = HashMap::from([(day(1), true), (day(0), true)]);
+        let priced = build_forecast(&daily, &complete, now).expect("forecast");
+        assert!(
+            priced.projected_30d_cost_usd.is_some(),
+            "a fully priced sample still forecasts"
+        );
+    }
+
+    /// A long-time user who was idle all week and worked today must not be
+    /// divided by one and projected at 30x a single day. Earlier history is the
+    /// evidence that distinguishes them from a genuinely new account.
+    #[test]
+    fn forecast_does_not_treat_a_long_idle_user_as_brand_new() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let day = |offset: i64| now.date_naive() - Duration::days(offset);
+        let spend = |cost: f64| TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(cost),
+            ..TokenBucket::default()
+        };
+
+        // Activity 90 days ago proves the account is not new, then a $7 day today.
+        let daily = [(day(90), spend(1.0)), (day(0), spend(7.0))];
+        let priced = HashMap::from([(day(90), true), (day(0), true)]);
+        let forecast = build_forecast(&daily, &priced, now).expect("forecast");
+
+        assert_eq!(
+            forecast.sample_days, 7,
+            "an established account uses the full window"
+        );
+        assert_eq!(
+            forecast.avg_daily_cost_usd,
+            Some(1.0),
+            "$7 over 7 days, not $7 over 1"
+        );
+        assert_eq!(forecast.projected_30d_cost_usd, Some(30.0));
+    }
+
+    #[test]
+    fn forecast_requires_trailing_data() {
+        let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        // Empty daily data yields no forecast.
+        assert!(build_forecast(&[], &HashMap::new(), now).is_none());
+        // Data older than 7 days is excluded.
+        let old_date = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let bucket = TokenBucket {
+            input_tokens: 100,
+            cost_usd: Some(1.0),
+            ..TokenBucket::default()
+        };
+        assert!(build_forecast(&[(old_date, bucket)], &HashMap::new(), now).is_none());
     }
 }

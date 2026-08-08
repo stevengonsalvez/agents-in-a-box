@@ -1,0 +1,50 @@
+
+╭─── Claude Code v2.1.224 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                                                                        │
+│                Welcome back steven!                │ Run /init to create a CLAUDE.md file with instructions for Claude                                                                               │
+│                                                    │ ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                                                                                                      │
+│                      ▝▜█████▛▘                     │ Added self-hosted environments: `claude self-hosted-runner` turns your own machines or containers into a place Claude Code web, mobile, and de… │
+│                        ▘▘ ▝▝                       │ Added `archive` plugin source: install plugins from a zip over HTTPS without git or npm, with optional SHA-256 pinning                          │
+│   Opus 5 (1M context) with high… · Claude Max ·    │ Added a cancel-and-confirm step when removing an unavailable paste changes a command's text                                                     │
+│   steven gonsalvez                                 │ /release-notes for more                                                                                                                         │
+│               /…/scratchpad/qfix-cwd               │                                                                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ test payload: run the bash command 'sleep 45' and then reply with the single word ACK and do nothing else
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✢ Hatching…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   …/scratchpad/qfix-cwd  ⚠200 /reflect:errors-ack  🪨 ⛏ 155.8k                                                                                                                                  /rc
+  opus-5·1m · eff high · 🟢 0/50 · ctx [░░░░░░] 0% · 5h [█░░░░░] 21% ↻ 22:00 · wk [░░░░░░] 2% ↻ Aug 14 18:00 · $0.00
+  TOK: ························   MEM: ························   REC: ·▂·███·▁▆▇▁·▂▂▁··▁▁▁▅▅▄█
+  UNC: ························   DRN: ·▁·▁·▁·▁▁▂·▁·▁·▁·▁·▁▁▁▂▂   ING: ························
+  CHR: ························   AGT: ·········▁··············   COM: ························
+  OUT: ························   THR: ························   ERR: ························
+  legend: █ TOK cache≥70%  █ 30-70%  █ <30% (uncached spike)  ▌ THR = cache invalidation
+  ↑ col 1 tokens (TOK/UNC/CHR/OUT) · col 2 ops + THR · col 3 REC/ING/COM/ERR · click label / --explain TOK
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents
