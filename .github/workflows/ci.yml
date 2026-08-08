@@ -329,6 +329,16 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
+      - name: Tripwire — Fleet panel renders an ACP session
+        # The TUI is the operating surface. The chat bus shipped a daemon and a
+        # CLI, and the panel maps the ACP wire token in ONE place, falling back
+        # to `unknown` in silence. Without this, that line has no coverage on
+        # the screen an operator actually looks at.
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: cargo test -p ainb --test tripwire_fleet_panel_shows_acp_session --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-
           always() && (github.event_name != 'pull_request' ||
