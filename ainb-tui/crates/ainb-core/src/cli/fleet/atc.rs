@@ -407,114 +407,6 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
 
 // --- status -----------------------------------------------------------------
 
-/// `ainb fleet atc repair <name>` (#615): rebuild the heartbeat unit from the
-/// CURRENT `PATH` and reload it.
-///
-/// Deliberately its own verb rather than a side effect of `status`, which must
-/// stay read-only: a diagnostic that silently mutates the system is a
-/// diagnostic nobody can trust. Also not folded into `setup`, which is far
-/// broader (it rewrites policy and meta, touches hooks, registers the daemon
-/// cron and may spawn a session) and so is not safe to reach for on a live
-/// instance just to repoint a unit.
-///
-/// Why rebuilding is the fix, and not merely reloading: the unit carries the
-/// `PATH` captured when it was installed. A binary that moves WITHIN that PATH
-/// already self-heals, since a missing program exits 127 and the scheduler
-/// retries on the next tick. A binary that moves OUTSIDE it never recovers, no
-/// matter how many times the existing unit is reloaded, because the stale PATH
-/// cannot reach the new location. Only re-deriving the unit from the current
-/// environment repairs that.
-async fn repair(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
-    let name = require_name(matches)?;
-    let force = matches.get_flag("force");
-    let paths = AtcPaths::resolve(&name)?;
-    if !paths.meta.exists() {
-        bail!(
-            "no ATC instance named '{name}' (expected {})",
-            paths.meta.display()
-        );
-    }
-    let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta)?)?;
-
-    let before = timer::installed_program_health(&name);
-    if !should_reinstall(&before, force) {
-        let program = before.program().unwrap_or("ainb").to_string();
-        emit_repair(
-            format,
-            &name,
-            &before,
-            None,
-            &format!("nothing to repair: the unit's program '{program}' resolves"),
-        );
-        return Ok(());
-    }
-
-    let written = timer::install(&meta).context("reinstalling the heartbeat timer")?;
-    let after = timer::installed_program_health(&name);
-    // Reinstalling does not guarantee a runnable unit: if `ainb` is not on the
-    // PATH we just captured either, the rebuild is honest about still being
-    // broken rather than reporting a repair that did not happen.
-    let note = match &after {
-        timer::ProgramHealth::Resolves(program) => {
-            format!("repaired: the unit now runs '{program}'")
-        }
-        _ => timer::install_would_be_unrunnable(&meta).unwrap_or_else(|| {
-            "reinstalled, but the unit's program still does not resolve".to_string()
-        }),
-    };
-    emit_repair(format, &name, &before, Some(&written), &note);
-    Ok(())
-}
-
-/// Whether `repair` should rewrite the unit.
-///
-/// A unit whose program already resolves is left alone unless asked: the
-/// reinstall itself is harmless, but it reloads a working timer, and doing that
-/// silently on every invocation makes `repair` unsafe to put in a script or a
-/// cron. `NoUnit` DOES reinstall: an instance with meta but no unit is exactly
-/// the state a repair should fix.
-fn should_reinstall(health: &timer::ProgramHealth, force: bool) -> bool {
-    force || !matches!(health, timer::ProgramHealth::Resolves(_))
-}
-
-/// Render a `repair` outcome in both output modes.
-fn emit_repair(
-    format: OutputFormat,
-    name: &str,
-    before: &timer::ProgramHealth,
-    written: Option<&[std::path::PathBuf]>,
-    note: &str,
-) {
-    let paths: Vec<String> =
-        written.unwrap_or(&[]).iter().map(|p| p.display().to_string()).collect();
-    match format {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "action": "repair",
-                    "name": name,
-                    "reinstalled": written.is_some(),
-                    "units": paths,
-                    "problem_before": before.problem(),
-                    "program_before": before.program(),
-                    "message": note,
-                })
-            );
-        }
-        _ => {
-            println!("atc repair {name}");
-            if let Some(problem) = before.problem() {
-                println!("  was:  {problem}");
-            }
-            for p in &paths {
-                println!("  wrote: {p}");
-            }
-            println!("  {note}");
-        }
-    }
-}
-
 async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let name = require_name(matches)?;
     let paths = AtcPaths::resolve(&name)?;
@@ -806,9 +698,25 @@ does not resolve on the PATH the unit will carry, so it still could not fire. No
                 // also covers a reachable daemon that declined, and an instance
                 // registered by an earlier `setup` keeps its enabled row. Left
                 // alone, the daemon cron and this local unit would both fire
-                // into one session. Best effort, because a daemon that is down
-                // cannot be told anything and is not scheduling either.
+                // into one session.
+                //
+                // A daemon that is DOWN cannot be told anything and is not
+                // scheduling either, so a failed unregister there is harmless.
+                // A daemon that is UP and refuses is the dangerous case: it may
+                // still hold the cron, and installing the local unit on top
+                // would produce exactly the double-scheduling this verb claims
+                // to prevent. Refuse BEFORE writing, so the instance is left
+                // exactly as it was, matching the `Scheduler::None` arm which
+                // already treats this state as fatal.
                 daemon_unregistered = unregister_heartbeat_with_daemon(&meta.name).await;
+                if !daemon_unregistered && daemon_is_reachable().await {
+                    bail!(
+                        "cannot repair ATC '{}': the daemon is reachable and did NOT accept the \
+unregister, so it may still hold the heartbeat cron. Installing a local timer on top would leave \
+two schedulers firing into one session. Nothing was written. Re-run once the daemon is healthy.",
+                        meta.name
+                    );
+                }
                 // Always install, even when `changed` is false: install also
                 // re-loads the job with launchctl/systemctl, and a byte-perfect
                 // unit whose job was unloaded (OS upgrade, manual unload) is
@@ -912,14 +820,19 @@ fn print_repair_text(
                 },
                 removed.len()
             );
+            // Dry-run attempts no daemon call, so "no" would state as fact the
+            // very guess the JSON surface refuses to make (it emits null here).
+            // Text is the DEFAULT format, so it is the one most operators read;
+            // it must not be more confident than the machine-readable output.
             println!(
-                "  daemon cron {}: {}",
+                "  daemon cron unregistered: {}",
                 if dry_run {
-                    "that would be unregistered"
+                    "unknown (dry-run attempts no daemon call)"
+                } else if daemon_unregistered {
+                    "yes"
                 } else {
-                    "unregistered"
-                },
-                if daemon_unregistered { "yes" } else { "no" }
+                    "no"
+                }
             );
             println!(
                 "  (enable it with `ainb fleet atc setup {name} --interval <n>`; note setup rewrites meta.json)"
@@ -2812,54 +2725,6 @@ mod tests {
     }
 
     // --- H-A1: the hook NEVER returns Err (always exit 0) --------------------
-
-    /// `repair` must not touch a healthy unit unless explicitly forced: a
-    /// diagnostic-adjacent verb that reloads a working timer on every call is
-    /// not safe to script.
-    #[test]
-    fn repair_only_rewrites_a_unit_that_needs_it() {
-        use crate::fleet::atc::timer::ProgramHealth;
-
-        let healthy = ProgramHealth::Resolves("ainb".into());
-        assert!(!should_reinstall(&healthy, false));
-        assert!(should_reinstall(&healthy, true), "--force must override");
-
-        // Every not-healthy state is repairable, including NoUnit (meta exists
-        // but the unit is gone) and Unreadable (we cannot prove it is fine).
-        for health in [
-            ProgramHealth::Missing("/gone/ainb".into()),
-            ProgramHealth::Unreadable("unrecognised unit shape".into()),
-            ProgramHealth::NoUnit,
-        ] {
-            assert!(
-                should_reinstall(&health, false),
-                "{health:?} should be repaired without --force"
-            );
-        }
-    }
-
-    /// Guards the clap wiring, which is otherwise only exercised by running the
-    /// real command (and that would install a unit into the operator's home).
-    #[test]
-    fn repair_is_registered_with_a_name_and_a_force_flag() {
-        let m = crate::cli::registry::build_atc_command()
-            .try_get_matches_from(["atc", "repair", "tower", "--force"])
-            .expect("repair should parse");
-        let (verb, sub) = m.subcommand().expect("subcommand");
-        assert_eq!(verb, "repair");
-        assert_eq!(
-            sub.get_one::<String>("name").map(String::as_str),
-            Some("tower")
-        );
-        assert!(sub.get_flag("force"));
-
-        // name is required, so a bare `repair` must not parse.
-        assert!(
-            crate::cli::registry::build_atc_command()
-                .try_get_matches_from(["atc", "repair"])
-                .is_err()
-        );
-    }
 
     #[test]
     fn hook_returns_ok_even_on_unrelated_session() {

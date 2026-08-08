@@ -2382,7 +2382,7 @@ impl CliCommand for FleetCommand {
 /// Build the `ainb fleet atc` subcommand tree: the persistent ATC brain's
 /// provisioning + management verbs. `heartbeat` is the internal timer-driven
 /// verb (hidden from `--help`).
-pub(crate) fn build_atc_command() -> Command {
+fn build_atc_command() -> Command {
     let interval = clap::Arg::new("interval")
         .long("interval")
         .value_parser(clap::value_parser!(u32))
@@ -2437,24 +2437,6 @@ pub(crate) fn build_atc_command() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("repair")
-                .about("Reinstall an ATC instance's heartbeat unit from the CURRENT PATH")
-                .long_about(
-                    "Rebuild and reload the local heartbeat unit for an instance whose program \
-                     no longer resolves. Touches ONLY the timer unit: it reuses the instance's \
-                     existing meta and leaves policy, hooks, the daemon cron and the session \
-                     alone, which is what makes it safe to run on a live instance. Use this \
-                     when `atc status` reports `program MISSING`.",
-                )
-                .arg(clap::Arg::new("name").required(true).help("Instance name"))
-                .arg(
-                    clap::Arg::new("force")
-                        .long("force")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Reinstall even when the current unit's program resolves"),
-                ),
-        )
-        .subcommand(
             Command::new("status")
                 .about("Report one ATC instance (meta + timer + session liveness)")
                 .arg(clap::Arg::new("name").required(true)),
@@ -2462,7 +2444,39 @@ pub(crate) fn build_atc_command() -> Command {
         .subcommand(
             Command::new("repair")
                 .about("Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)")
-                .arg(clap::Arg::new("name").required(true))
+                .long_about(
+                    "Re-assert the heartbeat scheduler for an existing instance, typically when \
+                     `atc status` reports `program MISSING` or `atc list` shows BROKEN because the \
+                     binary moved and the unit's program no longer resolves.\n\n\
+                     It READS meta.json and never writes it, so a customised interval or \
+                     idle-pause survives, and it leaves policy, CLAUDE.md, the hooks and the \
+                     session alone. That is what makes it safe on a live instance, and why it \
+                     exists instead of re-running setup, which rebuilds meta.json from defaults \
+                     and spawns a session.\n\n\
+                     It leaves exactly one scheduler active, the daemon cron or the local timer, \
+                     never both, and refuses rather than reaching a state it cannot vouch for. \
+                     Note what that means per branch:\n\n\
+                     - heartbeat ENABLED, daemon takes it: the local timer unit is REMOVED.\n\
+                     - heartbeat ENABLED, daemon does not: the local unit is rebuilt against the \
+                     current PATH. It refuses without writing anything if the rebuilt unit still \
+                     could not fire, or if a reachable daemon will not release the cron.\n\
+                     - heartbeat DISABLED in meta.json: this is destructive. The local timer unit \
+                     is DELETED and the daemon cron is unregistered, because a disabled heartbeat \
+                     with a live scheduler is the state repair exists to resolve.\n\n\
+                     Non-zero exit does not always mean nothing changed: the pre-write refusals \
+                     leave the instance untouched, but a failure verifying the unit after install, \
+                     or a daemon that refuses the unregister after the units were removed, exits \
+                     non-zero with the change already made. The message says which.\n\n\
+                     --dry-run writes nothing and is never GREENER than a real run: it previews \
+                     the conservative local-timer path and reports the daemon fields as unknown, \
+                     because whether the daemon would take the heartbeat depends on registration \
+                     succeeding, which a read-only preview cannot determine.",
+                )
+                .arg(
+                    clap::Arg::new("name")
+                        .required(true)
+                        .help("Instance name"),
+                )
                 .arg(
                     clap::Arg::new("dry-run")
                         .long("dry-run")
@@ -3019,5 +3033,45 @@ mod tests {
             add_args.get_one::<String>("url").map(String::as_str),
             Some("file:///tmp/m.json")
         );
+    }
+
+    /// A duplicate subcommand name is exactly how the build broke on
+    /// 2026-08-08: two PRs each added an `atc repair` verb in different regions
+    /// of this file, git merged both without a conflict, and main stopped
+    /// compiling. clap itself is happy to register the same name twice and
+    /// silently dispatch to the first, so this is the cheap structural guard.
+    #[test]
+    fn atc_registers_no_duplicate_subcommand_names() {
+        let atc = build_atc_command();
+        let mut seen = std::collections::BTreeSet::new();
+        for sub in atc.get_subcommands() {
+            let name = sub.get_name().to_string();
+            assert!(
+                seen.insert(name.clone()),
+                "`atc` registers the subcommand `{name}` twice; two implementations of one verb \
+                 merged without conflicting"
+            );
+        }
+    }
+
+    /// Replaces the parse-level coverage lost when the duplicate registration
+    /// was deleted: the instance name is required, so a bare `atc repair` must
+    /// fail at argument parsing rather than at runtime.
+    #[test]
+    fn atc_repair_requires_an_instance_name() {
+        assert!(
+            build_atc_command().try_get_matches_from(["atc", "repair"]).is_err(),
+            "`atc repair` with no instance name must not parse"
+        );
+        let m = build_atc_command()
+            .try_get_matches_from(["atc", "repair", "tower", "--dry-run"])
+            .expect("`atc repair <name> --dry-run` parses");
+        let (name, args) = m.subcommand().expect("repair subcommand");
+        assert_eq!(name, "repair");
+        assert_eq!(
+            args.get_one::<String>("name").map(String::as_str),
+            Some("tower")
+        );
+        assert!(args.get_flag("dry-run"));
     }
 }
