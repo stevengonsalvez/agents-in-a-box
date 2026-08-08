@@ -2570,6 +2570,24 @@ impl HangarPlugin {
                 session_key,
                 tmux_target,
             } => self.apply_fleet_attach(session_key, tmux_target, true),
+            // The copilot chat surface is served by the HOST Fleet panel (`f`
+            // from Home), which owns a blocking daemon client and can run the
+            // three-RPC page in one worker. This plugin screen reaches the
+            // daemon through the host's socket dial with one response id per
+            // method, so the same page would be a second, forked implementation
+            // of the same sequence. It says so instead of half-serving it:
+            // an empty channel that never explains itself is the failure mode
+            // this whole phase exists to stop.
+            FleetIntent::Chat(_) => {
+                let out = reduce_fleet(
+                    &self.screens.fleet,
+                    FleetEvent::ChatFailed {
+                        detail: "copilot chat is served by the Fleet panel (press f from Home)"
+                            .into(),
+                    },
+                );
+                self.screens.fleet = out.state;
+            }
         }
     }
 
