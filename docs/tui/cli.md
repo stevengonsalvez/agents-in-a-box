@@ -2014,8 +2014,8 @@ Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / d
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
-  approve       Approve a session's pending permission request (no arg: list waiters)
-  deny          Deny a session's pending permission request (no arg: list waiters)
+  approve       Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
+  deny          Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   msg           Chat bus: persisted messages with per-recipient delivery receipts
@@ -2046,17 +2046,18 @@ EXAMPLES:
   ainb fleet transcript <key> --follow  Stream one session's execution log
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
+  ainb fleet approve --full        Same listing, untruncated tool input + cwd
   ainb fleet approve <session-id>  Approve that session's pending permission request
   ainb fleet deny <session-id> --reason "not now"   Deny it, with a reason
 ```
 
 ### `ainb fleet approve`
 
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet approve --help
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet approve [OPTIONS] [session-id]
 
@@ -2066,16 +2067,17 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 
 ### `ainb fleet deny`
 
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet deny --help
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet deny [OPTIONS] [session-id]
 
@@ -2085,6 +2087,7 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 

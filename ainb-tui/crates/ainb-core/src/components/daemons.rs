@@ -193,6 +193,9 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
         .map(|d| {
             let (glyph, glyph_style) = match d.state {
                 DaemonState::Running => ("● running", Style::default().fg(HEALTHY_GREEN)),
+                // Amber, not green: the process is up but one half of its job is
+                // provably not happening (bridge outbound push).
+                DaemonState::Degraded => ("◐ degraded", Style::default().fg(GOLD)),
                 DaemonState::Stopped => ("○ stopped", Style::default().fg(STOPPED_RED)),
                 DaemonState::Unknown => ("? unknown", Style::default().fg(MUTED_GRAY)),
             };
@@ -201,7 +204,9 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
             let last_activity =
                 d.last_activity_at.map_or_else(|| "-".to_string(), |ts| fmt_ago(now, ts));
             let health = match (&d.channel, d.connected, d.state) {
-                (Some(ch), true, DaemonState::Running) => format!("{ch} — {}", d.reason),
+                (Some(ch), true, DaemonState::Running | DaemonState::Degraded) => {
+                    format!("{ch} - {}", d.reason)
+                }
                 _ => d.reason.clone(),
             };
             Row::new(vec![
@@ -271,6 +276,11 @@ mod tests {
             last_activity_at: Some(now_ms() - 5_000),
             error_count: 0,
             last_error: None,
+            last_attention_poll_at: None,
+            last_attention_error: None,
+            inbound_expected: 0,
+            inbound_live: 0,
+            last_inbound_error: None,
             reason: if connected {
                 "running + connected".to_string()
             } else {

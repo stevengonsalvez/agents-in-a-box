@@ -2301,15 +2301,23 @@ impl CliCommand for FleetCommand {
                     .default_value("")
                     .help("Optional reason relayed to the agent with the decision"),
             )
+            // Listing-only flag, registered on both verbs because either one
+            // with no session-id renders the same pending queue.
+            .arg(
+                clap::Arg::new("full")
+                    .long("full")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("When listing, print the complete tool input and cwd, not a preview"),
+            )
         };
-        let approve = decision_args(
-            Command::new("approve")
-                .about("Approve a session's pending permission request (no arg: list waiters)"),
-        );
-        let deny = decision_args(
-            Command::new("deny")
-                .about("Deny a session's pending permission request (no arg: list waiters)"),
-        );
+        let approve = decision_args(Command::new("approve").about(
+            "Approve a session's pending permission request \
+             (no arg: list every waiter with worktree, tool, input and age)",
+        ));
+        let deny = decision_args(Command::new("deny").about(
+            "Deny a session's pending permission request \
+             (no arg: list every waiter with worktree, tool, input and age)",
+        ));
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2359,6 +2367,7 @@ impl CliCommand for FleetCommand {
                      ainb fleet transcript <key> --follow  Stream one session's execution log\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
+                     ainb fleet approve --full        Same listing, untruncated tool input + cwd\n  \
                      ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
                      ainb fleet deny <session-id> --reason \"not now\"   Deny it, with a reason",
                 ),

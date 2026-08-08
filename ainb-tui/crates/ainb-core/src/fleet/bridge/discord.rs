@@ -20,6 +20,8 @@
 // gateway surface the bridge needs is small: HELLO/heartbeat/IDENTIFY plus the
 // MESSAGE_CREATE dispatch, all hand-rolled here.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -32,6 +34,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::config::DiscordConfig;
 use super::heartbeat::BridgeHeartbeat;
+use super::outbound;
 use super::redact::scrub_token;
 use super::relay::{FleetTransport, RelayParams, relay};
 
@@ -446,6 +449,139 @@ async fn handle_message<T: FleetTransport>(
             heartbeat.record_error(format!("postMessage: {scrubbed}"));
         }
     }
+}
+
+/// The Discord side of the proactive outbound push.
+///
+/// An [`outbound::Notifier`] that delivers a formatted attention message to the
+/// human's DM (or the configured `channel_id`) over the same REST path a
+/// relayed reply uses.
+///
+/// Target resolution, in order:
+///   1. `channel_id` from config, when set.
+///   2. the DM channel with the authorized user, opened once via
+///      `POST /users/@me/channels` and cached for the process lifetime.
+///
+/// Step 2 is what makes the push work on a config that only sets `token` +
+/// `user_id` (the common case): a bot has no channel to talk to until it opens
+/// the DM, so without it there would be nowhere to send.
+///
+/// Holds no heartbeat handle on purpose: a send failure is REPORTED to the
+/// caller, not buried in a counter here. Recording it locally is what let the
+/// worker treat a dropped push as delivered.
+pub struct DiscordNotifier {
+    client: reqwest::Client,
+    cfg: DiscordConfig,
+    /// Lazily-opened DM channel id. `tokio::sync::Mutex` because it is held
+    /// across the `await` that opens the DM.
+    dm_channel: tokio::sync::Mutex<Option<String>>,
+}
+
+impl DiscordNotifier {
+    /// Build a notifier for a configured Discord channel.
+    pub fn new(cfg: DiscordConfig) -> Result<Self> {
+        let client =
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "building Discord HTTP client: {}",
+                        scrub_token(&e.to_string())
+                    )
+                })?;
+        Ok(Self {
+            client,
+            cfg,
+            dm_channel: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    /// Resolve (and cache) the channel to push into.
+    // The guard is deliberately held across the `open_dm_channel` await: it is
+    // what makes the open happen exactly once. Dropping it early would let two
+    // concurrent pushes both miss the cache and open two DM channels.
+    #[allow(clippy::significant_drop_tightening)]
+    async fn target_channel(&self) -> Result<String> {
+        if let Some(explicit) = self.cfg.channel_id.as_deref() {
+            return Ok(explicit.to_string());
+        }
+        let mut cached = self.dm_channel.lock().await;
+        if let Some(id) = cached.as_deref() {
+            return Ok(id.to_string());
+        }
+        let id = open_dm_channel(&self.client, &self.cfg.token, &self.cfg.authorized_user_id)
+            .await
+            .context("opening the Discord DM channel for the proactive push")?;
+        *cached = Some(id.clone());
+        Ok(id)
+    }
+}
+
+impl outbound::Notifier for DiscordNotifier {
+    fn notify(
+        &self,
+        text: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), outbound::NotifyError>> + Send + '_>> {
+        Box::pin(async move {
+            // No DM channel means nowhere to deliver (the user has server DMs
+            // disabled, the token was revoked, …), so this is a failed push,
+            // not a skipped one: the row must be retried, not retired.
+            let channel = match self.target_channel().await {
+                Ok(c) => c,
+                Err(e) => {
+                    let scrubbed = scrub_token(&e.to_string());
+                    tracing::warn!(error = %scrubbed, "Discord outbound push: no target channel");
+                    return Err(outbound::NotifyError::new(format!(
+                        "Discord target: {scrubbed}"
+                    )));
+                }
+            };
+            for chunk in split_for_discord(&text) {
+                if let Err(e) = post_message(&self.client, &self.cfg.token, &channel, &chunk).await
+                {
+                    // Scrub before it leaves this function: the detail is
+                    // persisted to the heartbeat and rendered by the CLI.
+                    let scrubbed = scrub_token(&e.to_string());
+                    tracing::warn!(error = %scrubbed, "Discord outbound push failed");
+                    return Err(outbound::NotifyError::new(format!("Discord: {scrubbed}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Open (or fetch) the DM channel with `recipient_id` via
+/// `POST /users/@me/channels`. Discord returns the existing DM when one is
+/// already open, so this is idempotent.
+async fn open_dm_channel(
+    client: &reqwest::Client,
+    token: &str,
+    recipient_id: &str,
+) -> Result<String> {
+    let resp = client
+        .post(format!("{API_BASE}/users/@me/channels"))
+        .header("Authorization", format!("Bot {token}"))
+        .json(&json!({ "recipient_id": recipient_id }))
+        .send()
+        .await
+        .context("POST /users/@me/channels request")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let message = body.get("message").and_then(Value::as_str).unwrap_or("");
+        anyhow::bail!(
+            "opening Discord DM failed: HTTP {} ({})",
+            status.as_u16(),
+            message
+        );
+    }
+    let body: Value = resp.json().await.context("decoding DM channel")?;
+    body.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .context("Discord DM channel response carried no id")
 }
 
 /// Decide whether to act on a message. Returns `true` to act, `false` to skip.

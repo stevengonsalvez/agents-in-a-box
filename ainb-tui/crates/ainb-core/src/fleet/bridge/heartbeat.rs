@@ -104,6 +104,64 @@ impl BridgeHeartbeat {
         self.mutate(|hb| hb.record_error(message));
     }
 
+    /// Declare how many INBOUND chat channels this bridge is starting, and mark
+    /// them all live. Called ONCE, before the channel tasks are spawned.
+    ///
+    /// This is the claim the daemon is then held to: without it, `connected`
+    /// (stamped once per channel at its handshake, never reset when the task
+    /// dies) is the only inbound signal there is, and it cannot tell a relaying
+    /// bridge from one whose channels have all exited.
+    pub fn set_inbound_expected(&self, channels: u32) {
+        self.mutate(|hb| hb.set_inbound_expected(channels));
+    }
+
+    /// Record that one inbound chat channel has STOPPED, with the reason.
+    ///
+    /// Terminal: nothing restarts a channel task, so this only ever walks the
+    /// live count down. Scrubbed on the way in like every other persisted
+    /// diagnostic (the heartbeat scrubs again, defense in depth).
+    pub fn record_inbound_exit(&self, message: impl Into<String>) {
+        let message = super::redact::scrub_secrets(&message.into());
+        self.mutate(|hb| hb.record_inbound_exit(message));
+    }
+
+    /// Record a SUCCESSFUL poll of the daemon's attention inbox by the outbound
+    /// worker. This is the ONLY proof that the proactive-push half of the bridge
+    /// is alive: the chat gateway being connected says nothing about it.
+    pub fn record_attention_poll(&self) {
+        self.mutate(DaemonHeartbeat::record_attention_poll);
+    }
+
+    /// Record a FAILED attempt to reach the attention source (socket down, token
+    /// stale, daemon wedged). Scrubbed on the way in like every other persisted
+    /// diagnostic, and sticky until a poll succeeds so the health surface can
+    /// name the cause.
+    pub fn record_attention_error(&self, message: impl Into<String>) {
+        let message = super::redact::scrub_secrets(&message.into());
+        self.mutate(|hb| hb.record_attention_error(message));
+    }
+
+    /// Record a proactive push that did NOT reach the human (the channel send
+    /// failed). Sticky like the attention error and read by the health probe,
+    /// because a bridge that polls fine but delivers nothing is exactly as
+    /// useless to the human as one that cannot poll at all.
+    pub fn record_delivery_error(&self, message: impl Into<String>) {
+        let message = super::redact::scrub_secrets(&message.into());
+        self.mutate(|hb| hb.record_delivery_error(message));
+    }
+
+    /// Clear the sticky delivery verdict once nothing is left undelivered.
+    ///
+    /// Guarded so the healthy path (every poll, forever) does not rewrite the
+    /// file just to store the same `None`: the poll it accompanies has already
+    /// refreshed the liveness clock.
+    pub fn clear_delivery_error(&self) {
+        let outstanding = self.inner.lock().is_ok_and(|hb| hb.last_delivery_error.is_some());
+        if outstanding {
+            self.mutate(DaemonHeartbeat::clear_delivery_error);
+        }
+    }
+
     /// Refresh the liveness clock (the idle ticker path).
     pub fn touch(&self) {
         self.mutate(DaemonHeartbeat::touch);
@@ -204,6 +262,104 @@ mod tests {
         );
         // The error count still increments — scrubbing must not drop the signal.
         assert_eq!(on_disk.error_count, 2);
+    }
+
+    #[test]
+    fn attention_poll_and_error_persist_on_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        // A brand-new bridge has never polled the attention source.
+        let fresh = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert!(fresh.last_attention_poll_at.is_none());
+
+        hb.record_attention_error("connect /tmp/hangar.sock: Connection refused");
+        let failed = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert_eq!(failed.error_count, 1);
+        assert!(failed.last_attention_error.unwrap().contains("hangar.sock"));
+        assert!(failed.last_attention_poll_at.is_none());
+
+        hb.record_attention_poll();
+        let ok = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert!(ok.last_attention_poll_at.is_some());
+        assert!(
+            ok.last_attention_error.is_none(),
+            "a successful poll clears the sticky attention error on disk"
+        );
+    }
+
+    #[test]
+    fn delivery_error_persists_and_clears_on_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        let fresh = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert!(fresh.last_delivery_error.is_none());
+
+        hb.record_delivery_error("outbound push: Discord: HTTP 429 rate limited");
+        let failed = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert_eq!(failed.error_count, 1);
+        assert!(
+            failed.last_delivery_error.unwrap().contains("HTTP 429"),
+            "the push failure must be visible to the health probe"
+        );
+
+        hb.clear_delivery_error();
+        let cleared = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        assert!(cleared.last_delivery_error.is_none());
+        assert_eq!(
+            cleared.error_count, 1,
+            "clearing the verdict must not rewrite history"
+        );
+    }
+
+    #[test]
+    fn clearing_a_delivery_error_that_is_not_set_writes_nothing() {
+        // The healthy path runs this on every poll, forever. It must not churn
+        // the file just to store the same `None`.
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        let before = std::fs::metadata(heartbeat_path_in(home.path(), "bridge"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let before_record = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        hb.clear_delivery_error();
+        let after = std::fs::metadata(heartbeat_path_in(home.path(), "bridge"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "a no-op clear must not rewrite the file");
+        assert_eq!(
+            DaemonHeartbeat::read_in(home.path(), "bridge").unwrap(),
+            before_record
+        );
+    }
+
+    #[test]
+    fn record_delivery_error_scrubs_tokens_on_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        hb.record_delivery_error("outbound push: xoxb-9999-8888-supersecretslacktoken rejected");
+        let on_disk = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        let last = on_disk.last_delivery_error.expect("delivery error recorded");
+        assert!(
+            !last.contains("xoxb-9999-8888-supersecretslacktoken"),
+            "slack token leaked to disk: {last}"
+        );
+        assert!(last.contains("<redacted>"), "expected redaction: {last}");
+    }
+
+    #[test]
+    fn record_attention_error_scrubs_tokens_on_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let hb = BridgeHeartbeat::start_in(home.path());
+        hb.record_attention_error("poll failed: xoxb-9999-8888-supersecretslacktoken");
+        let on_disk = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
+        let last = on_disk.last_attention_error.expect("attention error recorded");
+        assert!(
+            !last.contains("xoxb-9999-8888-supersecretslacktoken"),
+            "slack token leaked to disk: {last}"
+        );
+        assert!(last.contains("<redacted>"), "expected redaction: {last}");
     }
 
     #[test]

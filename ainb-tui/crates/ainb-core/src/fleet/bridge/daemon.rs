@@ -200,6 +200,14 @@ impl DaemonClient {
         Self { socket, token }
     }
 
+    /// The socket this client dials. Diagnostics MUST name it: "attention/list
+    /// poll failed" without the path leaves the operator guessing which daemon,
+    /// which home, which socket.
+    #[must_use]
+    pub fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
     /// Snapshot the OPEN fleet-wide attention inbox (`attention/list`,
     /// `fleet = true`), oldest-first.
     pub async fn attention_list_fleet(&self) -> Result<Vec<AttentionRow>, DaemonError> {
