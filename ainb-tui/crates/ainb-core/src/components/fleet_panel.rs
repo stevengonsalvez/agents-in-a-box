@@ -280,6 +280,22 @@ impl FleetPanelState {
         self.daemon_health.is_online()
     }
 
+    /// Whether the daemon has been probed and found unreachable.
+    ///
+    /// The gate for degraded UI and high-risk refusals. `!daemon_online()` is
+    /// the wrong test: it is also true while the subscription is merely
+    /// dialing, which is every screen's first frame.
+    #[must_use]
+    pub const fn daemon_offline(&self) -> bool {
+        self.daemon_health.is_offline()
+    }
+
+    /// Whether the subscription is dialing and has reported nothing yet.
+    #[must_use]
+    pub const fn daemon_connecting(&self) -> bool {
+        self.daemon_health.is_connecting()
+    }
+
     /// Human-readable connection health for degraded UI and tests.
     #[must_use]
     pub fn daemon_health(&self) -> &FleetDaemonHealth {
@@ -898,8 +914,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         content_bottom,
         &state.canonical,
     );
-    if !state.daemon_online() {
+    if state.daemon_offline() {
         ainb_plugin_hangar::screen::fleet::render_degraded_banner(
+            &mut wire,
+            area.width,
+            content_top.saturating_add(1),
+        );
+    } else if state.daemon_connecting() {
+        ainb_plugin_hangar::screen::fleet::render_connecting_banner(
             &mut wire,
             area.width,
             content_top.saturating_add(1),
@@ -930,10 +952,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         Rect::new(area.x, area.y, area.width, 1),
     );
     if total == 0 && area.height > 3 {
-        let message = if state.daemon_online() {
-            "No Fleet sessions yet, press t to start managed Codex"
-        } else {
+        let message = if state.daemon_offline() {
             "Hangar daemon not running, cached snapshot retained"
+        } else if state.daemon_connecting() {
+            "Connecting to the Fleet daemon…"
+        } else {
+            "No Fleet sessions yet, press t to start managed Codex"
         };
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(MUTED_GRAY)),
@@ -1823,6 +1847,65 @@ mod tests {
             snapshot.expect("newest snapshot retained").snapshot.head_revision,
             9,
             "replayed complete snapshots must collapse to the newest revision"
+        );
+    }
+
+    /// The pre-probe frame must not claim the daemon is down. `Connecting` and
+    /// `Offline` used to render identically because every consumer tested
+    /// `!is_online()`, so opening Fleet always flashed "daemon offline, cached
+    /// snapshot, high-risk actions disabled" before anything had been probed.
+    #[test]
+    fn connecting_renders_distinctly_from_offline_and_does_not_gate_actions() {
+        let mut state = state_with(vec![row(
+            "cached-session",
+            "/work/cached",
+            "IDLE",
+            None,
+            "hook",
+        )]);
+        state
+            .stream_updates
+            .lock()
+            .expect("stream update queue")
+            .push(FleetHostUpdate::Health(FleetDaemonHealth::Connecting));
+        state.refresh();
+
+        assert!(state.daemon_connecting());
+        assert!(!state.daemon_offline(), "unprobed must not read as offline");
+        assert!(!state.daemon_online(), "unprobed must not read as online");
+
+        let connecting = render_to_string(&mut state, 130, 20);
+        assert!(
+            connecting.contains("Connecting to the Fleet daemon"),
+            "connecting banner missing: {connecting}"
+        );
+        assert!(
+            !connecting.contains("Fleet daemon offline"),
+            "connecting must not claim offline: {connecting}"
+        );
+        assert!(
+            !connecting.contains("high-risk actions disabled"),
+            "connecting must not disable high-risk actions: {connecting}"
+        );
+
+        state
+            .stream_updates
+            .lock()
+            .expect("stream update queue")
+            .push(FleetHostUpdate::Health(FleetDaemonHealth::Offline(
+                "socket closed".into(),
+            )));
+        state.refresh();
+
+        let offline = render_to_string(&mut state, 130, 20);
+        assert!(state.daemon_offline());
+        assert!(
+            offline.contains("Fleet daemon offline"),
+            "offline banner missing: {offline}"
+        );
+        assert_ne!(
+            connecting, offline,
+            "connecting and offline must not render identically"
         );
     }
 

@@ -3302,7 +3302,13 @@ impl EventHandler {
                 // and structured actions must not dispatch against that stale
                 // view. F5 / Ctrl-R force-refreshes back to Online, which is the
                 // intended way out of this state.
-                if action.is_high_risk() && !state.fleet_panel_state.daemon_online() {
+                //
+                // Gated on Offline, not on `!online`: a merely Connecting
+                // subscription has not found anything wrong, and refusing there
+                // blocked every action on the first frame after opening Fleet.
+                // A genuinely dead daemon still fails loudly — the action RPC
+                // returns ActionFailed.
+                if action.is_high_risk() && state.fleet_panel_state.daemon_offline() {
                     Self::reduce_fleet_event(
                         state,
                         FleetEvent::ActionFailed {
@@ -3386,7 +3392,7 @@ impl EventHandler {
                 cwd,
                 prompt,
             } => {
-                if !state.fleet_panel_state.daemon_online() {
+                if state.fleet_panel_state.daemon_offline() {
                     Self::reduce_fleet_event(
                         state,
                         FleetEvent::ActionFailed {
