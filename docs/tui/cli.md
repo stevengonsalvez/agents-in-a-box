@@ -2496,21 +2496,29 @@ Options:
 
 #### `ainb fleet atc repair`
 
-Rebuild the heartbeat scheduler for an instance whose timer can no longer fire, typically because the binary moved and the unit's program no longer resolves. Use it when `atc status` reports `program MISSING` or `atc list` shows BROKEN.
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
 
 ```console
 $ ainb fleet atc repair --help
-Rebuild the heartbeat scheduler for an instance whose timer can no longer fire, typically because the binary moved and the unit's program no longer resolves. Use it when `atc status` reports `program MISSING` or `atc list` shows BROKEN.
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
 
-It READS meta.json and never writes it, so a customised interval or idle-pause and a disabled heartbeat all survive; policy, hooks and the session are untouched. That is what makes it safe on a live instance, and why it exists instead of re-running setup, which rebuilds meta.json from defaults and spawns a session.
+It READS meta.json and never writes it, so a customised interval or idle-pause survives, and it leaves policy, CLAUDE.md, the hooks and the session alone. That is what makes it safe on a live instance, and why it exists instead of re-running setup, which rebuilds meta.json from defaults and spawns a session.
 
-It refuses (non-zero exit, nothing written) rather than replacing a unit with an equally dead one, and leaves exactly one scheduler active: the daemon cron or the local timer, never both.
+It leaves exactly one scheduler active, the daemon cron or the local timer, never both, and refuses rather than reaching a state it cannot vouch for. Note what that means per branch:
+
+- heartbeat ENABLED, daemon takes it: the local timer unit is REMOVED.
+- heartbeat ENABLED, daemon does not: the local unit is rebuilt against the current PATH. It refuses without writing anything if the rebuilt unit still could not fire, or if a reachable daemon will not release the cron.
+- heartbeat DISABLED in meta.json: this is destructive. The local timer unit is DELETED and the daemon cron is unregistered, because a disabled heartbeat with a live scheduler is the state repair exists to resolve.
+
+Non-zero exit does not always mean nothing changed: the pre-write refusals leave the instance untouched, but a failure verifying the unit after install, or a daemon that refuses the unregister after the units were removed, exits non-zero with the change already made. The message says which.
+
+--dry-run writes nothing and is never GREENER than a real run: it previews the conservative local-timer path and reports the daemon fields as unknown, because whether the daemon would take the heartbeat depends on registration succeeding, which a read-only preview cannot determine.
 
 Usage: ainb fleet atc repair [OPTIONS] <name>
 
 Arguments:
   <name>
-          
+          Instance name
 
 Options:
       --dry-run

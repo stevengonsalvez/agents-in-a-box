@@ -698,9 +698,25 @@ does not resolve on the PATH the unit will carry, so it still could not fire. No
                 // also covers a reachable daemon that declined, and an instance
                 // registered by an earlier `setup` keeps its enabled row. Left
                 // alone, the daemon cron and this local unit would both fire
-                // into one session. Best effort, because a daemon that is down
-                // cannot be told anything and is not scheduling either.
+                // into one session.
+                //
+                // A daemon that is DOWN cannot be told anything and is not
+                // scheduling either, so a failed unregister there is harmless.
+                // A daemon that is UP and refuses is the dangerous case: it may
+                // still hold the cron, and installing the local unit on top
+                // would produce exactly the double-scheduling this verb claims
+                // to prevent. Refuse BEFORE writing, so the instance is left
+                // exactly as it was, matching the `Scheduler::None` arm which
+                // already treats this state as fatal.
                 daemon_unregistered = unregister_heartbeat_with_daemon(&meta.name).await;
+                if !daemon_unregistered && daemon_is_reachable().await {
+                    bail!(
+                        "cannot repair ATC '{}': the daemon is reachable and did NOT accept the \
+unregister, so it may still hold the heartbeat cron. Installing a local timer on top would leave \
+two schedulers firing into one session. Nothing was written. Re-run once the daemon is healthy.",
+                        meta.name
+                    );
+                }
                 // Always install, even when `changed` is false: install also
                 // re-loads the job with launchctl/systemctl, and a byte-perfect
                 // unit whose job was unloaded (OS upgrade, manual unload) is
@@ -804,14 +820,19 @@ fn print_repair_text(
                 },
                 removed.len()
             );
+            // Dry-run attempts no daemon call, so "no" would state as fact the
+            // very guess the JSON surface refuses to make (it emits null here).
+            // Text is the DEFAULT format, so it is the one most operators read;
+            // it must not be more confident than the machine-readable output.
             println!(
-                "  daemon cron {}: {}",
+                "  daemon cron unregistered: {}",
                 if dry_run {
-                    "that would be unregistered"
+                    "unknown (dry-run attempts no daemon call)"
+                } else if daemon_unregistered {
+                    "yes"
                 } else {
-                    "unregistered"
-                },
-                if daemon_unregistered { "yes" } else { "no" }
+                    "no"
+                }
             );
             println!(
                 "  (enable it with `ainb fleet atc setup {name} --interval <n>`; note setup rewrites meta.json)"
