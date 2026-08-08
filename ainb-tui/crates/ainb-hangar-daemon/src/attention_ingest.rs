@@ -37,6 +37,22 @@
 //! Event IDs avoid context hashes, whose time-derived fields can change when a
 //! line is re-classified. Legacy offsets remain invariant to read time.
 //!
+//! The event ID alone is NOT enough for an ASK, because Claude re-fires
+//! `Notification` while a session stays blocked and each firing is a genuinely
+//! new event — one live question was measured raising three cards. ASK rows
+//! therefore also carry a `request_key` ([`request_key_of`], migration 0081):
+//! every firing that observes the SAME still-open question derives the same key
+//! and collapses onto the first row. Once that row is closed the key is free
+//! again, so a repeat of the same question is still raisable.
+//!
+//! ## Convergence
+//!
+//! [`AttentionIngest::sweep_once`] closes open rows no live Fleet session
+//! claims. The `attention` table and `fleet_session.attention_state` are two
+//! independent records of "needs input" with no cross-writes; without a
+//! reconcile they drift apart indefinitely (732 open rows against 7 waiting
+//! sessions, measured live).
+//!
 //! ## Delivery semantics
 //!
 //! Best-effort: a missing file is a no-op and a corrupt line is skipped. A store
@@ -65,6 +81,19 @@ const MAX_INGEST_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How often the producer tails the event log.
 const TICK: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often the producer reconciles the open set against Fleet's own view.
+/// Slow on purpose: the sweep is a convergence backstop, not a hot path.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long a row is protected from the sweep. A card raised seconds ago may
+/// legitimately lead its `fleet_session` projection, and closing it would delete
+/// a live question.
+const SWEEP_GRACE_MS: i64 = 15 * 60 * 1000;
+
+/// Rows one sweep pass may close. Bounds the pass so a pathological backlog
+/// cannot stall the tail loop; the remainder goes in the next pass.
+const SWEEP_LIMIT: i64 = 2000;
 
 /// The hook events worth classifying for attention. `Notification` is Claude
 /// asking for input / permission (the ASK path); `Stop` / `SubagentStop` mark a
@@ -371,22 +400,16 @@ impl AttentionIngest {
         // records retain offset identity rather than a time-derived context hash.
         let id = format!("att:{}:{event_id}", line.session_id);
 
-        match AttentionRepo::get(&self.pool, &id).await {
-            Ok(Some(_)) => return LineOutcome::Processed, // already raised
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "attention ingest: existence check failed");
-                return LineOutcome::Retry;
-            }
-        }
-
         // Resolve the routing channels ONCE, here at raise time (tcp T5). Hook
         // sessions are host-wide (workspace None), so this reads the GLOBAL rule
         // for the kind. Stamped onto the row + the event so every consumer filters
         // on the same decision.
         let channels = crate::notify::resolve_channels(&self.pool, kind, None).await;
 
-        let payload = serde_json::to_string(&row.context).unwrap_or_else(|_| "{}".to_string());
+        let context = serde_json::to_value(&row.context)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        let request_key = request_key_of(kind, &context);
+        let payload = context.to_string();
         let new = NewAttention {
             id: id.clone(),
             session_id: line.session_id.clone(),
@@ -406,9 +429,16 @@ impl AttentionIngest {
                 .then(|| line.transcript_path.clone()),
             channels,
         };
-        if let Err(e) = AttentionRepo::insert(&self.pool, &new).await {
-            tracing::warn!(error = %e, "attention ingest: insert failed");
-            return LineOutcome::Retry;
+        match AttentionRepo::insert_if_absent(&self.pool, &new, request_key.as_deref()).await {
+            // Already raised: a replay of this durable line, or an earlier firing
+            // of the SAME still-open question. Either way there is nothing new to
+            // announce, and re-emitting would resurrect a dismissed card.
+            Ok(false) => return LineOutcome::Processed,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "attention ingest: insert failed");
+                return LineOutcome::Retry;
+            }
         }
         self.events.emit_attention(HangarEvent::AttentionRaised {
             attention_id: id,
@@ -516,8 +546,36 @@ impl AttentionIngest {
         }
     }
 
-    /// Spawn the tail loop: tick every [`TICK`], ingesting each pass. Mirrors the
-    /// inbox aggregator — the returned handle is dropped by `boot()` (process exit
+    /// Close open rows that no live Fleet session still claims.
+    ///
+    /// The `attention` table and `fleet_session.attention_state` are two
+    /// independent records of "needs input" that never cross-write, so they
+    /// drift — measured live at 732 open rows against 7 sessions Fleet believed
+    /// were waiting, the oldest 25 days stale. Nothing else closes a `waiting`
+    /// row at all, so this runs on a slow tick rather than once at boot: a
+    /// one-shot pass would clear today's backlog and let it re-accumulate.
+    ///
+    /// Best-effort — a store fault is logged and retried next interval.
+    async fn sweep_once(&self, now_ms: i64) {
+        match AttentionRepo::close_unclaimed_open(
+            &self.pool,
+            now_ms - SWEEP_GRACE_MS,
+            now_ms,
+            SWEEP_LIMIT,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(closed) => {
+                tracing::info!(closed, "attention sweep: closed rows no session claims");
+            }
+            Err(e) => tracing::warn!(error = %e, "attention sweep failed"),
+        }
+    }
+
+    /// Spawn the tail loop: tick every [`TICK`], ingesting each pass and
+    /// reconciling the open set every [`SWEEP_INTERVAL`]. Mirrors the inbox
+    /// aggregator — the returned handle is dropped by `boot()` (process exit
     /// tears the task down); a future supervisor can keep it to stop cleanly.
     #[must_use]
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
@@ -525,9 +583,15 @@ impl AttentionIngest {
         tokio::spawn(async move {
             let clock = SystemClock;
             let mut ticker = tokio::time::interval(TICK);
+            let mut next_sweep = tokio::time::Instant::now();
             loop {
                 ticker.tick().await;
-                let _ = self.ingest_once(clock.now_ms()).await;
+                let now_ms = clock.now_ms();
+                if tokio::time::Instant::now() >= next_sweep {
+                    self.sweep_once(now_ms).await;
+                    next_sweep = tokio::time::Instant::now() + SWEEP_INTERVAL;
+                }
+                let _ = self.ingest_once(now_ms).await;
             }
         })
     }
@@ -552,6 +616,30 @@ fn session_from(line: &HookEventLine) -> Session {
         summary: None,
         last_seen_ms: None,
     }
+}
+
+/// The stable identity of the request an ASK row is about, or `None` for kinds
+/// that have no request identity to collapse on.
+///
+/// Claude re-fires `Notification` while a session stays blocked, and every
+/// firing carries a fresh hook `event_id`, so an event-keyed row id mints a new
+/// card per firing — one live question was measured producing three. The
+/// classifier reads the SAME still-open `AskUserQuestion` out of the transcript
+/// on every one of those firings, so a hash of the classified request collapses
+/// them onto one row (see migration 0080).
+///
+/// Derived from the CLASSIFIED context, not the hook payload, because the
+/// `Notification` line that raises most ASK rows carries neither `tool_use_id`
+/// nor `tool_input` — the fields `fleet_session.current_request_fingerprint` is
+/// built from. The two values are therefore NOT comparable, which is why the
+/// column is `request_key` and not `request_fingerprint`.
+///
+/// Only `Ask` qualifies: an `Idle` context carries a time-derived
+/// `idle_minutes`, so its hash would change with the read clock and dedupe
+/// nothing, and `Wait`/`Err` describe a session state rather than a request.
+fn request_key_of(kind: AttentionKind, context: &serde_json::Value) -> Option<String> {
+    (kind == AttentionKind::AskUserQuestion)
+        .then(|| ainb_plugin_notifyd::broker::request_fingerprint(context))
 }
 
 /// Map a classified need to its attention kind.
@@ -734,6 +822,19 @@ mod tests {
         )
     }
 
+    /// One hook line carrying an EXPLICIT durable `event_id` — the shape the
+    /// hook writes for every real firing (a fresh `Uuid::new_v4()` each time).
+    fn hook_line_with_event_id(
+        session: &str,
+        cwd: &str,
+        event_type: &str,
+        event_id: &str,
+    ) -> String {
+        format!(
+            r#"{{"agent":"claude","cwd":"{cwd}","event_id":"{event_id}","event_type":"{event_type}","matcher":null,"parent":"hangar-daemon","process_start_fingerprint":null,"session_id":"{session}","tmux_target":null,"transcript_path":"","ts":1700000000000}}"#
+        )
+    }
+
     /// A verbatim real hook line — nulls and all — parses, rather than being
     /// discarded as corrupt.
     #[test]
@@ -834,6 +935,117 @@ mod tests {
             AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
             1,
             "still exactly one IDLE row after the re-read"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_firings_for_one_open_question_raise_one_card() {
+        // The observed triplicate: ONE live question, three cards, because Claude
+        // re-fires `Notification` while a session stays blocked and the hook mints
+        // a fresh `event_id` per firing. The classifier reads the SAME still-open
+        // AskUserQuestion out of the transcript every time, so the request key
+        // collapses the later firings onto the first card.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let fx = plant_ask_transcript("refire");
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n{}\n{}\n",
+                hook_line_with_event_id(
+                    "sid-refire",
+                    &fx.cwd,
+                    "Notification",
+                    "f489417c-7995-41d4-af9c-5a5b12c9df48"
+                ),
+                hook_line_with_event_id(
+                    "sid-refire",
+                    &fx.cwd,
+                    "Notification",
+                    "6f238c73-a952-49f3-8595-a060040d29c6"
+                ),
+                hook_line_with_event_id(
+                    "sid-refire",
+                    &fx.cwd,
+                    "Notification",
+                    "0d64ec43-f2ef-4f90-9d9f-a111397945b0"
+                ),
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        assert_eq!(
+            ingest.ingest_once(5000).await,
+            1,
+            "three firings of one question raise ONE card"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1, "one question is one card");
+        assert_eq!(open[0].kind, AttentionKind::AskUserQuestion);
+        assert_eq!(
+            open[0].id, "att:sid-refire:f489417c-7995-41d4-af9c-5a5b12c9df48",
+            "the FIRST firing owns the card, so its wait time is the real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_closes_open_rows_no_fleet_session_claims() {
+        // The drift the two representations never reconciled: 732 open rows
+        // against 7 sessions Fleet believed were waiting.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        sqlx::query(
+            "INSERT INTO fleet_session \
+             (session_key, provider, provider_session_id, attention_state, discovered_at, \
+              last_observed_at) \
+             VALUES ('claude:live', 'claude', 'live', 'ASK', 0, 0)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        for (id, session, created) in [
+            ("keep-live", "live", base_ms - SWEEP_GRACE_MS - 1),
+            ("close-gone", "gone", base_ms - SWEEP_GRACE_MS - 1),
+            ("keep-fresh", "gone", base_ms - 1000),
+        ] {
+            AttentionRepo::insert(
+                store.pool(),
+                &NewAttention {
+                    id: id.to_string(),
+                    session_id: session.to_string(),
+                    cwd: "/w".to_string(),
+                    workspace_id: None,
+                    kind: AttentionKind::Waiting,
+                    payload: "{}".to_string(),
+                    degraded: false,
+                    created_at: created,
+                    raise_transcript: None,
+                    channels: ainb_hangar_core::channel::ChannelSet::NONE,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        ingest_for(&store, &events_jsonl, &cursor).sweep_once(base_ms).await;
+
+        let open: Vec<_> = AttentionRepo::list_fleet(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            open,
+            ["keep-live", "keep-fresh"],
+            "only the stale row whose session is gone is closed"
         );
     }
 
