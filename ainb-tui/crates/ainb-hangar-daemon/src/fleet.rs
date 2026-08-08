@@ -1291,6 +1291,12 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
     tokio::spawn(async move {
         let clock = SystemClock;
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+        // One iteration does a full `FleetRepo::snapshot` plus per-session work,
+        // which on a large roster has been measured over 1s. Under tokio's default
+        // `Burst` a period that short turns every overrun into back-to-back
+        // catch-up ticks with no sleep at all — a hot loop that then makes its own
+        // queries slower. `Delay` re-bases the schedule on completion instead.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             let observed_at = clock.now_ms();
