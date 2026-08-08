@@ -17,9 +17,11 @@ Set Padding 16
 Set Shell bash
 Set TypingSpeed 25ms
 
-Type "cd /home/claude/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-chat-bus-e2e"
-Enter
-Sleep 1s
 Type "./ainb-tui/scripts/chat-bus-smoke.sh j3"
 Enter
-Sleep 260s
+# Terminates on the VERDICT, never a guessed Sleep: a tape whose Sleep ends
+# before the journey does yields a banner with no verdict, which looks like
+# evidence and is not. The pattern is NOT in the typed command above, because
+# `Wait+Screen` matches the whole screen and the shell echoes what it types.
+Wait+Screen@900s /SMOKE-RESULT j3 /
+Sleep 3s
