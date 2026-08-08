@@ -29,6 +29,8 @@ pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
 pub const FLEET_CAPABILITY_USAGE_READ: &str = "fleet.usage.read";
 /// Negotiated capability for bounded live provider-quota summaries.
 pub const FLEET_CAPABILITY_QUOTA_READ: &str = "fleet.quota.read";
+/// Negotiated capability for the rich usage dashboard with 53-week history.
+pub const FLEET_CAPABILITY_DASHBOARD_READ: &str = "fleet.dashboard.read";
 /// Negotiated capability for runtime and provider-hook health.
 pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
 /// Negotiated capability required for chat-bus message sends.
@@ -82,6 +84,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_TRANSCRIPT_READ,
     FLEET_CAPABILITY_RUNTIME_READ,
     FLEET_CAPABILITY_USAGE_READ,
+    FLEET_CAPABILITY_DASHBOARD_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -680,6 +683,158 @@ pub struct FleetUsageSummaryResult {
     pub projects: Vec<FleetUsageProjectBucket>,
     /// Safe daemon status detail for partial or unavailable summaries, capped
     /// by [`FLEET_USAGE_DETAIL_MAX_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// fleet/usage_dashboard
+// ---------------------------------------------------------------------------
+
+/// Maximum weekly buckets the daemon returns for a dashboard response.
+pub const FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS: usize = 53;
+/// Maximum heatmap cells (one per day, 53 weeks).
+pub const FLEET_DASHBOARD_MAX_HEATMAP_CELLS: usize = 371;
+/// Maximum session/branch/tool/mcp/shell breakdown buckets.
+pub const FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS: usize = 20;
+
+/// Parameters for `fleet/usage_dashboard`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetUsageDashboardParams {}
+
+/// One heatmap cell representing a single calendar day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetHeatmapCell {
+    /// ISO-8601 UTC calendar date.
+    pub date: String,
+    /// Number of distinct API calls on this day.
+    pub call_count: u64,
+    /// Canonical USD cost when fully priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// One weekly usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageWeeklyBucket {
+    /// ISO-8601 UTC date of Monday starting this week.
+    pub week_start: String,
+    /// Weekly aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One session usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageSessionBucket {
+    /// Session identity (provider:project:session_id).
+    pub session_id: String,
+    /// Provider for this session.
+    pub provider: String,
+    /// Project for this session.
+    pub project: String,
+    /// Session aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One branch usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageBranchBucket {
+    /// Git branch name.
+    pub branch: String,
+    /// Branch aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One named dimension bucket (tools, MCP servers, shell commands).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageNamedBucket {
+    /// Dimension key (tool name, MCP server, shell command).
+    pub name: String,
+    /// Number of calls using this dimension.
+    pub call_count: u64,
+}
+
+/// Simple linear forecast from trailing daily data.
+///
+/// Averages are taken over CALENDAR days in the trailing window, not over the
+/// days that happen to have data: the next 30 days will contain idle days too,
+/// so an active-days-only divisor would quote a working-day rate and overstate
+/// an intermittent user's projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageForecast {
+    /// Projected cost for the next 30 days in USD, when fully priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_30d_cost_usd: Option<f64>,
+    /// Projected total tokens for the next 30 days.
+    pub projected_30d_tokens: u64,
+    /// Mean cost per calendar day across `sample_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_daily_cost_usd: Option<f64>,
+    /// Mean tokens per calendar day across `sample_days`.
+    pub avg_daily_tokens: u64,
+    /// The divisor actually used: calendar days spanned by the trailing window,
+    /// capped at 7 and floored at 1 so a first-day user is not diluted across a
+    /// week they were not present for.
+    pub sample_days: u32,
+}
+
+/// Bounded rich dashboard result for `fleet/usage_dashboard`.
+///
+/// Extends `fleet/usage_summary` with 53-week history, heatmap, forecast,
+/// and additional breakdowns. `fleet/usage_summary` remains the stable
+/// lightweight endpoint for quick checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageDashboardResult {
+    /// Current dashboard availability.
+    pub state: FleetUsageSummaryState,
+    /// Time the daemon generated this dashboard, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<i64>,
+    /// Inclusive window start, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<i64>,
+    /// Exclusive window end, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<i64>,
+    /// Whether every included call has a canonical USD rate.
+    pub cost_complete: bool,
+    /// Aggregate for the full 53-week window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<FleetUsageBucket>,
+    /// Weekly buckets, chronologically ordered.
+    #[serde(default)]
+    pub weekly: Vec<FleetUsageWeeklyBucket>,
+    /// Daily activity heatmap cells for 53 weeks.
+    #[serde(default)]
+    pub heatmap: Vec<FleetHeatmapCell>,
+    /// Linear forecast from trailing data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<FleetUsageForecast>,
+    /// Provider breakdowns.
+    #[serde(default)]
+    pub providers: Vec<FleetUsageProviderBucket>,
+    /// Top model breakdowns.
+    #[serde(default)]
+    pub models: Vec<FleetUsageModelBucket>,
+    /// Top project breakdowns.
+    #[serde(default)]
+    pub projects: Vec<FleetUsageProjectBucket>,
+    /// Top session breakdowns.
+    #[serde(default)]
+    pub sessions: Vec<FleetUsageSessionBucket>,
+    /// Top branch breakdowns.
+    #[serde(default)]
+    pub branches: Vec<FleetUsageBranchBucket>,
+    /// Top tool usage counts.
+    #[serde(default)]
+    pub tools: Vec<FleetUsageNamedBucket>,
+    /// Top MCP server usage counts.
+    #[serde(default)]
+    pub mcp_servers: Vec<FleetUsageNamedBucket>,
+    /// Top shell command usage counts.
+    #[serde(default)]
+    pub shell_commands: Vec<FleetUsageNamedBucket>,
+    /// Safe daemon status detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -1450,6 +1605,7 @@ mod tests {
             FLEET_CAPABILITY_USAGE_READ,
             FLEET_CAPABILITY_QUOTA_READ,
             FLEET_CAPABILITY_RUNTIME_READ,
+            FLEET_CAPABILITY_DASHBOARD_READ,
         ] {
             assert!(
                 FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
@@ -1643,5 +1799,67 @@ mod tests {
         .unwrap();
         // Delivery states reuse the durable receipt vocabulary verbatim.
         assert_eq!(delivery["state"], "REJECTED");
+    }
+
+    #[test]
+    fn usage_dashboard_wire_contract_round_trips() {
+        round_trip(&FleetUsageDashboardParams {});
+        round_trip(&FleetUsageDashboardResult {
+            state: FleetUsageSummaryState::Ready,
+            generated_at: Some(1_700_000_000_000),
+            start_at: Some(1_668_000_000_000),
+            end_at: Some(1_700_000_000_000),
+            cost_complete: false,
+            totals: Some(FleetUsageBucket {
+                input_tokens: 500_000,
+                cache_creation_tokens: 10_000,
+                cache_read_tokens: 20_000,
+                output_tokens: 100_000,
+                reasoning_tokens: 5_000,
+                call_count: 42,
+                session_count: 7,
+                project_count: 3,
+                cost_usd: Some(12.50),
+            }),
+            weekly: vec![FleetUsageWeeklyBucket {
+                week_start: "2026-07-28".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            heatmap: vec![FleetHeatmapCell {
+                date: "2026-08-06".to_string(),
+                call_count: 15,
+                cost_usd: Some(2.30),
+            }],
+            forecast: Some(FleetUsageForecast {
+                projected_30d_cost_usd: Some(125.00),
+                projected_30d_tokens: 5_000_000,
+                avg_daily_cost_usd: Some(4.17),
+                avg_daily_tokens: 166_667,
+                sample_days: 7,
+            }),
+            providers: vec![],
+            models: vec![],
+            projects: vec![],
+            sessions: vec![FleetUsageSessionBucket {
+                session_id: "claude:myproject:sess-1".to_string(),
+                provider: "claude".to_string(),
+                project: "myproject".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            branches: vec![FleetUsageBranchBucket {
+                branch: "feat/my-feature".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            tools: vec![FleetUsageNamedBucket {
+                name: "Edit".to_string(),
+                call_count: 100,
+            }],
+            mcp_servers: vec![],
+            shell_commands: vec![FleetUsageNamedBucket {
+                name: "cargo test".to_string(),
+                call_count: 30,
+            }],
+            detail: None,
+        });
     }
 }
