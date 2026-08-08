@@ -2023,6 +2023,7 @@ Commands:
   transcript    Page or follow one session's full execution transcript
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
+  archived      Sessions the daemon retired out of the live roster (still browsable)
   cost          Per-session / model / day / group spend rollups + budget caps
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
@@ -2324,6 +2325,22 @@ Options:
       --idle-min <idle-min>  Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)
       --no-enrich            Skip AI enrichment — 0-token HUD (env AINB_FLEET_ENRICH=0)
   -h, --help                 Print help
+```
+
+### `ainb fleet archived`
+
+Sessions the daemon retired out of the live roster (still browsable)
+
+```console
+$ ainb fleet archived --help
+Sessions the daemon retired out of the live roster (still browsable)
+
+Usage: ainb fleet archived [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <limit>    Maximum rows to list, most recently observed first [default: 50]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet cost`
