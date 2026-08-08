@@ -2497,3 +2497,317 @@ async fn the_runtime_path_converges_the_same_dirty_state_as_the_boot_scan() {
         Some(("UNKNOWN".to_string(), Some("adapter_exit".to_string())))
     );
 }
+
+// --------------------------------------- durability under a failing store
+
+/// Install a `SQLite` trigger that refuses exactly one column's UPDATE.
+///
+/// The store faults these tests need (a contended writer that exhausts its
+/// busy timeout, a disk that stops taking writes) are the ones a repo function
+/// surfaces as `Err`, and a trigger is the one way to produce them at the exact
+/// statement without a seam in the daemon that only tests use.
+async fn refuse_updates_of(store: &Store, name: &str, table: &str, column: &str) {
+    sqlx::query(&format!(
+        "CREATE TRIGGER {name} BEFORE UPDATE OF {column} ON {table} \
+         BEGIN SELECT RAISE(ABORT, 'the store refused this write'); END"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("install the write fault");
+}
+
+async fn allow_updates_again(store: &Store, name: &str) {
+    sqlx::query(&format!("DROP TRIGGER {name}"))
+        .execute(store.pool())
+        .await
+        .expect("remove the write fault");
+}
+
+/// Poll until `session_key`'s transcript carries `event_type`, or fail loudly.
+async fn await_transcript_event(store: &Store, session_key: &str, event_type: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let rows = transcript(store, session_key).await;
+        if rows.iter().any(|(kind, _)| kind == event_type) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{session_key} never wrote {event_type}: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// I16: a turn the store cannot RECORD is never issued.
+///
+/// Both convergence paths key off the persisted `open_turn_id`: the deadline
+/// sweep queries it, and `converge_dirty_session` writes `acp.turn_interrupted`
+/// only for a turn the store knows about. A prompt issued after that write
+/// failed is a turn nothing can converge: a hung adapter would hold the scope
+/// with no deadline able to see it, and a dying one would resolve the leg with
+/// no marker to say the turn was cut short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_the_store_cannot_record_is_never_prompted() {
+    let evidence = tempfile::tempdir().expect("evidence dir");
+    let log = evidence.path().join("rpc.log");
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_CHUNKS", "1"),
+        ("FAKE_ACP_RPC_LOG", log.to_str().expect("log path")),
+    ])
+    .await;
+    refuse_updates_of(
+        &store,
+        "refuse_open_turn",
+        "fleet_acp_session",
+        "open_turn_id",
+    )
+    .await;
+
+    let session = seed_session(&store, "acp:unrecordable").await;
+    let message_id = seed_message(&store, &session.session_key, "hi").await;
+    pool.submit_prompt(&session.session_key, &message_id, "hi").await;
+
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    assert_eq!(state, "FAILED", "{detail:?}");
+    assert_eq!(
+        detail.as_deref(),
+        Some("turn_unrecorded"),
+        "the receipt names why, so a resend is an operator decision"
+    );
+    let lines = rpc_log(&log);
+    assert!(
+        lines.iter().any(|line| line.starts_with("new:")),
+        "the adapter session was built before the turn was refused: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("prompt:")),
+        "a turn no sweep could reach must never be issued: {lines:?}"
+    );
+}
+
+/// I4: the turn-end write set is ONE transaction, and what survives a failure
+/// is a turn the boot scan already knows how to converge.
+///
+/// Four independent commits meant a store fault between them published the
+/// agent's answer under a receipt that convergence then resolved UNKNOWN:
+/// delivered content, failed receipt, and no repair for either. Now the receipt
+/// gates the reply, so a receipt that cannot commit leaves the timeline clean
+/// and the session dirty, which is exactly the state convergence exists for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_end_that_cannot_commit_leaves_no_reply_and_a_repairable_turn() {
+    let (_dir, store, pool, broker) =
+        harness_with_broker(&[("FAKE_ACP_CHUNKS", "2")], |_| {}).await;
+    let session = seed_session(&store, "acp:atomic-end").await;
+    let message_id = seed_message(&store, &session.session_key, "hi").await;
+    refuse_updates_of(&store, "refuse_receipt", "fleet_message_delivery", "state").await;
+
+    pool.submit_prompt(&session.session_key, &message_id, "hi").await;
+    // The turn itself SUCCEEDS at the adapter; only its commit fails, and the
+    // completion marker is the evidence the pool got that far.
+    await_transcript_event(&store, &session.session_key, "acp.turn_completed").await;
+    // Three attempts with backoff, then the pool gives the turn up to
+    // convergence rather than half-writing it.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert!(
+        FleetMessageRepo::list_by_origin(store.pool(), &message_id, 0, 50)
+            .await
+            .expect("replies")
+            .is_empty(),
+        "no reply may reach the timeline under a receipt that never committed"
+    );
+    assert_eq!(
+        delivery_state(&store, &message_id, &session.session_key).await,
+        Some(("PENDING".to_string(), None)),
+        "the receipt is untouched, so convergence can still claim it"
+    );
+    let row = FleetAcpSessionRepo::get(store.pool(), &session.session_key)
+        .await
+        .expect("session row")
+        .expect("session row");
+    assert_eq!(
+        row.open_turn_id.as_deref(),
+        Some(message_id.as_str()),
+        "the turn is still open, which is what makes this state DIRTY and repairable"
+    );
+
+    // The repair: exactly the routine a restarted daemon runs.
+    allow_updates_again(&store, "refuse_receipt").await;
+    ainb_hangar_daemon::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink())
+        .await;
+    assert_eq!(
+        delivery_state(&store, &message_id, &session.session_key).await,
+        Some(("UNKNOWN".to_string(), Some("daemon_restart".to_string()))),
+        "the boot scan gives the leg the terminal state the turn end could not"
+    );
+    let row = FleetAcpSessionRepo::get(store.pool(), &session.session_key)
+        .await
+        .expect("session row")
+        .expect("session row");
+    assert!(row.open_turn_id.is_none(), "and releases the scope");
+    assert!(
+        transcript(&store, &session.session_key)
+            .await
+            .iter()
+            .any(|(kind, _)| kind == "acp.turn_interrupted"),
+        "with a marker saying the turn was cut short"
+    );
+}
+
+/// R5: a `session/load` replay tail the daemon reads LATE is still replay.
+///
+/// The adapter is free to still be flushing history when its `session/load`
+/// reply lands, and the pool's demux hands notifications to a different task
+/// than the one awaiting that reply, so "the replay is drained" cannot be
+/// inferred from a quiet window. Here the store is held busy across the
+/// turn-start writes (a contended `SQLite` writer, the ordinary production
+/// case) and the tail arrives inside that window: it must not become this
+/// turn's transcript or this turn's timeline reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_tail_the_daemon_reads_late_is_never_this_turns_output() {
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_LOAD_REPLAY", "2"),
+        ("FAKE_ACP_LOAD_REPLAY_TAIL", "1"),
+        ("FAKE_ACP_LOAD_TAIL_DELAY_MS", "150"),
+        ("FAKE_ACP_CHUNKS", "1"),
+    ])
+    .await;
+    let session = seed_session(&store, "acp:late-tail").await;
+    seed_stale_adapter_id(&store, &session.session_key, "replayed-session").await;
+    let message_id = seed_message(&store, &session.session_key, "hi").await;
+
+    // Hold the store's writer. Every write the attach and the turn start make
+    // queues behind this, so the tail (150 ms after the load reply) lands while
+    // the pool is still recording the turn.
+    let (held, wait) = tokio::sync::oneshot::channel();
+    let writer = store.pool().clone();
+    let held_key = session.session_key.clone();
+    let fence = tokio::spawn(async move {
+        let mut tx = writer.begin().await.expect("fence transaction");
+        sqlx::query(
+            "UPDATE fleet_acp_session SET last_active_at = last_active_at WHERE session_key = ?",
+        )
+        .bind(&held_key)
+        .execute(&mut *tx)
+        .await
+        .expect("take the write lock");
+        let _ = held.send(());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        tx.rollback().await.expect("release the write lock");
+    });
+    wait.await.expect("the fence took the write lock");
+
+    pool.submit_prompt(&session.session_key, &message_id, "hi").await;
+    let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
+    fence.await.expect("fence task");
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+
+    let rows = transcript(&store, &session.session_key).await;
+    let text: String = rows.iter().map(|(_, payload)| payload.as_str()).collect();
+    assert!(
+        !text.contains("tail-replay"),
+        "a replay tail read late was written as live output: {text}"
+    );
+    let replies = FleetMessageRepo::list_by_origin(store.pool(), &message_id, 0, 50)
+        .await
+        .expect("replies");
+    let bodies: Vec<&str> = replies.iter().map(|row| row.body.as_str()).collect();
+    assert!(
+        bodies.iter().all(|body| !body.contains("tail-replay")),
+        "and it must never reach the chat timeline: {bodies:?}"
+    );
+    assert!(
+        bodies.iter().any(|body| body.contains("chunk-0")),
+        "while the turn's own answer still does: {bodies:?}"
+    );
+}
+
+/// The session cap is a CEILING: at the cap with every tenant mid-turn there is
+/// nothing to evict, so the arrival is refused with an enumerated detail.
+///
+/// Warning and attaching anyway put the process over the maximum an operator
+/// configured, silently and for every later arrival too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_provider_at_its_cap_with_every_tenant_busy_refuses_the_arrival() {
+    let evidence = tempfile::tempdir().expect("evidence dir");
+    let log = evidence.path().join("rpc.log");
+    let (_dir, store, pool, _broker) = harness_with_broker(
+        &[
+            // Nobody's turn ever ends, so nothing can become evictable.
+            ("FAKE_ACP_HANG_SESSIONS", "*"),
+            ("FAKE_ACP_RPC_LOG", log.to_str().expect("log path")),
+        ],
+        |config| config.max_sessions_per_provider = 1,
+    )
+    .await;
+    let busy = seed_session(&store, "acp:cap-busy").await;
+    let arriving = seed_session(&store, "acp:cap-arriving").await;
+    let busy_message = seed_message(&store, &busy.session_key, "first").await;
+    pool.submit_prompt(&busy.session_key, &busy_message, "first").await;
+    await_open_turn(&store, &busy.session_key).await;
+
+    let arriving_message = seed_message(&store, &arriving.session_key, "second").await;
+    pool.submit_prompt(&arriving.session_key, &arriving_message, "second").await;
+
+    let (state, detail) = await_terminal(&store, &arriving_message, &arriving.session_key).await;
+    assert_eq!(state, "FAILED", "{detail:?}");
+    assert_eq!(detail.as_deref(), Some("provider_at_capacity"));
+    let sessions = rpc_log(&log).into_iter().filter(|line| line.starts_with("new:")).count();
+    assert_eq!(
+        sessions, 1,
+        "the refused arrival never got an adapter session"
+    );
+}
+
+/// Two arrivals racing for one free slot do not BOTH take it.
+///
+/// Eviction only frees a slot once the victim's own actor closes its adapter
+/// session, so two arrivals that read the route table concurrently choose the
+/// same idle victim and overshoot the cap by one, permanently: the second
+/// victim is never evicted and the process hosts cap+1 tenants until something
+/// else removes one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_arrivals_never_overshoot_the_session_cap() {
+    let (_dir, store, pool, _broker) = harness_with_broker(&[("FAKE_ACP_CHUNKS", "1")], |config| {
+        config.max_sessions_per_provider = 2;
+    })
+    .await;
+    // Two hosted, idle sessions: the cap is full and both are evictable.
+    for key in ["acp:cap-a", "acp:cap-b"] {
+        let seeded = seed_session(&store, key).await;
+        let message = seed_message(&store, &seeded.session_key, "warm").await;
+        pool.submit_prompt(&seeded.session_key, &message, "warm").await;
+        await_terminal(&store, &message, &seeded.session_key).await;
+    }
+
+    let mut arrivals = Vec::new();
+    for key in ["acp:cap-c", "acp:cap-d"] {
+        let seeded = seed_session(&store, key).await;
+        let message = seed_message(&store, &seeded.session_key, "arrive").await;
+        arrivals.push((seeded.session_key.clone(), message.clone()));
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            pool.submit_prompt(&seeded.session_key, &message, "arrive").await;
+        });
+    }
+    for (session_key, message) in &arrivals {
+        let (state, detail) = await_terminal(&store, message, session_key).await;
+        assert_eq!(state, "DELIVERED", "{detail:?}");
+    }
+
+    // The victims leave asynchronously (each closes its own adapter session),
+    // so the cap is asserted as the state the process SETTLES in.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let hosted: u32 = pool.health().await.processes.iter().map(|row| row.sessions).sum();
+        if hosted <= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the process settled at {hosted} sessions with a cap of 2"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

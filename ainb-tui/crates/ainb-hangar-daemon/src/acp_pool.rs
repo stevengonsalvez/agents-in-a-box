@@ -29,7 +29,15 @@
 //! * **Convergence is not boot-only (I16).** An adapter that exits, or a turn
 //!   that outlives its deadline, runs [`converge_dirty_session`] — the SAME
 //!   function the boot scan runs. Under the multiplex it fans out to every
-//!   session the dead process hosted.
+//!   session the dead process hosted. Convergence can only reach turns the
+//!   STORE knows about, so a turn whose `open_turn_id` will not persist is
+//!   never issued ([`DELIVERY_TURN_UNRECORDED`]).
+//! * **A turn ends in ONE transaction.** The receipt, the agent's reply and the
+//!   released session commit together, and the receipt gates the reply
+//!   ([`FleetAcpSessionRepo::commit_turn_end`]), so no crash publishes an
+//!   answer the receipt says never landed. The transcript's completion marker
+//!   is committed first, on purpose: the only crash window it leaves is a turn
+//!   the boot scan still lists as dirty.
 //! * **Work is bounded; notifications are not.** The per-scope prompt queue is
 //!   a bounded channel (a full queue is a REJECTED delivery carrying
 //!   [`DELIVERY_QUEUE_FULL`], never silent growth), the per-process in-flight
@@ -74,7 +82,9 @@ use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::fleet::{
     FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
 };
-use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, FleetAcpSessionRow};
+use ainb_hangar_store::repo::fleet_acp_session::{
+    FleetAcpSessionRepo, FleetAcpSessionRow, TurnEnd, TurnEndOutcome,
+};
 use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventRepo, NewFleetProviderEvent,
@@ -104,8 +114,23 @@ pub const DELIVERY_DAEMON_RESTART: &str = "daemon_restart";
 pub const DELIVERY_SPAWN_FAILED: &str = "spawn_failed";
 /// The turn ended with an adapter-reported failure (refusal, cancel).
 pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
+/// The turn could not be RECORDED, so it was never issued (I16).
+///
+/// Both convergence paths key off the persisted `open_turn_id`: the deadline
+/// sweep queries it, and `converge_dirty_session` writes `acp.turn_interrupted`
+/// only for a turn the store knows about. A prompt issued after that write
+/// failed would be invisible to both, so a hung adapter would never be swept
+/// and a dying one would resolve the leg with no marker. Nothing reached the
+/// adapter, so FAILED is honest and an operator can resend.
+pub const DELIVERY_TURN_UNRECORDED: &str = "turn_unrecorded";
 /// The recipient exists but its session row is gone or dead.
 pub const DELIVERY_SESSION_GONE: &str = "session_gone";
+/// The provider's process is at its session cap and every tenant is busy.
+///
+/// Terminal, never requeued: the cap is a standing ceiling, not a transient
+/// fault, and a retry that ignored it would put the process one tenant over the
+/// maximum an operator configured. An operator resends once a turn ends.
+pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
 /// The pinned permission mode could not be proven for the session (I13).
 ///
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
@@ -259,7 +284,17 @@ pub enum PermissionDecision {
 /// The outcome of routing an answer back to the adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionAnswer {
-    /// Delivered to the adapter's pending JSON-RPC id.
+    /// HANDED OFF to the adapter's pending JSON-RPC id, carrying the option id
+    /// that was selected.
+    ///
+    /// Deliberately not "applied": `Responder::respond` enqueues the response
+    /// on this process's outgoing side and returns, and ACP has no
+    /// acknowledgement for a permission answer, so no local state can prove the
+    /// adapter received it, let alone acted on it. A daemon that dies in that
+    /// window loses the decision; the adapter re-asks on its next turn and
+    /// convergence has already closed the attention row, so the operator is
+    /// asked again rather than left staring at a row nobody will answer. The
+    /// receipt detail says hand-off for the same reason (`rpc::acp_permission_receipt`).
     Delivered(String),
     /// No permission with that fingerprint is parked (already answered, or the
     /// adapter died and convergence cleared it).
@@ -384,7 +419,17 @@ struct ProviderProcess {
     /// adapter has no routes yet and must not read as idle: `session/new` can
     /// take up to the spawn timeout against a real adapter, which is longer than
     /// a sweep tick.
+    ///
+    /// It is also the session cap's RESERVATION: it is incremented before the
+    /// cap is consulted, so two arrivals that race count each other instead of
+    /// both reading a table with one free slot in it.
     attaching: AtomicU32,
+    /// One capacity decision at a time. Eviction is asynchronous (the victim's
+    /// own actor closes its adapter session), so two arrivals evaluating the
+    /// cap concurrently would read the same route table, choose the SAME idle
+    /// victim, and both attach: one tenant over the cap with nothing left to
+    /// evict.
+    evicting: tokio::sync::Mutex<()>,
     /// [`PoolConfig::process_idle_window`], copied so the sweep predicate needs
     /// only the process.
     idle_window: Duration,
@@ -948,6 +993,7 @@ impl AcpPool {
             // a sweep sees it genuinely empty.
             empty_since: StdMutex::new(None),
             attaching: AtomicU32::new(0),
+            evicting: tokio::sync::Mutex::new(()),
             idle_window: self.config.process_idle_window,
             stopping: std::sync::atomic::AtomicBool::new(false),
         });
@@ -1606,49 +1652,35 @@ impl SessionActor {
             return;
         };
 
+        let now = SystemClock.now_ms();
+        if !self.record_turn(&job.message_id, now).await {
+            self.resolve(&job.message_id, "FAILED", DELIVERY_TURN_UNRECORDED).await;
+            return;
+        }
+
         // A rebuilt session gets its context back on the SAME prompt: one turn,
         // one delivery, one reply.
         //
-        // Taken AFTER the permit: an adapter that exits between the attach and
-        // the permit fails the leg above WITHOUT prompting, and consuming the
-        // prelude first would burn the rebuilt context on a turn that never
-        // happened.
+        // Taken AFTER the permit and after the turn is recorded: a leg that
+        // fails either of those never prompts, and consuming the prelude first
+        // would burn the rebuilt context on a turn that never happened.
         let text = match self.pending_prelude.take() {
             Some(prelude) => format!("{prelude}\n\n{}", job.text),
             None => job.text.clone(),
         };
         process.in_flight_used.fetch_add(1, Ordering::Relaxed);
 
-        let now = SystemClock.now_ms();
+        // The replay seam closes as LATE as it can, and only after everything
+        // already forwarded has been swallowed by it. `session/load` replays
+        // history as notifications a DIFFERENT task (the process supervisor)
+        // forwards, so a replay tail can land in this session's channel while
+        // the turn above was being recorded. Draining it here, with the seam
+        // still on, is what stops it from being read as this turn's output on
+        // the next pass of the select loop (R5), and doing it BEFORE
+        // `begin_turn` is what stops an ordinary post-turn straggler from being
+        // merged into the next turn's final message (I4).
+        self.drain_updates().await;
         self.reducer.begin_turn();
-        if let Err(error) = FleetAcpSessionRepo::set_open_turn(
-            self.pool.store.pool(),
-            &self.session_key,
-            &job.message_id,
-            now,
-        )
-        .await
-        {
-            tracing::error!(session_key = %self.session_key, %error, "could not open the turn");
-        }
-        let _ = FleetAcpSessionRepo::set_state(
-            self.pool.store.pool(),
-            &self.session_key,
-            "ACTIVE",
-            now,
-        )
-        .await;
-        self.set_state("ACTIVE");
-        if let Ok(Some(high_water)) = self
-            .writer
-            .lifecycle(
-                Lifecycle::TurnStarted,
-                serde_json::json!({ "turnId": job.message_id }),
-            )
-            .await
-        {
-            self.wake(&high_water);
-        }
 
         self.turn = Some(OpenTurn {
             message_id: job.message_id.clone(),
@@ -1668,6 +1700,58 @@ impl SessionActor {
             drop(permit);
             let _ = turn_tx.send(result).await;
         });
+    }
+
+    /// Record a turn BEFORE it exists at the adapter, answering whether it may
+    /// be issued at all (I16).
+    ///
+    /// Both convergence paths read the persisted `open_turn_id` and neither can
+    /// see a turn this write missed, so a prompt issued anyway would be a turn
+    /// no sweep could expire and no exit could mark interrupted: a hung adapter
+    /// would hold the scope with a PENDING leg nothing revisits. Nothing has
+    /// reached the adapter when this answers `false` (the caller still holds
+    /// the in-flight permit and has not spent the re-prime prelude), so the leg
+    /// fails terminal rather than being requeued: a store that cannot take this
+    /// write will not take it on an immediate retry either.
+    ///
+    /// The ACTIVE state and the `acp.turn_started` marker follow it, in that
+    /// order, so the transcript never opens a turn the store has not accepted.
+    async fn record_turn(&mut self, message_id: &str, now: i64) -> bool {
+        if let Err(error) = FleetAcpSessionRepo::set_open_turn(
+            self.pool.store.pool(),
+            &self.session_key,
+            message_id,
+            now,
+        )
+        .await
+        {
+            tracing::error!(
+                session_key = %self.session_key,
+                %message_id,
+                %error,
+                "could not record the turn; refusing to prompt an adapter no sweep could reach"
+            );
+            return false;
+        }
+        let _ = FleetAcpSessionRepo::set_state(
+            self.pool.store.pool(),
+            &self.session_key,
+            "ACTIVE",
+            now,
+        )
+        .await;
+        self.set_state("ACTIVE");
+        if let Ok(Some(high_water)) = self
+            .writer
+            .lifecycle(
+                Lifecycle::TurnStarted,
+                serde_json::json!({ "turnId": message_id }),
+            )
+            .await
+        {
+            self.wake(&high_water);
+        }
+        true
     }
 
     /// Drain the chunks the adapter wrote just BEFORE its prompt reply.
@@ -1759,42 +1843,98 @@ impl SessionActor {
         }
 
         let now = SystemClock.now_ms();
-        let _ =
-            FleetAcpSessionRepo::clear_open_turn(self.pool.store.pool(), &self.session_key, now)
-                .await;
-        let _ =
-            FleetAcpSessionRepo::set_state(self.pool.store.pool(), &self.session_key, "IDLE", now)
-                .await;
-        self.set_state("IDLE");
-
         // I4/I11: the TIMELINE gets exactly the final agent message, in the
         // RECIPIENT'S OWN scope, threaded to the prompt that caused it. The
         // whole chunk stream already went to the transcript.
-        if state == "DELIVERED" {
-            let body = self.reducer.final_message().trim().to_string();
-            if !body.is_empty() {
-                let reply = NewFleetMessage {
-                    id: SystemIdGen.new_ulid(),
-                    request_id: None,
-                    request_fingerprint: None,
-                    scope_key: self.scope_key.clone(),
-                    origin_message_id: Some(turn.message_id.clone()),
-                    sender: self.session_key.clone(),
-                    kind: "agent".to_string(),
-                    body,
-                    created_at: now,
-                };
-                match FleetMessageRepo::insert_message(self.pool.store.pool(), &reply).await {
-                    Ok(row) => self.pool.events.emit_message_seq(row.seq),
-                    Err(error) => tracing::error!(
+        let reply = (state == "DELIVERED")
+            .then(|| self.reducer.final_message().trim().to_string())
+            .filter(|body| !body.is_empty())
+            .map(|body| NewFleetMessage {
+                id: SystemIdGen.new_ulid(),
+                request_id: None,
+                request_fingerprint: None,
+                scope_key: self.scope_key.clone(),
+                origin_message_id: Some(turn.message_id.clone()),
+                sender: self.session_key.clone(),
+                kind: "agent".to_string(),
+                body,
+                created_at: now,
+            });
+        // ONE transaction (I4): the reply, its receipt and the released session
+        // land together or not at all. Four separate commits left a daemon
+        // death between them showing an answer with no receipt, or a receipt
+        // for a session still marked mid-turn, and nothing repaired either.
+        self.commit_turn_end(
+            &turn.message_id,
+            state,
+            detail.as_deref(),
+            reply.as_ref(),
+            now,
+        )
+        .await;
+        self.set_state("IDLE");
+    }
+
+    /// Commit the turn-end write set, retrying a contended writer.
+    ///
+    /// The retry is the same reasoning [`resolve_leg`] carries: the usual
+    /// failure is a busy `SQLite` writer, and giving up on the first one leaves
+    /// a turn that only convergence can finish. Unlike `resolve_leg` there is
+    /// no half-written state to rescue if every attempt fails, because the
+    /// whole set is one transaction.
+    // `&mut self` is LOAD-BEARING for the same reason it is on
+    // [`SessionActor::resolve`]: this future is spawned and must be `Send`.
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "an exclusive borrow is what keeps this spawned future Send"
+    )]
+    async fn commit_turn_end(
+        &mut self,
+        message_id: &str,
+        state: &str,
+        detail: Option<&str>,
+        reply: Option<&NewFleetMessage>,
+        now: i64,
+    ) {
+        let fingerprint = format!("acp:{}:{message_id}", self.session_key);
+        let turn = TurnEnd {
+            session_key: &self.session_key,
+            message_id,
+            fingerprint: &fingerprint,
+            state,
+            detail: detail.filter(|detail| !detail.is_empty()),
+            session_state: "IDLE",
+            reply,
+            now,
+        };
+        for attempt in 0..3 {
+            match FleetAcpSessionRepo::commit_turn_end(self.pool.store.pool(), &turn).await {
+                Ok(TurnEndOutcome::Committed { reply_seq }) => {
+                    if let Some(seq) = reply_seq {
+                        self.pool.events.emit_message_seq(seq);
+                    }
+                    return;
+                }
+                Ok(TurnEndOutcome::AlreadyResolved) => {
+                    tracing::debug!(
                         session_key = %self.session_key,
-                        %error,
-                        "could not persist the agent reply"
-                    ),
+                        %message_id,
+                        "acp turn ended on a leg another resolver already owns"
+                    );
+                    return;
+                }
+                Err(error) if attempt == 2 => tracing::error!(
+                    session_key = %self.session_key,
+                    %message_id,
+                    %error,
+                    "could not commit the acp turn end; convergence must finish this turn"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, attempt = attempt + 1, "retrying an acp turn-end commit");
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
                 }
             }
         }
-        self.resolve(&turn.message_id, state, detail.as_deref().unwrap_or("")).await;
     }
 
     /// I6: attach with EXACTLY one legal requeue.
@@ -1820,6 +1960,7 @@ impl SessionActor {
             match self.ensure_session(message_id, attempt == 0).await {
                 Ok(process) => return Ok(process),
                 Err(EnsureFailure::BreakerOpen) => return Err(DELIVERY_BREAKER_OPEN),
+                Err(EnsureFailure::AtCapacity) => return Err(DELIVERY_PROVIDER_AT_CAPACITY),
                 // I13 is terminal: an adapter that will not hold the pinned mode
                 // holds it no better on a retry, and retrying would drive the
                 // session a second time in a permission regime nobody chose.
@@ -1902,8 +2043,10 @@ impl SessionActor {
 
         // The session cap is enforced HERE, where a new tenant arrives: evict
         // the least recently used idle session (`session/close`) and keep the
-        // process warm for everyone else.
-        self.pool.evict_if_at_cap(&process, &self.session_key).await;
+        // process warm for everyone else, or refuse when nothing can be freed.
+        if !self.pool.make_room(&process, &self.session_key).await {
+            return Err(EnsureFailure::AtCapacity);
+        }
 
         // PROBED per spawn, never persisted (B-defect 5): `can_load` on disk
         // would outlive the adapter version that justified it.
@@ -1988,9 +2131,13 @@ impl SessionActor {
             .await;
         // Drained with the seam STILL ON, and LEFT on: the notifications sit in
         // the actor's channel until something reads them, and a replay tail
-        // that outran the quiesce window would otherwise be classified as live
-        // output. `begin_turn` closes the seam when a live turn actually
-        // starts, which is the only moment the distinction can matter.
+        // that outran this window would otherwise be classified as live output.
+        //
+        // This quiesce is therefore an optimisation, NOT the guarantee. The
+        // guarantee is in `start_turn`, which drains again with the seam still
+        // on immediately before it closes it and prompts: the process
+        // supervisor forwards on its own task, so how much of the replay has
+        // reached this channel by now is not something a timer can answer.
         self.quiesce().await;
 
         match loaded {
@@ -2437,6 +2584,10 @@ impl SessionActor {
 enum EnsureFailure {
     /// The provider's breaker is open: terminal, no retry.
     BreakerOpen,
+    /// The provider process is full and nothing can be evicted: terminal, no
+    /// retry. A second attempt would find the same busy tenants, and requeueing
+    /// past the cap is the overshoot the cap exists to prevent.
+    AtCapacity,
     /// The pinned permission mode could not be proven (I13): terminal, no
     /// retry. Distinct from [`EnsureFailure::NeverSent`] because a retry would
     /// re-attach a session whose permission regime is not the configured one.
@@ -2446,58 +2597,93 @@ enum EnsureFailure {
 }
 
 impl AcpPool {
-    /// Close the least recently used idle session on `process` when adding one
-    /// more would exceed the per-provider cap.
-    async fn evict_if_at_cap(&self, process: &Arc<ProviderProcess>, incoming: &str) {
+    /// Make room for one arriving session, or answer `false` when the cap
+    /// cannot be honoured.
+    ///
+    /// The cap is a CEILING, not a hint: at the cap with every tenant mid-turn
+    /// there is nothing to evict, and the honest answer is to refuse the
+    /// arrival with [`DELIVERY_PROVIDER_AT_CAPACITY`]. Attaching anyway (what
+    /// the warn-and-continue path did) puts the process over the maximum an
+    /// operator configured, and does it silently and repeatedly, since every
+    /// later arrival takes the same branch.
+    ///
+    /// Occupancy counts the tenants that still HOLD a slot plus everything
+    /// still attaching, because the arrival's own reservation is already in
+    /// `attaching` and so is every concurrent one. A session already marked
+    /// `EVICTED` is on its way out and is counted as gone: eviction only frees
+    /// the route asynchronously (the victim's actor closes its own adapter
+    /// session), so counting it as a tenant would make the SECOND of two
+    /// concurrent arrivals refuse a slot the first had already freed for it.
+    async fn make_room(&self, process: &Arc<ProviderProcess>, incoming: &str) -> bool {
+        let _one_at_a_time = process.evicting.lock().await;
+        let cap = self.config.max_sessions_per_provider;
         let hosted: Vec<String> = process
             .routes
             .lock()
             .map(|routes| routes.values().map(|route| route.session_key.clone()).collect())
             .unwrap_or_default();
-        if hosted.len() < self.config.max_sessions_per_provider {
-            return;
-        }
+
         // LRU by the store's own `last_active_at`, so the choice survives a
         // daemon that has only just adopted these sessions.
+        let mut tenants = 0_usize;
         let mut candidates: Vec<FleetAcpSessionRow> = Vec::new();
         for session_key in hosted {
             if session_key == incoming {
                 continue;
             }
-            if let Ok(Some(row)) = FleetAcpSessionRepo::get(self.store.pool(), &session_key).await {
-                if row.open_turn_id.is_none() {
-                    candidates.push(row);
-                }
+            let Ok(Some(row)) = FleetAcpSessionRepo::get(self.store.pool(), &session_key).await
+            else {
+                // A row we cannot read is a tenant we cannot evict; counting it
+                // is the direction that respects the cap.
+                tenants += 1;
+                continue;
+            };
+            if row.state == "EVICTED" {
+                continue;
+            }
+            tenants += 1;
+            if row.open_turn_id.is_none() {
+                candidates.push(row);
             }
         }
-        candidates.sort_by_key(|row| row.last_active_at);
-        let Some(victim) = candidates.first() else {
+        let attaching = process.attaching.load(Ordering::Relaxed) as usize;
+        let Some(over) = (tenants + attaching).checked_sub(cap).filter(|over| *over > 0) else {
+            return true;
+        };
+        if candidates.len() < over {
             tracing::warn!(
                 provider = %process.provider,
-                "acp provider is at its session cap with no idle session to evict"
+                %incoming,
+                cap,
+                idle = candidates.len(),
+                "acp provider is at its session cap with nothing idle to evict; refusing the arrival"
             );
-            return;
-        };
-        tracing::info!(
-            provider = %process.provider,
-            session_key = %victim.session_key,
-            "evicting the least recently used idle acp session; the process stays warm"
-        );
-        let control = {
-            let sessions = self.sessions.lock().await;
-            sessions.get(&victim.session_key).map(|handle| handle.control.clone())
-        };
-        if let Some(control) = control {
-            let _ = control.send(Control::Evict);
+            return false;
         }
-        let _ = FleetAcpSessionRepo::set_state(
-            self.store.pool(),
-            &victim.session_key,
-            "EVICTED",
-            SystemClock.now_ms(),
-        )
-        .await;
-        self.evicted_total.fetch_add(1, Ordering::Relaxed);
+        candidates.sort_by_key(|row| row.last_active_at);
+        for victim in candidates.into_iter().take(over) {
+            tracing::info!(
+                provider = %process.provider,
+                session_key = %victim.session_key,
+                "evicting the least recently used idle acp session; the process stays warm"
+            );
+            let control = {
+                let sessions = self.sessions.lock().await;
+                sessions.get(&victim.session_key).map(|handle| handle.control.clone())
+            };
+            if let Some(control) = control {
+                let _ = control.send(Control::Evict);
+            }
+            let _ = FleetAcpSessionRepo::set_state(
+                self.store.pool(),
+                &victim.session_key,
+                "EVICTED",
+                SystemClock.now_ms(),
+            )
+            .await;
+            self.evicted_total.fetch_add(1, Ordering::Relaxed);
+        }
+        true
     }
 }
 

@@ -1701,6 +1701,38 @@ async fn message_send_inner(
         return Err(invalid_params("targets must name at least one session"));
     }
 
+    // A supplied scope must be CONSISTENT with the recipients it claims to
+    // address. Without this, `--target session:B --scope session:A` prompts B
+    // while filing the message in A's timeline: cross-session contamination
+    // from caller-controlled input, not a routing preference. The grammar is
+    // the plan's (Scope + threading rules) and this fails CLOSED, so the
+    // channel scopes part 2 mints have to be allowed here deliberately.
+    if let Some(scope) = params.scope_key.as_deref().map(str::trim) {
+        if let Some(named) = scope.strip_prefix("session:") {
+            if targets.len() > 1 {
+                return Err(invalid_params(
+                    "a session scope cannot carry a multi-target send; omit scope_key and the \
+                     daemon mints the broadcast scope",
+                ));
+            }
+            if !targets.iter().any(|target| target == named) {
+                return Err(invalid_params(
+                    "scope_key names a session that is not a recipient of this send",
+                ));
+            }
+        } else if scope.strip_prefix("broadcast:").is_some() {
+            if targets.len() < 2 {
+                return Err(invalid_params(
+                    "a broadcast scope needs more than one recipient",
+                ));
+            }
+        } else {
+            return Err(invalid_params(
+                "scope_key must be `session:<recipient>` or `broadcast:<id>`",
+            ));
+        }
+    }
+
     // The fingerprint hashes the REQUEST as the client wrote it, so a retry
     // that omits scope_key (and would mint a fresh broadcast ulid) still
     // replays instead of being rejected as a different message.
@@ -4910,6 +4942,16 @@ async fn execute_acp_action(
 }
 
 /// Map the pool's answer routing onto a receipt an operator can read.
+///
+/// `DELIVERED` here means HANDED OFF, and the detail says so. ACP defines no
+/// acknowledgement for a `session/request_permission` response: the answer is
+/// written to the adapter's pending JSON-RPC id and the protocol's next word on
+/// the subject is whatever the turn does afterwards. A daemon that dies between
+/// the hand-off and the pipe therefore loses a decision whose receipt already
+/// says delivered, and no wording can make that receipt mean "applied". What
+/// the vocabulary CAN do is stop implying an acknowledgement nobody sent, which
+/// is what an operator reading `DELIVERED` before a re-ask would otherwise
+/// conclude the daemon had.
 fn acp_permission_receipt(
     answer: crate::acp_pool::PermissionAnswer,
 ) -> (
@@ -4922,7 +4964,9 @@ fn acp_permission_receipt(
     match answer {
         PermissionAnswer::Delivered(option) => (
             ActionReceiptStatus::Delivered,
-            Some(format!("acp permission answered; option {option}")),
+            Some(format!(
+                "acp permission handed to the adapter; option {option} (hand-off, not an adapter ack: ACP defines none)"
+            )),
         ),
         PermissionAnswer::NotWaiting => (
             ActionReceiptStatus::Failed,
