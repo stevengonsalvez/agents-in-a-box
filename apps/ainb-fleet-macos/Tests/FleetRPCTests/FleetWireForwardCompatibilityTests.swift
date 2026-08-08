@@ -42,6 +42,25 @@ final class FleetWireForwardCompatibilityTests: XCTestCase {
         XCTAssertEqual(try decode(FleetConfidence.self, "CERTAIN"), .low)
     }
 
+    /// Usage state gates the whole usage/dashboard panel. An unknown state must
+    /// degrade to `.unavailable` (which renders an explanatory empty state), not
+    /// throw -- and not decode as `.ready`, which would promise data that is not
+    /// there.
+    func testUnknownUsageStateDegradesInsteadOfBlankingThePanel() throws {
+        XCTAssertEqual(try decode(FleetUsageSummaryState.self, "degraded"), .unavailable)
+        XCTAssertEqual(try decode(FleetUsageSummaryState.self, "ready"), .ready)
+        XCTAssertEqual(try decode(FleetUsageSummaryState.self, "scanning"), .scanning)
+    }
+
+    /// The regression that matters for the dashboard: one unknown state value
+    /// must not fail the decode of the entire result.
+    func testUnknownUsageStateDoesNotFailTheWholeDashboard() throws {
+        let json = #"{"state":"recalibrating","cost_complete":false,"weekly":[],"heatmap":[],"providers":[],"models":[],"projects":[],"sessions":[],"branches":[],"tools":[],"mcp_servers":[],"shell_commands":[],"detail":"daemon is newer than this build"}"#
+        let result = try JSONDecoder().decode(FleetUsageDashboardResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.state, .unavailable)
+        XCTAssertEqual(result.detail, "daemon is newer than this build")
+    }
+
     func testKnownValuesStillRoundTripThroughEncoding() throws {
         let encoded = try JSONEncoder().encode(FleetProvider.codex)
         XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "\"codex\"")

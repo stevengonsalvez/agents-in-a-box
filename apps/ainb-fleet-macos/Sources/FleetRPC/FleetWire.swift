@@ -569,9 +569,16 @@ struct FleetUsageSummaryParams: Codable, Equatable {
     let period: FleetUsagePeriod
 }
 
-enum FleetUsageSummaryState: String, Codable, Equatable {
+enum FleetUsageSummaryState: String, Encodable, Equatable {
     case scanning, ready, partial, unavailable
 }
+
+// Usage state gates a whole panel, and both the summary and the dashboard embed
+// it. Left as a plain synthesized `Codable` it threw on any value this build did
+// not know, so a daemon adding one state blanked the entire panel rather than
+// degrading it. Unknown degrades to `.unavailable`: the panel then renders its
+// explanatory empty state instead of over-promising `.ready` with no data.
+extension FleetUsageSummaryState: TolerantWireEnum { static var wireFallback: Self { .unavailable } }
 
 struct FleetUsageBucket: Codable, Equatable {
     let inputTokens: UInt64
