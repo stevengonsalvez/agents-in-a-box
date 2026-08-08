@@ -1822,6 +1822,19 @@ mod tests {
             None,
             "a prefix with no server is not a server"
         );
+        // A well-formed MCP tool name has BOTH segments. Accepting a truncated
+        // one would delete an ordinary tool from the tool list and invent a
+        // server bucket that never made a call.
+        assert_eq!(
+            mcp_server_of("mcp__github"),
+            None,
+            "no tool segment means this is not an MCP call"
+        );
+        assert_eq!(
+            mcp_server_of("mcp__github__"),
+            None,
+            "an empty tool segment means this is not an MCP call"
+        );
 
         use ainb_plugin_types_sessions::Provider;
         let now = "2026-08-06T15:00:00Z".parse::<DateTime<Utc>>().unwrap();
