@@ -550,6 +550,113 @@ impl FleetRepo {
         Ok(Some(revision))
     }
 
+    /// Session keys a retention pass may demote out of the visible roster.
+    ///
+    /// "Archivable" is deliberately narrow: an `EXITED` row that is still
+    /// visible, has never been superseded, and has gone unobserved past the
+    /// caller's cutoff. Ordered oldest-first and capped so a caller drains a
+    /// large backlog over several passes instead of one long write.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` read failure.
+    pub async fn list_archivable(
+        pool: &SqlitePool,
+        stale_before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT session_key FROM fleet_session \
+             WHERE visible = 1 AND superseded_by IS NULL \
+               AND lifecycle_state = 'EXITED' AND last_observed_at < ? \
+             ORDER BY last_observed_at ASC LIMIT ?",
+        )
+        .bind(stale_before_ms)
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Demote one dead session out of the visible roster, keeping its identity.
+    ///
+    /// Modelled on [`Self::supersede_session`], with ONE deliberate difference:
+    /// `superseded_by` stays NULL. That keeps the two hidden shapes separable
+    /// forever — `visible = 0 AND superseded_by IS NULL` is archived,
+    /// `superseded_by IS NOT NULL` is superseded — which is what lets
+    /// [`apply_patch`]'s revival clause un-hide an archived row without ever
+    /// resurrecting a superseded duplicate.
+    ///
+    /// Returns `None` when the row no longer satisfies the predicate, which is
+    /// re-checked INSIDE the transaction: the candidate list is read outside it,
+    /// so a hook can land in between and make the row live again.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` write failure.
+    pub async fn archive_session(
+        pool: &SqlitePool,
+        session_key: &str,
+        observed_at: i64,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let version: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM fleet_session WHERE session_key = ? \
+             AND visible = 1 AND superseded_by IS NULL AND lifecycle_state = 'EXITED'",
+        )
+        .bind(session_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(version) = version else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let next_version = version + 1;
+        sqlx::query(
+            "UPDATE fleet_session SET visible = 0, version = ?, \
+             last_observed_at = MAX(last_observed_at, ?) WHERE session_key = ?",
+        )
+        .bind(next_version)
+        .bind(observed_at)
+        .bind(session_key)
+        .execute(&mut *tx)
+        .await?;
+        let revision = sqlx::query(
+            "INSERT INTO fleet_event \
+             (event_id, session_key, observed_at, authority, event_type, payload, \
+              session_version, applied) VALUES (?, ?, ?, 'authoritative', \
+              'session_archived', '{}', ?, 1)",
+        )
+        .bind(format!("fleet-archive:{session_key}:{next_version}"))
+        .bind(session_key)
+        .bind(observed_at)
+        .bind(next_version)
+        .execute(&mut *tx)
+        .await?
+        .last_insert_rowid();
+        sqlx::query("UPDATE fleet_session SET updated_revision = ? WHERE session_key = ?")
+            .bind(revision)
+            .bind(session_key)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(revision))
+    }
+
+    /// Read the archived roster, most recently observed first.
+    ///
+    /// Archiving hides a row from [`Self::snapshot`], it does not delete it, so
+    /// this is the browse path that keeps a retired session reachable. Excludes
+    /// superseded duplicates, which are hidden for an unrelated reason and have
+    /// nothing to show an operator.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` read failure.
+    pub async fn list_archived(
+        pool: &SqlitePool,
+        limit: i64,
+    ) -> Result<Vec<FleetSessionRow>, sqlx::Error> {
+        let rows = sqlx::query(SESSION_SELECT_ARCHIVED).bind(limit.max(0)).fetch_all(pool).await?;
+        rows.iter().map(session_from_row).collect()
+    }
+
     /// Fetch one canonical session by stable key.
     pub async fn get_session(
         pool: &SqlitePool,
@@ -851,6 +958,19 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
+/// The archived roster: hidden by [`FleetRepo::archive_session`], NOT by
+/// supersession. `superseded_by IS NULL` is the whole discriminator — the only
+/// writer of that column is `supersede_session`.
+const SESSION_SELECT_ARCHIVED: &str = "SELECT session_key, provider, provider_session_id, \
+    tmux_target, process_start_fingerprint, cwd, display_name, lifecycle_state, \
+    attention_state, current_request_fingerprint, management_state, transport_health, capabilities, provenance, \
+    confidence, discovered_at, last_observed_at, metadata_updated_at, \
+    metadata_authority, lifecycle_updated_at, lifecycle_authority, \
+    attention_updated_at, attention_authority, transport_updated_at, \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
+    FROM fleet_session WHERE visible = 0 AND superseded_by IS NULL \
+    ORDER BY last_observed_at DESC LIMIT ?";
+
 async fn session_by_key_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session_key: &str,
@@ -1088,12 +1208,29 @@ async fn insert_session(
     Ok(())
 }
 
+/// Persist one accepted patch, and REVIVE the row if it had been archived.
+///
+/// `visible = CASE WHEN superseded_by IS NULL THEN 1 ELSE visible END` is the
+/// revival clause. `FleetRepo::archive_session` hides dead rows on a 24h clock;
+/// without this, a session that comes back to life would stay invisible
+/// forever. It must never un-hide a SUPERSEDED row, hence the guard on
+/// `superseded_by` rather than a bare `visible = 1`.
+///
+/// Only reached when `apply_patch` returned `changed`, i.e. some state group
+/// won its `should_replace` authority/recency check, and only for a NEW
+/// `event_id` (a replayed duplicate returns early in `apply_event_in_tx`). So a
+/// replay can never revive. Note the weaker half of that guarantee: the
+/// comparison is against the winning GROUP's timestamp, not against the moment
+/// of archiving, so an event older than the archive cutoff but newer than that
+/// group can still revive a row. That is benign — visibility is not
+/// correctness, and the next archive pass re-hides it.
 async fn update_session(
     tx: &mut Transaction<'_, Sqlite>,
     row: &FleetSessionRow,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE fleet_session SET \
+            visible = CASE WHEN superseded_by IS NULL THEN 1 ELSE visible END, \
             provider = ?, provider_session_id = ?, tmux_target = ?, \
             process_start_fingerprint = ?, cwd = ?, display_name = ?, \
             lifecycle_state = ?, attention_state = ?, current_request_fingerprint = ?, management_state = ?, \
@@ -1653,5 +1790,256 @@ mod tests {
             projection.sessions[0].current_request.as_ref().unwrap()["request"],
             "current"
         );
+    }
+
+    /// Archiving a dead session must take it OUT of the roster every snapshot
+    /// scans, while leaving it reachable by key and listed as archived.
+    ///
+    /// This is the whole point of the change: 1,440 of 1,472 visible rows on a
+    /// measured profile were dead, and every 3s tick scanned all of them.
+    #[tokio::test]
+    async fn archiving_removes_a_dead_session_from_the_scanned_roster() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        for (id, key) in [("e-dead", "claude:dead"), ("e-live", "claude:live")] {
+            FleetRepo::apply_event(
+                pool,
+                &event(
+                    id,
+                    key,
+                    100,
+                    ObservationAuthority::Authoritative,
+                    FleetSessionPatch {
+                        lifecycle_state: Some(
+                            if key == "claude:dead" {
+                                "EXITED"
+                            } else {
+                                "RUNNING"
+                            }
+                            .to_string(),
+                        ),
+                        ..FleetSessionPatch::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let candidates = FleetRepo::list_archivable(pool, 200, 500).await.unwrap();
+        assert_eq!(
+            candidates,
+            vec!["claude:dead".to_string()],
+            "only the EXITED row is archivable"
+        );
+
+        let revision = FleetRepo::archive_session(pool, "claude:dead", 300).await.unwrap();
+        assert!(revision.is_some(), "archiving must commit a revision");
+
+        let scanned: Vec<String> = FleetRepo::snapshot(pool)
+            .await
+            .unwrap()
+            .sessions
+            .into_iter()
+            .map(|row| row.session_key)
+            .collect();
+        assert_eq!(
+            scanned,
+            vec!["claude:live".to_string()],
+            "the archived session must leave the roster SESSION_SELECT_ALL scans"
+        );
+        assert!(
+            FleetRepo::get_session(pool, "claude:dead").await.unwrap().is_some(),
+            "archived is not deleted — direct lookup by key must still resolve"
+        );
+        let archived: Vec<String> = FleetRepo::list_archived(pool, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.session_key)
+            .collect();
+        assert_eq!(archived, vec!["claude:dead".to_string()]);
+        assert_eq!(
+            FleetRepo::list_archivable(pool, 400, 500).await.unwrap(),
+            Vec::<String>::new(),
+            "an archived row must never be re-archived"
+        );
+    }
+
+    /// A session that comes back to life after being archived returns to the
+    /// roster on its next real observation. Without this an archived session
+    /// would be invisible forever.
+    #[tokio::test]
+    async fn a_new_observation_revives_an_archived_session() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-dead",
+                "claude:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("EXITED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        FleetRepo::archive_session(pool, "claude:s-1", 300).await.unwrap();
+        assert!(FleetRepo::snapshot(pool).await.unwrap().sessions.is_empty());
+
+        let revived = FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-alive-again",
+                "claude:s-1",
+                400,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(revived.applied);
+        let roster: Vec<String> = FleetRepo::snapshot(pool)
+            .await
+            .unwrap()
+            .sessions
+            .into_iter()
+            .map(|row| row.session_key)
+            .collect();
+        assert_eq!(
+            roster,
+            vec!["claude:s-1".to_string()],
+            "a revived session must return to the scanned roster"
+        );
+        assert!(
+            FleetRepo::list_archived(pool, 50).await.unwrap().is_empty(),
+            "and must leave the archived list"
+        );
+    }
+
+    /// The revival clause must not resurrect a SUPERSEDED duplicate. Both
+    /// shapes sit at `visible = 0`; only `superseded_by` tells them apart, and
+    /// a superseded row still receives events (its history stays on its key).
+    #[tokio::test]
+    async fn revival_never_unhides_a_superseded_duplicate() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        for (id, key) in [
+            ("e-legacy", "claude:legacy"),
+            ("e-managed", "claude:managed"),
+        ] {
+            FleetRepo::apply_event(
+                pool,
+                &event(
+                    id,
+                    key,
+                    100,
+                    ObservationAuthority::Authoritative,
+                    FleetSessionPatch {
+                        management_state: Some("DEGRADED".to_string()),
+                        ..FleetSessionPatch::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        FleetRepo::supersede_session(pool, "claude:legacy", "claude:managed", 200)
+            .await
+            .unwrap()
+            .expect("supersede applies");
+
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-legacy-late",
+                "claude:legacy",
+                300,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let roster: Vec<String> = FleetRepo::snapshot(pool)
+            .await
+            .unwrap()
+            .sessions
+            .into_iter()
+            .map(|row| row.session_key)
+            .collect();
+        assert_eq!(
+            roster,
+            vec!["claude:managed".to_string()],
+            "a superseded duplicate must stay hidden however many events it receives"
+        );
+        assert!(
+            FleetRepo::list_archived(pool, 50).await.unwrap().is_empty(),
+            "and must never be confused with an archived row"
+        );
+    }
+
+    /// The candidate list is read outside the archiving transaction, so a hook
+    /// can revive a row in between. The in-transaction re-check must catch it.
+    #[tokio::test]
+    async fn archiving_declines_a_session_revived_after_the_candidate_read() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-dead",
+                "claude:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("EXITED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            FleetRepo::list_archivable(pool, 200, 500).await.unwrap().len(),
+            1
+        );
+
+        // The hook that lands between the candidate read and the archive.
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-alive",
+                "claude:s-1",
+                200,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            FleetRepo::archive_session(pool, "claude:s-1", 300).await.unwrap(),
+            None,
+            "a session that came back to life must not be archived on a stale candidate"
+        );
+        assert_eq!(FleetRepo::snapshot(pool).await.unwrap().sessions.len(), 1);
     }
 }
