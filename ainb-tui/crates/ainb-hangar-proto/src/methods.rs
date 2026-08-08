@@ -516,14 +516,26 @@ pub const FLEET_CONFIRM_ANSWER: &str = "fleet/confirm_answer";
 /// value (part 1's cursor rule).
 pub const FLEET_ACTIVITY_LIST: &str = "fleet/activity_list";
 
+/// Notification carrying one guardrail confirm card at its new state.
+///
+/// Params: [`crate::fleet::FleetConfirmEventParams`]. Emitted when a card is
+/// opened, answered or expired; the card is re-readable from
+/// `fleet/confirm_list`, so a missed frame self-heals.
+pub const FLEET_CONFIRM_EVENT: &str = "fleet/confirm_event";
+/// Notification carrying one committed copilot activity row.
+///
+/// Params: [`crate::fleet::FleetActivityEventParams`]. Re-readable from
+/// `fleet/activity_list` by the same commit-ordered `seq`.
+pub const FLEET_ACTIVITY_EVENT: &str = "fleet/activity_event";
+
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     "fleet/resync_required",
     "fleet/message_event",
     "fleet/transcript_event",
     // Part 2's two streams, page-to-head like the part 1 forwarders above.
-    "fleet/confirm_event",
-    "fleet/activity_event",
+    FLEET_CONFIRM_EVENT,
+    FLEET_ACTIVITY_EVENT,
 ];
 
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues

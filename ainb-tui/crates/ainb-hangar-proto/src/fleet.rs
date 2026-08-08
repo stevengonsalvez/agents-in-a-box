@@ -90,6 +90,12 @@ pub const FLEET_CAPABILITY_CONFIRM_ANSWER: &str = "fleet.confirm.answer";
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_ACP_SPAWN,
     FLEET_CAPABILITY_ACTION_EXECUTE,
+    // Part 2 phase A2 landed the six chat/copilot dispatch arms, so their
+    // capabilities are advertised in the SAME change, per the rule below.
+    FLEET_CAPABILITY_CHAT_READ,
+    FLEET_CAPABILITY_CHAT_WRITE,
+    FLEET_CAPABILITY_CONFIRM_ANSWER,
+    FLEET_CAPABILITY_COPILOT_CONFIGURE,
     FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
     FLEET_CAPABILITY_MESSAGE_READ,
@@ -1867,12 +1873,10 @@ mod tests {
                 "{id:?} has dispatch arms but is not advertised"
             );
         }
-        // The other half of the same rule, and the half that actually bites
-        // between phases: part 2's capabilities are DEFINED (so both surfaces
-        // can name them) and NOT advertised, because their methods answer
-        // -32601 until their dispatch arms land. Delete an entry from this
-        // list in the SAME change that lands its handler and appends it to
-        // FLEET_PROTOCOL_CAPABILITY_IDS; doing either alone is red.
+        // Part 2 phase A2 landed all six of its dispatch arms, so all four of
+        // its capabilities moved into the catalogue in that same change. The
+        // rule is unchanged and still runs both ways: a capability is
+        // advertised WITH its handler, never before it.
         for id in [
             FLEET_CAPABILITY_CHAT_WRITE,
             FLEET_CAPABILITY_CHAT_READ,
@@ -1880,8 +1884,8 @@ mod tests {
             FLEET_CAPABILITY_CONFIRM_ANSWER,
         ] {
             assert!(
-                !FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
-                "{id:?} is advertised but its methods still answer -32601"
+                FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
+                "{id:?} has dispatch arms but is not advertised"
             );
         }
     }
