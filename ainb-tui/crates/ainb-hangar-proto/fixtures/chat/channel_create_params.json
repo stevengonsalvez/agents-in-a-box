@@ -1,0 +1,5 @@
+{
+  "kind": "broadcast",
+  "name": "release-train",
+  "recipients": ["tmux:sess-a", "tmux:sess-b", "acp:01J0KEY"]
+}

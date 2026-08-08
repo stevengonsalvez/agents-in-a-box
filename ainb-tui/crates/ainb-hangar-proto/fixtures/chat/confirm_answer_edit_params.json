@@ -1,0 +1,5 @@
+{
+  "confirm_id": "01J0CONFIRM2",
+  "answer": "edit",
+  "arguments": { "cwd": "/repo/worktrees/fix", "provider": "codex" }
+}

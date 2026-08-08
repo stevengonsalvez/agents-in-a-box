@@ -473,11 +473,57 @@ pub const FLEET_TRANSCRIPT_SUBSCRIBE: &str = "fleet/transcript_subscribe";
 /// `fleet.transcript.prune`.
 pub const FLEET_TRANSCRIPT_PRUNE: &str = "fleet/transcript_prune";
 
+/// Mint one chat channel and its `channel:<id>` scope (buzz-port part 2).
+///
+/// Params: [`crate::fleet::FleetChannelCreateParams`]; result:
+/// [`crate::fleet::FleetChannelCreateResult`]. Gated by `fleet.chat.write`,
+/// which is DEFINED but not advertised until this dispatch arm lands.
+pub const FLEET_CHANNEL_CREATE: &str = "fleet/channel_create";
+/// List the chat channels and their recipient sets.
+///
+/// Params: [`crate::fleet::FleetChannelListParams`]; result:
+/// [`crate::fleet::FleetChannelListResult`]. Gated by `fleet.chat.read`.
+pub const FLEET_CHANNEL_LIST: &str = "fleet/channel_list";
+/// Set the copilot session's per-session adapter config.
+///
+/// Params: [`crate::fleet::FleetCopilotConfigureParams`]; result:
+/// [`crate::fleet::FleetCopilotConfigureResult`]. Gated by
+/// `fleet.copilot.configure`. Carries model / reasoning effort / persona ONLY:
+/// the permission mode is daemon config and is deliberately not overridable,
+/// because a remotely settable mode is a remote off-switch for the whole
+/// permission surface.
+pub const FLEET_COPILOT_CONFIGURE: &str = "fleet/copilot_configure";
+/// List the copilot guardrail confirm cards awaiting an operator.
+///
+/// Params: [`crate::fleet::FleetConfirmListParams`]; result:
+/// [`crate::fleet::FleetConfirmListResult`]. Gated by `fleet.chat.read`.
+///
+/// A guardrail confirm is NOT an ACP permission request: those stay part 1's
+/// attention rows answered through `fleet/action`.
+pub const FLEET_CONFIRM_LIST: &str = "fleet/confirm_list";
+/// Answer one guardrail confirm card.
+///
+/// Params: [`crate::fleet::FleetConfirmAnswerParams`]; result:
+/// [`crate::fleet::FleetConfirmAnswerResult`]. Gated by
+/// `fleet.confirm.answer`. Single-use: an already-answered or already-expired
+/// `confirm_id` is a typed error, never a second execution.
+pub const FLEET_CONFIRM_ANSWER: &str = "fleet/confirm_answer";
+/// Page the copilot activity log by commit order.
+///
+/// Params: [`crate::fleet::FleetActivityListParams`]; result:
+/// [`crate::fleet::FleetActivityListResult`]. Gated by `fleet.chat.read`. The
+/// cursor is the commit-ordered `seq`, never a client-minted or wall-clock
+/// value (part 1's cursor rule).
+pub const FLEET_ACTIVITY_LIST: &str = "fleet/activity_list";
+
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     "fleet/resync_required",
     "fleet/message_event",
     "fleet/transcript_event",
+    // Part 2's two streams, page-to-head like the part 1 forwarders above.
+    "fleet/confirm_event",
+    "fleet/activity_event",
 ];
 
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
@@ -1752,6 +1798,15 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_TRANSCRIPT_LIST,
     FLEET_TRANSCRIPT_SUBSCRIBE,
     FLEET_TRANSCRIPT_PRUNE,
+    // Fleet chat channels, copilot config, guardrail confirms and the activity
+    // feed (buzz-port part 2) are APPENDED at the catalogue tail. Part 1's v2
+    // bump was the one bump; these are append-only additions on top of it.
+    FLEET_CHANNEL_CREATE,
+    FLEET_CHANNEL_LIST,
+    FLEET_COPILOT_CONFIGURE,
+    FLEET_CONFIRM_LIST,
+    FLEET_CONFIRM_ANSWER,
+    FLEET_ACTIVITY_LIST,
 ];
 
 #[cfg(test)]
@@ -1776,6 +1831,25 @@ mod tests {
             assert!(
                 *m == PING || m.contains('/'),
                 "{m:?} is neither namespaced nor `ping`"
+            );
+        }
+    }
+
+    /// Fleet notifications are a DISJOINT surface: a daemon-pushed
+    /// notification name that is also a request method would make the same
+    /// frame mean two things depending on whether it carries an `id`. Also
+    /// pins the namespacing the request registry gets from
+    /// `methods_namespaced_or_ping`, which never sees these.
+    #[test]
+    fn notification_methods_are_namespaced_and_never_request_methods() {
+        let requests: HashSet<&&str> = ALL_METHODS.iter().collect();
+        let mut seen = HashSet::new();
+        for m in FLEET_PROTOCOL_NOTIFICATION_METHODS {
+            assert!(m.starts_with("fleet/"), "{m:?} not under fleet/");
+            assert!(seen.insert(m), "duplicate notification name {m:?}");
+            assert!(
+                !requests.contains(m),
+                "{m:?} is both a notification and a request method"
             );
         }
     }
@@ -2038,6 +2112,12 @@ mod tests {
             FLEET_TRANSCRIPT_LIST,
             FLEET_TRANSCRIPT_SUBSCRIBE,
             FLEET_TRANSCRIPT_PRUNE,
+            FLEET_CHANNEL_CREATE,
+            FLEET_CHANNEL_LIST,
+            FLEET_COPILOT_CONFIGURE,
+            FLEET_CONFIRM_LIST,
+            FLEET_CONFIRM_ANSWER,
+            FLEET_ACTIVITY_LIST,
         ];
         for m in declared {
             assert!(

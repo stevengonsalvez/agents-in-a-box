@@ -1,0 +1,7 @@
+{
+  "session_key": "acp:01J0COPILOT",
+  "provider": "claude",
+  "model": "claude-sonnet-4-5",
+  "reasoning_effort": "medium",
+  "persona_set": true
+}

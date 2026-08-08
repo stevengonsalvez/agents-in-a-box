@@ -1,0 +1,11 @@
+{
+  "activity": {
+    "seq": 44,
+    "id": "01J0ACTIVITY3",
+    "scope_key": "channel:copilot",
+    "tool": "fleet_status",
+    "class": "read",
+    "outcome": "ok",
+    "created_at": 1700000600100
+  }
+}
