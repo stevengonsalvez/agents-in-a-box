@@ -99,25 +99,25 @@ owned_kill() {
 }
 
 # --- the sandbox project ----------------------------------------------------
-# Hooks resolve their home from THEIR OWN env, which a parent export does not
-# reach. Baking it into the command is the only reliable route.
+# NO custom hook definitions. Two reasons, both learned the hard way:
+#
+#   1. `${CLAUDE_PLUGIN_ROOT}` only resolves inside a plugin's own hooks; a copy
+#      in project settings fails with "Hook command references
+#      ${CLAUDE_PLUGIN_ROOT} but the hook is not associated with a plugin",
+#      and every hook event then reports an error into the session.
+#   2. It is unnecessary. The installed ainb-hooks plugin already resolves its
+#      home from the environment -- notify.sh:122
+#      `AINB_DIR="${AINB_HANGAR_HOME:-${AINB_HOME:-${HOME}/.agents-in-a-box}}"`
+#      -- and the Claude session is launched with AINB_HANGAR_HOME set, so the
+#      real plugin hook routes itself into the sandbox. Verified: an interview
+#      fired in the sandbox raised its card on the sandbox Fleet, not the
+#      developer's.
+#
+# So the sandbox project needs to exist and be a git repo; nothing more.
 write_settings() {
-  mkdir -p "$SBX_WORK/.claude"
-  local hook="AINB_HANGAR_HOME=$SBX_HOME AINB_AGENT=claude \${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh"
-  local ev
-  {
-    echo '{'
-    echo '  "hooks": {'
-    local first=1
-    for ev in SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop MessageDisplay; do
-      [ $first -eq 0 ] && echo ','
-      first=0
-      printf '    "%s": [{"matcher": "", "hooks": [{"type": "command", "command": "%s", "timeout": 3600}]}]' "$ev" "$hook"
-    done
-    echo
-    echo '  }'
-    echo '}'
-  } > "$SBX_WORK/.claude/settings.json"
+  mkdir -p "$SBX_WORK"
+  # Remove a settings file from an older sbx that defined broken hooks.
+  rm -f "$SBX_WORK/.claude/settings.json" 2>/dev/null || true
 }
 
 # --- commands ---------------------------------------------------------------
