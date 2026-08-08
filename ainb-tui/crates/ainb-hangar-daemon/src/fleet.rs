@@ -3389,4 +3389,64 @@ mod tests {
             "a second pass must be free"
         );
     }
+
+    /// An archive pass sends ONE broadcast wakeup, however many rows it moved.
+    ///
+    /// The fleet broadcast holds 256 and `spawn_fleet_forwarder` treats
+    /// `Lagged` as terminal — it emits `fleet/resync_required` and dies. A pass
+    /// that emitted per row would, on the measured 1,440-row backlog, tear down
+    /// every connected subscriber's live stream. The forwarder discards the
+    /// value and re-drains the durable log from its own cursor, so one send
+    /// carries exactly what N would.
+    ///
+    /// Seeds MORE dead sessions than the channel holds, so a per-row emit
+    /// cannot pass this by luck.
+    #[tokio::test]
+    async fn an_archive_pass_emits_one_wakeup_no_matter_how_many_rows_it_moves() {
+        const DEAD_SESSIONS: usize = 300;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let broker = EventBroker::new();
+        let sink = broker.sink();
+        let pool = store.pool();
+
+        for n in 0..DEAD_SESSIONS {
+            FleetRepo::apply_event(
+                pool,
+                &NewFleetEvent {
+                    event_id: format!("seed-{n}"),
+                    session_key: format!("claude:dead-{n:04}"),
+                    observed_at: 1,
+                    authority: ObservationAuthority::Authoritative,
+                    event_type: "observation".to_string(),
+                    payload: "{}".to_string(),
+                    patch: FleetSessionPatch {
+                        lifecycle_state: Some("EXITED".to_string()),
+                        ..FleetSessionPatch::default()
+                    },
+                },
+            )
+            .await
+            .expect("seed");
+        }
+
+        // Subscribe AFTER seeding, so the only sends counted are the pass's.
+        let mut rx = broker.subscribe_fleet();
+        let archived = archive_dead_sessions(pool, &sink, SESSION_ARCHIVE_TTL_MS * 2)
+            .await
+            .expect("archive");
+
+        assert_eq!(archived, DEAD_SESSIONS, "the whole batch is archived");
+
+        let mut wakeups = 0;
+        while rx.try_recv().is_ok() {
+            wakeups += 1;
+        }
+        assert_eq!(
+            wakeups, 1,
+            "a bulk janitor pass must nudge subscribers once, not once per row \
+             — {DEAD_SESSIONS} sends would lag a 256-slot channel and kill the stream"
+        );
+    }
 }
