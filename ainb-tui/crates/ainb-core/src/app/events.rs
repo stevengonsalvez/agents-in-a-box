@@ -1305,8 +1305,20 @@ impl EventHandler {
                 }
             });
 
+        // The Fleet panel is a HOST screen with a plugin-shaped reducer, and
+        // that reducer has text-entry modes of its own: the prompt composer
+        // (`p`), the broadcast composer (`b`), and the copilot chat composer
+        // (`m`). It answers `is_capturing_text()` exactly as a plugin screen
+        // answers `captures_text`, and nothing consulted it, so the global
+        // `?` / `H` / `W` shortcuts ate keys typed into all three. A live
+        // tripwire caught it on the chat: typing "what is blocked?" opened the
+        // help overlay on the `?` and the overlay then swallowed the Enter.
+        let fleet_panel_text_active = state.current_screen == screen_ids::FLEET_PANEL
+            && state.fleet_panel_state.canonical.is_capturing_text();
+
         new_session_text_active
             || plugin_capturing_text
+            || fleet_panel_text_active
             || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
@@ -3033,6 +3045,11 @@ impl EventHandler {
                     Some(AppEvent::FleetPanelNewAtcOpen)
                 }
             }
+            // `m` for messages: opens the copilot chat surface. Forwarded to
+            // the pane reducer, which owns the mode; once the chat is open the
+            // pane reports a modal and EVERY key routes above, so the composer
+            // gets its printable characters without a second key table here.
+            KeyCode::Char('m') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m'))),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
             KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
@@ -3475,6 +3492,10 @@ impl EventHandler {
                     }
                 });
             }
+            // The copilot chat's three RPCs, on the panel's own worker. One
+            // executor, two doors: this key path and the frame tick that polls
+            // for the reply.
+            FleetIntent::Chat(intent) => state.fleet_panel_state.dispatch_chat_intent(intent),
             FleetIntent::AttachEmbedded {
                 session_key,
                 tmux_target,
@@ -8904,12 +8925,22 @@ mod panel_back_tests {
             route(&mut state, KeyCode::Char('5')),
             Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
         ));
-        for legacy in ['f', 'o', 'm', 'd', 'l', 'x', 'v'] {
+        for legacy in ['f', 'o', 'd', 'l', 'x', 'v'] {
             assert!(
                 route(&mut state, KeyCode::Char(legacy)).is_none(),
                 "legacy Fleet filter key {legacy:?} must be unbound"
             );
         }
+        // `m` is the one legacy filter key deliberately re-bound: it opens the
+        // copilot chat, the sibling of `b` for broadcast. It is pinned here
+        // rather than dropped from the list, so re-using another old filter key
+        // still has to be an explicit decision rather than a silent one, and so
+        // the panel's help bar (which advertises `m chat`) cannot drift from
+        // what the router actually does.
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('m')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m')))
+        ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))

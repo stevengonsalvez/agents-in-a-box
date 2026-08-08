@@ -1,0 +1,26 @@
+{
+  "activities": [
+    {
+      "seq": 42,
+      "id": "01J0ACTIVITY",
+      "scope_key": "channel:copilot",
+      "tool": "answer_need",
+      "class": "write",
+      "target_session_key": "tmux:sess-a",
+      "outcome": "ok",
+      "detail": "operator named tmux:sess-a in the triggering message",
+      "created_at": 1700000000300
+    },
+    {
+      "seq": 43,
+      "id": "01J0ACTIVITY2",
+      "scope_key": "channel:copilot",
+      "tool": "kill",
+      "class": "destructive",
+      "target_session_key": "tmux:sess-c",
+      "outcome": "expired",
+      "created_at": 1700000600000
+    }
+  ],
+  "next_after_seq": 43
+}

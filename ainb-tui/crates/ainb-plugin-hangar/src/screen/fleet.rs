@@ -11,16 +11,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
 
+use super::fleet_chat::{
+    ChatIntent, ChatKey, ChatKeyOutcome, ChatSnapshot, ChatState, chat_tick, reduce_chat_key,
+    render_chat,
+};
+
 const BROADCAST_MAX_PARALLEL: usize = 8;
-const FG: Color = Color::rgb(226, 232, 240);
-const MUTED: Color = Color::rgb(148, 163, 184);
-const GOLD: Color = Color::rgb(251, 191, 36);
-const BLUE: Color = Color::rgb(96, 165, 250);
-const VIOLET: Color = Color::rgb(185, 140, 235);
-const GREEN: Color = Color::rgb(110, 200, 130);
+pub(crate) const FG: Color = Color::rgb(226, 232, 240);
+pub(crate) const MUTED: Color = Color::rgb(148, 163, 184);
+pub(crate) const GOLD: Color = Color::rgb(251, 191, 36);
+pub(crate) const BLUE: Color = Color::rgb(96, 165, 250);
+pub(crate) const VIOLET: Color = Color::rgb(185, 140, 235);
+pub(crate) const GREEN: Color = Color::rgb(110, 200, 130);
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-const ALERT: Color = Color::rgb(220, 90, 90);
-const SURFACE: Color = Color::rgb(15, 23, 42);
+pub(crate) const ALERT: Color = Color::rgb(220, 90, 90);
+pub(crate) const SURFACE: Color = Color::rgb(15, 23, 42);
 const ACTIVE_CHIP: Color = Color::rgb(30, 64, 175);
 const CARD_BORDER: Color = Color::rgb(70, 80, 110);
 const BOLD: u16 = 1;
@@ -643,6 +648,8 @@ enum FleetMode {
         text: String,
     },
     Broadcast(BroadcastState),
+    /// The copilot chat surface (`screen::fleet_chat`), opened with `m`.
+    Chat(Box<ChatState>),
     Confirm {
         session_key: String,
         action: FleetAction,
@@ -804,6 +811,16 @@ impl FleetPaneState {
         !matches!(self.mode, FleetMode::Browse)
     }
 
+    /// Whether the copilot chat is the open mode.
+    ///
+    /// The host needs this separately from [`Self::is_modal_open`]: the chat is
+    /// the one mode that must repaint without input, because it polls on the
+    /// frame tick and a dirty-gated paint loop would otherwise load it once and
+    /// never show another message.
+    pub const fn is_chat_open(&self) -> bool {
+        matches!(self.mode, FleetMode::Chat(_))
+    }
+
     pub fn is_capturing_text(&self) -> bool {
         match &self.mode {
             FleetMode::TypedConfirm { .. }
@@ -814,6 +831,7 @@ impl FleetPaneState {
                 ..
             }) => true,
             FleetMode::Answer(queue) => queue.current().is_some_and(|answer| answer.editing_text),
+            FleetMode::Chat(chat) => chat.is_capturing_text(),
             _ => false,
         }
     }
@@ -941,6 +959,16 @@ pub enum FleetEvent {
     BroadcastFailed {
         detail: String,
     },
+    /// One fetched page of the copilot channel (host answered `ChatIntent::Refresh`).
+    ChatSnapshot(ChatSnapshot),
+    /// The chat fetch could not be served.
+    ChatFailed {
+        detail: String,
+    },
+    /// A chat send or confirm answer could not be served.
+    ChatSendFailed {
+        detail: String,
+    },
     Feedback(String),
     Tick(i64),
 }
@@ -973,6 +1001,10 @@ pub enum FleetIntent {
         max_parallel: usize,
         retry_failures_only: bool,
     },
+    /// A copilot-chat effect: page the channel, post a message, or answer a
+    /// guardrail confirm card. The chat surface owns the shape
+    /// ([`super::fleet_chat::ChatIntent`]); the host owns the socket.
+    Chat(ChatIntent),
 }
 
 /// Result of one pure Fleet reduction.
@@ -1045,13 +1077,37 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
             apply_broadcast_failure(&mut next, detail);
             None
         }
+        FleetEvent::ChatSnapshot(snapshot) => {
+            if let FleetMode::Chat(chat) = &mut next.mode {
+                chat.apply_snapshot(snapshot);
+            }
+            None
+        }
+        FleetEvent::ChatFailed { detail } => {
+            if let FleetMode::Chat(chat) = &mut next.mode {
+                chat.apply_failure(detail);
+            }
+            None
+        }
+        FleetEvent::ChatSendFailed { detail } => {
+            if let FleetMode::Chat(chat) = &mut next.mode {
+                chat.apply_send_failure(detail);
+            }
+            None
+        }
         FleetEvent::Feedback(message) => {
             next.feedback = Some(message);
             None
         }
         FleetEvent::Tick(now_ms) => {
             next.now_ms = now_ms;
-            None
+            // The chat surface polls on the pane's existing tick rather than
+            // holding a second socket open. Its own in-flight latch is what
+            // keeps one intent per interval instead of one per frame.
+            match &mut next.mode {
+                FleetMode::Chat(chat) => chat_tick(chat, now_ms).map(FleetIntent::Chat),
+                _ => None,
+            }
         }
     };
     FleetReduction {
@@ -1128,6 +1184,7 @@ fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> 
         FleetMode::Start(start) => reduce_start_key(state, start, key),
         FleetMode::Prompt { text } => reduce_prompt_key(state, text, key),
         FleetMode::Broadcast(broadcast) => reduce_broadcast_key(state, broadcast, key),
+        FleetMode::Chat(_) => reduce_chat_mode_key(state, key),
         FleetMode::Confirm {
             session_key,
             action,
@@ -1184,6 +1241,10 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // Broadcast is `b` only: the uppercase alias was dead (the hangar router
         // claims bare `B` as the Boards tab) (#450).
         FleetKey::Char('b') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
+        // `m` for messages: the copilot chat surface. Lowercase for the same
+        // reason `b` is: the reserved-key invariant test refuses a browse
+        // binding on a char the router or host swallows first (#450).
+        FleetKey::Char('m') => state.mode = FleetMode::Chat(Box::new(ChatState::opening())),
         FleetKey::Char('r') => {
             if let Some(intent) = reconcile_structured_intent(state) {
                 return Some(intent);
@@ -1193,6 +1254,37 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         _ => {}
     }
     None
+}
+
+/// Translate a pane key for the chat surface and act on what it did.
+///
+/// The chat surface has its own key vocabulary so it can be tested without a
+/// pane; this is the single point the two meet.
+fn reduce_chat_mode_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
+    let chat_key = match key {
+        FleetKey::Char(character) => ChatKey::Char(character),
+        FleetKey::Enter => ChatKey::Enter,
+        FleetKey::Tab | FleetKey::BackTab => ChatKey::Tab,
+        FleetKey::Esc => ChatKey::Esc,
+        FleetKey::Backspace => ChatKey::Backspace,
+        FleetKey::Up => ChatKey::Up,
+        FleetKey::Down => ChatKey::Down,
+        FleetKey::Space => ChatKey::Space,
+        // Left/Right have no chat meaning; swallowing them keeps a stray arrow
+        // from leaking into the pane underneath and moving the roster selection.
+        FleetKey::Left | FleetKey::Right => return None,
+    };
+    let FleetMode::Chat(chat) = &mut state.mode else {
+        return None;
+    };
+    match reduce_chat_key(chat, chat_key) {
+        ChatKeyOutcome::Handled => None,
+        ChatKeyOutcome::Close => {
+            state.mode = FleetMode::Browse;
+            None
+        }
+        ChatKeyOutcome::Intent(intent) => Some(FleetIntent::Chat(intent)),
+    }
 }
 
 fn reconcile_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent> {
@@ -2943,6 +3035,9 @@ fn render_mode(
         FleetMode::Broadcast(broadcast) => {
             render_broadcast_modal(buffer, area_width, top, bottom, state, broadcast)
         }
+        // Full-area, not a centred modal: a conversation with a composer needs
+        // the width, and every other mode here is a one-decision dialog.
+        FleetMode::Chat(chat) => render_chat(buffer, area_width, top, bottom, chat),
     }
 }
 
@@ -3475,7 +3570,7 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn truncate_ellipsis(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_ellipsis(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
@@ -3502,11 +3597,18 @@ fn format_age(now_ms: i64, observed_ms: i64) -> String {
     }
 }
 
-fn put_str(buffer: &mut WireBuffer, x: u16, row: u16, value: &str, color: Color, right: u16) {
+pub(crate) fn put_str(
+    buffer: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    value: &str,
+    color: Color,
+    right: u16,
+) {
     put_str_styled(buffer, x, row, value, color, None, 0, right);
 }
 
-fn put_str_styled(
+pub(crate) fn put_str_styled(
     buffer: &mut WireBuffer,
     x: u16,
     row: u16,
@@ -3537,7 +3639,7 @@ fn put_str_styled(
     }
 }
 
-fn fill_background(
+pub(crate) fn fill_background(
     buffer: &mut WireBuffer,
     left: u16,
     top: u16,

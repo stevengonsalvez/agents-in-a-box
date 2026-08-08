@@ -27,5 +27,12 @@ pub mod circuit;
 pub mod client;
 pub mod config;
 pub mod reducer;
-pub mod reprime;
+/// The untrusted-text envelope, re-exported from its home in the pure
+/// `ainb-hangar-proto` crate.
+///
+/// It moved there when the fleet copilot's MCP tool server (`ainb-fleet-tools`)
+/// needed the SAME renderer for its read-tool results: that crate must not link
+/// an ACP client (nor, through it, `sqlx`) to fence a string. Path unchanged for
+/// every existing caller.
+pub use ainb_hangar_proto::reprime;
 pub mod store_writer;

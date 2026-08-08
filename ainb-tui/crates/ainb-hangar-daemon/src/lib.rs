@@ -62,6 +62,12 @@ pub mod cancel;
 /// `~/.claude`, so the unsandboxed daemon resolves the token and injects it as
 /// ONE env var, for the `claude` backend only.
 pub mod claude_cred;
+/// The fleet copilot's guardrail gate and its confirm cards (buzz-port part 2).
+///
+/// The classifier and the argument projection are `ainb-fleet-tools`'; the
+/// parking, the expiry, the activity feed and the copilot's authorship live
+/// here, because only the daemon owns the store and the event broker.
+pub mod copilot;
 /// Fresh-home boot seed: lay down the default workspace + runtime + one starter
 /// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
 /// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
@@ -481,6 +487,23 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // session this process never hosted. Same shared routine the process-exit
     // and deadline paths run, so the outcomes cannot drift.
     crate::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink()).await;
+
+    // The confirm-card TTL, swept once at boot. The park's own bound is a
+    // `tokio` timer inside a copilot turn, and a timer dies with the process:
+    // without this, a card left open by a SIGKILLed or upgraded daemon keeps
+    // rendering as answerable on every client for as long as the row exists,
+    // and approving it returns a success receipt for a destructive tool call
+    // with no waiter left to run it.
+    match ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo::sweep_expired(
+        store.pool(),
+        ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock),
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(swept) => tracing::warn!(swept, "expired confirm cards left open by a prior daemon"),
+        Err(error) => tracing::error!(%error, "could not sweep expired confirm cards at boot"),
+    }
 
     // The ACP agent pool. Installed BEFORE the socket accepts a connection so
     // `fleet/acp_session_create` can never answer "no pool" on a daemon that

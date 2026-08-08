@@ -1,0 +1,10 @@
+{
+  "channel": {
+    "id": "01J0CHANNEL",
+    "kind": "broadcast",
+    "name": "release-train",
+    "scope_key": "channel:01J0CHANNEL",
+    "recipients": ["tmux:sess-a", "tmux:sess-b", "acp:01J0KEY"],
+    "created_at": 1700000000000
+  }
+}

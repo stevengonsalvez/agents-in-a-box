@@ -26,6 +26,7 @@ pub mod dispatch_attempt;
 pub mod event_log;
 pub mod fleet;
 pub mod fleet_acp_session;
+pub mod fleet_chat;
 pub mod fleet_message;
 pub mod fleet_provider_event;
 pub mod fleet_retention;

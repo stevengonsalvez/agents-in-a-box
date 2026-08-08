@@ -68,6 +68,12 @@ ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 # (plan Phase 4). The pool lives HERE, not there, because only the daemon owns
 # the EventBroker and the SQLite handle; `ainb-acp` stays a pure library.
 ainb-acp = { path = "../ainb-acp" }
+# The copilot's MCP tool server, for its two PURE halves only: the guardrail
+# classifier and `project_arguments`. The daemon mints the confirm cards, so the
+# daemon must classify and project with the SAME code the tool server does — a
+# second copy of either would be a second guardrail, and the one that drifts is
+# always the one holding the destructive tools.
+ainb-fleet-tools = { path = "../ainb-fleet-tools" }
 agent-client-protocol = "=1.3.0"
 blake3 = { workspace = true }
 # Claude's blocking broker owns exact structured-question and permission

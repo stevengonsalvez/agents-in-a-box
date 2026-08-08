@@ -67,6 +67,23 @@ pub struct FleetAcpSessionRow {
     pub last_active_at: i64,
 }
 
+/// One session's per-session adapter override (migration 0082).
+///
+/// Model, reasoning effort and persona ONLY. The permission mode is absent by
+/// design and not by omission: part 1 pins it at `session/new` and re-asserts
+/// it after load because an ambient `bypassPermissions` silently disables the
+/// entire permission surface, so an overridable mode would be a remote
+/// guardrail off-switch reachable by anyone holding `fleet.copilot.configure`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetAcpSessionConfig {
+    /// Adapter model id; `None` means the daemon's static config.
+    pub model: Option<String>,
+    /// Adapter reasoning-effort token; `None` means the daemon's static config.
+    pub reasoning_effort: Option<String>,
+    /// Operator-supplied system prompt; `None` means none is stored.
+    pub persona: Option<String>,
+}
+
 /// ACP session persistence failures.
 #[derive(Debug, thiserror::Error)]
 pub enum FleetAcpSessionError {
@@ -289,6 +306,63 @@ impl FleetAcpSessionRepo {
              SET open_turn_id = NULL, open_turn_started_at = NULL, last_active_at = ? \
              WHERE session_key = ?",
         )
+        .bind(now)
+        .bind(session_key)
+        .execute(pool)
+        .await?;
+        Self::require_hit(result.rows_affected(), session_key)
+    }
+
+    /// Read one session's per-session adapter override (migration 0082).
+    ///
+    /// `None` on every field means "no override": the resume path keeps the
+    /// daemon's static adapter config, which is what every pre-0080 row says.
+    pub async fn get_config(
+        pool: &SqlitePool,
+        session_key: &str,
+    ) -> Result<Option<FleetAcpSessionConfig>, sqlx::Error> {
+        sqlx::query(
+            "SELECT model, reasoning_effort, persona FROM fleet_acp_session \
+             WHERE session_key = ?",
+        )
+        .bind(session_key)
+        .fetch_optional(pool)
+        .await?
+        .map(|row| {
+            Ok(FleetAcpSessionConfig {
+                model: row.try_get("model")?,
+                reasoning_effort: row.try_get("reasoning_effort")?,
+                persona: row.try_get("persona")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Write one session's per-session adapter override (migration 0082).
+    ///
+    /// The three 0080 columns and NOTHING else: `permission_mode` is 0079's
+    /// column and is deliberately not reachable from here, because a settable
+    /// mode is a remote off-switch for the whole permission surface. There is
+    /// no argument for it in this signature precisely so no future caller can
+    /// pass one by accident.
+    ///
+    /// A `None` field CLEARS that override rather than leaving the previous
+    /// value: `configure` states the full override, so an omitted model means
+    /// "back to the daemon's static config", never "keep whatever was there".
+    pub async fn set_config(
+        pool: &SqlitePool,
+        session_key: &str,
+        config: &FleetAcpSessionConfig,
+        now: i64,
+    ) -> Result<(), FleetAcpSessionError> {
+        let result = sqlx::query(
+            "UPDATE fleet_acp_session \
+             SET model = ?, reasoning_effort = ?, persona = ?, last_active_at = ? \
+             WHERE session_key = ?",
+        )
+        .bind(&config.model)
+        .bind(&config.reasoning_effort)
+        .bind(&config.persona)
         .bind(now)
         .bind(session_key)
         .execute(pool)

@@ -2948,7 +2948,11 @@ mod fleet_routing_tests {
             assert_eq!(states.fleet.filter(), filter, "Fleet lens key {digit}");
         }
 
-        for legacy in ['f', 'o', 'm', 'd', 'c', 'x', 'v'] {
+        // `m` left this list when it started opening the copilot chat surface:
+        // it still does not touch the lens, but it is no longer inert, and a
+        // test that pressed it and carried on would leave the pane in chat mode
+        // for every assertion after it.
+        for legacy in ['f', 'o', 'd', 'c', 'x', 'v'] {
             route_fleet(&mut states, &key(KeyCode::Char { ch: legacy }));
             assert_eq!(
                 states.fleet.filter(),
@@ -2956,6 +2960,24 @@ mod fleet_routing_tests {
                 "legacy Fleet filter key {legacy:?} must not change lens"
             );
         }
+
+        // `m` opens the copilot chat surface, which then swallows every key
+        // until Esc: that is what makes it a modal rather than a lens.
+        route_fleet(&mut states, &key(KeyCode::Char { ch: 'm' }));
+        assert!(
+            states.fleet.is_modal_open(),
+            "m did not open the chat surface"
+        );
+        assert_eq!(
+            states.fleet.filter(),
+            FleetFilter::All,
+            "m changed the lens"
+        );
+        route_fleet(&mut states, &key(KeyCode::Esc));
+        assert!(
+            !states.fleet.is_modal_open(),
+            "Esc did not close the chat surface"
+        );
 
         route_fleet(&mut states, &key(KeyCode::Char { ch: 'p' }));
         route_fleet(&mut states, &key(KeyCode::Char { ch: '1' }));

@@ -2021,6 +2021,10 @@ Commands:
   msg           Chat bus: persisted messages with per-recipient delivery receipts
   acp           ACP sessions: daemon-owned headless agents that answer on the chat bus
   transcript    Page or follow one session's full execution transcript
+  channel       Chat channels: a named scope with a recipient set
+  copilot       The fleet copilot session's per-session adapter config
+  confirm       Guardrail confirm cards: copilot tool calls held for a human
+  activity      The append-only copilot activity feed
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
   archived      Sessions the daemon retired out of the live roster (still browsable)
@@ -2291,6 +2295,200 @@ Options:
   -h, --help               Print help
 
 Refuses without --export unless --no-export is explicit. Only source='acp' rows are eligible; nothing else in the provider-event ledger is ever touched.
+```
+
+### `ainb fleet channel`
+
+Chat channels: a named scope with a recipient set
+
+```console
+$ ainb fleet channel --help
+Chat channels: a named scope with a recipient set
+
+Usage: ainb fleet channel [OPTIONS] <COMMAND>
+
+Commands:
+  create  Mint a channel and its channel:<id> scope
+  list    List channels and their members
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet channel create`
+
+Mint a channel and its channel:<id> scope
+
+```console
+$ ainb fleet channel create --help
+Mint a channel and its channel:<id> scope
+
+Usage: ainb fleet channel create [OPTIONS] --name <name>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --kind <kind>            copilot (an ACP session answers on it) or broadcast [default: broadcast] [possible values: copilot, broadcast]
+      --name <name>            Human-readable channel name
+      --recipient <recipient>  Member session_key (repeat); none for a copilot channel
+  -h, --help                   Print help
+```
+
+#### `ainb fleet channel list`
+
+List channels and their members
+
+```console
+$ ainb fleet channel list --help
+List channels and their members
+
+Usage: ainb fleet channel list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet copilot`
+
+The fleet copilot session's per-session adapter config
+
+```console
+$ ainb fleet copilot --help
+The fleet copilot session's per-session adapter config
+
+Usage: ainb fleet copilot [OPTIONS] <COMMAND>
+
+Commands:
+  configure  Set the copilot's provider, model, reasoning effort and persona
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet copilot configure`
+
+Set the copilot's provider, model, reasoning effort and persona
+
+```console
+$ ainb fleet copilot configure --help
+Set the copilot's provider, model, reasoning effort and persona
+
+Usage: ainb fleet copilot configure [OPTIONS] --provider <provider>
+
+Options:
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --provider <provider>
+          Adapter family [possible values: claude, codex]
+      --model <model>
+          Adapter model id
+      --reasoning-effort <reasoning-effort>
+          Adapter reasoning-effort token
+      --persona-file <persona-file>
+          File holding the copilot system prompt
+  -h, --help
+          Print help
+
+There is no permission-mode flag. The mode is daemon config, pinned at session/new and re-asserted after load; a per-session override would be a remote off-switch for the whole permission surface.
+```
+
+### `ainb fleet confirm`
+
+Guardrail confirm cards: copilot tool calls held for a human
+
+```console
+$ ainb fleet confirm --help
+Guardrail confirm cards: copilot tool calls held for a human
+
+Usage: ainb fleet confirm [OPTIONS] <COMMAND>
+
+Commands:
+  list    List the open cards, oldest first
+  answer  Answer one card: approve (default), --deny, or --edit
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet confirm list`
+
+List the open cards, oldest first
+
+```console
+$ ainb fleet confirm list --help
+List the open cards, oldest first
+
+Usage: ainb fleet confirm list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --scope <scope>    Filter to one scope key
+  -h, --help             Print help
+```
+
+#### `ainb fleet confirm answer`
+
+Answer one card: approve (default), --deny, or --edit
+
+```console
+$ ainb fleet confirm answer --help
+Answer one card: approve (default), --deny, or --edit
+
+Usage: ainb fleet confirm answer [OPTIONS] <confirm_id>
+
+Arguments:
+  <confirm_id>  The card to answer
+
+Options:
+      --deny             Refuse; the suspended tool result resolves as denied
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --edit <edit>      Approve with these JSON arguments INSTEAD of the proposed ones
+  -h, --help             Print help
+
+A card is single-use: answering an already-answered or already-expired card exits 1, and never runs the tool a second time.
+```
+
+### `ainb fleet activity`
+
+The append-only copilot activity feed
+
+```console
+$ ainb fleet activity --help
+The append-only copilot activity feed
+
+Usage: ainb fleet activity [OPTIONS] <COMMAND>
+
+Commands:
+  list  Page the feed by its commit-ordered seq, oldest first
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet activity list`
+
+Page the feed by its commit-ordered seq, oldest first
+
+```console
+$ ainb fleet activity list --help
+Page the feed by its commit-ordered seq, oldest first
+
+Usage: ainb fleet activity list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --scope <scope>    Filter to one scope key
+      --after <after>    Return rows strictly after this seq
+      --limit <limit>    Page size (clamped to the daemon's maximum) [default: 50]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet sequence`

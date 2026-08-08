@@ -408,6 +408,71 @@ async fn double_send_is_idempotent_and_a_mismatched_replay_is_rejected() {
     );
 }
 
+/// Attribution: `sender` is what the recipient's re-prime corpus attributes the
+/// message to and what every chat UI renders, so a copilot-authored send must
+/// not be indistinguishable from a human one. An absent actor still means the
+/// operator, which is what every human surface sends.
+#[tokio::test]
+async fn a_copilot_send_is_recorded_as_copilot_and_an_absent_actor_as_the_operator() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:one").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let human = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "ship it",
+                "request_id": "req-human",
+            }),
+        )
+        .await;
+    let copilot = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "status?",
+                "request_id": "req-copilot",
+                "actor": "copilot",
+            }),
+        )
+        .await;
+    assert!(human["error"].is_null(), "{human}");
+    assert!(copilot["error"].is_null(), "{copilot}");
+
+    for (response, expected) in [(&human, "operator"), (&copilot, "copilot")] {
+        let id = response["result"]["message_id"].as_str().expect("message id");
+        let sender: String = sqlx::query_scalar("SELECT sender FROM fleet_message WHERE id = ?")
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            sender, expected,
+            "a copilot write must never wear the operator's name: {response}"
+        );
+    }
+
+    let blank = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "x",
+                "request_id": "req-blank",
+                "actor": "   ",
+            }),
+        )
+        .await;
+    assert_eq!(
+        blank["error"]["code"], -32602,
+        "a blank actor would render as nobody: {blank}"
+    );
+}
+
 /// I3: an N-target send writes one delivery row per recipient, each resolving
 /// to exactly one terminal state with an enumerated detail, and the receipts
 /// are queryable per (message, recipient).

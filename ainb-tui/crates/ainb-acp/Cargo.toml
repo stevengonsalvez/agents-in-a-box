@@ -23,6 +23,9 @@ agent-client-protocol = "=1.3.0"
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 # `IdGen` seam: minted event ids are deterministic under test.
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Home of the re-primed untrusted-text envelope (`reprime`), shared with the
+# copilot's MCP tool server. Pure data crate, so it costs this crate nothing.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 tokio = { workspace = true }
 # `compat` bridges tokio's child stdio to the futures AsyncRead/AsyncWrite the
 # upstream `ByteStreams` transport wants.

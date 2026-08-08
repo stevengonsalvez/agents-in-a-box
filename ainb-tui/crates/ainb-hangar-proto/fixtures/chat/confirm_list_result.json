@@ -1,0 +1,23 @@
+{
+  "confirms": [
+    {
+      "confirm_id": "01J0CONFIRM",
+      "scope_key": "channel:copilot",
+      "tool": "kill",
+      "arguments": { "session": "tmux:sess-c" },
+      "target_session_key": "tmux:sess-c",
+      "state": "open",
+      "created_at": 1700000000000,
+      "expires_at": 1700000600000
+    },
+    {
+      "confirm_id": "01J0CONFIRM2",
+      "scope_key": "channel:copilot",
+      "tool": "spawn_session",
+      "arguments": { "cwd": "/repo", "provider": "claude" },
+      "state": "open",
+      "created_at": 1700000000200,
+      "expires_at": 1700000600200
+    }
+  ]
+}
