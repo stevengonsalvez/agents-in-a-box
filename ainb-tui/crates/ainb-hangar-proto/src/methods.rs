@@ -415,6 +415,12 @@ pub const FLEET_TIMELINE: &str = "fleet/timeline";
 /// Params: [`crate::fleet::FleetUsageSummaryParams`]; result:
 /// [`crate::fleet::FleetUsageSummaryResult`]. Gated by `fleet.usage.read`.
 pub const FLEET_USAGE_SUMMARY: &str = "fleet/usage_summary";
+/// Read the rich usage dashboard with 53-week history, heatmap, forecast,
+/// and extended breakdowns.
+///
+/// Params: [`crate::fleet::FleetUsageDashboardParams`]; result:
+/// [`crate::fleet::FleetUsageDashboardResult`]. Gated by `fleet.dashboard.read`.
+pub const FLEET_USAGE_DASHBOARD: &str = "fleet/usage_dashboard";
 /// Read bounded daemon-owned live provider quota windows.
 ///
 /// Result: [`crate::fleet::FleetQuotaSummaryResult`]. Gated by
@@ -1782,6 +1788,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_START,
     FLEET_TIMELINE,
     FLEET_USAGE_SUMMARY,
+    FLEET_USAGE_DASHBOARD,
     FLEET_QUOTA_SUMMARY,
     FLEET_RUNTIME_STATUS,
     FLEET_REPROJECT_CLAUDE_INTERVIEW,
@@ -2103,6 +2110,7 @@ mod tests {
             FLEET_START,
             FLEET_TIMELINE,
             FLEET_USAGE_SUMMARY,
+            FLEET_USAGE_DASHBOARD,
             FLEET_QUOTA_SUMMARY,
             FLEET_RUNTIME_STATUS,
             FLEET_REPROJECT_CLAUDE_INTERVIEW,

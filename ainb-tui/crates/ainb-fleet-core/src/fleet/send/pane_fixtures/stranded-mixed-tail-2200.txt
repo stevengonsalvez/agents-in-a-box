@@ -1,0 +1,50 @@
+
+⏺ ACK
+
+✻ Brewed for 3s
+
+❯ test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else.
+  test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing
+  else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing
+  else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do
+  nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do
+  nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and
+  do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and
+  do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK
+  and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK
+  and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word
+  ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word
+  ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single
+  word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothin
+  ──── (0 lines hidden) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single
+  word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the
+  single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the
+  single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with
+  the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with
+  the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply
+  with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply
+  with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload,
+  reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload,
+  reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test
+  payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test
+  payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else.
+  test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply with the
+
+⏺ ACK
+
+✻ Brewed for 3s
+                                                                                                                                                                           Ctrl+Y to paste deleted text
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ [Pasted text #218][Pasted text #219]. test payload, reply with the single word ACK and do nothing else. test payload, reply with the single word ACK and do nothing else. test payload, reply wi
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   …/scratchpad/qfix-cwd  ⚠200 /reflect:errors-ack  bd:8▸  🪨 ⛏ 269.1k                                                                                                                          /rc
+  opus-5·1m · eff high · 🟢 9/50 · ctx [░░░░░░] 7% · 5h [█░░░░░] 22% ↻ 22:00 · wk [░░░░░░] 2% ↻ Aug 14 18:00 · $1.23
+  TOK: ······················██   MEM: ························   REC: ·▂▆█▃▁▂▆▅▁▂▂▁··▁·▁▂▄▇▆██
+  UNC: ······················█▂   DRN: ▁·▁·▁·▁▂▁·▁·▁·▁·▁·▁▁▂▁▂▅   ING: ························
+  CHR: ······················█▅   AGT: ·······▁················   COM: ························
+  OUT: ······················▂▁   THR: ······················▁·   ERR: ························
+  legend: █ TOK cache≥70%  █ 30-70%  █ <30% (uncached spike)  ▌ THR = cache invalidation
+  ↑ col 1 tokens (TOK/UNC/CHR/OUT) · col 2 ops + THR · col 3 REC/ING/COM/ERR · click label / --explain TOK
+  paste again to expand

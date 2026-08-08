@@ -329,11 +329,89 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
+      - name: Tripwire — Fleet panel renders an ACP session
+        # The TUI is the operating surface. The chat bus shipped a daemon and a
+        # CLI, and the panel maps the ACP wire token in ONE place, falling back
+        # to `unknown` in silence. Without this, that line has no coverage on
+        # the screen an operator actually looks at.
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: cargo test -p ainb --test tripwire_fleet_panel_shows_acp_session --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Fleet send-path integrity against a REAL tmux pane
+  #
+  # `Test` already COMPILES and selects this binary: `--all-features` turns on
+  # ainb-fleet-core's `tmux-tests` feature and `tmux_send_integrity` is not
+  # matched by that job's `not binary(/^tripwire_/)` filter. But neither runner
+  # image ships tmux, so there every test self-skips and the send-path proof is
+  # vacuously green. This job is the lane where it actually executes.
+  #
+  # The trailing grep is the point: an environment that silently degrades to
+  # SKIP is exactly the trap `run_all_tripwires.sh` documents for its macOS
+  # leg, and a skipped suite here would mean the chunked-write / capture-failure
+  # guarantees ship untested while CI stays green.
+  #
+  # Safe to run on a shared machine as well as a runner: the tests clear `TMUX`
+  # and pin `TMUX_TMPDIR` onto a pid-unique socket dir, so their panes live on a
+  # private tmux server and never join the ambient one.
+  # ────────────────────────────────────────────────────────────────────────────
+  fleet-send-tmux:
+    name: fleet send integrity (${{ matrix.os }})
+    needs: changes
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: Swatinem/rust-cache@v2
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        with:
+          workspaces: "ainb-tui -> target"
+      # macOS runner images do NOT ship tmux (actions/runner-images macos-15
+      # README), the same reason `hangar-e2e` brew-installs it.
+      - name: Install tmux (apt-get on Linux, brew on macOS)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
+      - name: Send-path integrity against a real tmux pane
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          set -o pipefail
+          cargo test -p ainb-fleet-core --features tmux-tests \
+            --test tmux_send_integrity --no-fail-fast -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/tmux-send-integrity.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/tmux-send-integrity.log"; then
+            echo "::error::tmux send-integrity suite SKIPped, so the send path was never exercised on this runner"
+            exit 1
+          fi
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────

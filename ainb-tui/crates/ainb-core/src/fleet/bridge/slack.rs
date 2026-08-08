@@ -14,6 +14,8 @@
 //     Slack mrkdwn (Slack renders **bold**/`code` natively, so the reply text is
 //     posted verbatim with a light leading-mention strip).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -23,6 +25,7 @@ use serde_json::{Value, json};
 
 use super::config::{SlackConfig, SlackListenMode};
 use super::heartbeat::BridgeHeartbeat;
+use super::outbound;
 use super::relay::{FleetTransport, RelayParams, relay};
 
 const API_BASE: &str = "https://slack.com/api";
@@ -332,6 +335,119 @@ async fn post_message(
         );
     }
     Ok(())
+}
+
+/// The Slack side of the proactive outbound push: an [`outbound::Notifier`] that
+/// DMs the authorized user a formatted attention message.
+///
+/// The DM conversation is opened once via `conversations.open` and cached.
+/// `chat.postMessage` needs a conversation id, and a bot has no DM with the user
+/// until it opens one, so without this there would be nowhere to push.
+///
+/// Holds no heartbeat handle on purpose: a send failure is REPORTED to the
+/// caller, not buried in a counter here. Recording it locally is what let the
+/// worker treat a dropped push as delivered.
+pub struct SlackNotifier {
+    client: reqwest::Client,
+    bot_token: String,
+    user_id: String,
+    /// Lazily-opened DM conversation id. `tokio::sync::Mutex` because it is held
+    /// across the `await` that opens the conversation.
+    dm_channel: tokio::sync::Mutex<Option<String>>,
+}
+
+impl SlackNotifier {
+    /// Build a notifier that pushes to the configured authorized user's DM.
+    pub fn new(cfg: &SlackConfig) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("building Slack HTTP client")?;
+        Ok(Self {
+            client,
+            bot_token: cfg.bot_token.clone(),
+            user_id: cfg.authorized_user_id.clone(),
+            dm_channel: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    // The guard is deliberately held across the `open_dm_conversation` await:
+    // it is what makes the open happen exactly once. Dropping it early would
+    // let two concurrent pushes both miss the cache and open two DMs.
+    #[allow(clippy::significant_drop_tightening)]
+    async fn target_channel(&self) -> Result<String> {
+        let mut cached = self.dm_channel.lock().await;
+        if let Some(id) = cached.as_deref() {
+            return Ok(id.to_string());
+        }
+        let id = open_dm_conversation(&self.client, &self.bot_token, &self.user_id)
+            .await
+            .context("opening the Slack DM conversation for the proactive push")?;
+        *cached = Some(id.clone());
+        Ok(id)
+    }
+}
+
+impl outbound::Notifier for SlackNotifier {
+    fn notify(
+        &self,
+        text: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), outbound::NotifyError>> + Send + '_>> {
+        Box::pin(async move {
+            // No conversation means nowhere to deliver, so this is a failed
+            // push, not a skipped one: the row must be retried, not retired.
+            let channel = match self.target_channel().await {
+                Ok(c) => c,
+                Err(e) => {
+                    let scrubbed = super::redact::scrub_secrets(&e.to_string());
+                    tracing::warn!(error = %scrubbed, "Slack outbound push: no target conversation");
+                    return Err(outbound::NotifyError::new(format!(
+                        "Slack target: {scrubbed}"
+                    )));
+                }
+            };
+            for chunk in split_for_slack(&text) {
+                if let Err(e) =
+                    post_message(&self.client, &self.bot_token, &channel, &chunk, None).await
+                {
+                    // Scrub before it leaves this function: the detail is
+                    // persisted to the heartbeat and rendered by the CLI.
+                    let scrubbed = super::redact::scrub_secrets(&e.to_string());
+                    tracing::warn!(error = %scrubbed, "Slack outbound push failed");
+                    return Err(outbound::NotifyError::new(format!("Slack: {scrubbed}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Open (or fetch) the DM conversation with `user_id` via `conversations.open`.
+/// Slack returns the existing IM when one is already open, so this is idempotent.
+async fn open_dm_conversation(
+    client: &reqwest::Client,
+    bot_token: &str,
+    user_id: &str,
+) -> Result<String> {
+    let resp = client
+        .post(format!("{API_BASE}/conversations.open"))
+        .bearer_auth(bot_token)
+        .json(&json!({ "users": user_id }))
+        .send()
+        .await
+        .context("conversations.open request")?;
+    let body: Value = resp.json().await.context("conversations.open decode")?;
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!(
+            "conversations.open failed: {}",
+            body.get("error").and_then(Value::as_str).unwrap_or("unknown")
+        );
+    }
+    body.get("channel")
+        .and_then(|c| c.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .context("conversations.open returned no channel id")
 }
 
 // ── Socket-mode wire types ──────────────────────────────────────────────────

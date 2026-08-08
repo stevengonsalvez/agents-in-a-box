@@ -1,4 +1,4 @@
-// ABOUTME: Read-side fleet primitives — tmux capture, error regex, JSONL tail,
+// ABOUTME: Read-side fleet primitives: tmux capture, error regex, JSONL tail,
 // and the needs classifier.
 //
 // This is the fleet-core slice of the read layer. The event-sourced
@@ -25,4 +25,4 @@ pub use needs::{
     ClassifyInput, ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint, WaitContext,
     classify,
 };
-pub use tmux_pane::{capture_pane, detect_signals_from_pane};
+pub use tmux_pane::{capture_pane, capture_pane_ansi, detect_signals_from_pane};

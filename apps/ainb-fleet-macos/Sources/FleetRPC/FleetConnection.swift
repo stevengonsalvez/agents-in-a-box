@@ -177,6 +177,11 @@ actor FleetConnection {
         return try await request("fleet/usage_summary", params: params, result: FleetUsageSummaryResult.self)
     }
 
+    func usageDashboard() async throws -> FleetUsageDashboardResult {
+        try requireReadCapability("fleet.dashboard.read")
+        return try await request("fleet/usage_dashboard", params: FleetUsageDashboardParams(), result: FleetUsageDashboardResult.self)
+    }
+
     func quotaSummary() async throws -> FleetQuotaSummaryResult {
         try requireReadCapability("fleet.quota.read")
         return try await request("fleet/quota_summary", params: FleetQuotaSummaryParams(), result: FleetQuotaSummaryResult.self)

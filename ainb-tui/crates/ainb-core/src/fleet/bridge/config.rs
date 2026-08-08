@@ -9,6 +9,8 @@
 //
 //   [fleet.bridge]
 //   response_timeout = 300            # optional, seconds (shared default)
+//   outbound_enabled = true           # optional: proactive push to the phone
+//   outbound_poll_secs = 15           # optional: attention inbox poll cadence
 //
 //   [fleet.bridge.telegram]
 //   token = "$TELEGRAM_BOT_TOKEN"     # or "keychain:svc" or a literal
@@ -44,6 +46,12 @@ use super::secrets::resolve_secret;
 /// Default time (seconds) the bridge waits for a session to finish its turn
 /// before giving up on capturing a reply.
 pub const RESPONSE_TIMEOUT: u64 = 300;
+
+/// Default cadence (seconds) for the outbound attention-inbox poll.
+///
+/// Fast enough that a phone push feels immediate, cheap enough that it is a
+/// local unix-socket round trip per tick.
+pub const OUTBOUND_POLL_SECS: u64 = 15;
 
 /// How a Slack channel decides a message is addressed to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +103,14 @@ pub struct BridgeConfig {
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackConfig>,
     pub discord: Option<DiscordConfig>,
+    /// Whether the bridge runs the proactive outbound push worker (the half that
+    /// watches the daemon's attention inbox and messages the phone). On by
+    /// default: a bridge that only answers when spoken to is not what the phone
+    /// bridge is for. Turning it OFF is visible in `ainb fleet daemons`, which
+    /// degrades the row rather than pretending the push is happening.
+    pub outbound_enabled: bool,
+    /// Attention-inbox poll cadence in seconds. See [`OUTBOUND_POLL_SECS`].
+    pub outbound_poll_secs: u64,
 }
 
 impl BridgeConfig {
@@ -120,6 +136,8 @@ struct RawFleet {
 #[derive(Debug, Default, Deserialize)]
 struct RawBridge {
     response_timeout: Option<toml::Value>,
+    outbound_enabled: Option<bool>,
+    outbound_poll_secs: Option<toml::Value>,
     telegram: Option<RawTelegram>,
     slack: Option<RawSlack>,
     discord: Option<RawDiscord>,
@@ -166,20 +184,20 @@ pub fn default_config_path() -> PathBuf {
     p
 }
 
-/// Coerce a TOML scalar (`response_timeout`) into a positive `u64` seconds.
+/// Coerce a TOML scalar seconds value (`response_timeout`,
+/// `outbound_poll_secs`) into a positive `u64`. The caller attaches the key name
+/// via `.context(...)`, so the messages here stay key-neutral.
 fn coerce_timeout(value: Option<&toml::Value>, default: u64) -> Result<u64> {
     let Some(value) = value else {
         return Ok(default);
     };
     let secs = match value {
         toml::Value::Integer(i) => *i,
-        toml::Value::String(s) => {
-            s.trim().parse::<i64>().context("response_timeout is not an integer")?
-        }
-        _ => bail!("response_timeout must be an integer"),
+        toml::Value::String(s) => s.trim().parse::<i64>().context("value is not an integer")?,
+        _ => bail!("value must be an integer"),
     };
     if secs <= 0 {
-        bail!("response_timeout must be positive");
+        bail!("value must be a positive number of seconds");
     }
     Ok(secs as u64)
 }
@@ -330,10 +348,16 @@ pub fn parse_config(toml_text: &str) -> Result<BridgeConfig> {
              [fleet.bridge.telegram], [fleet.bridge.slack], or [fleet.bridge.discord]"
         );
     }
+    let outbound_enabled = bridge.outbound_enabled.unwrap_or(true);
+    let outbound_poll_secs = coerce_timeout(bridge.outbound_poll_secs.as_ref(), OUTBOUND_POLL_SECS)
+        .context("[fleet.bridge] `outbound_poll_secs`")?;
+
     Ok(BridgeConfig {
         telegram,
         slack,
         discord,
+        outbound_enabled,
+        outbound_poll_secs,
     })
 }
 
@@ -377,6 +401,57 @@ mod tests {
         assert!(tg.require_mention_in_groups);
         assert_eq!(tg.response_timeout, RESPONSE_TIMEOUT);
         assert!(cfg.slack.is_none());
+    }
+
+    #[test]
+    fn outbound_push_is_on_by_default() {
+        // The bridge exists to tell the human a session needs them. A config
+        // that says nothing about outbound must get outbound.
+        let cfg = parse_config(
+            r#"
+            [fleet.bridge.discord]
+            token = "dc"
+            user_id = "1234"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.outbound_enabled);
+        assert_eq!(cfg.outbound_poll_secs, OUTBOUND_POLL_SECS);
+    }
+
+    #[test]
+    fn outbound_push_knobs_are_tunable() {
+        let cfg = parse_config(
+            r#"
+            [fleet.bridge]
+            outbound_enabled = false
+            outbound_poll_secs = 60
+
+            [fleet.bridge.discord]
+            token = "dc"
+            user_id = "1234"
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.outbound_enabled);
+        assert_eq!(cfg.outbound_poll_secs, 60);
+    }
+
+    #[test]
+    fn outbound_poll_secs_rejects_a_non_positive_cadence() {
+        let err = parse_config(
+            r#"
+            [fleet.bridge]
+            outbound_poll_secs = 0
+
+            [fleet.bridge.discord]
+            token = "dc"
+            user_id = "1234"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outbound_poll_secs"), "got: {err}");
     }
 
     #[test]

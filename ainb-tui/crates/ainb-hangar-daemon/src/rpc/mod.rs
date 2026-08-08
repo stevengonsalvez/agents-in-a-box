@@ -1229,6 +1229,7 @@ async fn handle(
         }
         methods::FLEET_RUNTIME_STATUS => handle_fleet_runtime_status(req, health).await,
         methods::FLEET_USAGE_SUMMARY => handle_fleet_usage_summary(req).await,
+        methods::FLEET_USAGE_DASHBOARD => handle_fleet_usage_dashboard(req).await,
         methods::FLEET_QUOTA_SUMMARY => handle_fleet_quota_summary(req).await,
         methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
         methods::FLEET_MESSAGE_LIST => handle_fleet_message_list(pool, req).await,
@@ -1468,6 +1469,17 @@ async fn handle_fleet_usage_summary(req: &RpcRequest) -> Result<serde_json::Valu
     let params: FleetUsageSummaryParams = parse_params(req, "{ period? }")?;
     let summary = crate::fleet_usage::summary(params.period).await;
     to_value(&summary)
+}
+
+/// Return the rich usage dashboard with 53-week history, heatmap, forecast,
+/// and extended dimension breakdowns.
+async fn handle_fleet_usage_dashboard(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FLEET_CAPABILITY_DASHBOARD_READ, FleetUsageDashboardParams};
+
+    require_fleet_capability(FLEET_CAPABILITY_DASHBOARD_READ)?;
+    let _: FleetUsageDashboardParams = parse_params(req, "{}")?;
+    let dashboard = crate::fleet_usage::dashboard().await;
+    to_value(&dashboard)
 }
 
 /// Return bounded daemon-owned live quota windows without exposing provider
