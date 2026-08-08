@@ -643,6 +643,110 @@ struct FleetUsageSummaryResult: Codable, Equatable {
     }
 }
 
+// MARK: - fleet/usage_dashboard
+
+struct FleetUsageDashboardParams: Codable, Equatable { init() {} }
+
+struct FleetHeatmapCell: Codable, Equatable {
+    let date: String
+    let callCount: UInt64
+    let costUSD: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case callCount = "call_count"
+        case costUSD = "cost_usd"
+    }
+}
+
+struct FleetUsageWeeklyBucket: Codable, Equatable {
+    let weekStart: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case weekStart = "week_start"
+        case bucket
+    }
+}
+
+struct FleetUsageSessionBucket: Codable, Equatable {
+    let sessionID: String
+    let provider: String
+    let project: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case provider, project, bucket
+    }
+}
+
+struct FleetUsageBranchBucket: Codable, Equatable {
+    let branch: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageNamedBucket: Codable, Equatable {
+    let name: String
+    let callCount: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case callCount = "call_count"
+    }
+}
+
+struct FleetUsageForecast: Codable, Equatable {
+    let projected30dCostUSD: Double?
+    let projected30dTokens: UInt64
+    let avgDailyCostUSD: Double?
+    let avgDailyTokens: UInt64
+    let sampleDays: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case projected30dCostUSD = "projected_30d_cost_usd"
+        case projected30dTokens = "projected_30d_tokens"
+        case avgDailyCostUSD = "avg_daily_cost_usd"
+        case avgDailyTokens = "avg_daily_tokens"
+        case sampleDays = "sample_days"
+    }
+}
+
+struct FleetUsageDashboardResult: Codable, Equatable {
+    let state: FleetUsageSummaryState
+    let generatedAt: Int64?
+    let startAt: Int64?
+    let endAt: Int64?
+    let costComplete: Bool
+    let totals: FleetUsageBucket?
+    let weekly: [FleetUsageWeeklyBucket]
+    let heatmap: [FleetHeatmapCell]
+    let forecast: FleetUsageForecast?
+    let providers: [FleetUsageProviderBucket]
+    let models: [FleetUsageModelBucket]
+    let projects: [FleetUsageProjectBucket]
+    let sessions: [FleetUsageSessionBucket]
+    let branches: [FleetUsageBranchBucket]
+    let tools: [FleetUsageNamedBucket]
+    let mcpServers: [FleetUsageNamedBucket]
+    let shellCommands: [FleetUsageNamedBucket]
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case generatedAt = "generated_at"
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case costComplete = "cost_complete"
+        case totals, weekly, heatmap, forecast
+        case providers, models, projects, sessions, branches
+        case tools
+        case mcpServers = "mcp_servers"
+        case shellCommands = "shell_commands"
+        case detail
+    }
+}
+
 struct FleetQuotaSummaryParams: Codable, Equatable { init() {} }
 
 struct FleetQuotaWindow: Codable, Equatable {
