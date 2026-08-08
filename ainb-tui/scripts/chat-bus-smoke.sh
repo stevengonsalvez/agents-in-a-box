@@ -8,6 +8,7 @@
 #   ./scripts/chat-bus-smoke.sh            # every journey (CI / release smoke)
 #   ./scripts/chat-bus-smoke.sh j2         # one journey, for recording
 #   ./scripts/chat-bus-smoke.sh j1 j5c     # a subset
+#   ./scripts/chat-bus-smoke.sh j6         # the real TUI, the operating surface
 #   ./scripts/chat-bus-smoke.sh --keep j4  # leave the scratch world behind
 #
 # What it stands up (nothing touches the operator's real hangar or tmux):
@@ -22,6 +23,10 @@
 #   * ACP adapters: the real ones when they are installed AND credentialled,
 #     otherwise the `fake_acp_adapter` fixture from `ainb-acp`. The mode is
 #     printed in the banner, never guessed at by the reader.
+#   * for J6, the REAL `ainb tui` in a session of its own on that private
+#     server. Every other journey drives the daemon and the CLI; J6 drives the
+#     OPERATING SURFACE, because part 1 shipped a bus the TUI consumed without
+#     anything ever opening it.
 #
 # How the tmux sessions become fleet sessions: they are NOT seeded into the
 # store. The daemon's own tmux reconciler (`spawn_tmux_reconciler`, every 3 s)
@@ -70,7 +75,11 @@ TURN_DEADLINE_MS="${AINB_SMOKE_TURN_DEADLINE_MS:-45000}"
 KEEP_ROOT=0
 DAEMON_PID=""
 BG_PIDS=()
+# The three fake-agent panes, and ONLY those: J1 asserts a delivery in every
+# member of this array, so J6's TUI pane is tracked separately rather than
+# appended here.
 TMUX_SESSIONS=()
+TUI_SESSION=""
 declare -a RESULT_LINES=()
 FAILED=0
 SKIP_REASON=""
@@ -107,6 +116,12 @@ dump_diagnostics() {
     printf '%s[pane %s]%s\n' "$c_yellow" "$session" "$c_off"
     tmux_cmd capture-pane -p -t "$session" 2>&1 | tail -25 || true
   done
+  # The whole screen, not a tail: a red J6 is nearly always "what was actually
+  # on the operating surface", and the answer is the top of the pane.
+  if [[ -n "$TUI_SESSION" ]]; then
+    printf '%s[TUI pane %s]%s\n' "$c_yellow" "$TUI_SESSION" "$c_off"
+    tmux_cmd capture-pane -p -t "$TUI_SESSION" 2>&1 || true
+  fi
   printf '%s[daemon stdout/stderr tail]%s\n' "$c_yellow" "$c_off"
   tail -40 "$LOG_DIR/daemon.out" 2>/dev/null || true
   local structured
@@ -135,6 +150,7 @@ cleanup() {
   for session in "${TMUX_SESSIONS[@]:-}"; do
     [[ -n "$session" ]] && tmux_cmd kill-session -t "$session" 2>/dev/null
   done
+  [[ -n "$TUI_SESSION" ]] && tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null
   if [[ "$KEEP_ROOT" == 1 ]]; then
     log "scratch world kept at $ROOT"
   else
@@ -459,22 +475,52 @@ resolve_tmux_targets() {
   (( ${#TMUX_KEYS[@]} == 3 ))
 }
 
-setup_world() {
-  mkdir -p "$BIN_DIR" "$LOG_DIR" "$SCRATCH_HOME" "$HANGAR_HOME/hangar" "$TMUX_DIR"
+# Every first-run surface, pre-answered. A CLI verb only ever met the
+# onboarding wizard, so this used to be one file; the TUI (J6) meets all of
+# them, and each one intercepts keystrokes until it is satisfied.
+#
+# Runs AFTER `build_binaries` because the onboarding record has to name the
+# version of the binary under test — see below.
+seed_first_run_records() {
   # A completed onboarding record so no first-run wizard can intercept a CLI
   # verb (same trap the tmux tripwires document).
+  #
+  # The version is READ FROM THE BINARY, never a literal: `needs_onboarding`
+  # (ainb-core/src/config/onboarding.rs) re-runs the wizard when the record's
+  # MAJOR version differs from the binary's, so a placeholder like `smoke` is
+  # indistinguishable from major 0 and the wizard fires anyway — invisible to
+  # every CLI journey, and fatal to J6, whose `f` the wizard swallows.
   mkdir -p "$SCRATCH_HOME/.agents-in-a-box/config"
-  cat >"$SCRATCH_HOME/.agents-in-a-box/config/onboarding.toml" <<'TOML'
+  local version
+  version="$("$BIN_DIR/ainb" --version | awk '{print $2}')"
+  cat >"$SCRATCH_HOME/.agents-in-a-box/config/onboarding.toml" <<TOML
 completed = true
 completed_at = "2026-05-11T00:00:00+00:00"
-version = "smoke"
+version = "$version"
 skipped_dependencies = []
 git_directories = []
 TOML
+
+  # …and a DISMISSED notify-install record, for the same reason one screen up.
+  #
+  # `notifyd::Paths::from_home` (crates/ainb-plugin-notifyd/src/paths.rs)
+  # resolves `AINB_HANGAR_HOME` BEFORE `AINB_HOME`, and this world sets both.
+  # Seeded under only one base, the "install the notify hooks?" offer fires on
+  # first paint and its MODAL swallows the `f` that opens the Fleet panel — J6
+  # would then fail on a first-run prompt while looking like a Fleet bug.
+  # Written under BOTH bases so the seeding never depends on which var wins.
+  local notify_record='{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}'
+  printf '%s' "$notify_record" >"$HANGAR_HOME/install.json"
+  printf '%s' "$notify_record" >"$SCRATCH_HOME/.agents-in-a-box/install.json"
+}
+
+setup_world() {
+  mkdir -p "$BIN_DIR" "$LOG_DIR" "$SCRATCH_HOME" "$HANGAR_HOME/hangar" "$TMUX_DIR"
   write_rpc_client
   write_fake_agent
   write_turn_script
   build_binaries || return 1
+  seed_first_run_records
   resolve_adapters
   start_tmux_sessions
   start_daemon || return 1
@@ -488,8 +534,11 @@ TOML
 # FAKE_ACP_HANG_PROMPTS entry). Journeys that need an open turn send this.
 HANG_TEXT="SMOKE_HANG_PROMPT"
 
-new_acp_session() { # provider -> prints "<session_key> <scope_key>"
-  ainb_cli --format json fleet acp create --provider "$1" --cwd "$ROOT" |
+# The cwd defaults to the scratch root. J6 overrides it because the Fleet card's
+# identity line is the cwd's basename, and that is what makes its assertion
+# specific to its own row.
+new_acp_session() { # provider [cwd] -> prints "<session_key> <scope_key>"
+  ainb_cli --format json fleet acp create --provider "$1" --cwd "${2:-$ROOT}" |
     jqr '"\(.session_key) \(.scope_key)"'
 }
 
@@ -988,9 +1037,127 @@ journey_j5e() {
   log "   DELIVERED + REJECTED/target_unknown in one request, message persisted"
 }
 
+# ---- J6: the operating surface --------------------------------------------
+
+# Chrome the panel itself paints (`ainb-core/src/components/fleet_panel.rs`),
+# so a match means the Fleet panel is ON SCREEN, not merely that the TUI booted.
+FLEET_PANEL_MARKER='Fleet ·'
+# The cold-launch home screen's own banner (`components/home_screen_v2.rs`).
+# Waiting for it before the keypress is what makes "one press of f" an honest
+# claim: a key sent into a terminal that has not painted yet is a key nobody can
+# prove was seen. Spaced letters ON PURPOSE — the setup wizard's own splash says
+# "Welcome to Agents in a Box!", so the unspaced name would match a screen that
+# eats `f` rather than the screen that acts on it.
+HOME_SCREEN_MARKER='A I N B'
+
+tui_pane()     { tmux_cmd capture-pane -p -t "$TUI_SESSION"; }
+tui_pane_has() { tui_pane | grep -qF -- "$1"; }
+
+journey_j6() {
+  banner "J6 · the operating surface" \
+    "a chat-bus ACP session is VISIBLE in the real Fleet panel of a cold-launched \`ainb tui\`, opened by ONE press of \`f\`"
+
+  "$BIN_DIR/ainb" tui --help >/dev/null 2>&1 || {
+    skip "this ainb has no \`tui\` subcommand: there is no operating surface to drive"
+    return 77
+  }
+
+  # Deliberately NOT setting `AINB_FLEET_DISABLE_TMUX_DISCOVERY`: it gates the
+  # DAEMON's reconciler (`ainb-hangar-daemon/src/fleet.rs`), and this world runs
+  # ONE daemon that J1/J5c/J5e need discovery from. Setting it on the TUI child
+  # would be a no-op anyway — the TUI is a snapshot reader, not a discoverer. So
+  # the three fake `claude` panes DO share the roster, and J6 earns its
+  # specificity by anchoring on its own card instead of on an empty panel.
+  local project="$ROOT/j6-project"
+  local identity="j6-project"
+  mkdir -p "$project"
+
+  local created session_key
+  created="$(new_acp_session "$ACP_PROVIDER" "$project")" || { fail "acp create failed"; return 1; }
+  read -r session_key _ <<<"$created"
+  [[ "$session_key" == acp:* ]] || { fail "expected an acp: session key, got [$session_key]"; return 1; }
+  step "session_key=$session_key cwd=$project"
+
+  step "cold-launching the REAL \`ainb tui\` on the private tmux server"
+  TUI_SESSION="ainb-smoke-tui-$RUN_ID"
+  # NOT the `ainb-smoke-$RUN_ID-` prefix the fake agents use: `resolve_tmux_targets`
+  # selects on that prefix, and a TUI pane joining the roster would break its
+  # exactly-3 check. 200x50 so the panel renders its wide two-column form.
+  tmux_cmd new-session -d -s "$TUI_SESSION" -x 200 -y 50 \
+    "env -u TMUX HOME=$SCRATCH_HOME AINB_HOME=$SCRATCH_HOME/.agents-in-a-box \
+       AINB_HANGAR_HOME=$HANGAR_HOME TMUX_TMPDIR=$TMUX_DIR PATH=$BIN_DIR:$PATH \
+       AINB_DISABLE_PLUGINS=1 AINB_CODEX_MANAGED=0 \
+       CLAUDE_PEERS_DB=$ROOT/j6-peers.db AINB_FLEET_JOBS_DIR=$ROOT/j6-jobs \
+       $BIN_DIR/ainb tui"
+  wait_until 60 "the TUI to paint its home screen" tui_pane_has "$HOME_SCREEN_MARKER" || return 1
+
+  step "pressing \`f\` ONCE, the way a user opens Fleet"
+  tmux_cmd send-keys -t "$TUI_SESSION" f
+  # A retry loop here would be a lie: pressing `f` until something happens is
+  # exactly how a modal eating the first one goes unnoticed.
+  wait_until 30 "the Fleet panel to open on the FIRST \`f\` (a modal in the way would eat it)" \
+    tui_pane_has "$FLEET_PANEL_MARKER" || return 1
+
+  # The panel opens on the `Needs input` lens, and a freshly minted ACP session
+  # needs nothing, so its card is filtered out until the operator widens the
+  # lens. `5` is not a workaround: it is the key the panel's OWN empty state
+  # prints ("Press 5 for All"), so this is still the path a user walks.
+  step "pressing \`5\` for the All lens, the key the panel's empty state names"
+  tmux_cmd send-keys -t "$TUI_SESSION" 5
+  wait_until 45 "the card for $session_key ($identity) to appear in the panel" \
+    tui_pane_has "$identity" || return 1
+
+  # `render_session_card` (ainb-plugin-hangar/src/screen/fleet.rs) paints each
+  # roster entry as four lines: a top border, status + age, the identity, then
+  # `<branch>  ·  <provider>  ·  <attachment>`. The provider cell is read from
+  # the line AFTER this journey's own identity line, which is what stops the
+  # assertion passing on an incidental `acp` elsewhere in the pane — the session
+  # key, the scratch paths and any other journey's row all contain one.
+  #
+  # The identity match is ANCHORED at the card's left border (`│` at column 0,
+  # the `▶ `/`  ` marker at column 2) because `capture-pane` returns the whole
+  # screen on one physical line per row: the roster header and the detail pane
+  # to the right of the divider both repeat this identity, and an unanchored
+  # match lands on one of those and reads a provider cell from the wrong column.
+  local pane card identity_line provider_line provider_cell provider_token
+  pane="$(tui_pane)"
+  # `|| true` because this grep legitimately finds nothing when the card is
+  # rendered in a shape this anchor does not know about, and `set -e` would turn
+  # that into a bare abort with no reason instead of the `fail` two lines down.
+  card="$(printf '%s\n' "$pane" | grep -m1 -A1 -E "^│ +(▶ )?$identity( |$)" || true)"
+  identity_line="$(printf '%s\n' "$card" | head -1)"
+  provider_line="$(printf '%s\n' "$card" | tail -1)"
+  [[ -n "$identity_line" && "$provider_line" != "$identity_line" ]] ||
+    { fail "no roster card for $identity in the Fleet panel: [$identity_line]"; return 1; }
+  provider_cell="$(printf '%s' "$provider_line" | awk -F'  ·  ' '{print $2}' | tr -d '[:space:]')"
+  provider_token="$(printf '%s' "$provider_cell" | tr '[:upper:]' '[:lower:]')"
+
+  # Echoed, not just asserted: a recording of this run should SHOW the operator's
+  # own two lines, the same way J1 echoes the delivered pane text. Trimmed at the
+  # `││` seam between the roster column and the detail pane, and squeezed, so the
+  # card reads as one line instead of 200 columns of card padding.
+  step "card identity, as the operator sees it:$(printf '%s' "$identity_line" | awk -F'││' '{print $1}' | tr -s ' ')"
+  step "card provider row, as the operator sees it:$(printf '%s' "$provider_line" | awk -F'││' '{print $1}' | tr -s ' ')"
+
+  # `unknown` first: it is the SILENT degradation this journey exists for. The
+  # panel maps the wire token in one place and falls back rather than failing,
+  # so an unmapped provider looks like a live session with a shrugging label.
+  [[ "$provider_token" != unknown ]] ||
+    { fail "the Fleet card labelled $session_key [$provider_cell]: an unmapped wire token degraded to the silent fallback"; return 1; }
+  assert_eq "acp" "$provider_token" "the Fleet card must name the ACP session's provider" || return 1
+
+  local roster
+  roster="$(printf '%s\n' "$pane" | grep -m1 -F -- "$FLEET_PANEL_MARKER" | tr -s ' ')"
+  tmux_cmd send-keys -t "$TUI_SESSION" Escape
+  tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null || true
+  TUI_SESSION=""
+
+  log "   Fleet opened on the first \`f\` ·$roster· card [$identity] labelled [$provider_cell]"
+}
+
 # --------------------------------------------------------------------- driver
 
-ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e)
+ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e j6)
 
 run_journey() {
   local name="$1"
@@ -1016,10 +1183,10 @@ main() {
   while (( $# )); do
     case "$1" in
       --keep) KEEP_ROOT=1 ;;
-      -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
+      -h|--help) sed -n '2,48p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
       all) selected+=("${ALL_JOURNEYS[@]}") ;;
       j5) selected+=(j5a j5b j5c j5d j5e) ;;
-      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e) selected+=("$1") ;;
+      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e|j6) selected+=("$1") ;;
       *) log "unknown journey: $1 (try: ${ALL_JOURNEYS[*]}, j5, all)"; exit 2 ;;
     esac
     shift
