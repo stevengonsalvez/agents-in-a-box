@@ -1193,10 +1193,24 @@ pub async fn reconcile_tmux_once(
     }
     let snapshot = FleetRepo::snapshot(pool).await?;
     for row in snapshot.sessions {
-        if row.tmux_target.is_none()
-            || discovered.contains(&row.session_key)
-            || (row.lifecycle_state == "EXITED" && row.transport_health == "UNAVAILABLE")
-        {
+        // TRANSITION, NOT STATE. The guard keys off `transport_health` ALONE —
+        // the thing `tmux_missing_event` actually always writes.
+        //
+        // It used to also require `lifecycle_state == "EXITED"`, which the event
+        // only sets when `management_state != "MANAGED" && lifecycle_authority ==
+        // "inferred"`. Every hook-backed session is MANAGED and authoritative, so
+        // for those the conjunct could never become true, the row never reached
+        // the skip, and each one re-emitted `tmux_missing` on EVERY 3s tick —
+        // forever, with a timestamped `event_id` that dedup cannot collapse. That
+        // wrote 832,711 rows (76% of `fleet_event`, 197k/day) on one host before
+        // it was found. Same defect the discovery loop above already fixed via
+        // `lifecycle_settled`; this pass never got the equivalent guard.
+        //
+        // Keying on transport alone is self-healing: when tmux reappears the
+        // discovery loop puts the session in `discovered` and flips
+        // `transport_health` back to HEALTHY, so the next disappearance is a real
+        // transition and emits again.
+        if !needs_tmux_missing_event(&row, &discovered) {
             continue;
         }
         let event = tmux_missing_event(&row, observed_at);
@@ -1213,6 +1227,21 @@ pub async fn reconcile_tmux_once(
         }
     }
     Ok(applied)
+}
+
+/// Does this registered row need a fresh `tmux_missing` event this pass?
+///
+/// The loop's termination condition, split out so it is testable without a real
+/// tmux server. It must be the exact complement of what
+/// [`tmux_missing_event`]'s patch writes, or the emit never terminates — see the
+/// comment at the call site for the 832,711-row incident that proved it.
+fn needs_tmux_missing_event(
+    row: &FleetSessionRow,
+    discovered: &std::collections::HashSet<String>,
+) -> bool {
+    row.tmux_target.is_some()
+        && !discovered.contains(&row.session_key)
+        && row.transport_health != "UNAVAILABLE"
 }
 
 fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent {
@@ -2396,6 +2425,82 @@ mod tests {
         assert_eq!(missing.lifecycle_state, "RUNNING");
         assert_eq!(missing.lifecycle_authority, "authoritative");
         assert_eq!(missing.transport_health, "UNAVAILABLE");
+
+        // The row above is EXACTLY the shape that looped: hook-backed, so
+        // `tmux_missing_event` never patches `lifecycle_state` to EXITED, and the
+        // old guard required EXITED before it would stop. One more pass must now
+        // be a no-op — otherwise this session re-emits every 3s forever.
+        assert!(
+            !needs_tmux_missing_event(&missing, &std::collections::HashSet::new()),
+            "an authoritative session already marked UNAVAILABLE must not re-emit"
+        );
+    }
+
+    /// The emit loop must terminate for a hook-backed session: one transition in,
+    /// one event out, then silence until tmux actually comes back.
+    #[tokio::test]
+    async fn tmux_missing_emits_once_per_transition_not_once_per_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let payload = serde_json::json!({
+            "tmux_target": "codex-loop:0.0",
+            "process_start_fingerprint": "fp-loop"
+        });
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "loop-start".to_string(),
+                provider: "codex",
+                provider_session_id: "thread-loop",
+                cwd: "/repo",
+                event_type: "UserPromptSubmit",
+                payload: &payload,
+                observed_at: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+            .await
+            .unwrap()
+            .unwrap();
+        let nobody = std::collections::HashSet::new();
+
+        // Tmux has gone: the first pass is a real transition and must emit.
+        assert!(
+            needs_tmux_missing_event(&row, &nobody),
+            "a healthy session whose pane vanished must emit once"
+        );
+        FleetRepo::apply_event(store.pool(), &tmux_missing_event(&row, 200))
+            .await
+            .unwrap();
+
+        // Every subsequent pass sees the state it just wrote and must stay quiet.
+        for tick in 0..5 {
+            let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !needs_tmux_missing_event(&row, &nobody),
+                "tick {tick}: re-emitting is the 832k-row bug"
+            );
+        }
+
+        // Discovery seeing the pane again is what re-arms it.
+        let seen: std::collections::HashSet<String> =
+            std::iter::once("codex:thread-loop".to_string()).collect();
+        let row = FleetRepo::get_session(store.pool(), "codex:thread-loop")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !needs_tmux_missing_event(&row, &seen),
+            "a discovered session is never missing"
+        );
     }
 
     #[tokio::test]
