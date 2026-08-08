@@ -4942,6 +4942,16 @@ async fn execute_acp_action(
 }
 
 /// Map the pool's answer routing onto a receipt an operator can read.
+///
+/// `DELIVERED` here means HANDED OFF, and the detail says so. ACP defines no
+/// acknowledgement for a `session/request_permission` response: the answer is
+/// written to the adapter's pending JSON-RPC id and the protocol's next word on
+/// the subject is whatever the turn does afterwards. A daemon that dies between
+/// the hand-off and the pipe therefore loses a decision whose receipt already
+/// says delivered, and no wording can make that receipt mean "applied". What
+/// the vocabulary CAN do is stop implying an acknowledgement nobody sent, which
+/// is what an operator reading `DELIVERED` before a re-ask would otherwise
+/// conclude the daemon had.
 fn acp_permission_receipt(
     answer: crate::acp_pool::PermissionAnswer,
 ) -> (
@@ -4954,7 +4964,9 @@ fn acp_permission_receipt(
     match answer {
         PermissionAnswer::Delivered(option) => (
             ActionReceiptStatus::Delivered,
-            Some(format!("acp permission answered; option {option}")),
+            Some(format!(
+                "acp permission handed to the adapter; option {option} (hand-off, not an adapter ack: ACP defines none)"
+            )),
         ),
         PermissionAnswer::NotWaiting => (
             ActionReceiptStatus::Failed,
