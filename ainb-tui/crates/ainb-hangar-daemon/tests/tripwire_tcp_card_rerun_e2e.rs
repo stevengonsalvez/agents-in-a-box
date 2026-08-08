@@ -51,7 +51,23 @@ fn launch_headless(sess: &TuiSession, scale: u64) {
             break;
         }
     }
-    assert!(opened, "Run ▾ menu never opened:\n{}", sess.capture());
+    // Name the FIRST thing that did not happen, not the last. `Enter` opens
+    // this menu over a FOCUSED CARD, so when the board holds no card there is
+    // nothing for it to open and "Run ▾ never opened" is a true statement about
+    // the wrong step. That message sent three separate investigations after a
+    // menu bug when every observed failure was actually an empty board.
+    let capture = sess.capture();
+    assert!(
+        opened,
+        "{}:\n{capture}",
+        if capture.contains("— empty —") {
+            "the board is EMPTY, so there was no card to open `Run ▾` over: the card \
+             never reached this TUI (check it is talking to the seeded hangar, not \
+             another one)"
+        } else {
+            "a card is on the board but the `Run ▾` menu never opened"
+        }
+    );
     sess.send_enter(); // headless launch → hangar/board_card_run
 }
 
