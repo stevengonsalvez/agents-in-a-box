@@ -108,6 +108,14 @@ pub fn install() -> Result<std::path::PathBuf> {
     service::install()
 }
 
+/// `Some(warning)` when the unit `install` would write names a program that
+/// does not resolve, so the CLI can say so rather than reporting a success
+/// that can never start.
+#[must_use]
+pub fn install_would_be_unrunnable() -> Option<String> {
+    service::install_would_be_unrunnable()
+}
+
 /// Uninstall the bridge service. Returns the removed unit path, if any.
 pub fn uninstall() -> Result<Option<std::path::PathBuf>> {
     service::uninstall()

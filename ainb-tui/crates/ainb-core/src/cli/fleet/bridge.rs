@@ -18,6 +18,15 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
                 format,
                 &format!("phone bridge installed: {}", path.display()),
             );
+            // Writing the unit is not the same as being able to start it. Say
+            // so at install time rather than leaving the operator to discover
+            // a dead bridge from `status` they had no reason to run.
+            // stderr, not `emit`: in --format json the result must stay a
+            // single document on stdout, and a warning is not the result.
+            // Matches how `fleet atc setup` surfaces the same condition.
+            if let Some(warning) = crate::fleet::bridge::install_would_be_unrunnable() {
+                eprintln!("warning: {warning}");
+            }
             Ok(())
         }
         Some(("uninstall", _)) => {

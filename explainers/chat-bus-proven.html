@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The ainb chat bus: built, proven, recorded</title>
+<style>
+  :root {
+    --ivory:   #FAF9F5;
+    --slate:   #141413;
+    --clay:    #D97757;
+    --oat:     #E3DACC;
+    --olive:   #788C5D;
+    --gray-150:#F0EEE6;
+    --gray-300:#D1CFC5;
+    --gray-500:#87867F;
+    --gray-700:#3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--ivory);
+    color: var(--gray-700);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    padding: 56px 24px 120px;
+  }
+  .page { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 48px; }
+  @media (max-width: 980px) { .page { grid-template-columns: 1fr; } nav { display: none; } }
+
+  nav { position: sticky; top: 32px; align-self: start; font-size: 13px; }
+  nav .label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gray-500); margin-bottom: 12px; }
+  nav a { display: block; padding: 5px 0 5px 12px; border-left: 2px solid var(--gray-300); color: var(--gray-700); text-decoration: none; }
+  nav a:hover { color: var(--slate); border-color: var(--slate); }
+  nav a.l2 { padding-left: 24px; font-size: 12.5px; color: var(--gray-500); }
+  nav .files { margin-top: 28px; border-top: 1px solid var(--gray-300); padding-top: 16px; }
+  nav .files code { display: block; font-family: var(--mono); font-size: 11px; color: var(--gray-500); padding: 3px 0; }
+
+  header { margin-bottom: 12px; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gray-500); margin-bottom: 10px; }
+  h1 { font-family: var(--serif); font-weight: 500; font-size: 33px; color: var(--slate); letter-spacing: -0.01em; margin-bottom: 14px; }
+  .tldr { border: 1.5px solid var(--gray-300); border-left: 2px solid var(--clay); border-radius: 10px; background: #fff; padding: 16px 18px; margin-bottom: 8px; }
+  .tldr b { color: var(--slate); }
+
+  h2 { font-family: var(--serif); font-weight: 500; font-size: 23px; color: var(--slate); margin: 44px 0 14px; scroll-margin-top: 24px; }
+  p { margin-bottom: 12px; max-width: 720px; }
+  code { font-family: var(--mono); font-size: 13px; }
+
+  figure { margin: 18px 0 24px; border: 1.5px solid var(--gray-300); border-radius: 10px; overflow: hidden; background: #fff; }
+  figure img { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 13px; color: var(--gray-700); padding: 10px 14px; border-top: 1px solid var(--gray-150); background: var(--gray-150); }
+  figcaption b { color: var(--slate); }
+  figcaption .assert { font-family: var(--mono); font-size: 12px; color: var(--olive); }
+
+  details { border: 1.5px solid var(--gray-300); border-radius: 10px; background: #fff; margin: 14px 0; overflow: hidden; }
+  summary { list-style: none; cursor: pointer; padding: 14px 16px; font-family: var(--serif); font-size: 16px; color: var(--slate); display: flex; align-items: baseline; gap: 10px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "\25B8"; color: var(--clay); font-family: var(--sans); font-size: 12px; transition: transform 120ms; }
+  details[open] summary::before { transform: rotate(90deg); }
+  summary .where { font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-left: auto; }
+  details .body { padding: 0 16px 16px; }
+  details .body p { font-size: 14px; }
+
+  pre { margin: 0; padding: 16px 18px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: var(--slate); overflow-x: auto; background: #fff; border: 1.5px solid var(--gray-300); border-radius: 10px; }
+  .hl { color: var(--clay); }
+  .cm { color: var(--gray-500); }
+
+  .callout { display: flex; gap: 12px; border: 1.5px solid var(--oat); background: rgba(227,218,204,0.35); border-radius: 10px; padding: 14px 16px; margin: 18px 0; font-size: 14px; }
+  .callout .ico { color: var(--clay); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; background: #fff; border: 1.5px solid var(--gray-300); border-radius: 10px; overflow: hidden; margin: 14px 0; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; text-align: left; color: var(--gray-500); background: var(--gray-150); padding: 9px 12px; border-bottom: 1px solid var(--gray-300); }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--gray-150); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12px; }
+  .pass { color: var(--olive); font-weight: 600; }
+  .dl { font-family: var(--mono); font-size: 11.5px; color: var(--gray-500); }
+  .dl:hover { color: var(--slate); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <nav>
+    <div class="label">On this page</div>
+    <a href="#tldr">TL;DR</a>
+    <a href="#what">What shipped</a>
+    <a href="#arch">How it works</a>
+    <a href="#proof">The proof</a>
+    <a href="#recordings">All recordings</a>
+    <a href="#proof" class="l2">j1 bus on tmux</a>
+    <a href="#proof" class="l2">j2 ACP streaming</a>
+    <a href="#proof" class="l2">j3 resume</a>
+    <a href="#proof" class="l2">j4 convergence</a>
+    <a href="#faults">Fault matrix</a>
+    <a href="#caught">What review caught</a>
+    <a href="#invariants">Invariants</a>
+    <a href="#next">What is next</a>
+    <div class="files">
+      <div class="label">Where it lives</div>
+      <code>hangar-daemon/acp_pool.rs</code>
+      <code>ainb-acp/{client,reducer}.rs</code>
+      <code>migrations/0079_chat_bus.sql</code>
+      <code>scripts/chat-bus-smoke.sh</code>
+    </div>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">agents-in-a-box · buzz port part 1 · shipped 2026-08-07</div>
+      <h1>The ainb chat bus: built, proven, recorded</h1>
+      <div class="tldr" id="tldr">
+        <b>TL;DR</b> ainb can now hold a conversation. Messages go to running tmux sessions AND to
+        headless ACP agents through one bus, with receipts per recipient, live
+        execution transcripts, actionable permission prompts, and resume across a daemon crash. Six
+        phases, five merged PRs, sixteen named invariants, and nine live journeys recorded end to
+        end against real processes. Every recording below is an uncut run, and every frame was read
+        to confirm it shows the assertion it claims.
+      </div>
+    </header>
+
+    <h2 id="what">What shipped</h2>
+    <p>The port took the good ideas from <code>block/buzz</code> (agents as first-class chat members,
+      a clean timeline with execution detail on a side channel) and put them on ainb's own daemon
+      rather than adopting buzz's Nostr relay stack.</p>
+
+    <table>
+      <thead><tr><th>Phase</th><th>What it added</th><th>PR</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>Killed a second unverified tmux send path that corrupted dash-prefixed prompts</td><td>#587</td></tr>
+        <tr><td>1</td><td>Message store: commit-ordered cursor, per-recipient receipts, ACP session identity</td><td>#587</td></tr>
+        <tr><td>2</td><td>Fleet protocol v2: the one bump, six methods, ACP provider token</td><td>#587</td></tr>
+        <tr><td>3</td><td>The bus live on tmux sessions, page-to-head subscribers, <code>ainb fleet msg</code></td><td>#592</td></tr>
+        <tr><td>4</td><td><code>ainb-acp</code> crate on the upstream protocol: client, reducer, writer, reprime</td><td>#592</td></tr>
+        <tr><td>5</td><td>Multiplexed agent pool, ACP delivery, permission round trip, convergence</td><td>#596</td></tr>
+        <tr><td>6</td><td>Resume by <code>session/load</code> with a re-prime fallback, transcript prune</td><td>#598</td></tr>
+        <tr><td>E2E</td><td>Nine live journeys, opt-in CI lane, the recordings on this page</td><td>#614</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="arch">How it works</h2>
+    <pre><span class="cm">every client speaks ONE wire contract; one process owns the store</span>
+
++----------+  +----------+  +----------+   fleet/* JSON-RPC over hangar.sock (v2)
+| ainb TUI |  | macOS    |  | ainb CLI |   msg send . msg list . msg follow
+| plugin   |  | Fleet    |  | + web    |   acp create . transcript [--follow]
++----+-----+  +----+-----+  +----+-----+
+     +-------------+-------------+
+                   v
++----------------------------------------------------------+
+| hangar daemon                                            |
+|  fleet_message (seq = commit order) - receipts per leg   |
+|                                                          |
+|  +-- tmux leg --------+   +-- <span class="hl">ACP leg</span> -----------------+   |
+|  | verified send-keys |   | one process per provider,  |   |
+|  | (unchanged)        |   | many sessions multiplexed  |   |
+|  +--------+-----------+   +---+--------------+---------+   |
+|           v                   | stdio        |             |
+|    your tmux panes    +-------v------+ +-----v--------+    |
+|                       |claude-agent- | | codex-acp    |    |
+|                       |acp           | |              |    |
+|                       +--------------+ +--------------+    |
+|                                                            |
+|  timeline    &lt;- final message only                         |
+|  transcript  &lt;- every chunk: thought, tool call, plan, cost|
+|  permission  &lt;- attention row, answered over fleet/action  |
++------------------------------------------------------------+</pre>
+
+    <div class="callout">
+      <span class="ico">*</span>
+      <div>The idea worth stealing from buzz: <b>the chat timeline only ever gets the agent's final
+        message</b>. Thinking, tool calls, plans and token cost stream to a separate transcript. Your
+        chat view stays readable and never has to render half-finished markdown.</div>
+    </div>
+
+    <h2 id="proof">The proof</h2>
+    <p>Every recording is one uncut run of <code>ainb-tui/scripts/chat-bus-smoke.sh</code>. Each run
+      builds a scratch world: its own hangar home, a real daemon, the real <code>ainb</code> binary,
+      three real tmux sessions, and an ACP adapter. Frames were extracted from every tape and read;
+      the assertion text quoted under each recording is text that was actually on screen.</p>
+    <p><b>What is real and what is not, precisely.</b> The daemon, the store, the CLI, the tmux
+      sessions and the protocol traffic are real: these runs speak the same wire the TUI and the
+      macOS app speak. The ACP agent on the far end is a scripted fixture that implements the
+      protocol, not a live Claude or Codex process, because no adapter is installed on this
+      machine. Every tape says so in its own banner (<code>adapter mode: fixture</code>). The
+      adapters themselves were measured by hand against the real thing when the protocol behaviour
+      was pinned, and the real-adapter tests are written and skip until an adapter is present.</p>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j1.gif" alt="Journey 1: one message reaching three real tmux panes verbatim">
+      <figcaption><b>j1 . the bus on tmux.</b> One <code>msg send</code> to three targets, three
+        DELIVERED receipts, the payload verbatim in every pane, and a follower that was already
+        streaming when it happened.<br>
+        <span class="assert">RECEIVED:[j1 ...] hello fleet, deliver me verbatim &middot; 3/3 DELIVERED &middot; 3/3 panes verbatim &middot; follower saw it</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j1.mp4">download the full j1 run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j2.gif" alt="Journey 2: ACP transcript chunks streaming before the turn ends">
+      <figcaption><b>j2 . ACP with live transcript.</b> A chunk is readable while the delivery is
+        still PENDING, which is the whole point of the side channel, and the timeline gets exactly
+        one message against seven transcript chunks.<br>
+        <span class="assert">7 transcript chunks &middot; 1 timeline reply &middot; first chunk line 3 &lt; turn end line 8</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j2.mp4">download the full j2 run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j3.gif" alt="Journey 3: resume across a daemon SIGKILL">
+      <figcaption><b>j3 . resume across a daemon SIGKILL.</b> The daemon is killed mid-turn and
+        restarted; the conversation continues on the same session key, through the adapter's own
+        <code>session/load</code> rather than the fallback, with the interrupted leg converged and no
+        ghost approval rows left behind. The journey asserts the path is <code>loaded</code>, so a
+        daemon that silently fell back to re-priming fails this rather than passing quietly.<br>
+        <span class="assert">resumed via [loaded] on the same session_key &middot; 2 agent replies &middot; 0 ghost attention rows</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j3.mp4">download the full j3 run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j4.gif" alt="Journey 4: convergence when only the adapter dies">
+      <figcaption><b>j4 . the adapter dies, the daemon lives.</b> The in-flight leg converges with an
+        enumerated reason, the daemon pid is unchanged, and the same scope accepts the next message
+        with no restart. Before this work the honest answer was "restart the daemon".<br>
+        <span class="assert">converged UNKNOWN/adapter_exit &middot; same daemon pid &middot; next message DELIVERED</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j4.mp4">download the full j4 run (mp4)</a></figcaption>
+    </figure>
+
+    <h2 id="faults">The fault matrix</h2>
+    <p>Five more journeys, each provoking a specific failure and asserting the system's answer.</p>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j5a.gif" alt="Queue overflow rejects rather than growing">
+      <figcaption><b>j5a . bounded queue.</b> Prompts pile up behind a wedged turn until one is
+        refused, rather than the queue growing without bound. The depth is discovered from the
+        running pool, not hard-coded in the test.<br>
+        <span class="assert">queue accepted 32 prompts, then REJECTED/queue_full</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5a.mp4">download the full j5a run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j5b.gif" alt="Turn deadline converges a hung adapter">
+      <figcaption><b>j5b . turn deadline.</b> An adapter that never ends its turn cannot hold a scope
+        forever: the deadline cancels that session only, and the scope is immediately reusable.<br>
+        <span class="assert">converged UNKNOWN/turn_deadline after the deadline &middot; scope reusable</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5b.mp4">download the full j5b run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j5c.gif" alt="Idempotency replay delivers once">
+      <figcaption><b>j5c . idempotency.</b> The same request id twice delivers once. The same id with
+        different text is refused with a typed error and a distinct exit code, and never reaches the
+        pane.<br>
+        <span class="assert">one delivery for two identical sends &middot; exit 5 on the conflicting third</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5c.mp4">download the full j5c run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j5d.gif" alt="Permission round trip through fleet action">
+      <figcaption><b>j5d . permission round trip.</b> The agent asks, an attention row appears with
+        the option ids and the pending request id, an operator approves over the same wire the TUI
+        uses, and the adapter gets a real answer rather than the "transport is not active" shrug the
+        pre-port code returned.<br>
+        <span class="assert">attention row -&gt; fleet/action approve -&gt; DELIVERED, row closed</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5d.mp4">download the full j5d run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j5e.gif" alt="Unknown target rejected per delivery">
+      <figcaption><b>j5e . unknown target.</b> One bad recipient in a broadcast is rejected on its own
+        leg with a reason; the request itself still succeeds and the message is still persisted.<br>
+        <span class="assert">DELIVERED + REJECTED/target_unknown in one request, message persisted</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">download the full j5e run (mp4)</a></figcaption>
+    </figure>
+
+    <h2 id="recordings">All recordings</h2>
+    <p>Nine tapes, one per journey, each an uncut run. They live in the repo at
+      <code>explainers/recordings/chat-bus/</code> next to
+      <code>EXPECTED-OUTCOMES.md</code>, which names the exact frame text each one must
+      show. There is deliberately no whole-suite tape: three attempts to capture the
+      fifteen minute run died mid-recording, and a tape that stops after four journeys
+      looks like evidence without being any. Run the suite yourself instead, it is one
+      command.</p>
+
+    <table>
+      <thead><tr><th>Journey</th><th>What it proves</th><th>Files</th></tr></thead>
+      <tbody>
+        <tr><td><code>j1</code></td><td>the bus on tmux, three panes</td><td><a href="https://robust-rocket-8zjr.here.now/media/j1.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j1.mp4">mp4</a></td></tr>
+        <tr><td><code>j2</code></td><td>ACP with live transcript</td><td><a href="https://robust-rocket-8zjr.here.now/media/j2.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j2.mp4">mp4</a></td></tr>
+        <tr><td><code>j3</code></td><td>resume across a daemon SIGKILL</td><td><a href="https://robust-rocket-8zjr.here.now/media/j3.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j3.mp4">mp4</a></td></tr>
+        <tr><td><code>j4</code></td><td>adapter dies, daemon lives</td><td><a href="https://robust-rocket-8zjr.here.now/media/j4.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j4.mp4">mp4</a></td></tr>
+        <tr><td><code>j5a</code></td><td>bounded queue overflow</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5a.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5a.mp4">mp4</a></td></tr>
+        <tr><td><code>j5b</code></td><td>turn deadline</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5b.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5b.mp4">mp4</a></td></tr>
+        <tr><td><code>j5c</code></td><td>idempotency replay</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5c.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5c.mp4">mp4</a></td></tr>
+        <tr><td><code>j5d</code></td><td>permission round trip</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5d.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5d.mp4">mp4</a></td></tr>
+        <tr><td><code>j5e</code></td><td>unknown target</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5e.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">mp4</a></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="caught">What the reviews caught</h2>
+    <p>Every phase was built by one agent, reviewed adversarially by another, then reviewed again
+      before merge. That third pass is where the expensive bugs died, each one found by reading the
+      code rather than by a failing test.</p>
+
+    <details>
+      <summary>A message stream that silently dropped rows <span class="where">phase 1</span></summary>
+      <div class="body"><p>The cursor was a daemon-minted ULID, generated before the write
+        transaction. Two concurrent sends could commit out of id order, and a subscriber that had
+        already paged past the higher id would never see the lower one. No error, no gap, just a
+        missing message. Replaced with a SQLite-assigned sequence so cursor order is commit order,
+        with a concurrency test written to fail against the old design.</p></div>
+    </details>
+
+    <details>
+      <summary>An older permission that could never be answered <span class="where">phase 5</span></summary>
+      <div class="body"><p>With two permissions parked at once, the newer one overwrote the session's
+        request fingerprint, so answering the older ask was refused before the pool was ever
+        consulted. The adapter stayed blocked until the deadline. Reproduced first with a two-ask
+        fixture, capturing the exact refusal, then fixed by making the parked map authoritative.</p></div>
+    </details>
+
+    <details>
+      <summary>Whole turns lost when an adapter exited <span class="where">phase 5</span></summary>
+      <div class="body"><p>Buffered transcript notifications were dropped at three points on the exit
+        path, and because the upstream notification future outlives the supervisor loop it could lose
+        an entire turn, not just the tail. The supervisor now drains to silence and the actor flushes
+        its reducer before detaching.</p></div>
+    </details>
+
+    <details>
+      <summary>A prune that deleted more than it exported <span class="where">phase 6</span></summary>
+      <div class="body"><p>The retention command exported a snapshot, then deleted by re-evaluating
+        the operator's watermark. Anything committed in between was destroyed with no export and no
+        error. The delete now takes the exported watermark, so export-then-delete is total by
+        construction.</p></div>
+    </details>
+
+    <details>
+      <summary>Resume that would have quietly degraded on Claude <span class="where">gate</span></summary>
+      <div class="body"><p>Re-running the protocol probes against fresh adapter versions found that
+        mode-loss-on-load affects <em>both</em> adapters, not just Codex as the original spike
+        recorded. Had the plan's Codex-only re-apply shipped, every Claude resume would have failed
+        its mode assertion and silently fallen back to re-priming, never using <code>session/load</code>
+        at all. The j3 recording above is the proof it takes the fast path.</p></div>
+    </details>
+
+    <h2 id="invariants">The sixteen invariants</h2>
+    <p>Each one is a property the plan named up front, mapped to the test that would go red if it
+      broke. This is the contract the port was built against.</p>
+
+    <table>
+      <thead><tr><th>#</th><th>Property</th><th>Proven by</th></tr></thead>
+      <tbody>
+        <tr><td>I1</td><td>Sends are idempotent by request id; a conflicting replay is refused</td><td>daemon test + <span class="pass">j5c</span></td></tr>
+        <tr><td>I2</td><td>Lagging subscribers page to head with no gaps and no duplicates</td><td>forced-lag test</td></tr>
+        <tr><td>I3</td><td>Every delivery leg reaches exactly one terminal state</td><td>concurrent resolver test + <span class="pass">j1 j4 j5e</span></td></tr>
+        <tr><td>I4</td><td>Timeline gets the final message only; everything else is transcript</td><td><span class="pass">j2</span></td></tr>
+        <tr><td>I5</td><td>The session key survives an adapter session rebuild</td><td>rebuild test + <span class="pass">j3</span></td></tr>
+        <tr><td>I6</td><td>At most once: requeue only when the prompt provably never landed</td><td>two-point fault injection</td></tr>
+        <tr><td>I7</td><td>Boot converges a dirty store, and a second boot changes nothing</td><td>seeded-store test + <span class="pass">j3</span></td></tr>
+        <tr><td>I8</td><td>No ACP session ever reaches the tmux send path</td><td>fake-tmux recorder, zero calls</td></tr>
+        <tr><td>I9</td><td>Post-bump, a v1 client is refused on both legs</td><td>live socket test + Swift contract</td></tr>
+        <tr><td>I10</td><td>Transcripts never degrade the recovery scan's index</td><td>query-plan assertion</td></tr>
+        <tr><td>I11</td><td>Broadcast replies thread into each recipient's own scope</td><td>two-scope end to end</td></tr>
+        <tr><td>I12</td><td>Transcript streams during the turn, not after it</td><td><span class="pass">j2</span></td></tr>
+        <tr><td>I13</td><td>Permission mode is pinned and asserted, never inherited</td><td>mode-echo fixture, spawn fails</td></tr>
+        <tr><td>I14</td><td>The message cursor is commit-ordered under concurrency</td><td>12 concurrent senders</td></tr>
+        <tr><td>I15</td><td>Re-prime is injection-safe against hostile message bodies</td><td>hostile-corpus test</td></tr>
+        <tr><td>I16</td><td>Convergence is not boot-only: crashes and deadlines converge live</td><td>kill tests + <span class="pass">j4 j5b</span></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="next">What is next</h2>
+    <p>Part 1 gave the fleet a nervous system. Part 2 gives it a voice: a
+      <code>#copilot</code> channel where an agent holds fleet-control tools and orchestrates the
+      whole fleet, with per-session chat threads and broadcast channels, on the macOS app and the TUI
+      in parallel. That plan is already written, reviewed, and reconciled against everything above,
+      including the decision that the copilot may act on its own for reads and prompts but must ask
+      before anything destructive.</p>
+
+    <div class="callout">
+      <span class="ico">-&gt;</span>
+      <div>Try it: <code>ainb fleet msg send --target &lt;session&gt; --text "hello"</code>,
+        <code>ainb fleet msg follow --format json</code>, or run the whole proof yourself with
+        <code>./ainb-tui/scripts/chat-bus-smoke.sh</code>.</div>
+    </div>
+  </main>
+
+</div>
+</body>
+</html>
