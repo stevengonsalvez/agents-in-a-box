@@ -18,10 +18,33 @@
 //! a ghost suggestion from real typed text, and `-p` strips it.
 
 use super::{
-    Gate, GateAction, Verdict, apply_sgr, composer_pending, composer_region, composer_state,
-    gate_action, is_rule_row, payload_needle, region_is_clear, region_shows_payload_tail,
-    region_shows_placeholder, squeeze,
+    Attribution, Baseline, Gate, GateAction, PLACEHOLDER_SETTLE, PasteTally, Verdict, apply_sgr,
+    composer_pending, composer_region, composer_state, gate_action, ingest_observed, is_rule_row,
+    parse_baseline_record, paste_capacity, payload_needle, region_is_clear,
+    region_shows_payload_tail, squeeze, tally_pastes,
 };
+
+/// The post-send check for a payload written into a composer that held nothing
+/// at all, which is the ordinary case and the one every fixture was captured
+/// in. Naming it keeps the table readable now that the strict check carries the
+/// pre-write baseline it must measure against.
+fn strict(payload: &str) -> Attribution<'_> {
+    Attribution::Payload(payload, Baseline::default())
+}
+
+/// Does this region carry a paste placeholder at all? The pre-baseline
+/// predicate, kept in the tests as the "what HEAD gated on" precondition.
+fn shows_placeholder(region: &str) -> bool {
+    super::paste_tally(region).count > 0
+}
+
+/// The pre-check as the ATC coalesce guard reaches it when `tmux_send` DID
+/// record a baseline for this pane and the composer was empty at the time.
+const OUR_SEND_INTO_AN_EMPTY_COMPOSER: Attribution<'static> =
+    Attribution::Precheck(Some(PasteTally {
+        count: 0,
+        max_index: 0,
+    }));
 
 // ---- 200x50 captures -------------------------------------------------------
 
@@ -249,14 +272,14 @@ fn cases() -> Vec<Case> {
 fn the_classifier_agrees_with_every_captured_composer_state() {
     let mut wrong = Vec::new();
     for case in cases() {
-        let strict = composer_state(case.pane, Some(&case.payload));
+        let strict = composer_state(case.pane, strict(&case.payload));
         if strict != case.strict {
             wrong.push(format!(
                 "STRICT  {}: want {:?}, got {:?} ({})",
                 case.name, case.strict, strict, case.why
             ));
         }
-        let conservative = composer_pending(case.pane, None);
+        let conservative = composer_pending(case.pane, OUR_SEND_INTO_AN_EMPTY_COMPOSER);
         if conservative != case.conservative {
             wrong.push(format!(
                 "PRECHK  {}: want {}, got {} ({})",
@@ -274,7 +297,7 @@ fn no_captured_state_is_ever_reported_as_submitted_while_parked() {
     for case in cases() {
         if case.strict == Verdict::Pending {
             assert_ne!(
-                composer_state(case.pane, Some(&case.payload)),
+                composer_state(case.pane, strict(&case.payload)),
                 Verdict::Submitted,
                 "{} would be reported as delivered while parked",
                 case.name
@@ -314,7 +337,7 @@ fn at_80x24_the_payload_head_is_off_screen_and_the_tail_is_not() {
         "the TAIL needle must still find the parked payload"
     );
     assert_eq!(
-        composer_state(X80_PARKED_HEARTBEAT, Some(&payload)),
+        composer_state(X80_PARKED_HEARTBEAT, strict(&payload)),
         Verdict::Pending
     );
 }
@@ -345,12 +368,12 @@ fn a_short_payload_still_gets_a_needle() {
 fn a_one_character_payload_is_verified_against_the_pane() {
     // Real 80x24 capture of `2` parked in the composer, no Enter.
     assert_eq!(
-        composer_state(X80_PARKED_TINY, Some("2")),
+        composer_state(X80_PARKED_TINY, strict("2")),
         Verdict::Pending,
         "a one-character payload must not skip verification"
     );
     assert_eq!(
-        composer_state(X80_EMPTY, Some("2")),
+        composer_state(X80_EMPTY, strict("2")),
         Verdict::Submitted,
         "and must be cleared by an empty composer"
     );
@@ -366,9 +389,12 @@ fn a_pane_with_no_composer_is_unverified_not_submitted() {
     // could only match markers, then turned its `false` into `Submitted`.
     let bare = "plain shell output\n$ ls\nfile";
     assert_eq!(composer_region(bare), None);
-    assert_eq!(composer_state(bare, Some("continue")), Verdict::Unverified);
     assert_eq!(
-        composer_state("", Some("continue")),
+        composer_state(bare, strict("continue")),
+        Verdict::Unverified
+    );
+    assert_eq!(
+        composer_state("", strict("continue")),
         Verdict::Unverified,
         "an empty capture is the shape a dead pane produces"
     );
@@ -377,9 +403,9 @@ fn a_pane_with_no_composer_is_unverified_not_submitted() {
     // ATC tick forever.
     assert!(composer_pending(
         "transcript\n> [Pasted text #8 +5 lines]rest\nstatus line",
-        None
+        OUR_SEND_INTO_AN_EMPTY_COMPOSER
     ));
-    assert!(!composer_pending(bare, None));
+    assert!(!composer_pending(bare, OUR_SEND_INTO_AN_EMPTY_COMPOSER));
 }
 
 #[test]
@@ -388,11 +414,11 @@ fn a_composer_holding_someone_elses_text_is_unverified() {
     // payload is not there, but neither is proof that it went through, and
     // another Enter would submit THEIR text.
     assert_eq!(
-        composer_state(HUMAN_TYPED, Some("run the standup and summarise")),
+        composer_state(HUMAN_TYPED, strict("run the standup and summarise")),
         Verdict::Unverified
     );
     assert!(
-        !composer_pending(HUMAN_TYPED, None),
+        !composer_pending(HUMAN_TYPED, OUR_SEND_INTO_AN_EMPTY_COMPOSER),
         "a human mid-keystroke is not a parked nudge"
     );
 }
@@ -477,7 +503,7 @@ fn a_rule_pair_below_the_composer_does_not_steal_the_region() {
     assert_eq!(
         composer_state(
             pane,
-            Some("git pull --rebase && cargo test -p ainb-fleet-core")
+            strict("git pull --rebase && cargo test -p ainb-fleet-core")
         ),
         Verdict::Pending
     );
@@ -521,9 +547,9 @@ fn a_placeholder_is_positive_evidence_even_with_no_payload_text_visible() {
     let payload = repeat_to(PROBE_UNIT, 900);
     let region = composer_region(X80_HIDDEN_BY_PLACEHOLDER).expect("composer");
     assert!(!region_shows_payload_tail(&region, &payload));
-    assert!(region_shows_placeholder(&region));
+    assert!(shows_placeholder(&region));
     assert_eq!(
-        composer_state(X80_HIDDEN_BY_PLACEHOLDER, Some(&payload)),
+        composer_state(X80_HIDDEN_BY_PLACEHOLDER, strict(&payload)),
         Verdict::Pending
     );
 }
@@ -539,8 +565,11 @@ fn a_placeholder_that_wrapped_across_rows_still_matches() {
                 ────────────────────────────────────────────\n\
                 status";
     let region = composer_region(pane).expect("composer");
-    assert!(region_shows_placeholder(&region));
-    assert!(composer_pending(pane, None), "the ATC guard must see it");
+    assert!(shows_placeholder(&region));
+    assert!(
+        composer_pending(pane, OUR_SEND_INTO_AN_EMPTY_COMPOSER),
+        "the ATC guard must see the placeholder OUR write left behind"
+    );
 }
 
 #[test]
@@ -552,7 +581,346 @@ fn the_heartbeat_marker_is_pending_without_a_payload() {
                 ❯\u{a0}[HEARTBEAT 1782949818090] 16 session(s)\n\
                 ──────────────────────────────────────────────\n\
                 status";
-    assert!(composer_pending(pane, None));
+    assert!(
+        composer_pending(pane, Attribution::Precheck(None)),
+        "the [HEARTBEAT marker is unambiguously a machine nudge, so it needs no record"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CRITICAL-1: the ingest gate must fire on a CHANGE, never on residue
+//
+// Every test below drives [`ingest_observed`], which IS the gate: it is the
+// whole of what `wait_for_ingest` decides on, lifted out so a fixture can be
+// put through it without a live pane.
+// ---------------------------------------------------------------------------
+
+/// The dim ghost text in `ghost-suggestion.ansi.txt`, verbatim. It is the
+/// previous prompt, so it is byte-for-byte a payload we already sent.
+const GHOST_TEXT: &str = "test payload, reply with the single word ACK and do nothing else";
+
+/// A one-row composer holding `text` as LIVE (non-dim) content, in the shape
+/// `capture-pane -e` produces. Synthetic pane art, labelled as such.
+fn parked(text: &str) -> String {
+    format!("\u{1b}[39m❯\u{a0}{text}")
+}
+
+/// A heartbeat as `ainb-core/src/fleet/atc/heartbeat.rs` builds it: a per-tick
+/// body followed by the SAME fixed instruction literal on every tick, which is
+/// why two consecutive heartbeats have byte-identical tail needles.
+fn atc_heartbeat(now_ms: u64, needs: usize) -> String {
+    format!(
+        "[HEARTBEAT {now_ms}] {needs} session(s) need attention. Apply the ATC playbook, \
+then persist state.json + task-log.md."
+    )
+}
+
+#[test]
+fn a_dim_ghost_of_our_own_payload_is_not_our_payload_arriving() {
+    // THE CRITICAL-1 SHAPE, on the real capture. Claude Code draws a DIM ghost
+    // of the previous prompt inside an EMPTY composer, so the same region reads
+    // as both "clear, the send was accepted" and, to a bare `contains` gate,
+    // "the payload is visibly in the composer, press Enter now". The second
+    // reading fires Enter ~20ms after the write, which is exactly the measured
+    // CR-fusion condition for a 2200-16000 byte payload.
+    let region = composer_region(GHOST).expect("composer");
+    assert!(
+        region_shows_payload_tail(&region, GHOST_TEXT),
+        "precondition: a bare contains-the-needle gate DOES fire on this region"
+    );
+    assert!(
+        region_is_clear(&region),
+        "precondition: the very same region is also verdict-CLEAR"
+    );
+
+    let baseline = Baseline::of(Some(&region), GHOST_TEXT);
+    for settled in 0..=PLACEHOLDER_SETTLE + 2 {
+        assert!(
+            !ingest_observed(&region, GHOST_TEXT, &baseline, settled),
+            "the ghost was on screen BEFORE the write, so it is not evidence of it"
+        );
+    }
+}
+
+#[test]
+fn our_payload_landing_over_a_ghost_does_open_the_gate() {
+    // The other half: the fix must not make a real send unverifiable. As our
+    // text is typed the ghost is replaced by LIVE cells, and a live needle
+    // where there was none before is exactly the change the gate wants.
+    let ghost = composer_region(GHOST).expect("composer");
+    let baseline = Baseline::of(Some(&ghost), GHOST_TEXT);
+    assert_eq!(baseline.needles, 0, "the ghost's needle is DIM, not live");
+    assert!(ingest_observed(
+        &parked(GHOST_TEXT),
+        GHOST_TEXT,
+        &baseline,
+        0
+    ));
+}
+
+#[test]
+fn a_second_heartbeat_is_not_gated_in_by_the_first_ones_residue() {
+    // The ATC appends a fixed literal to every non-empty heartbeat, so the last
+    // NEEDLE_CHARS characters of tick N are identical to those of tick N-1. A
+    // needle can therefore never tell two heartbeats apart, and the previous
+    // one still parked in the composer answers "yes, your payload is here".
+    let first = atc_heartbeat(1_782_949_818_090, 16);
+    let second = atc_heartbeat(1_782_949_998_090, 11);
+    assert_ne!(first, second, "different ticks, different bodies");
+    assert_eq!(
+        payload_needle(&first),
+        payload_needle(&second),
+        "precondition: the needle cannot discriminate two heartbeats"
+    );
+
+    let residue = parked(&first);
+    assert!(
+        region_shows_payload_tail(&residue, &second),
+        "precondition: a bare contains-the-needle gate DOES fire on the residue"
+    );
+    let baseline = Baseline::of(Some(&residue), &second);
+    for settled in 0..=PLACEHOLDER_SETTLE + 2 {
+        assert!(
+            !ingest_observed(&residue, &second, &baseline, settled),
+            "tick N-1's parked body is not tick N arriving"
+        );
+    }
+    // Once tick N really does land on top of it, the needle count grows.
+    assert!(ingest_observed(
+        &parked(&format!("{first}{second}")),
+        &second,
+        &baseline,
+        0
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-2: a human's paste is byte-identical to a machine nudge
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_humans_paste_staged_before_the_send_is_not_our_payload_arriving() {
+    // A human pastes a stack trace (>801 characters, so one `[Pasted text #7]`)
+    // and walks away. A broadcast lands. HEAD's placeholder branch accepts
+    // THEIR placeholder as proof of OUR ingest and presses Enter, submitting
+    // their staged text.
+    let staged = parked("[Pasted text #7]");
+    let payload = repeat_to(ACK_UNIT, 4000);
+    assert!(
+        shows_placeholder(&staged),
+        "precondition: a bare placeholder gate DOES fire on this region"
+    );
+
+    let baseline = Baseline::of(Some(&staged), &payload);
+    for settled in 0..=PLACEHOLDER_SETTLE + 2 {
+        assert!(
+            !ingest_observed(&staged, &payload, &baseline, settled),
+            "a placeholder that was already on screen is not evidence of our write"
+        );
+    }
+    // Our own reads stack placeholders on top of theirs, and those ARE ours.
+    let ours_too = parked("[Pasted text #7][Pasted text #8][Pasted text #9]");
+    assert!(
+        ingest_observed(&ours_too, &payload, &baseline, PLACEHOLDER_SETTLE),
+        "placeholders that appeared after the write are ours"
+    );
+}
+
+#[test]
+fn a_placeholder_cannot_gate_a_payload_too_short_to_have_drawn_one() {
+    // Claude Code only draws a placeholder for a PTY read of >=801 characters,
+    // so a one-character phone reply can never account for one. A placeholder
+    // appearing during such a send belongs to somebody else.
+    let payload = "2";
+    assert_eq!(paste_capacity(payload), 0);
+    let baseline = Baseline::of(Some(&parked("")), payload);
+    assert!(!ingest_observed(
+        &parked("[Pasted text #7]"),
+        payload,
+        &baseline,
+        PLACEHOLDER_SETTLE + 5
+    ));
+}
+
+#[test]
+fn an_unattributed_paste_placeholder_is_not_a_parked_nudge() {
+    // The payload-less ATC pre-check. Its answer is a LONE Enter, so a
+    // placeholder it cannot attribute must not be reported.
+    let pane = "transcript\n\
+                ────────────────────────────────────────────\n\
+                ❯\u{a0}[Pasted text #8 +5 lines]\n\
+                ────────────────────────────────────────────\n\
+                status";
+    assert!(
+        !composer_pending(pane, Attribution::Precheck(None)),
+        "no record of a send to this pane: this paste is not ours to flush"
+    );
+    assert!(
+        composer_pending(pane, OUR_SEND_INTO_AN_EMPTY_COMPOSER),
+        "our own write into an empty composer left it parked"
+    );
+    assert!(
+        !composer_pending(
+            pane,
+            Attribution::Precheck(Some(PasteTally {
+                count: 1,
+                max_index: 8
+            }))
+        ),
+        "the identical placeholder was already there before our write"
+    );
+}
+
+#[test]
+fn a_paste_tally_counts_placeholders_and_their_indices() {
+    let tally = tally_pastes("[Pastedtext#214][Pastedtext#215][Pastedtext#217+1lines]");
+    assert_eq!(tally.count, 3);
+    assert_eq!(tally.max_index, 217);
+    // The index survives the tail-anchored viewport scrolling the earlier
+    // placeholders out of view, which the COUNT alone does not.
+    assert!(tally.grew_beyond(PasteTally {
+        count: 4,
+        max_index: 213
+    }));
+    assert!(!tally.grew_beyond(PasteTally {
+        count: 3,
+        max_index: 217
+    }));
+    assert_eq!(tally_pastes("no pastes here"), PasteTally::default());
+}
+
+#[test]
+fn a_stale_baseline_record_is_ignored() {
+    // A record left behind by a process that died between the write and the
+    // verdict must not attribute a placeholder to us forever.
+    let now = 1_782_949_818_090_u128;
+    assert_eq!(
+        parse_baseline_record("1782949818090 2 41", now),
+        Some(PasteTally {
+            count: 2,
+            max_index: 41
+        })
+    );
+    // 10m01s old: past the TTL.
+    assert_eq!(parse_baseline_record("1782949217090 2 41", now), None);
+    assert_eq!(parse_baseline_record("garbage", now), None);
+    assert_eq!(parse_baseline_record("", now), None);
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM-4: the placeholder branch needs a real settle, not one quiet poll
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_placeholder_branch_waits_out_a_whole_ingest_before_it_fires() {
+    // In the 2000-8000 byte band the tail needle can NEVER fire (measured: 2000,
+    // 4000 and 8000 byte writes rendered as placeholders with zero payload text
+    // on screen), so the placeholder branch is the only carrier and its settle
+    // is the only thing standing between Enter and a still-draining pane.
+    // Measured: 8000 bytes ingested in 0.53-0.55s over 8 reads, ~66ms per read,
+    // with the FIRST placeholder drawn after read 1 of 8. At a 120ms poll a
+    // single stall makes two captures identical with ~7KB still queued.
+    let payload = repeat_to(ACK_UNIT, 8000);
+    let baseline = Baseline::of(Some(&parked("")), &payload);
+    let mid_ingest = parked("[Pasted text #1]");
+    for settled in 0..PLACEHOLDER_SETTLE {
+        assert!(
+            !ingest_observed(&mid_ingest, &payload, &baseline, settled),
+            "{settled} unchanged polls is {}ms, not enough to mean the ingest finished",
+            settled * 120
+        );
+    }
+    assert!(
+        ingest_observed(&mid_ingest, &payload, &baseline, PLACEHOLDER_SETTLE),
+        "600ms of stillness is longer than the whole measured ingest of the largest payload"
+    );
+}
+
+#[test]
+fn a_visible_tail_needle_does_not_wait_for_the_settle() {
+    // The needle proves the LAST bytes landed, so there is nothing left to
+    // drain and the send must not pay the placeholder branch's quiet window.
+    let payload = repeat_to(ACK_UNIT, 1546);
+    let baseline = Baseline::of(Some(&parked("")), &payload);
+    assert!(ingest_observed(&parked(&payload), &payload, &baseline, 0));
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM-3: the region must keep the first character of every wrapped row
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wrapped_row_starting_with_a_quote_glyph_keeps_its_first_character() {
+    // Synthetic pane (labelled). Real triggers: the bridge relaying a Slack or
+    // Discord reply quoted with `> `, a broadcast carrying a markdown
+    // blockquote, or a `>>>>>>>` conflict marker. Re-running the prompt-glyph
+    // skip on every row dropped that character from the REGION while keeping it
+    // in the NEEDLE, so the payload could not recognise itself, the gate never
+    // accepted, and `tmux_send` returned Err BEFORE Enter was ever pressed:
+    // typed into the composer, never submitted, never retried by any transport.
+    let pane = "transcript\n\
+                ────────────────────────────────────────────\n\
+                ❯\u{a0}please apply this patch and report back\n\
+                  > final answer TAILMARK\n\
+                ────────────────────────────────────────────\n\
+                status";
+    let payload = "please apply this patch and report back > final answer TAILMARK";
+    let region = composer_region(pane).expect("composer");
+    assert!(
+        super::region_squeezed(&region).contains('>'),
+        "the quote glyph must survive into the region, got {:?}",
+        super::region_squeezed(&region)
+    );
+    assert!(
+        region_shows_payload_tail(&region, payload),
+        "the payload must be able to recognise its own tail"
+    );
+    assert_eq!(composer_state(pane, strict(payload)), Verdict::Pending);
+    let baseline = Baseline::of(Some(&parked("")), payload);
+    assert!(ingest_observed(&region, payload, &baseline, 0));
+}
+
+#[test]
+fn a_wrapped_row_starting_with_any_prompt_like_glyph_keeps_it() {
+    // The skip matched all THREE glyph shapes, so `❯` and `›` were eaten from a
+    // continuation row exactly as `>` was. Scoped honestly: an ORDINARY first
+    // character was always kept (verified against the real 80x24 heartbeat
+    // capture, whose seven row boundaries are intact), so the defect is
+    // glyph-specific rather than universal, which is why it survived review.
+    for glyph in ['>', '❯', '›'] {
+        let pane = format!(
+            "transcript\n\
+             ────────────────────────────────────────────\n\
+             ❯\u{a0}deploy the shim then\n\
+             \u{20}\u{20}{glyph} report back TAILMARK\n\
+             ────────────────────────────────────────────\n\
+             status"
+        );
+        let payload = format!("deploy the shim then {glyph} report back TAILMARK");
+        let region = composer_region(&pane).expect("composer");
+        assert!(
+            region_shows_payload_tail(&region, &payload),
+            "the wrapped row's leading {glyph:?} was eaten, got {:?}",
+            super::region_squeezed(&region)
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_wrapped_row_is_unaffected() {
+    // The guard on the scoping above: the real 1546-byte heartbeat wraps over
+    // seven rows and none of them lost a character before OR after the fix, so
+    // the change is confined to the glyph case.
+    let region = composer_region(X80_PARKED_HEARTBEAT).expect("composer");
+    let squeezed = super::region_squeezed(&region);
+    assert!(
+        squeezed.contains("thesinglewordACK.sessionneedsanudge"),
+        "a row boundary must not eat a character, got {squeezed:?}"
+    );
+    assert!(
+        squeezed.ends_with("singlewTAILMARKER9911"),
+        "got {squeezed:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

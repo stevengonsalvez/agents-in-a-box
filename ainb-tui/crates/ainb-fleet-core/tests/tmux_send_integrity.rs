@@ -185,6 +185,16 @@ fn isolation() -> &'static TmuxIsolation {
         std::env::remove_var("TMUX");
         std::env::remove_var("TMUX_PANE");
         std::env::set_var("TMUX_TMPDIR", &dir);
+        // AINB_HOME too, not just the tmux server. `tmux_send` records a
+        // per-pane composer baseline under `<home>/fleet/composer-baseline/`,
+        // and `baseline_record_path` falls back to `dirs::home_dir()` when
+        // AINB_HOME is unset. Without this the suite (and CI, which runs
+        // --all-features) writes real files into the developer's actual
+        // ~/.agents-in-a-box on every run. Measured: 12 records after one run.
+        // The tmux server was isolated meticulously here while this was not,
+        // which is the same "isolate the obvious thing, miss the quiet one"
+        // shape the send path itself was fixed for.
+        std::env::set_var("AINB_HOME", &dir);
         TmuxIsolation { dir, ambient }
     })
 }
@@ -520,6 +530,47 @@ async fn a_target_that_submits_is_reported_as_delivered_exactly_once() {
     let accepted = pane.accepted();
     assert_eq!(accepted.len(), 1, "exactly one turn, got {accepted:?}");
     assert_eq!(accepted[0], payload, "the payload was corrupted in flight");
+}
+
+#[tokio::test]
+async fn a_target_that_repaints_late_is_still_reported_as_delivered() {
+    if !tmux_available() || !python3_available() {
+        skip("late-repaint send verification");
+        return;
+    }
+    // A DELIVERED payload must not be reported as a failure. The "lazy" target
+    // takes the turn on the first Enter but keeps the composer painted for
+    // 1.5s afterwards, which is what a busy pane looks like between accepting a
+    // turn and repainting: the first post-Enter check still sees the payload,
+    // and by the time the loop looks again the composer is empty.
+    //
+    // Re-running the 8s ingest gate on every retry turned exactly that into an
+    // `Err` / `SendFailure::Written`: the payload is gone from the composer
+    // PRECISELY because it went through, so the gate could not observe it,
+    // waited out the whole timeout and refused. A false failure is not as bad
+    // as a false success, but the ATC gates `commit_delivery_on_send` on
+    // `is_ok()`, so its completions inbox is never drained and regrows without
+    // bound.
+    let pane = ComposerPane::start("lazy", "lazy");
+    let payload = head_and_tail_payload();
+    let started = Instant::now();
+
+    tmux_send(&pane.name, &payload)
+        .await
+        .expect("a payload the target ACCEPTED must be reported as delivered");
+
+    let accepted = pane.accepted();
+    assert_eq!(
+        accepted.len(),
+        1,
+        "exactly one turn, and no empty retry turn, got {accepted:?}"
+    );
+    assert_eq!(accepted[0], payload, "the payload was corrupted in flight");
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "a delivered payload must not pay the whole ingest timeout, took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
