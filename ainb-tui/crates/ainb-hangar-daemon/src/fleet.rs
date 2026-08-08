@@ -1147,53 +1147,76 @@ fn parse_attention(value: &str) -> ainb_hangar_proto::fleet::AttentionState {
     }
 }
 
+/// Which passes one reconcile tick runs.
+///
+/// A cost split, not a correctness one. Correlating the discovered panes reads
+/// one snapshot and writes only where a pane resolved; the missing sweep walks
+/// every registered row. On the measured registry — 1,587 rows against 63 live
+/// panes — running the sweep on the 3s tick is tens of millions of row decodes
+/// a day to re-notice panes that are already gone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReconcilePass {
+    /// Correlate the discovered panes only.
+    Panes,
+    /// Also sweep every registered row that no discovered pane accounts for.
+    PanesAndMissing,
+}
+
 /// Reconcile every exact tmux pane into the authoritative registry.
 ///
 /// Discovery failures leave durable state untouched. A missing tmux server is
 /// reported by fleet-core as an empty roster, not an error.
+///
+/// # Errors
+/// Propagates a discovery or store failure.
 pub async fn reconcile_tmux_once(
     pool: &SqlitePool,
     events: &EventSink,
     observed_at: i64,
+    pass: ReconcilePass,
 ) -> anyhow::Result<usize> {
-    reconcile_discovered_panes(pool, events, discover_from_tmux().await?, observed_at).await
+    reconcile_discovered_panes(pool, events, discover_from_tmux().await?, observed_at, pass).await
 }
 
 /// Fold one discovery sample into the registry.
 ///
 /// Split from [`reconcile_tmux_once`] so pane-to-row correlation is testable
 /// without a live tmux server.
+///
+/// One snapshot resolves every pane to the row that owns it, and both the
+/// restore pass and the missing sweep are driven from that single resolution.
+/// Deriving "is this pane live?" twice, independently, is the defect migration
+/// `0075_prune_tmux_flipflop.sql` exists to clean up after: restore matched by
+/// (tmux_target, fingerprint) while the sweep matched by `session_key`, so a row
+/// the two disagreed about was set HEALTHY by one and UNAVAILABLE by the other,
+/// one applied event each, every three seconds, forever.
 async fn reconcile_discovered_panes(
     pool: &SqlitePool,
     events: &EventSink,
     sessions: Vec<FleetSession>,
     observed_at: i64,
+    pass: ReconcilePass,
 ) -> anyhow::Result<usize> {
-    restore_tmux_transport(pool, events, &sessions, observed_at).await?;
     let registered = FleetRepo::snapshot(pool).await?.sessions;
-    let mut discovered: std::collections::HashSet<String> =
-        sessions.iter().map(|session| session.session_key.to_string()).collect();
+    let owners = pane_owners(&registered, &sessions);
+    let discovered = discovered_session_keys(&sessions, &owners);
+    restore_tmux_transport(pool, events, &registered, &discovered, observed_at).await?;
+
     let mut applied = 0;
-    for session in sessions {
-        if let Some(managed) = registered.iter().find(|row| {
-            row.management_state == "MANAGED"
-                && row.tmux_target == session.exact_tmux_target
-                && row.process_start_fingerprint == session.process_start_fingerprint
-        }) {
-            discovered.insert(managed.session_key.clone());
-            continue;
-        }
-        // The exact match above misses whenever the fingerprint's `pid` field
-        // has drifted between the hook's read and this scan, which leaves the
-        // pane keyed under `SessionKey::legacy` in a second row that can never
-        // carry interview actions. Correlate on the stable half of the
-        // fingerprint instead, and collapse any duplicate already written.
-        if let Some(managed) = correlated_managed_row(&registered, &session) {
-            discovered.insert(managed.session_key.clone());
+    for (session, owner) in sessions.iter().zip(&owners) {
+        if let Some(owner) = owner {
+            // The pane already has its row. Collapse a duplicate written under
+            // the scan's own key ONLY when the snapshot in hand still shows one
+            // — `supersede_session` opens an IMMEDIATE transaction, so calling
+            // it speculatively would take the write lock once per live pane per
+            // tick to discover there is nothing to do.
+            if !registered.iter().any(|row| row.session_key == session.session_key.as_str()) {
+                continue;
+            }
             match FleetRepo::supersede_session(
                 pool,
                 session.session_key.as_str(),
-                &managed.session_key,
+                &owner.session_key,
                 observed_at,
             )
             .await
@@ -1205,10 +1228,10 @@ async fn reconcile_discovered_panes(
             continue;
         }
         let prior = FleetRepo::get_session(pool, session.session_key.as_str()).await?;
-        if prior.as_ref().is_some_and(|row| tmux_row_matches(row, &session)) {
+        if prior.as_ref().is_some_and(|row| tmux_row_matches(row, session)) {
             continue;
         }
-        let mut event = tmux_event(&session, observed_at);
+        let mut event = tmux_event(session, observed_at);
         if prior.is_some() {
             event.event_id.push_str(&format!(":{observed_at}"));
         }
@@ -1224,11 +1247,15 @@ async fn reconcile_discovered_panes(
             Err(error) => tracing::warn!(error = %error, "fleet tmux reconcile failed"),
         }
     }
+    if pass == ReconcilePass::Panes {
+        return Ok(applied);
+    }
+
     let snapshot = FleetRepo::snapshot(pool).await?;
     for row in snapshot.sessions {
         if row.tmux_target.is_none()
             || discovered.contains(&row.session_key)
-            || (row.lifecycle_state == "EXITED" && row.transport_health == "UNAVAILABLE")
+            || tmux_missing_settled(&row)
         {
             continue;
         }
@@ -1246,6 +1273,92 @@ async fn reconcile_discovered_panes(
         }
     }
     Ok(applied)
+}
+
+/// The registry row that owns each discovered pane, positionally aligned with
+/// `sessions`.
+///
+/// `None` means no MANAGED row claims the pane, so it belongs to its own scanned
+/// key. Computed once and shared by every pass in a tick.
+fn pane_owners<'a>(
+    registered: &'a [FleetSessionRow],
+    sessions: &[FleetSession],
+) -> Vec<Option<&'a FleetSessionRow>> {
+    sessions
+        .iter()
+        .map(|session| {
+            exact_managed_row(registered, session)
+                // The exact match misses whenever the fingerprint's `pid` field
+                // drifted between the hook's read and this scan, which would
+                // leave the pane keyed under `SessionKey::legacy` in a second
+                // row that can never carry interview actions.
+                .or_else(|| correlated_managed_row(registered, session))
+        })
+        .collect()
+}
+
+/// Every registry key this discovery sample accounts for: the scanned keys plus
+/// the MANAGED keys those panes resolved onto.
+fn discovered_session_keys(
+    sessions: &[FleetSession],
+    owners: &[Option<&FleetSessionRow>],
+) -> std::collections::HashSet<String> {
+    let mut keys: std::collections::HashSet<String> =
+        sessions.iter().map(|session| session.session_key.to_string()).collect();
+    keys.extend(owners.iter().flatten().map(|row| row.session_key.clone()));
+    keys
+}
+
+/// The MANAGED row whose tmux binding is byte-identical to this pane's.
+fn exact_managed_row<'a>(
+    registered: &'a [FleetSessionRow],
+    session: &FleetSession,
+) -> Option<&'a FleetSessionRow> {
+    registered.iter().find(|row| {
+        row.management_state == "MANAGED"
+            && row.tmux_target == session.exact_tmux_target
+            && row.process_start_fingerprint == session.process_start_fingerprint
+    })
+}
+
+/// Whether a tmux transport transition would write exactly what the row already
+/// holds.
+///
+/// The store decides "did this event change anything?" from authority and
+/// timestamp, not from value equality (`apply_patch` → `should_replace`), so an
+/// authoritative event ALWAYS bumps the row's version and `last_observed_at` and
+/// ALWAYS appends a `fleet_event` — even when every field it writes is already
+/// there. One such event per dead session per 3s tick is what produced 91,779
+/// `tmux_missing` and 58,679 `tmux_unavailable` rows in a single day against a
+/// ~17k/day baseline for the whole table.
+///
+/// The bumped `last_observed_at` is the half that made it self-sustaining:
+/// `reap_stale_sessions` retires on 15 minutes of silence, and a row re-asserted
+/// every three seconds is never silent, so the retirement that would have ended
+/// the probing could never fire. The emitter must therefore do the value
+/// comparison the store does not.
+///
+/// `capabilities_for_tmux_state` is idempotent (`f(f(x)) == f(x)`), so comparing
+/// its output to the stored string is stable. A row whose capabilities were
+/// serialized by some other path may differ textually on the first comparison;
+/// that costs one event, after which the stored form is canonical.
+fn tmux_transport_settled(row: &FleetSessionRow, available: bool) -> bool {
+    let health = if available { "HEALTHY" } else { "UNAVAILABLE" };
+    row.transport_health == health
+        && row.capabilities == capabilities_for_tmux_state(row, available)
+}
+
+/// Whether [`tmux_missing_event`] would be a pure no-op for this row.
+///
+/// Mirrors that event's patch exactly: transport plus the lifecycle demotion it
+/// applies only to an inferred, unmanaged row. This replaces the narrower
+/// `EXITED && UNAVAILABLE` skip, which let every MANAGED row — whose lifecycle
+/// this sweep deliberately never demotes — be re-asserted forever.
+fn tmux_missing_settled(row: &FleetSessionRow) -> bool {
+    let demotes_lifecycle =
+        row.management_state != "MANAGED" && row.lifecycle_authority == "inferred";
+    let lifecycle_settled = !demotes_lifecycle || row.lifecycle_state == "EXITED";
+    tmux_transport_settled(row, false) && lifecycle_settled
 }
 
 fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent {
@@ -1336,6 +1449,14 @@ fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
         && row.transport_health == transport_token(session.transport_health)
 }
 
+/// How many 3s discovery ticks pass between full missing sweeps.
+///
+/// A pane that has gone away is then noticed within 30s rather than 3s. Nothing
+/// routes on a sub-minute `transport_health` deadline — it gates capability
+/// flags and a banner, not a control path — and the tenfold cut applies to a
+/// full walk of every registered row, which is the whole cost of the pass.
+const MISSING_SWEEP_EVERY_N_TICKS: u32 = 10;
+
 /// Keep unmanaged tmux sessions visible even when hooks are absent.
 #[must_use]
 pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task::JoinHandle<()> {
@@ -1346,10 +1467,23 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
     tokio::spawn(async move {
         let clock = SystemClock;
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+        let mut tick: u32 = 0;
         loop {
+            // The breadcrumb keeps one coarse phase for the process, so a death
+            // during the sleep must not still name the pass that already
+            // finished — see `observability::note_phase`.
+            crate::observability::note_phase("fleet:tmux-idle");
             ticker.tick().await;
             let observed_at = clock.now_ms();
-            if let Err(error) = reconcile_tmux_once(&pool, &events, observed_at).await {
+            let pass = if tick % MISSING_SWEEP_EVERY_N_TICKS == 0 {
+                ReconcilePass::PanesAndMissing
+            } else {
+                ReconcilePass::Panes
+            };
+            tick = tick.wrapping_add(1);
+
+            crate::observability::note_phase("fleet:tmux-reconcile");
+            if let Err(error) = reconcile_tmux_once(&pool, &events, observed_at, pass).await {
                 tracing::debug!(error = %error, "fleet tmux discovery unavailable");
                 if let Err(downgrade) = mark_tmux_unavailable(&pool, &events, observed_at).await {
                     tracing::warn!(error = %downgrade, "fleet tmux downgrade failed");
@@ -1357,6 +1491,7 @@ pub fn spawn_tmux_reconciler(pool: SqlitePool, events: EventSink) -> tokio::task
             }
             // Runs whether or not discovery succeeded: the rows it retires are
             // precisely the ones discovery can no longer see.
+            crate::observability::note_phase("fleet:stale-reap");
             if let Err(error) = reap_stale_sessions(&pool, &events, observed_at).await {
                 tracing::warn!(error = %error, "fleet stale reap failed");
             }
@@ -1468,7 +1603,12 @@ pub async fn mark_tmux_unavailable(
 ) -> Result<usize, FleetRepoError> {
     let snapshot = FleetRepo::snapshot(pool).await?;
     let mut changed = 0;
-    for row in snapshot.sessions.into_iter().filter(|row| row.tmux_target.is_some()) {
+    for row in snapshot.sessions.into_iter().filter(|row| {
+        // Already unavailable: nothing to say. Without this the downgrade wrote
+        // one event for EVERY routed row on every discovery failure, whatever
+        // those rows already held — 58,679 `tmux_unavailable` rows in a day.
+        row.tmux_target.is_some() && !tmux_transport_settled(row, false)
+    }) {
         let event = NewFleetEvent {
             event_id: format!("tmux:unavailable:{}:{observed_at}", row.session_key),
             session_key: row.session_key.clone(),
@@ -1491,34 +1631,35 @@ pub async fn mark_tmux_unavailable(
     Ok(changed)
 }
 
+/// Restore transport on the rows a discovery sample accounts for.
+///
+/// `discovered` is the single pane-to-row resolution computed once per tick, so
+/// this loop and the missing sweep can never disagree about which rows are live.
+/// They used to: this one matched by (tmux_target, fingerprint) while the sweep
+/// matched by `session_key`, and a row the two disagreed about was set HEALTHY
+/// here and UNAVAILABLE there, one applied event each, every tick, forever.
+/// They disagreed whenever a pane's `session_key` changed but the pane did not,
+/// which is what improved provider detection does, since the provider is part of
+/// `SessionKey::legacy`. Sharing the resolution removes the disagreement rather
+/// than patching around it, and it also restores a MANAGED row whose fingerprint
+/// `pid` merely drifted — the exact-match asymmetry that survived the
+/// duplicate-row fix.
+///
+/// An EXITED row is still never restored: its lifecycle is terminal and only a
+/// fresh authoritative observation may revive it.
 async fn restore_tmux_transport(
     pool: &SqlitePool,
     events: &EventSink,
-    discovered: &[FleetSession],
+    registered: &[FleetSessionRow],
+    discovered: &std::collections::HashSet<String>,
     observed_at: i64,
 ) -> Result<(), FleetRepoError> {
-    let snapshot = FleetRepo::snapshot(pool).await?;
-    for row in snapshot.sessions {
-        let Some(target) = row.tmux_target.as_deref() else {
-            continue;
-        };
-        let live = discovered.iter().any(|session| {
-            session.exact_tmux_target.as_deref() == Some(target)
-                && session.process_start_fingerprint == row.process_start_fingerprint
-        });
-        // An EXITED row is never restored, even when a pane still matches its
-        // target and fingerprint. Matching here is by (target, fingerprint) —
-        // deliberately, so a MANAGED row whose key is provider-qualified is still
-        // reachable — while the missing-sweep matches by session_key. When those
-        // two disagree the row flip-flops: this loop restores it to HEALTHY, the
-        // sweep's skip (which needs EXITED *and* UNAVAILABLE) then misses, and it
-        // is marked UNAVAILABLE again, one applied event each per tick forever.
-        //
-        // They disagree whenever a pane's session_key changes but the pane does
-        // not — which is exactly what happens when provider detection improves,
-        // since the provider is part of `SessionKey::legacy`. The old row is
-        // orphaned, stays EXITED, and still matches by target+fingerprint.
-        if !live || row.transport_health == "HEALTHY" || row.lifecycle_state == "EXITED" {
+    for row in registered {
+        if row.tmux_target.is_none()
+            || !discovered.contains(&row.session_key)
+            || row.lifecycle_state == "EXITED"
+            || tmux_transport_settled(row, true)
+        {
             continue;
         }
         let event = NewFleetEvent {
@@ -1529,7 +1670,7 @@ async fn restore_tmux_transport(
             event_type: "tmux_available".to_string(),
             payload: "{}".to_string(),
             patch: FleetSessionPatch {
-                capabilities: Some(capabilities_for_tmux_state(&row, true)),
+                capabilities: Some(capabilities_for_tmux_state(row, true)),
                 transport_health: Some("HEALTHY".to_string()),
                 ..FleetSessionPatch::default()
             },
@@ -1963,15 +2104,18 @@ mod tests {
 
     /// An orphaned row must not flip-flop with the missing-sweep, forever.
     ///
-    /// `restore_tmux_transport` matches by (target, fingerprint) so a MANAGED
-    /// row with a provider-qualified key stays reachable; the missing-sweep
-    /// matches by `session_key`. When a pane's key changes but the pane does
-    /// not — which is what happens when provider detection improves, since the
-    /// provider is part of `SessionKey::legacy` — the old row is orphaned yet
-    /// still matches by target+fingerprint. Restore then set it HEALTHY, the
-    /// sweep's skip (which needs EXITED *and* UNAVAILABLE) missed, and it was
-    /// marked UNAVAILABLE again: two applied events per row per tick, forever.
-    /// Observed live at ~57,600 rows/day for two panes before this guard.
+    /// `restore_tmux_transport` used to match by (target, fingerprint) while the
+    /// missing-sweep matched by `session_key`. When a pane's key changes but the
+    /// pane does not — which is what happens when provider detection improves,
+    /// since the provider is part of `SessionKey::legacy` — the old row is
+    /// orphaned yet still matched by target+fingerprint. Restore then set it
+    /// HEALTHY, the sweep's skip (which needs EXITED *and* UNAVAILABLE) missed,
+    /// and it was marked UNAVAILABLE again: two applied events per row per tick,
+    /// forever. Observed live at ~57,600 rows/day for two panes.
+    ///
+    /// Both passes now read one shared pane-to-row resolution, so the
+    /// disagreement cannot arise; this pins the resulting behaviour through the
+    /// whole tick rather than through the restore half alone.
     #[tokio::test]
     async fn an_exited_orphan_row_stops_churning_against_a_live_pane() {
         let dir = tempfile::tempdir().unwrap();
@@ -2027,17 +2171,27 @@ mod tests {
         .await
         .expect("seed orphan");
 
-        let before = FleetRepo::get_session(pool, &orphan_key)
+        // Full ticks, restore and sweep both, exactly as the 3s loop runs them.
+        // The first is allowed to canonicalise the seed's capability blob; from
+        // the second on, a settled row must be silent.
+        let tick = |at: i64| {
+            reconcile_discovered_panes(
+                pool,
+                &sink,
+                discovered.clone(),
+                at,
+                ReconcilePass::PanesAndMissing,
+            )
+        };
+        tick(1_000).await.expect("settling tick");
+        let settled = FleetRepo::get_session(pool, &orphan_key)
             .await
             .expect("get")
-            .expect("orphan present")
-            .version;
+            .expect("orphan present");
+        let settled_transitions = transition_count(pool, &orphan_key).await;
 
-        // Two passes of the restore half, exactly as the 3s loop runs it.
-        for tick in 0..2 {
-            restore_tmux_transport(pool, &sink, &discovered, 1_000 + tick)
-                .await
-                .expect("restore");
+        for step in 1..5 {
+            tick(1_000 + step * 3_000).await.expect("tick");
         }
 
         let after = FleetRepo::get_session(pool, &orphan_key)
@@ -2045,13 +2199,30 @@ mod tests {
             .expect("get")
             .expect("orphan present");
         assert_eq!(
-            after.version, before,
+            after.version, settled.version,
             "an EXITED orphan must not be restored, or it flip-flops with the sweep forever"
+        );
+        assert_eq!(
+            transition_count(pool, &orphan_key).await,
+            settled_transitions,
+            "and it must stop appending transitions once settled"
         );
         assert_eq!(
             after.transport_health, "UNAVAILABLE",
             "the orphan must stay UNAVAILABLE so the missing-sweep keeps skipping it"
         );
+    }
+
+    /// Every tmux transport transition written for one session.
+    async fn transition_count(pool: &SqlitePool, session_key: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM fleet_event WHERE session_key = ? \
+             AND event_type IN ('tmux_missing', 'tmux_available', 'tmux_unavailable')",
+        )
+        .bind(session_key)
+        .fetch_one(pool)
+        .await
+        .expect("count transitions")
     }
 
     #[test]
@@ -2992,9 +3163,15 @@ mod tests {
         // 1. The scanner sees the pane before any hook fires: a legacy row.
         let scanned = scanned_pane(target, scanned_fingerprint, Provider::Unknown);
         let legacy_key = scanned.session_key.to_string();
-        reconcile_discovered_panes(pool, &sink, vec![scanned.clone()], 1_000)
-            .await
-            .expect("first scan");
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            vec![scanned.clone()],
+            1_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("first scan");
         assert!(
             FleetRepo::get_session(pool, &legacy_key).await.unwrap().is_some(),
             "the pre-hook scan must register the pane"
@@ -3021,9 +3198,15 @@ mod tests {
         .expect("hook applies");
 
         // 3. The next scan must collapse the duplicate rather than keep it.
-        reconcile_discovered_panes(pool, &sink, vec![scanned], 3_000)
-            .await
-            .expect("second scan");
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            vec![scanned],
+            3_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("second scan");
 
         let visible = FleetRepo::snapshot(pool).await.unwrap().sessions;
         assert_eq!(
@@ -3051,6 +3234,7 @@ mod tests {
             &sink,
             vec![scanned_pane(target, scanned_fingerprint, Provider::Unknown)],
             4_000,
+            ReconcilePass::PanesAndMissing,
         )
         .await
         .expect("third scan");
@@ -3107,6 +3291,337 @@ mod tests {
         assert!(
             correlated_managed_row(&registered, &other_provider).is_none(),
             "a confidently different provider must not be absorbed"
+        );
+    }
+
+    /// Register one Claude session bound to a live pane, exactly as a hook does.
+    async fn hooked_session(
+        pool: &SqlitePool,
+        sink: &EventSink,
+        session_id: &str,
+        target: &str,
+        fingerprint: &str,
+        observed_at: i64,
+    ) -> String {
+        apply_hook(
+            pool,
+            sink,
+            HookObservation {
+                event_id: format!("hook:{session_id}"),
+                provider: "claude",
+                provider_session_id: session_id,
+                event_type: "UserPromptSubmit",
+                cwd: "/work/repo",
+                payload: &serde_json::json!({
+                    "tmux_target": target,
+                    "process_start_fingerprint": fingerprint,
+                }),
+                observed_at,
+            },
+        )
+        .await
+        .expect("hook applies");
+        format!("claude:{session_id}")
+    }
+
+    /// A session whose pane is gone must be told so exactly ONCE.
+    ///
+    /// The store's "did this change anything?" test is authority plus timestamp,
+    /// not value equality, so an authoritative event always bumps the row and
+    /// always appends to `fleet_event` even when it writes what is already
+    /// there. The sweep's only guard was `EXITED && UNAVAILABLE`, and this
+    /// sweep deliberately never demotes a MANAGED row's lifecycle — so every
+    /// hook-backed session with a dead pane re-emitted `tmux_missing` every
+    /// three seconds, forever. Measured live: 91,779 rows in one day against a
+    /// ~17k/day baseline for the entire table.
+    ///
+    /// Worse, each re-emission refreshed `last_observed_at`, so
+    /// `reap_stale_sessions` — which retires on 15 minutes of silence — could
+    /// never fire, and the loop kept itself alive.
+    #[tokio::test]
+    async fn a_missing_pane_emits_one_transition_then_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let key = hooked_session(
+            pool,
+            &sink,
+            "sess-dead",
+            "tmux_gone:1.1",
+            "pane=%77;pid=901;session_started=1785400000",
+            1_000,
+        )
+        .await;
+
+        // The pane is gone: every tick from here discovers nothing.
+        for tick in 0..5 {
+            reconcile_discovered_panes(
+                pool,
+                &sink,
+                Vec::new(),
+                2_000 + tick * 3_000,
+                ReconcilePass::PanesAndMissing,
+            )
+            .await
+            .expect("tick");
+        }
+
+        assert_eq!(
+            transition_count(pool, &key).await,
+            1,
+            "a dead pane is news once; after that the row already says so"
+        );
+        let row = FleetRepo::get_session(pool, &key).await.unwrap().unwrap();
+        assert_eq!(row.transport_health, "UNAVAILABLE");
+        assert_eq!(
+            row.last_observed_at, 2_000,
+            "a settled row must stop refreshing its own staleness clock, or the \
+             stale reaper can never retire it"
+        );
+    }
+
+    /// The whole convergence chain, in the order the daemon runs it: the sweep
+    /// reports the dead pane once, which stops refreshing `last_observed_at`,
+    /// which lets `reap_stale_sessions` retire the row to `EXITED`, after which
+    /// nothing may speak to it again.
+    ///
+    /// Every link mattered: while the sweep re-asserted the row every three
+    /// seconds the staleness clock never advanced, so the retirement that ends
+    /// the probing could never happen and the sweep fed itself forever.
+    #[tokio::test]
+    async fn an_exited_session_with_a_dead_pane_is_never_probed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let key = hooked_session(
+            pool,
+            &sink,
+            "sess-exited",
+            "tmux_gone:2.1",
+            "pane=%78;pid=902;session_started=1785400000",
+            1_000,
+        )
+        .await;
+        // The pane goes away; the sweep marks the route unreachable.
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            Vec::new(),
+            2_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("sweep");
+        // 15 minutes of silence later the reaper can finally retire it.
+        reap_stale_sessions(pool, &sink, 2_000 + SESSION_STALE_TTL_MS)
+            .await
+            .expect("reap");
+        let retired = FleetRepo::get_session(pool, &key).await.unwrap().unwrap();
+        assert_eq!(retired.lifecycle_state, "EXITED");
+
+        let before = transition_count(pool, &key).await;
+        for tick in 0..5 {
+            reconcile_discovered_panes(
+                pool,
+                &sink,
+                Vec::new(),
+                2_000_000 + tick * 3_000,
+                ReconcilePass::PanesAndMissing,
+            )
+            .await
+            .expect("tick");
+        }
+        assert_eq!(
+            transition_count(pool, &key).await,
+            before,
+            "a terminal state must be terminal: no further transitions, ever"
+        );
+        assert_eq!(
+            FleetRepo::get_session(pool, &key).await.unwrap().unwrap().version,
+            retired.version,
+            "and no further writes to the row either"
+        );
+    }
+
+    /// A live pane that has not changed is not news. Repeated ticks against it
+    /// must write nothing at all — no transitions, no version bumps.
+    #[tokio::test]
+    async fn repeated_ticks_against_an_unchanged_live_pane_emit_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let target = "tmux_live:1.1";
+        let fingerprint = "pane=%12;pid=555;session_started=1785400000";
+        let key = hooked_session(pool, &sink, "sess-live", target, fingerprint, 1_000).await;
+
+        // Settle first, then measure: the head must not move afterwards.
+        let pane = scanned_pane(target, fingerprint, Provider::Unknown);
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            vec![pane.clone()],
+            2_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("settling tick");
+
+        let head = FleetRepo::snapshot(pool).await.unwrap().head_revision;
+        let version = FleetRepo::get_session(pool, &key).await.unwrap().unwrap().version;
+        for tick in 0..6 {
+            reconcile_discovered_panes(
+                pool,
+                &sink,
+                vec![pane.clone()],
+                3_000 + tick * 3_000,
+                ReconcilePass::PanesAndMissing,
+            )
+            .await
+            .expect("tick");
+        }
+
+        assert_eq!(
+            FleetRepo::snapshot(pool).await.unwrap().head_revision,
+            head,
+            "an unchanged live pane must append nothing to the ledger"
+        );
+        assert_eq!(
+            FleetRepo::get_session(pool, &key).await.unwrap().unwrap().version,
+            version,
+            "nor rewrite its row"
+        );
+    }
+
+    /// The pane's pid drifts between the hook's read and the scan. Wave 1 taught
+    /// the duplicate check to see through that; the restore pass was left
+    /// matching on the exact fingerprint, so a drifted MANAGED row could never
+    /// be brought back to HEALTHY by this loop — only by the next hook. Both
+    /// passes now read one shared resolution, so the asymmetry is gone.
+    #[tokio::test]
+    async fn a_drifted_pid_row_is_restored_to_healthy_by_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let target = "tmux_drift:1.1";
+        let key = hooked_session(
+            pool,
+            &sink,
+            "sess-drift",
+            target,
+            "pane=%4257;pid=69099;session_started=1785436252",
+            1_000,
+        )
+        .await;
+        // Discovery failed once, so the route was downgraded.
+        mark_tmux_unavailable(pool, &sink, 2_000).await.expect("downgrade");
+        assert_eq!(
+            FleetRepo::get_session(pool, &key).await.unwrap().unwrap().transport_health,
+            "UNAVAILABLE"
+        );
+
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            vec![scanned_pane(
+                target,
+                "pane=%4257;pid=68868;session_started=1785436252",
+                Provider::Unknown,
+            )],
+            3_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("tick");
+
+        assert_eq!(
+            FleetRepo::get_session(pool, &key).await.unwrap().unwrap().transport_health,
+            "HEALTHY",
+            "the pane is live; only its pid drifted"
+        );
+    }
+
+    /// The discovery-failure downgrade must also be idempotent. It carried no
+    /// state check at all and wrote one event for every routed row on every
+    /// failure — 58,679 `tmux_unavailable` rows in a day.
+    #[tokio::test]
+    async fn a_repeated_discovery_failure_downgrades_a_route_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let key = hooked_session(
+            pool,
+            &sink,
+            "sess-flap",
+            "tmux_flap:1.1",
+            "pane=%13;pid=556;session_started=1785400000",
+            1_000,
+        )
+        .await;
+
+        for tick in 0..5 {
+            mark_tmux_unavailable(pool, &sink, 2_000 + tick * 3_000)
+                .await
+                .expect("downgrade");
+        }
+        assert_eq!(
+            transition_count(pool, &key).await,
+            1,
+            "the route is unavailable; saying it five times is five rows of noise"
+        );
+    }
+
+    /// The sweep is tiered off the discovery tick: a `Panes` pass correlates the
+    /// live panes and leaves every other row alone, so the 3s cadence never
+    /// walks the whole registry.
+    #[tokio::test]
+    async fn a_panes_only_pass_does_not_sweep_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let pool = store.pool();
+
+        let key = hooked_session(
+            pool,
+            &sink,
+            "sess-untouched",
+            "tmux_gone:3.1",
+            "pane=%79;pid=903;session_started=1785400000",
+            1_000,
+        )
+        .await;
+
+        reconcile_discovered_panes(pool, &sink, Vec::new(), 2_000, ReconcilePass::Panes)
+            .await
+            .expect("panes-only tick");
+        assert_eq!(
+            transition_count(pool, &key).await,
+            0,
+            "a panes-only pass must not touch rows no pane accounts for"
+        );
+
+        reconcile_discovered_panes(
+            pool,
+            &sink,
+            Vec::new(),
+            5_000,
+            ReconcilePass::PanesAndMissing,
+        )
+        .await
+        .expect("sweep tick");
+        assert_eq!(
+            transition_count(pool, &key).await,
+            1,
+            "the sweep still reports the dead pane, 30s later instead of 3s"
         );
     }
 
