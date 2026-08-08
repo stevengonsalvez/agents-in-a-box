@@ -37,10 +37,8 @@ ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 # ULID minting for the idempotent `request_id` each write carries.
 ainb-hangar-core = { path = "../ainb-hangar-core" }
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
