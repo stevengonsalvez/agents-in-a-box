@@ -3,11 +3,15 @@
 //!
 //! Part 1 of the chat bus shipped a daemon and a CLI, and every end-to-end proof
 //! it carried drove those two. The TUI is the operating surface, and it consumed
-//! part 1's changes without anything ever opening it: `FleetProvider::Acp` maps
-//! to the string `acp` at exactly one line of `ainb-plugin-hangar`
-//! (`src/screen/fleet.rs`), and a wire token the panel does not recognise falls
-//! to `unknown` SILENTLY. That is a one-line regression nothing else would
-//! catch, on the screen the operator actually looks at.
+//! part 1's changes without anything ever opening it.
+//!
+//! Writing this found the bug it was written to imagine. `ainb-plugin-hangar`
+//! maps a provider TWICE: `FleetSessionRow::from` turns `FleetProvider::Acp`
+//! into the wire token `acp`, and `provider_label` turns that token into what
+//! the operator reads. Part 1 updated the first and not the second, so a chat
+//! session rendered as UNKNOWN on the panel while every daemon-level and
+//! CLI-level test stayed green. That is the class of regression only this
+//! surface can catch.
 //!
 //! So this drives the real `ainb` binary in tmux against an isolated Hangar,
 //! creates the session the way a user would (`ainb fleet acp create`), and reads
@@ -170,33 +174,41 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         .status()
         .expect("launch the TUI");
 
-    let panel = open_fleet_panel(session).unwrap_or_else(|| {
+    open_fleet_panel(session).unwrap_or_else(|| {
         panic!("the Fleet panel never opened:\n{}", capture_pane(session));
     });
 
-    // The pane must show the session AS an ACP session. `unknown` here is the
-    // exact silent regression this tripwire exists for: the panel maps the wire
-    // token in one place and falls back rather than failing.
+    // The panel lands on the action queue, which shows only what needs the
+    // operator; an idle chat session is not on it. `5` is the All view, the
+    // key the pane itself advertises, and the first screen that renders rows.
+    send_key(session, "5");
+
+    // A row reads `<branch>  ·  <PROVIDER>  ·  <attachment>`, so match the
+    // provider IN its row rather than anywhere in the pane: a bare `contains`
+    // would pass on any incidental occurrence and prove nothing.
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut last = panel;
-    let mut seen = false;
+    let mut last = String::new();
+    let mut labelled = None;
     while Instant::now() < deadline {
         last = capture_pane(session);
-        if last.contains("acp") {
-            seen = true;
+        labelled = last.lines().find(|line| line.contains("·  ACP  ·")).map(str::to_string);
+        if labelled.is_some() {
             break;
         }
         thread::sleep(Duration::from_millis(500));
     }
     send_key(session, "Escape");
 
+    // UNKNOWN in the provider column is the exact silent regression this
+    // tripwire exists for: the panel maps a provider twice (wire token, then
+    // display label) and the display half falls back instead of failing.
     assert!(
-        seen,
-        "the Fleet panel never rendered the ACP session {session_key} as `acp`\npane:\n{last}"
+        !last.contains("·  UNKNOWN  ·"),
+        "the panel rendered a session's provider as UNKNOWN, which is how an \
+         unmapped provider degrades silently\npane:\n{last}"
     );
     assert!(
-        !last.contains("unknown"),
-        "the panel rendered a session as `unknown`, which is how an unmapped \
-         provider token degrades silently\npane:\n{last}"
+        labelled.is_some(),
+        "the Fleet panel never rendered the ACP session {session_key} as ACP\npane:\n{last}"
     );
 }
