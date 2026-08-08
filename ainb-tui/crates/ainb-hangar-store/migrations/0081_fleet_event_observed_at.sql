@@ -1,0 +1,31 @@
+-- Hangar v1 schema, migration 0081: make the retention row-delete seek instead
+-- of scan.
+--
+-- Follow-up to 0080, which is deliberately NOT amended: it is already applied to
+-- production databases and sqlx validates recorded migrations by checksum, so
+-- editing its bytes would lock those databases out of booting.
+--
+-- WHAT WAS WRONG. The 30-day DELETE filters `observed_at < ?` and nothing
+-- indexed that column, so its steady state -- the common case, where the whole
+-- ledger is younger than the cutoff and nothing matches -- walked all 1.1M rows
+-- of the fleet_event btree, once an hour, to delete nothing. Same page-cache
+-- pressure this retention work exists to remove.
+--
+-- WHY THE KEY IS (observed_at, revision). Measured with EXPLAIN QUERY PLAN, the
+-- index alone is not enough: while the delete carried `ORDER BY e.revision`,
+-- SQLite preferred a full INTEGER PRIMARY KEY scan to satisfy that ordering and
+-- ignored this index entirely. The query was changed to
+-- `ORDER BY e.observed_at, e.revision` to match the index key, and only then
+-- does the plan become `SEARCH e USING INDEX idx_fleet_event_observed_at
+-- (observed_at<?)`. The two must stay in step: re-ordering that query by
+-- revision alone silently reverts to the full scan with no other symptom.
+--
+-- The new ordering is also the honest one for a retention policy -- oldest
+-- OBSERVATION first is the thing the 30-day rule is actually about, and
+-- revision only approximated it.
+--
+-- Not partial. Unlike 0080's sweep index there is no tombstone to exclude: the
+-- row delete applies uniformly across event types and both swept and unswept
+-- rows are candidates.
+CREATE INDEX idx_fleet_event_observed_at
+    ON fleet_event(observed_at, revision);

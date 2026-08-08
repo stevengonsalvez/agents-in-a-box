@@ -98,6 +98,14 @@ impl FleetRetentionRepo {
     /// - the ledger head is never deleted, so `MAX(revision)` cannot move
     ///   backwards under a subscriber's cursor (same guard as 0075).
     ///
+    /// `ORDER BY observed_at, revision` is load-bearing, not cosmetic: it is
+    /// the key of `idx_fleet_event_observed_at` (migration 0081), and ordering
+    /// by `revision` alone makes `SQLite` prefer a full `INTEGER PRIMARY KEY`
+    /// scan to satisfy the sort and ignore that index — turning the steady
+    /// state, where nothing is old enough to delete, back into an hourly walk
+    /// of the whole ledger. Confirmed with `EXPLAIN QUERY PLAN`; there is no
+    /// other symptom if the two drift apart.
+    ///
     /// Returns rows deleted. Call in a loop until it returns 0.
     ///
     /// # Errors
@@ -115,7 +123,7 @@ impl FleetRetentionRepo {
                   AND NOT EXISTS (\
                      SELECT 1 FROM fleet_session s \
                      WHERE s.current_request_fingerprint = e.request_fingerprint) \
-                ORDER BY e.revision ASC LIMIT ?)",
+                ORDER BY e.observed_at ASC, e.revision ASC LIMIT ?)",
         )
         .bind(before_ms)
         .bind(limit.max(0))
@@ -148,16 +156,26 @@ impl FleetRetentionRepo {
 
     /// Total bytes of `fleet_event` payload still holding content.
     ///
-    /// The input to the byte ceiling. Costs one pass over the `fleet_event`
-    /// btree, but `length()` over a text column is the one aggregate `SQLite`
-    /// answers WITHOUT faulting in overflow pages, so an 800 MB table is read
-    /// as its page headers rather than its bodies.
+    /// The input to the byte ceiling.
+    ///
+    /// `LENGTH(CAST(payload AS BLOB))`, never a bare `LENGTH(payload)`. The
+    /// content-skipping optimisation that lets `SQLite` answer a length from a
+    /// row header applies to BLOB only: on TEXT, `length()` counts UTF-8
+    /// CHARACTERS, so it must fault in every overflow page it measures.
+    /// Measured on a 164 MB fixture — `SUM(LENGTH(text_col))` 0.178s versus
+    /// `SUM(LENGTH(CAST(text_col AS BLOB)))` 0.064s, the latter matching a bare
+    /// `COUNT(*)` at 0.030s. Reading 700 MB of payload through the page cache
+    /// once an hour to answer one number is exactly the pressure this module
+    /// exists to remove.
+    ///
+    /// Bytes are also the honest unit here: the ceiling is about disk, and a
+    /// character count is not a byte count for any payload with non-ASCII in it.
     ///
     /// # Errors
     /// Propagates the `SQLite` read failure.
     pub async fn live_payload_bytes(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
         sqlx::query_scalar(
-            "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM fleet_event \
+            "SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM fleet_event \
              WHERE payload_evicted_at IS NULL",
         )
         .fetch_one(pool)
@@ -169,6 +187,7 @@ impl FleetRetentionRepo {
 mod tests {
     use super::*;
     use crate::Store;
+    use sqlx::Row as _;
 
     async fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -379,32 +398,25 @@ mod tests {
         );
     }
 
-    /// The byte ceiling counts only bodies still holding content.
+    /// The byte ceiling counts BYTES, and only bodies still holding content.
+    ///
+    /// The payloads are deliberately non-ASCII. A bare `LENGTH()` on a TEXT
+    /// column counts UTF-8 CHARACTERS, so on any payload carrying an em dash or
+    /// a non-Latin path it under-reports the disk it is supposed to be
+    /// bounding — and it is the same bare `LENGTH()` that forces `SQLite` to
+    /// fault in every overflow page to do it. One assertion pins both the unit
+    /// and, by consequence, the cheap plan.
     #[tokio::test]
-    async fn live_payload_bytes_excludes_evicted_rows() {
+    async fn live_payload_bytes_counts_bytes_not_characters_and_drops_evicted_rows() {
         let (_dir, store) = store().await;
         let pool = store.pool();
         seed_session(pool, "claude:s-1", None).await;
-        seed_event(
-            pool,
-            "e-1",
-            "claude:s-1",
-            100,
-            "PostToolUse",
-            r#"{"a":"bbbb"}"#,
-            None,
-        )
-        .await;
-        seed_event(
-            pool,
-            "e-2",
-            "claude:s-1",
-            9_000,
-            "PostToolUse",
-            r#"{"a":"bbbb"}"#,
-            None,
-        )
-        .await;
+        // 10 characters but 13 bytes: 'é' is 2 and '—' is 3.
+        let body = r#"{"a":"é—"}"#;
+        assert_eq!(body.chars().count(), 10);
+        assert_eq!(body.len(), 13);
+        seed_event(pool, "e-1", "claude:s-1", 100, "PostToolUse", body, None).await;
+        seed_event(pool, "e-2", "claude:s-1", 9_000, "PostToolUse", body, None).await;
 
         let before = FleetRetentionRepo::live_payload_bytes(pool).await.unwrap();
         FleetRetentionRepo::evict_payloads_before(pool, 1_000, 5_000, 100)
@@ -412,7 +424,73 @@ mod tests {
             .unwrap();
         let after = FleetRetentionRepo::live_payload_bytes(pool).await.unwrap();
 
-        assert_eq!(before, 24, "two 12-byte payloads");
-        assert_eq!(after, 12, "the evicted row leaves the accounting entirely");
+        assert_eq!(
+            before, 26,
+            "two 13-BYTE payloads — a character count would say 20 and under-report the disk"
+        );
+        assert_eq!(after, 13, "the evicted row leaves the accounting entirely");
+    }
+
+    /// The row delete must SEEK on `idx_fleet_event_observed_at`, never scan.
+    ///
+    /// Its steady state is the common one — nothing is 30 days old, so the
+    /// query matches nothing — and without the index that costs a full walk of
+    /// the whole ledger every hour to delete zero rows. Asserted on the PLAN
+    /// because there is no other symptom: the results are identical either way,
+    /// only the cost differs, and reordering the query by `revision` alone is
+    /// enough to silently lose the index (measured: `SQLite` then prefers the
+    /// `INTEGER PRIMARY KEY` scan to satisfy the sort).
+    ///
+    /// Mirrors `fleet_provider_event`'s own plan guard on its partial index.
+    #[tokio::test]
+    async fn the_row_delete_seeks_on_the_observed_at_index() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        seed_session(pool, "claude:s-1", None).await;
+        for n in 0..64 {
+            seed_event(
+                pool,
+                &format!("e-{n}"),
+                "claude:s-1",
+                n,
+                "PostToolUse",
+                "{}",
+                None,
+            )
+            .await;
+        }
+        sqlx::query("ANALYZE").execute(pool).await.unwrap();
+
+        // The exact subquery `delete_events_before` runs, prefixed.
+        let rows = sqlx::query(
+            "EXPLAIN QUERY PLAN \
+             SELECT e.revision FROM fleet_event e \
+             WHERE e.observed_at < ? \
+               AND e.revision < (SELECT MAX(revision) FROM fleet_event) \
+               AND NOT EXISTS (\
+                  SELECT 1 FROM fleet_session s \
+                  WHERE s.current_request_fingerprint = e.request_fingerprint) \
+             ORDER BY e.observed_at ASC, e.revision ASC LIMIT ?",
+        )
+        .bind(10_i64)
+        .bind(500_i64)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let detail = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            detail.contains("idx_fleet_event_observed_at"),
+            "the retention delete must seek the observed_at index, plan was:\n{detail}"
+        );
+        assert!(
+            detail.contains("idx_fleet_session_current_request"),
+            "and the live-request guard must ride its own index rather than \
+             rebuilding an AUTOMATIC one per batch, plan was:\n{detail}"
+        );
     }
 }
