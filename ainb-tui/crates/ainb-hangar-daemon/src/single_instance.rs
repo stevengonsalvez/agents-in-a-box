@@ -64,7 +64,16 @@ pub enum Ownership {
 /// `<home>/hangar` directory the store and pid file need, so it is fatal rather
 /// than a reason to boot unguarded.
 pub fn acquire(dir: &Path) -> std::io::Result<Ownership> {
-    acquire_with(dir, holder_is_live_daemon)
+    match acquire_with(dir, holder_is_live_daemon)? {
+        // Sample twice before declining on `Contended`. That verdict means the
+        // path churned for the whole window without ever naming a live holder,
+        // which is NOT evidence that someone else won it — and if every
+        // contender declined on one such sample, the home would end up with no
+        // daemon at all. A second pass costs one fail-fast window and turns the
+        // usual case (someone did win) into an honest `HeldBy`.
+        Ownership::Contended => acquire_with(dir, holder_is_live_daemon),
+        won_or_held => Ok(won_or_held),
+    }
 }
 
 /// [`acquire`] with an injectable holder predicate, so the decision table is

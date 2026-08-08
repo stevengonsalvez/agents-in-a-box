@@ -448,10 +448,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             );
             return Ok(());
         }
+        // Two fail-fast windows elapsed with the lock churning and no live
+        // holder to name. Almost always another daemon booting; logged as a
+        // warning rather than an info because, unlike `HeldBy`, we cannot point
+        // at the daemon that won.
         single_instance::Ownership::Contended => {
-            tracing::info!(
+            tracing::warn!(
                 lock = %single_instance::lock_path_in(&dir).display(),
-                "another hangar daemon is taking this home; exiting"
+                "hangar home is contended and no holder could be named; exiting"
             );
             return Ok(());
         }
