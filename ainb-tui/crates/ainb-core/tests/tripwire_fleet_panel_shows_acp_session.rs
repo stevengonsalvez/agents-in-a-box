@@ -34,7 +34,7 @@ fn tmux_available() -> bool {
 
 /// A HOME with onboarding complete and the notify prompt dismissed, so no
 /// first-run modal eats the `f` that opens the panel.
-fn seed_isolated_home(home: &Path) {
+fn seed_isolated_home(home: &Path, hangar_home: &Path) {
     let base = home.join(".agents-in-a-box");
     let cfg = base.join("config");
     fs::create_dir_all(&cfg).expect("create isolated config dir");
@@ -51,6 +51,15 @@ git_directories = []
         ),
     )
     .expect("seed onboarding.toml");
+    // `notifyd::Paths::from_home` resolves `AINB_HANGAR_HOME` BEFORE `AINB_HOME`,
+    // and this test sets both, so the record has to exist under the hangar home
+    // or the install offer fires and its modal swallows the `f`.
+    seed_notify_dismissed(&base);
+    seed_notify_dismissed(hangar_home);
+}
+
+fn seed_notify_dismissed(base: &Path) {
+    fs::create_dir_all(base).expect("create notify record dir");
     fs::write(
         base.join("install.json"),
         r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#,
@@ -98,8 +107,8 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         .prefix("ainb-acpv-")
         .tempdir_in("/tmp")
         .expect("home tempdir");
-    seed_isolated_home(home_tmp.path());
     let hangar_home = home_tmp.path().join("hangar-home");
+    seed_isolated_home(home_tmp.path(), &hangar_home);
     let _ainb_home = EnvGuard::set("AINB_HOME", home_tmp.path().join(".agents-in-a-box"));
     let _no_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
 
