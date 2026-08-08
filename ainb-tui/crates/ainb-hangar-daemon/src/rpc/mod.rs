@@ -149,6 +149,14 @@ pub fn set_approve_socket_for_test(path: Option<PathBuf>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
 }
 
+/// The approve broker socket this daemon would dial for the current
+/// environment, exposed so a tripwire can pin the home-resolution contract the
+/// waiting Claude hook depends on. Honours [`set_approve_socket_for_test`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn approve_socket_path_for_test() -> std::io::Result<PathBuf> {
+    approve_socket_path()
+}
+
 /// Immutable daemon facts the `hangar/health` snapshot reports.
 ///
 /// Carried alongside the pool so the dispatcher can answer `hangar/health`
@@ -4375,6 +4383,18 @@ fn claude_native_picker_is_visible(pane: &str) -> bool {
     pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
 }
 
+/// The approve broker socket this daemon delivers answers and permission
+/// decisions on.
+///
+/// Resolved through the notifyd path owner, which is the SAME resolver the
+/// waiting Claude hook uses to register (`$AINB_HANGAR_HOME`, else `$AINB_HOME`,
+/// else `~/.agents-in-a-box`). Resolving it independently here is not a style
+/// nit: this function used to read `$AINB_HOME` alone, so a stack running under
+/// `$AINB_HANGAR_HOME` (any sandboxed or second home) dialled the DEFAULT home's
+/// broker instead of its own. Every Fleet interview answer was posted to a
+/// broker that had never seen the session, came back unmatched, and was recorded
+/// as "Claude request no longer waiting" while the hook sat blocked until its
+/// 600s timeout.
 fn approve_socket_path() -> std::io::Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(path) = APPROVE_SOCKET_OVERRIDE
@@ -4385,12 +4405,9 @@ fn approve_socket_path() -> std::io::Result<PathBuf> {
     {
         return Ok(path);
     }
-    std::env::var_os("AINB_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".agents-in-a-box")))
-        .map(|base| base.join("approve.sock"))
-        .ok_or_else(|| std::io::Error::other("cannot resolve approve socket"))
+    ainb_plugin_notifyd::paths::Paths::from_home()
+        .map(|paths| paths.approve_socket)
+        .map_err(|error| std::io::Error::other(format!("cannot resolve approve socket: {error}")))
 }
 
 async fn verified_tmux_send(
