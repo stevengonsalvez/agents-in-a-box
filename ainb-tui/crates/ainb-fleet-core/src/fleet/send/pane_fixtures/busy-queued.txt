@@ -1,0 +1,50 @@
+  178
+  179
+  180
+  181
+  182
+  183
+  184
+  185
+  186
+  187
+  188
+  189
+  190
+  191
+  192
+  193
+  194
+  195
+  196
+  197
+  198
+  199
+  200
+
+✻ Brewed for 5s
+
+❯ second message sent while you are busy, just reply ACK
+
+⏺ ACK
+
+✻ Cooked for 2s
+
+❯ test payload: reply with the numbers 1 to 300, one number per line, nothing else, no tools
+
+· Transmuting…
+
+  ❯ queued message number two, reply ACK
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   …/scratchpad/qfix-cwd  ⚠200 /reflect:errors-ack  🪨 ⛏ 222.7k                                                                                                                                  /rc
+  opus-5·1m · eff high · 🟢 6/50 · ctx [░░░░░░] 7% · 5h [█░░░░░] 21% ↻ 22:00 · wk [░░░░░░] 2% ↻ Aug 14 18:00 · $0.94
+  TOK: ·······················█   MEM: ························   REC: ▂·▂▆█▇▁▂▆▅▁▂·▃··▁·▁▁▅▇▅█
+  UNC: ·······················█   DRN: ·▁·▁·▁·▁▂▁·▁·▁·▁·▁·▁▁▂▁▂   ING: ························
+  CHR: ·······················█   AGT: ········▁···············   COM: ························
+  OUT: ·······················▁   THR: ·······················▁   ERR: ························
+  legend: █ TOK cache≥70%  █ 30-70%  █ <30% (uncached spike)  ▌ THR = cache invalidation
+  ↑ col 1 tokens (TOK/UNC/CHR/OUT) · col 2 ops + THR · col 3 REC/ING/COM/ERR · click label / --explain TOK
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents
