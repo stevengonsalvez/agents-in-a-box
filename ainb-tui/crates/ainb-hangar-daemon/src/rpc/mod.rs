@@ -340,6 +340,12 @@ async fn serve_conn(
     // own cursors; a connection may hold either, both, or neither.
     let mut message_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     let mut transcript_forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // Part 2's confirm cards and activity rows ride the chat-bus subscription
+    // rather than a subscribe verb of their own: a client watching the bus is
+    // by definition the client that wants to see what the copilot asked for and
+    // what it did, and the frozen part-2 surface has no third subscribe method
+    // to add one to.
+    let mut notification_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
     // this per-connection task (and its fd) forever. The RPC is request/response
@@ -375,6 +381,10 @@ async fn serve_conn(
             let pending_transcript_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::FLEET_TRANSCRIPT_SUBSCRIBE)
                     .then(|| broker.subscribe_transcript())
+            });
+            let pending_notification_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::FLEET_MESSAGE_SUBSCRIBE)
+                    .then(|| broker.subscribe_notifications())
             });
             let resp = match &req {
                 Ok(req) => dispatch(&pool, req, &health, &events).await,
@@ -476,6 +486,13 @@ async fn serve_conn(
                         start_id,
                         out_tx.clone(),
                     ));
+                    if let Some(old) = notification_forwarder.take() {
+                        old.abort();
+                    }
+                    let notify_rx =
+                        pending_notification_rx.unwrap_or_else(|| broker.subscribe_notifications());
+                    notification_forwarder =
+                        Some(spawn_notification_forwarder(notify_rx, out_tx.clone()));
                 } else if acked && req.method == methods::FLEET_TRANSCRIPT_SUBSCRIBE {
                     if let Some(old) = transcript_forwarder.take() {
                         old.abort();
@@ -521,6 +538,9 @@ async fn serve_conn(
         f.abort();
     }
     if let Some(f) = transcript_forwarder {
+        f.abort();
+    }
+    if let Some(f) = notification_forwarder {
         f.abort();
     }
     drop(out_tx);
@@ -685,6 +705,38 @@ fn spawn_fleet_forwarder(
 /// `start_id` is resolved to a cursor ONCE here rather than on the socket
 /// thread: ids are stable, so a row committed between the acknowledgement and
 /// this task starting is still picked up by the first page.
+/// Forward part 2's `fleet/confirm_event` and `fleet/activity_event` frames.
+///
+/// Payload-carrying, not cursor-carrying: a confirm card is one row that
+/// changes state rather than an append-only log, so there is no cursor that
+/// means "the card is answered now". A lagged receiver therefore misses a frame
+/// and re-reads the truth from `fleet/confirm_list` / `fleet/activity_list`,
+/// which is the same self-healing contract every other channel here has.
+fn spawn_notification_forwarder(
+    mut rx: broadcast::Receiver<(&'static str, serde_json::Value)>,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok((method, params)) => {
+                    if out.send(encode_notification_frame(method, &params)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(
+                        missed,
+                        "chat notification receiver lagged; the client re-reads via \
+                         fleet/confirm_list and fleet/activity_list"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    })
+}
+
 fn spawn_message_forwarder(
     pool: SqlitePool,
     mut rx: broadcast::Receiver<i64>,
@@ -1186,6 +1238,14 @@ async fn handle(
         methods::FLEET_TRANSCRIPT_LIST => handle_fleet_transcript_list(pool, req).await,
         methods::FLEET_TRANSCRIPT_SUBSCRIBE => handle_fleet_transcript_subscribe(pool, req).await,
         methods::FLEET_TRANSCRIPT_PRUNE => handle_fleet_transcript_prune(pool, req).await,
+        // Part 2's chat surface. Each arm's capability is advertised in the
+        // same change that landed it (part 1's Phase 2/3 rule).
+        methods::FLEET_CHANNEL_CREATE => handle_fleet_channel_create(pool, req).await,
+        methods::FLEET_CHANNEL_LIST => handle_fleet_channel_list(pool, req).await,
+        methods::FLEET_COPILOT_CONFIGURE => handle_fleet_copilot_configure(pool, req, events).await,
+        methods::FLEET_CONFIRM_LIST => handle_fleet_confirm_list(pool, req).await,
+        methods::FLEET_CONFIRM_ANSWER => handle_fleet_confirm_answer(pool, req, events).await,
+        methods::FLEET_ACTIVITY_LIST => handle_fleet_activity_list(pool, req).await,
         methods::FLEET_REPROJECT_CLAUDE_INTERVIEW => {
             handle_fleet_reproject_claude_interview(pool, req, events).await
         }
@@ -1647,8 +1707,9 @@ async fn message_send_inner(
 
     use ainb_hangar_proto::fleet::{
         ActionReceiptStatus, FLEET_MESSAGE_BODY_MAX, FLEET_MESSAGE_TARGETS_MAX,
-        FleetMessageDelivery, FleetMessageSendResult,
+        FleetMessageDelivery, FleetMessageSendResult, FleetScope,
     };
+    use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
     use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
 
     if params.text.trim().is_empty() {
@@ -1696,6 +1757,48 @@ async fn message_send_inner(
         .collect();
     if targets.is_empty() {
         return Err(invalid_params("targets must name at least one session"));
+    }
+
+    // A CHANNEL scope's recipients are its membership, and nothing else.
+    //
+    // A session scope already carries this rule implicitly: absent a scope_key
+    // a single-target send mints `session:<target>`, so the scope and the
+    // recipient are the same fact. A channel scope is the first case where the
+    // two can disagree, and the disagreement is the interesting one: a send
+    // addressed to `channel:X` but delivered to a session that is not on X
+    // would put the message in X's timeline, where every member reads it, while
+    // delivering it to somebody who was never invited. Fail closed on both
+    // halves: an unknown channel scope, and a target the channel does not name.
+    if let Some(FleetScope::Channel(_)) = params.scope_key.as_deref().and_then(FleetScope::parse) {
+        let scope = params.scope_key.clone().unwrap_or_default();
+        let channel = FleetChannelRepo::by_scope(pool, &scope)
+            .await
+            .map_err(|error| store_err(&error))?
+            .ok_or_else(|| invalid_params(&format!("scope_key {scope:?} names no channel")))?;
+        // A COPILOT channel's membership is not its recipient list: it has
+        // none, because `fleet/channel_create` refuses one on the grounds that
+        // the members ARE the ACP session created against the minted scope.
+        // Resolve that session HERE, or the channel's only true member is a
+        // stranger to its own membership check and every operator message into
+        // the copilot channel is refused.
+        let mut members = channel.recipients.clone();
+        if channel.kind == "copilot" {
+            if let Some(session) =
+                ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo::get_live_by_scope(
+                    pool, &scope,
+                )
+                .await
+                .map_err(|error| store_err(&error))?
+            {
+                members.push(session.session_key);
+            }
+        }
+        if let Some(stranger) = targets.iter().find(|target| !members.contains(target)) {
+            return Err(invalid_params(&format!(
+                "session {stranger:?} is not a member of channel {:?}",
+                channel.name
+            )));
+        }
     }
 
     // The fingerprint hashes the REQUEST as the client wrote it, so a retry
@@ -2333,6 +2436,337 @@ async fn handle_fleet_transcript_prune(
         exported,
         deleted: u32::try_from(deleted).unwrap_or(u32::MAX),
         export_path,
+    })
+}
+
+// ---------------------------------------------------- part 2: chat channels,
+// copilot config, guardrail confirms, activity feed (buzz-port part 2, A2).
+
+/// Mint one channel and the `channel:<id>` scope it owns.
+async fn handle_fleet_channel_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CHAT_WRITE, FLEET_CHANNEL_NAME_MAX, FLEET_CHANNEL_RECIPIENTS_MAX,
+        FleetChannelCreateParams, FleetChannelCreateResult, FleetChannelKind,
+    };
+    use ainb_hangar_store::repo::fleet_chat::{FleetChannelRepo, FleetChannelRow};
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_WRITE)?;
+    let params: FleetChannelCreateParams = parse_params(req, "{ kind, name, recipients? }")?;
+    let name = params.name.trim().to_string();
+    if name.is_empty() {
+        return Err(invalid_params("name must not be empty"));
+    }
+    if name.len() > FLEET_CHANNEL_NAME_MAX {
+        return Err(invalid_params(&format!(
+            "name must be at most {FLEET_CHANNEL_NAME_MAX} bytes, got {}",
+            name.len()
+        )));
+    }
+    // The RAW list, like `message_send`'s target ceiling: a channel fan-out is
+    // ONE send with N legs, so a channel too big to address in a single send is
+    // a channel whose messages would only ever reach a prefix of its members.
+    let raw = params.recipients.unwrap_or_default();
+    if raw.len() > FLEET_CHANNEL_RECIPIENTS_MAX {
+        return Err(invalid_params(&format!(
+            "recipients must name at most {FLEET_CHANNEL_RECIPIENTS_MAX} sessions, got {}",
+            raw.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let recipients: Vec<String> = raw
+        .into_iter()
+        .filter(|key| !key.trim().is_empty())
+        .filter(|key| seen.insert(key.clone()))
+        .collect();
+    // A copilot channel's membership is the ACP session that ANSWERS on it, and
+    // that session is minted by `fleet/acp_session_create` against this scope.
+    // Accepting a recipient list here would create a second, contradictory
+    // notion of who is on the channel. `message_send`'s channel check resolves
+    // that session through the scope for exactly this reason.
+    if params.kind == FleetChannelKind::Copilot && !recipients.is_empty() {
+        return Err(invalid_params(
+            "a copilot channel has no recipient list; create its ACP session against the minted scope_key",
+        ));
+    }
+    let id = SystemIdGen.new_ulid();
+    let row = FleetChannelRow {
+        scope_key: format!("channel:{id}"),
+        id,
+        kind: match params.kind {
+            FleetChannelKind::Copilot => "copilot",
+            FleetChannelKind::Broadcast => "broadcast",
+        }
+        .to_string(),
+        name,
+        recipients,
+        created_at: SystemClock.now_ms(),
+    };
+    let row = FleetChannelRepo::insert(pool, &row).await.map_err(|error| store_err(&error))?;
+    tracing::info!(channel_id = %row.id, scope_key = %row.scope_key, "fleet channel created");
+    to_value(&FleetChannelCreateResult {
+        channel: wire_channel(&row),
+    })
+}
+
+/// Every channel and its membership.
+async fn handle_fleet_channel_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CHAT_READ, FleetChannelListParams, FleetChannelListResult,
+    };
+    use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
+    let _params: FleetChannelListParams = parse_params(req, "{}")?;
+    let channels = FleetChannelRepo::list(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&FleetChannelListResult {
+        channels: channels.iter().map(wire_channel).collect(),
+    })
+}
+
+fn wire_channel(
+    row: &ainb_hangar_store::repo::fleet_chat::FleetChannelRow,
+) -> ainb_hangar_proto::fleet::FleetChannel {
+    use ainb_hangar_proto::fleet::{FleetChannel, FleetChannelKind};
+
+    FleetChannel {
+        id: row.id.clone(),
+        kind: if row.kind == "copilot" {
+            FleetChannelKind::Copilot
+        } else {
+            FleetChannelKind::Broadcast
+        },
+        name: row.name.clone(),
+        scope_key: row.scope_key.clone(),
+        recipients: row.recipients.clone(),
+        created_at: row.created_at,
+    }
+}
+
+/// Write the copilot session's per-session adapter config (migration 0080).
+///
+/// The refusal this handler exists to make explicit: a `permission_mode` (under
+/// any spelling) is REJECTED, not ignored. serde drops unknown keys by default,
+/// so an operator who sent one would otherwise get a success response for a
+/// setting the daemon never applied — and the one setting they would most
+/// plausibly try to send here is the one that turns the whole permission
+/// surface off. Loud beats silent when the silent answer reads as "done".
+async fn handle_fleet_copilot_configure(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_COPILOT_CONFIGURE, FLEET_COPILOT_PERSONA_MAX, FleetCopilotConfigureParams,
+        FleetCopilotConfigureResult, FleetCopilotProvider,
+    };
+    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionConfig, FleetAcpSessionRepo};
+    use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_COPILOT_CONFIGURE)?;
+    if let Some(object) = req.params.as_object() {
+        for forbidden in ["permission_mode", "permissionMode", "mode"] {
+            if object.contains_key(forbidden) {
+                return Err(invalid_params(
+                    "the permission mode is daemon config and is not settable per session; \
+                     it is pinned at session/new and re-asserted after load",
+                ));
+            }
+        }
+    }
+    let params: FleetCopilotConfigureParams =
+        parse_params(req, "{ provider, model?, reasoning_effort?, persona? }")?;
+    let adapter = match params.provider {
+        FleetCopilotProvider::Claude => "claude-agent-acp",
+        FleetCopilotProvider::Codex => "codex-acp",
+    };
+    let persona = params.persona.clone();
+    if let Some(persona) = &persona {
+        if persona.len() > FLEET_COPILOT_PERSONA_MAX {
+            return Err(invalid_params(&format!(
+                "persona must be at most {FLEET_COPILOT_PERSONA_MAX} bytes, got {}",
+                persona.len()
+            )));
+        }
+    }
+
+    // The copilot session is the live ACP session on the newest copilot
+    // channel's scope. Resolved here rather than named in the params because
+    // the copilot is a SINGLETON per channel: a session key on the wire would
+    // let this method configure any ACP session in the fleet.
+    let channel = FleetChannelRepo::newest_of_kind(pool, "copilot")
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| {
+            invalid_params(
+                "no copilot channel exists; create one with fleet/channel_create {kind: copilot}",
+            )
+        })?;
+    let session = FleetAcpSessionRepo::get_live_by_scope(pool, &channel.scope_key)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| {
+            invalid_params(&format!(
+                "copilot channel {:?} has no live ACP session; create one with \
+                 fleet/acp_session_create {{ scope_key: {:?} }}",
+                channel.scope_key, channel.scope_key
+            ))
+        })?;
+    // A provider swap is a DIFFERENT adapter process and a different session;
+    // silently writing the new token onto the old row would leave a session
+    // whose stored provider and running adapter disagree.
+    if session.provider != adapter {
+        return Err(invalid_params(&format!(
+            "the copilot session runs {:?}; a provider change needs a new session on a new channel",
+            session.provider
+        )));
+    }
+
+    let config = FleetAcpSessionConfig {
+        model: params.model.clone(),
+        reasoning_effort: params.reasoning_effort.clone(),
+        persona,
+    };
+    FleetAcpSessionRepo::set_config(pool, &session.session_key, &config, SystemClock.now_ms())
+        .await
+        .map_err(|error| internal(&format!("store error: {error}")))?;
+    // The persona is a system prompt for an agent holding destructive tools, so
+    // every change is logged where an operator reviews copilot behaviour. The
+    // TEXT is deliberately not in the row: this feed is readable by anyone with
+    // `fleet.chat.read`, and the persona is gated behind a stronger capability.
+    let detail = format!(
+        "provider={adapter} model={} reasoning={} persona={}",
+        config.model.as_deref().unwrap_or("-"),
+        config.reasoning_effort.as_deref().unwrap_or("-"),
+        if config.persona.is_some() { "set" } else { "-" }
+    );
+    crate::copilot::record_configure(pool, events, &channel.scope_key, &detail).await;
+
+    to_value(&FleetCopilotConfigureResult {
+        session_key: session.session_key,
+        provider: params.provider,
+        model: config.model,
+        reasoning_effort: config.reasoning_effort,
+        persona_set: config.persona.is_some(),
+    })
+}
+
+/// The open confirm cards awaiting an operator.
+async fn handle_fleet_confirm_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CHAT_READ, FleetConfirmListParams, FleetConfirmListResult,
+    };
+    use ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
+    let params: FleetConfirmListParams = parse_params(req, "{ scope_key? }")?;
+    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(invalid_params("scope_key must not be empty"));
+    }
+    // `now` is passed in so a lapsed card is not offered to an operator: the
+    // park's timer is process state, and this list outlives the process.
+    let rows = FleetConfirmRepo::list_open(pool, params.scope_key.as_deref(), SystemClock.now_ms())
+        .await
+        .map_err(|error| store_err(&error))?;
+    to_value(&FleetConfirmListResult {
+        confirms: rows.iter().map(crate::copilot::wire_confirm).collect(),
+    })
+}
+
+/// Answer one confirm card: approve, deny, or approve with edited arguments.
+async fn handle_fleet_confirm_answer(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CONFIRM_ANSWER, FleetConfirmAnswer, FleetConfirmAnswerParams,
+        FleetConfirmAnswerResult,
+    };
+
+    require_fleet_capability(FLEET_CAPABILITY_CONFIRM_ANSWER)?;
+    let params: FleetConfirmAnswerParams =
+        parse_params(req, "{ confirm_id, answer: approve|deny|edit{arguments} }")?;
+    if params.confirm_id.trim().is_empty() {
+        return Err(invalid_params("confirm_id must not be empty"));
+    }
+    let (approve, edited) = match &params.answer {
+        FleetConfirmAnswer::Approve => (true, None),
+        FleetConfirmAnswer::Deny => (false, None),
+        FleetConfirmAnswer::Edit { arguments } => {
+            let object = arguments
+                .as_object()
+                .cloned()
+                .ok_or_else(|| invalid_params("edit arguments must be a JSON object"))?;
+            (true, Some(object))
+        }
+    };
+    let card = crate::copilot::answer(pool, events, &params.confirm_id, approve, edited)
+        .await
+        .map_err(confirm_err)?;
+    tracing::info!(
+        confirm_id = %card.confirm_id,
+        tool = %card.tool,
+        approved = approve,
+        "operator answered a guardrail confirm card"
+    );
+    to_value(&FleetConfirmAnswerResult {
+        confirm_id: card.confirm_id,
+        state: card.state,
+    })
+}
+
+/// Map a confirm-answer failure onto its wire error. A card that is already
+/// answered or already expired is `invalid_params`, never a second execution.
+fn confirm_err(error: crate::copilot::ConfirmError) -> RpcError {
+    match error {
+        crate::copilot::ConfirmError::Sql(error) => store_err(&error),
+        other => invalid_params(&other.to_string()),
+    }
+}
+
+/// Page the copilot activity feed by its commit-ordered cursor.
+async fn handle_fleet_activity_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_ACTIVITY_LIST_MAX, FLEET_CAPABILITY_CHAT_READ, FleetActivityListParams,
+        FleetActivityListResult,
+    };
+    use ainb_hangar_store::repo::fleet_chat::FleetActivityRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
+    let params: FleetActivityListParams = parse_params(req, "{ scope_key?, after_seq?, limit }")?;
+    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(invalid_params("scope_key must not be empty"));
+    }
+    if params.after_seq.is_some_and(|seq| seq < 0) {
+        return Err(invalid_params("after_seq must not be negative"));
+    }
+    let limit = i64::from(params.limit.clamp(1, FLEET_ACTIVITY_LIST_MAX));
+    let rows = FleetActivityRepo::list(
+        pool,
+        params.scope_key.as_deref(),
+        params.after_seq.unwrap_or(0),
+        limit,
+    )
+    .await
+    .map_err(|error| store_err(&error))?;
+    // The cursor is the LAST row's seq, so the next page continues exactly
+    // where this one stopped; `None` on an empty page, never a fabricated 0.
+    let next_after_seq = rows.last().map(|row| row.seq);
+    to_value(&FleetActivityListResult {
+        activities: rows.iter().map(crate::copilot::wire_activity).collect(),
+        next_after_seq,
     })
 }
 

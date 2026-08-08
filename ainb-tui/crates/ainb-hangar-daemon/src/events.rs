@@ -95,6 +95,21 @@ pub struct EventBroker {
     /// `session_key` BEFORE issuing any query: an unrelated session's chunk
     /// costs a wakeup and nothing more.
     transcript_tx: broadcast::Sender<(String, i64)>,
+    /// Part 2's chat notifications (`fleet/confirm_event`,
+    /// `fleet/activity_event`) as `(method, params)` ready to frame.
+    ///
+    /// These carry the PAYLOAD rather than a cursor, unlike the two streams
+    /// above. A confirm card is not an append-only log — it is one row that
+    /// changes state — so there is no cursor that means "the card is answered
+    /// now", and inventing one would be a second ordering key over the same
+    /// table.
+    ///
+    /// ponytail: lossy like every other channel here. A lagged consumer misses
+    /// a card and re-reads it from `fleet/confirm_list` /
+    /// `fleet/activity_list`, which is exactly what those methods are for. If a
+    /// surface ever needs gap-free activity delivery, page it to head off
+    /// `fleet_activity.seq` the way the message forwarder does.
+    notify_tx: broadcast::Sender<(&'static str, serde_json::Value)>,
 }
 
 impl Default for EventBroker {
@@ -114,6 +129,7 @@ impl EventBroker {
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (transcript_tx, _trx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (notify_tx, _nrx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
             outbox_tx: None,
@@ -121,6 +137,7 @@ impl EventBroker {
             fleet_tx,
             message_tx,
             transcript_tx,
+            notify_tx,
         }
     }
 
@@ -139,6 +156,7 @@ impl EventBroker {
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (transcript_tx, _trx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (notify_tx, _nrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
         (
             Self {
@@ -148,6 +166,7 @@ impl EventBroker {
                 fleet_tx,
                 message_tx,
                 transcript_tx,
+                notify_tx,
             },
             outbox_rx,
         )
@@ -163,6 +182,7 @@ impl EventBroker {
             fleet_tx: self.fleet_tx.clone(),
             message_tx: self.message_tx.clone(),
             transcript_tx: self.transcript_tx.clone(),
+            notify_tx: self.notify_tx.clone(),
         }
     }
 
@@ -207,6 +227,16 @@ impl EventBroker {
     pub fn subscribe_transcript(&self) -> broadcast::Receiver<(String, i64)> {
         self.transcript_tx.subscribe()
     }
+
+    /// A fresh receiver onto part 2's chat notification stream. The RPC server
+    /// opens one alongside a chat-bus subscription, so a client watching the
+    /// bus also sees the confirm cards and activity rows that bus produced.
+    #[must_use]
+    pub fn subscribe_notifications(
+        &self,
+    ) -> broadcast::Receiver<(&'static str, serde_json::Value)> {
+        self.notify_tx.subscribe()
+    }
 }
 
 /// A publishing handle onto the broker, threaded through the daemon's mutation
@@ -219,6 +249,7 @@ pub struct EventSink {
     fleet_tx: broadcast::Sender<i64>,
     message_tx: broadcast::Sender<i64>,
     transcript_tx: broadcast::Sender<(String, i64)>,
+    notify_tx: broadcast::Sender<(&'static str, serde_json::Value)>,
 }
 
 impl EventSink {
@@ -270,6 +301,16 @@ impl EventSink {
     /// commits for `session_key`.
     pub fn emit_transcript_order(&self, session_key: &str, ingest_order: i64) {
         let _ = self.transcript_tx.send((session_key.to_string(), ingest_order));
+    }
+
+    /// Publish one part-2 chat notification (`fleet/confirm_event`,
+    /// `fleet/activity_event`) to every live chat subscriber.
+    ///
+    /// `method` is a `&'static str` on purpose: the only legal values are the
+    /// consts in [`ainb_hangar_proto::methods::FLEET_PROTOCOL_NOTIFICATION_METHODS`],
+    /// and a `String` here would invite a formatted method name onto the wire.
+    pub fn emit_fleet_notification(&self, method: &'static str, params: serde_json::Value) {
+        let _ = self.notify_tx.send((method, params));
     }
 }
 
