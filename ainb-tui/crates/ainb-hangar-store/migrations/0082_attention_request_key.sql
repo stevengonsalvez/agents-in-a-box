@@ -1,10 +1,16 @@
--- Hangar migration 0081: collapse repeat hook firings for ONE logical request
+-- Hangar migration 0082: collapse repeat hook firings for ONE logical request
 -- onto ONE `attention` row.
 --
--- Numbered 0081, not 0080: version 80 is already applied on live databases as
--- "fleet event retention" (`_sqlx_migrations` records it with that checksum).
--- Shipping different content under version 80 would fail sqlx's checksum
--- validation and refuse to open the store on boot.
+-- Numbered 0082, not 0080 or 0081. Both of those versions are already applied
+-- on live databases, from a sibling branch: 80 as "fleet event retention" and
+-- 81 as "fleet event observed at". `_sqlx_migrations` records each with its own
+-- checksum, so shipping different content under either version fails sqlx's
+-- checksum validation and refuses to open the store on boot -- observed live as
+-- `migration 81 was previously applied but has been modified`.
+--
+-- Pick the next free version, never backfill a lower one: a version below an
+-- already-applied migration produces the sibling failure mode,
+-- `migration N was previously applied but is missing in the resolved migrations`.
 --
 -- # The defect
 --
