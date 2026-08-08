@@ -22,7 +22,9 @@
 //! set, so `install` must be called once from `main` before any service spans
 //! are emitted.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
@@ -332,6 +334,324 @@ pub fn install(opts: ObservabilityOpts) -> anyhow::Result<Guard> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Crash breadcrumbs that survive SIGKILL
+// ---------------------------------------------------------------------------
+//
+// `tracing` only records what user code gets to run. Four daemon deaths in one
+// day left two with no ERROR line and no panic — the JSON log simply stops
+// mid-stream, which is the signature of SIGKILL / abort / an OOM kill, none of
+// which run a panic hook or any other user code.
+//
+// So the breadcrumb has to be inverted: instead of writing something *when* the
+// process dies, keep a file that says "still alive" and delete it only on a
+// shutdown we actually observed. Two files under `<hangar_home>/hangar/`:
+//
+//   daemon.heartbeat    rewritten every 10s while the process lives
+//   daemon.exit-reason  written once, on an observed exit; heartbeat removed
+//
+// The diagnosis is then a single `ls`:
+//
+//   heartbeat present, exit-reason absent   -> running, or killed uncatchably
+//                                              (its `updated_at_ms` says which)
+//   heartbeat absent, exit-reason present   -> observed, explained shutdown
+//
+// The ticker runs on a dedicated OS thread, NOT a tokio task, deliberately: a
+// wedged runtime (every worker blocked in sync code) would freeze a tokio-based
+// heartbeat and be indistinguishable from a kill. A plain thread keeps ticking
+// and tells us "process alive, runtime stuck".
+
+/// File name of the liveness breadcrumb under `<hangar_home>/hangar/`.
+const HEARTBEAT_FILE: &str = "daemon.heartbeat";
+
+/// File name of the observed-exit breadcrumb under `<hangar_home>/hangar/`.
+const EXIT_REASON_FILE: &str = "daemon.exit-reason";
+
+/// How often the heartbeat file is rewritten.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Path of the liveness breadcrumb: `<hangar_home>/hangar/daemon.heartbeat`.
+///
+/// Sibling of `daemon.pid` (see [`crate::pid_path_in`]), so a reader that
+/// resolved the pid file has already resolved this one's directory.
+#[must_use]
+pub fn heartbeat_path_in(hangar_home: &Path) -> PathBuf {
+    hangar_home.join("hangar").join(HEARTBEAT_FILE)
+}
+
+/// Path of the observed-exit breadcrumb: `<hangar_home>/hangar/daemon.exit-reason`.
+#[must_use]
+pub fn exit_reason_path_in(hangar_home: &Path) -> PathBuf {
+    hangar_home.join("hangar").join(EXIT_REASON_FILE)
+}
+
+/// The coarse phase the process believes it is in, reported in every heartbeat.
+///
+/// Process-global so the panic hook and the ticker thread can both read it
+/// without threading a handle through every call site.
+static PHASE: Mutex<&'static str> = Mutex::new("starting");
+
+/// The live breadcrumb writer, installed once by [`start_breadcrumbs`].
+static BREADCRUMBS: OnceLock<Arc<Breadcrumbs>> = OnceLock::new();
+
+/// Mutable ticker state, guarded by one mutex so a tick can never resurrect a
+/// heartbeat that [`record_exit`] has already removed.
+#[derive(Debug, Default)]
+struct TickState {
+    /// Monotonic count of heartbeats written since process start.
+    ticks: u64,
+    /// Set by [`record_exit`]; stops the ticker and makes further exits no-ops.
+    stopped: bool,
+}
+
+/// Owns the two breadcrumb paths and the ticker's shared state.
+#[derive(Debug)]
+struct Breadcrumbs {
+    heartbeat: PathBuf,
+    exit_reason: PathBuf,
+    pid: u32,
+    started_wall: SystemTime,
+    started_mono: Instant,
+    state: Mutex<TickState>,
+    wake: Condvar,
+}
+
+impl Breadcrumbs {
+    /// Seconds since [`start_breadcrumbs`] ran, on the monotonic clock (immune
+    /// to a wall-clock step, which a long-lived daemon will see).
+    fn uptime_secs(&self) -> u64 {
+        self.started_mono.elapsed().as_secs()
+    }
+
+    /// Rewrite the heartbeat file. Best-effort: an IO failure is logged once per
+    /// tick and never propagates — breadcrumb bookkeeping must not be able to
+    /// stop the daemon it is watching.
+    fn write_heartbeat(&self, ticks: u64) {
+        let body = serde_json::json!({
+            "pid": self.pid,
+            "phase": phase(),
+            "ticks": ticks,
+            "started_at_ms": epoch_ms(self.started_wall),
+            "updated_at_ms": epoch_ms(SystemTime::now()),
+            "uptime_secs": self.uptime_secs(),
+            "version": env!("CARGO_PKG_VERSION"),
+        });
+        if let Err(e) = write_atomic(&self.heartbeat, &format!("{body}\n")) {
+            tracing::warn!(error = %e, path = %self.heartbeat.display(), "heartbeat write failed");
+        }
+    }
+}
+
+/// Convert a wall-clock instant to epoch milliseconds (0 if it predates the
+/// epoch, which only a badly wrong clock produces).
+fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+/// Write `body` to `path` via a sibling `.tmp` + rename, so a kill mid-write
+/// leaves the previous complete breadcrumb rather than a truncated one.
+fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The current coarse phase, or `"unknown"` if the lock was poisoned.
+fn phase() -> &'static str {
+    PHASE.lock().map_or("unknown", |p| *p)
+}
+
+/// Record the coarse phase the process is now in; it rides along in every
+/// subsequent heartbeat and in the exit reason.
+///
+/// Today the daemon entry points report only `boot` and `shutdown` — enough to
+/// tell "died during migrations" from "died in the run loop". Finer, loop-level
+/// phases (`claim`, `sweep`, `reconcile`) are a matter of calling this from the
+/// loops themselves; this is the seam for that.
+pub fn note_phase(phase: &'static str) {
+    if let Ok(mut slot) = PHASE.lock() {
+        *slot = phase;
+    }
+}
+
+/// Start writing crash breadcrumbs for this process under `hangar_home`.
+///
+/// Clears any `daemon.exit-reason` left by a previous run (so a stale one can
+/// never be mistaken for this run's), writes the first `daemon.heartbeat`
+/// synchronously (so the file exists the moment this returns), then spawns the
+/// ticker thread.
+///
+/// Best-effort and idempotent: a second call is a no-op, and every IO failure is
+/// logged and swallowed — mirroring [`crate::PidFile::register`], because pid
+/// and breadcrumb bookkeeping must never stop a daemon from booting.
+pub fn start_breadcrumbs(hangar_home: &Path) {
+    let heartbeat = heartbeat_path_in(hangar_home);
+    let exit_reason = exit_reason_path_in(hangar_home);
+
+    if let Some(parent) = heartbeat.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %e, path = %parent.display(), "breadcrumb dir create failed");
+            return;
+        }
+    }
+    // A previous run's exit reason must not be read as this run's.
+    if let Err(e) = std::fs::remove_file(&exit_reason) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, path = %exit_reason.display(), "stale exit-reason removal failed");
+        }
+    }
+
+    let crumbs = Arc::new(Breadcrumbs {
+        heartbeat,
+        exit_reason,
+        pid: std::process::id(),
+        started_wall: SystemTime::now(),
+        started_mono: Instant::now(),
+        state: Mutex::new(TickState::default()),
+        wake: Condvar::new(),
+    });
+    if BREADCRUMBS.set(Arc::clone(&crumbs)).is_err() {
+        tracing::warn!("crash breadcrumbs already started; ignoring second call");
+        return;
+    }
+    crumbs.write_heartbeat(0);
+
+    let ticker = Arc::clone(&crumbs);
+    let spawned = std::thread::Builder::new()
+        .name("ainb-breadcrumb".to_string())
+        .spawn(move || run_ticker(&ticker));
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "breadcrumb ticker thread spawn failed (heartbeat will not refresh)");
+    }
+}
+
+/// The ticker body: wait out the interval, then rewrite the heartbeat, until
+/// [`record_exit`] stops it. Exits promptly on the condvar notify rather than
+/// sleeping out the remaining interval.
+fn run_ticker(crumbs: &Breadcrumbs) {
+    let mut state = match crumbs.state.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    loop {
+        let (next, _) = match crumbs.wake.wait_timeout(state, HEARTBEAT_INTERVAL) {
+            Ok(pair) => pair,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state = next;
+        if state.stopped {
+            return;
+        }
+        state.ticks += 1;
+        crumbs.write_heartbeat(state.ticks);
+    }
+}
+
+/// Record an observed exit: write `daemon.exit-reason` naming `reason`, then
+/// remove `daemon.heartbeat` and stop the ticker.
+///
+/// Order matters — the exit reason lands first, so there is never a window in
+/// which neither file exists (which would read as "no daemon ever ran"). The
+/// first call wins; later ones are no-ops, and a call before
+/// [`start_breadcrumbs`] does nothing.
+pub fn record_exit(reason: &str) {
+    let Some(crumbs) = BREADCRUMBS.get() else {
+        return;
+    };
+    let mut state = match crumbs.state.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if state.stopped {
+        return;
+    }
+    state.stopped = true;
+
+    let body = serde_json::json!({
+        "pid": crumbs.pid,
+        "reason": reason,
+        "phase": phase(),
+        "ticks": state.ticks,
+        "started_at_ms": epoch_ms(crumbs.started_wall),
+        "exited_at_ms": epoch_ms(SystemTime::now()),
+        "uptime_secs": crumbs.uptime_secs(),
+        "recorded_by": "daemon",
+    });
+    if let Err(e) = write_atomic(&crumbs.exit_reason, &format!("{body}\n")) {
+        tracing::warn!(error = %e, path = %crumbs.exit_reason.display(), "exit-reason write failed");
+    }
+    if let Err(e) = std::fs::remove_file(&crumbs.heartbeat) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, path = %crumbs.heartbeat.display(), "heartbeat removal failed");
+        }
+    }
+    drop(state);
+    crumbs.wake.notify_all();
+}
+
+/// Record an exit on a daemon's behalf, from the process that ended it.
+///
+/// `ainb hangar daemon stop` signals the daemon with `SIGTERM`, whose default
+/// disposition runs NO user code in the target — so the daemon itself cannot
+/// write this breadcrumb. The stopper knows the reason and writes it here, once
+/// it has confirmed the pid is gone. Without this, a deliberate `stop` would be
+/// indistinguishable from the SIGKILL/OOM deaths these breadcrumbs exist to
+/// catch.
+///
+/// Best-effort: IO failures are logged and swallowed.
+pub fn record_external_exit(hangar_home: &Path, pid: u32, reason: &str) {
+    let exit_reason = exit_reason_path_in(hangar_home);
+    if let Some(parent) = exit_reason.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %e, path = %parent.display(), "breadcrumb dir create failed");
+            return;
+        }
+    }
+    let body = serde_json::json!({
+        "pid": pid,
+        "reason": reason,
+        "exited_at_ms": epoch_ms(SystemTime::now()),
+        "recorded_by": "stopper",
+    });
+    if let Err(e) = write_atomic(&exit_reason, &format!("{body}\n")) {
+        tracing::warn!(error = %e, path = %exit_reason.display(), "exit-reason write failed");
+    }
+    if let Err(e) = std::fs::remove_file(heartbeat_path_in(hangar_home)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, "heartbeat removal failed");
+        }
+    }
+}
+
+/// Install the daemon's panic hook: log the panic through `tracing` (so it
+/// reaches the JSON sink) *and* to stderr, then delegate to the previous hook.
+///
+/// The `ainb` binary installs an equivalent hook in its own `main`, but the
+/// standalone `ainb-hangar-daemon` binary had none — and `resolve_daemon_launch_for`
+/// prefers that binary whenever it is fresh, so the daemon most likely to be
+/// running was the one with no hook at all.
+///
+/// Chaining to the previous hook keeps the default panic output (location plus
+/// `RUST_BACKTRACE` backtrace), which now reaches disk because the launcher
+/// captures the child's stderr instead of discarding it.
+///
+/// Deliberately does NOT touch the breadcrumbs: a panic inside a spawned run
+/// task is caught and logged by the run loop and the daemon keeps serving, so
+/// writing an exit reason here would declare a live daemon dead.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, phase = phase(), "ainb-hangar-daemon panicked");
+        eprintln!("ainb-hangar-daemon panicked (phase {}): {info}", phase());
+        previous(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::OtlpOpts;
@@ -369,5 +689,128 @@ mod tests {
         let blank = dir.path().join("blank.env");
         std::fs::write(&blank, "export OTEL_EXPORTER_OTLP_ENDPOINT=''\n").unwrap();
         assert!(OtlpOpts::endpoint_from_creds_file(&blank).is_none());
+    }
+
+    /// Both breadcrumbs sit beside `daemon.pid` under `<hangar_home>/hangar/`,
+    /// and — critically — neither the heartbeat nor the exit reason is named
+    /// `daemon.*` inside the LOG dir, so they cannot be swept up by the
+    /// `starts_with("daemon")` glob the log-tail surfaces use.
+    #[test]
+    fn breadcrumb_paths_sit_beside_the_pid_file() {
+        let home = std::path::Path::new("/tmp/home");
+        assert_eq!(
+            super::heartbeat_path_in(home),
+            crate::pid_path_in(home).with_file_name("daemon.heartbeat")
+        );
+        assert_eq!(
+            super::exit_reason_path_in(home),
+            crate::pid_path_in(home).with_file_name("daemon.exit-reason")
+        );
+    }
+
+    /// The atomic writer replaces the file's contents and leaves no `.tmp`
+    /// residue, and the two breadcrumbs use DISTINCT temp names (a shared
+    /// `daemon.tmp` would let a heartbeat tick clobber an in-flight exit
+    /// reason).
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat = dir.path().join("daemon.heartbeat");
+        let exit = dir.path().join("daemon.exit-reason");
+
+        super::write_atomic(&heartbeat, "first\n").unwrap();
+        super::write_atomic(&heartbeat, "second\n").unwrap();
+        super::write_atomic(&exit, "bye\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&heartbeat).unwrap(), "second\n");
+        assert_eq!(std::fs::read_to_string(&exit).unwrap(), "bye\n");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    /// The stopper-written breadcrumb: exit reason appears, heartbeat is
+    /// removed, and the payload names the pid it ended and who recorded it.
+    #[test]
+    fn external_exit_replaces_heartbeat_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("hangar")).unwrap();
+        let heartbeat = super::heartbeat_path_in(dir.path());
+        std::fs::write(&heartbeat, "{}\n").unwrap();
+
+        super::record_external_exit(dir.path(), 4242, "stopped by `ainb hangar daemon stop`");
+
+        assert!(
+            !heartbeat.exists(),
+            "heartbeat must be gone after an observed exit"
+        );
+        let raw = std::fs::read_to_string(super::exit_reason_path_in(dir.path())).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["pid"], 4242);
+        assert_eq!(v["recorded_by"], "stopper");
+        assert_eq!(v["reason"], "stopped by `ainb hangar daemon stop`");
+    }
+
+    /// Full in-process lifecycle. `start_breadcrumbs` installs a process-global
+    /// (a `OnceLock`), so this is deliberately the ONE test that calls it —
+    /// splitting it would make the second call a no-op and the assertions
+    /// meaningless.
+    ///
+    /// The uncatchable-kill half of the invariant (heartbeat survives, exit
+    /// reason absent) cannot be asserted in-process — a test that `kill -9`s
+    /// itself has no one left to assert. It is covered by driving the real
+    /// binary; what is proven here is that only an OBSERVED exit ever removes
+    /// the heartbeat.
+    #[test]
+    fn breadcrumb_lifecycle_heartbeat_then_exit_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat = super::heartbeat_path_in(dir.path());
+        let exit_reason = super::exit_reason_path_in(dir.path());
+        // A previous run's exit reason must be cleared on start, not inherited.
+        std::fs::create_dir_all(exit_reason.parent().unwrap()).unwrap();
+        std::fs::write(&exit_reason, "{\"reason\":\"previous run\"}\n").unwrap();
+
+        super::note_phase("boot");
+        super::start_breadcrumbs(dir.path());
+
+        assert!(
+            heartbeat.exists(),
+            "heartbeat must exist as soon as start returns"
+        );
+        assert!(
+            !exit_reason.exists(),
+            "a previous run's exit reason must be cleared"
+        );
+        let beat: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&heartbeat).unwrap()).unwrap();
+        assert_eq!(beat["pid"], std::process::id());
+        assert_eq!(beat["phase"], "boot");
+        assert_eq!(beat["ticks"], 0);
+
+        super::note_phase("shutdown");
+        super::record_exit("clean exit: run loop returned");
+
+        assert!(
+            !heartbeat.exists(),
+            "an observed exit removes the heartbeat"
+        );
+        let reason: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&exit_reason).unwrap()).unwrap();
+        assert_eq!(reason["reason"], "clean exit: run loop returned");
+        assert_eq!(reason["phase"], "shutdown");
+        assert_eq!(reason["recorded_by"], "daemon");
+
+        // Second exit is a no-op: the first reason stands.
+        super::record_exit("should not overwrite");
+        let reason: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&exit_reason).unwrap()).unwrap();
+        assert_eq!(reason["reason"], "clean exit: run loop returned");
     }
 }

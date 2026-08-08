@@ -8401,7 +8401,30 @@ async fn run_daemon_run() -> Result<()> {
         )
     };
 
+    // Same crash breadcrumbs the standalone binary lays down: this is the SAME
+    // long-lived daemon process, just launched through `ainb`, and the launcher
+    // picks this path whenever the sidecar binary is missing or stale. A
+    // heartbeat that only an observed exit removes is what turns a SIGKILL — a
+    // death that runs no user code, so no panic hook can catch it — into
+    // evidence.
+    match ainb_hangar_daemon::hangar_dir() {
+        Ok(dir) => {
+            ainb_hangar_daemon::observability::note_phase("boot");
+            ainb_hangar_daemon::observability::start_breadcrumbs(&dir);
+        }
+        Err(e) => tracing::warn!(error = %e, "no hangar home; crash breadcrumbs disabled"),
+    }
+
     let result = ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)");
+
+    ainb_hangar_daemon::observability::note_phase("shutdown");
+    match &result {
+        Ok(()) => ainb_hangar_daemon::observability::record_exit(
+            "clean exit: daemon run loop returned (foreground)",
+        ),
+        Err(e) => ainb_hangar_daemon::observability::record_exit(&format!("error: {e:#}")),
+    }
+
     // Explicit flush/teardown on both paths (drop inside a live tokio runtime
     // is the trap the standalone binary documents).
     if let Some(guard) = guard {
@@ -8433,6 +8456,41 @@ pub fn ensure_hangar_daemon() {
     }
 }
 
+/// File name of the captured daemon stderr, inside the daemon's log dir.
+///
+/// Deliberately NOT `daemon.*`: `ainb_hangar_core::logs::log_files_newest_first`
+/// globs that log dir with `starts_with("daemon")` and feeds the newest match to
+/// the JSON log-tail surfaces. A `daemon.stderr.log` there would become "the
+/// newest daemon log", parse as zero JSON lines, and silently blank
+/// `ainb hangar logs tail` and the Daemons pane.
+const DAEMON_STDERR_LOG: &str = "hangar-daemon.stderr.log";
+
+/// Roll the stderr capture over at this size, keeping one previous generation —
+/// so the file is bounded at ~2x this, forever, with no background rotator.
+const DAEMON_STDERR_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Open the append-mode stderr capture for a daemon about to be spawned,
+/// rotating it first if it has grown past [`DAEMON_STDERR_MAX_BYTES`].
+///
+/// Rotation happens only here, at spawn time: the daemon holds the fd for its
+/// whole life, so rotating underneath a running daemon would silently orphan its
+/// writes into an unlinked inode. One spawn, one rotation check, one generation
+/// kept (`.1`).
+fn open_daemon_stderr_log(log_dir: &std::path::Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(log_dir).context("create hangar log dir")?;
+    let path = log_dir.join(DAEMON_STDERR_LOG);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= DAEMON_STDERR_MAX_BYTES) {
+        // Best-effort: a failed roll just means we keep appending to a big file,
+        // which beats refusing to capture stderr at all.
+        std::fs::rename(&path, path.with_extension("log.1")).ok();
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open daemon stderr log {}", path.display()))
+}
+
 /// Spawn the daemon as a detached background child unless it is already running,
 /// recording its EXACT pid. When `announce` is true the outcome is printed
 /// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
@@ -8461,15 +8519,34 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     } else {
         format!("{} {}", bin.display(), args.join(" "))
     };
+    // A daemon that dies OUTSIDE `tracing` — a panic in the standalone binary,
+    // an `abort`, an OOM kill — writes its last words to stderr. Discarding
+    // them is why two of the four observed deaths left no trace at all: no
+    // ERROR line, no panic, the JSON log just stops mid-stream. Capture stderr
+    // to a file; stdin/stdout stay null (the child must not inherit this
+    // process's controlling terminal).
+    //
+    // `log_dir` is not in scope here, but `pid_path` is — it resolves to
+    // <hangar_home>/hangar/daemon.pid, so the logs live in its parent's `logs/`.
+    let stderr = pid_path
+        .parent()
+        .context("resolve hangar home dir from pid path")
+        .and_then(|hangar| open_daemon_stderr_log(&hangar.join("logs")));
+    let stderr = match stderr {
+        Ok(file) => std::process::Stdio::from(file),
+        // Never block a daemon start on its diagnostic sink: fall back to the
+        // old discard, loudly.
+        Err(e) => {
+            tracing::warn!(error = %e, "daemon stderr capture unavailable; discarding stderr");
+            std::process::Stdio::null()
+        }
+    };
     let mut command = std::process::Command::new(&bin);
     command
         .args(&args)
-        // The child must not inherit this process's controlling terminal's
-        // stdio; the daemon writes its own rolling JSONL log under the hangar
-        // home, so discard the std streams.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(stderr);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -8510,11 +8587,62 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     Ok(())
 }
 
+/// How long `stop` waits for the signalled daemon to actually exit before
+/// giving up on confirming it.
+const DAEMON_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Block until `pid` is gone or `grace` elapses; `true` iff it exited.
+///
+/// `stop` used to declare success the instant `SIGTERM` was delivered, which is
+/// not the same thing as the daemon being gone — and `restart` immediately
+/// spawned a replacement into a socket the old one still held.
+fn wait_for_pid_exit(pid: u32, grace: std::time::Duration) -> bool {
+    /// 60 probes across the grace window: fast enough that a normal stop returns
+    /// in tens of milliseconds, cheap enough to be free.
+    const PROBE: std::time::Duration = std::time::Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        if !pid_is_running(pid) {
+            return true;
+        }
+        std::thread::sleep(PROBE);
+    }
+    !pid_is_running(pid)
+}
+
+/// Record the daemon's exit on its behalf after a `stop`.
+///
+/// `SIGTERM`'s default disposition runs NO user code in the target, so the
+/// daemon cannot write its own exit reason for this path — but the stopper knows
+/// exactly why it died. Without this, a deliberate `stop` would leave the same
+/// evidence as the SIGKILL/OOM deaths the breadcrumbs exist to catch: a stale
+/// heartbeat and no exit reason.
+///
+/// When the process did NOT die, the heartbeat is left alone (it is still the
+/// truth) and the reason records the unconfirmed kill.
+fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
+    let Ok(home) = ainb_hangar_daemon::hangar_dir() else {
+        return;
+    };
+    if died {
+        ainb_hangar_daemon::observability::record_external_exit(
+            &home,
+            pid,
+            "stopped by `ainb hangar daemon stop` (SIGTERM, exit confirmed)",
+        );
+    } else {
+        tracing::warn!(pid, "daemon survived SIGTERM; leaving heartbeat in place");
+    }
+}
+
 /// `hangar daemon stop`: signal the EXACT recorded pid, then remove the file.
 ///
 /// Reads the pid back from the PID file and sends `SIGTERM` to that exact
 /// process (never a name-based `pkill`). A stale pid file (process already gone)
 /// is cleaned up; an absent file is reported as "not running".
+///
+/// Waits (bounded) for the process to actually exit, then records the exit
+/// breadcrumb on its behalf — see [`record_daemon_stop_breadcrumb`].
 fn run_daemon_stop() -> Result<()> {
     let pid_path = daemon_pid_path()?;
     // Drop the version record too — a stopped daemon has no running version, and
@@ -8528,8 +8656,22 @@ fn run_daemon_stop() -> Result<()> {
             use nix::unistd::Pid;
             kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
                 .with_context(|| format!("send SIGTERM to pid {pid}"))?;
-            std::fs::remove_file(&pid_path).ok();
-            println!("hangar daemon: stopped (signalled pid {pid})");
+            let died = wait_for_pid_exit(pid, DAEMON_STOP_GRACE);
+            record_daemon_stop_breadcrumb(pid, died);
+            if died {
+                std::fs::remove_file(&pid_path).ok();
+                println!("hangar daemon: stopped (signalled pid {pid})");
+            } else {
+                // Keep the pid file: it still names a live daemon. Dropping it
+                // here (as this did unconditionally) would let the next `start`
+                // spawn a SECOND daemon onto the same SQLite file — new write
+                // contention, which is the last thing this daemon needs.
+                println!(
+                    "hangar daemon: SIGTERM sent to pid {pid}, still alive after {}s \
+                     (pid file kept; re-run stop or `kill -9 {pid}`)",
+                    DAEMON_STOP_GRACE.as_secs()
+                );
+            }
         }
         Some(pid) => {
             std::fs::remove_file(&pid_path).ok();
