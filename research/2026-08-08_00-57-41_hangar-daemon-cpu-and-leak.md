@@ -14,6 +14,34 @@ A prior session diagnosed this as an fsevents-triggered rescan storm in
 `scan_all_summaries`, and reported a migration-76 lockout of the released
 binary as a secondary find.
 
+## Outcome (added 2026-08-08, after the work landed)
+
+All five defects fixed on `f/cpu-fix-hangar-daemon`, 20 signed commits, PR #633.
+
+| | before | after |
+|---|---|---|
+| daemon CPU | 99.3% | **0.0%** idle |
+| daemon RSS | 537 MB | **53-92 MB** |
+| usage scan peak | 2,821 MB / 13.0 s | **917 MB / 10.2 s** |
+| tmux events | ~455k/day | **0** in 15 min |
+| `fleet_event` payload | 724 MB | 342 MB, now bounded |
+| visible sessions scanned every 3 s | 1,472 (1,440 dead) | 1,275, dead rows archiving |
+
+The cleanest evidence is accidental: for a while two daemons ran side by side on
+this host against the same database — ours at **0.0% CPU / 53 MB**, and another
+session's build without the fixes at **110.6% CPU / 459 MB**. Same host, same
+DB, same minute.
+
+Two numbers in this document were wrong when first written and are corrected
+above: the usage-scan baseline was originally sampled once under light load at
+1,747 MB, which understated it; three interleaved runs put it at 2,821 MB, which
+also reconciles with the 2,305 MB peak observed on the live daemon.
+
+Also found along the way, and not in the original five: the `tmux_missing` guard
+had a **second half** (`restore_tmux_transport` and the sweep disagreeing about
+what "missing" means) that kept the storm running at 40 events/min after the
+first fix, and a review caught two further defects in the fixes themselves.
+
 ## Executive Summary
 
 The prior diagnosis was **half right and wrong about the trigger**. There is no
