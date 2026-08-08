@@ -2437,24 +2437,6 @@ pub(crate) fn build_atc_command() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("repair")
-                .about("Reinstall an ATC instance's heartbeat unit from the CURRENT PATH")
-                .long_about(
-                    "Rebuild and reload the local heartbeat unit for an instance whose program \
-                     no longer resolves. Touches ONLY the timer unit: it reuses the instance's \
-                     existing meta and leaves policy, hooks, the daemon cron and the session \
-                     alone, which is what makes it safe to run on a live instance. Use this \
-                     when `atc status` reports `program MISSING`.",
-                )
-                .arg(clap::Arg::new("name").required(true).help("Instance name"))
-                .arg(
-                    clap::Arg::new("force")
-                        .long("force")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Reinstall even when the current unit's program resolves"),
-                ),
-        )
-        .subcommand(
             Command::new("status")
                 .about("Report one ATC instance (meta + timer + session liveness)")
                 .arg(clap::Arg::new("name").required(true)),
