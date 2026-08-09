@@ -330,11 +330,13 @@ private struct FleetNotchView: View {
                             .id("\(selectedSession.sessionKey):\(selectedSession.currentRequestFingerprint ?? "")")
                             .padding(.top, 4)
                     } else {
-                        Text("No matching sessions")
-                            .font(.subheadline)
-                            .foregroundStyle(FleetNotchPalette.muted)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 20)
+                        FleetRosterEmptyState(
+                            connection: store.connectionState,
+                            total: store.sessions.count,
+                            filters: presentation.preferences.filters,
+                            retry: { store.retry() },
+                            clearFilters: { presentation.preferences.filters = .all }
+                        )
                     }
                 }
             }
@@ -1629,6 +1631,90 @@ private struct FleetUsageStats {
         return best
     }
 }
+/// Says WHY the roster is empty, and offers the action that fixes it.
+///
+/// "No matching sessions" was true but useless: it did not distinguish a
+/// daemon that is not answering from a filter that excludes everything, and it
+/// offered no way out. A persisted `attentionOnly` is the common case, because
+/// the toggle lives in the separate window while the filter it sets also
+/// governs this one, so the notch could sit permanently empty with no visible
+/// control to clear it.
+struct FleetRosterEmptyState: View {
+    let connection: FleetConnectionState
+    let total: Int
+    let filters: FleetRosterFilters
+    let retry: () -> Void
+    let clearFilters: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(connection.isLive ? Color.primary : .orange)
+
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(FleetNotchPalette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !connection.isLive {
+                Button("Retry connection", action: retry)
+                    .controlSize(.small)
+            } else if hiddenByFilters {
+                Button("Show all sessions", action: clearFilters)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("fleet.roster.clear-filters")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(FleetNotchPalette.detail, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.vertical, 8)
+    }
+
+    /// Sessions exist, but every one of them is filtered out.
+    private var hiddenByFilters: Bool { total > 0 }
+
+    private var symbol: String {
+        if !connection.isLive { return "exclamationmark.triangle" }
+        return hiddenByFilters ? "line.3.horizontal.decrease.circle" : "moon.zzz"
+    }
+
+    private var title: String {
+        if !connection.isLive { return "Not connected to the Hangar daemon" }
+        if hiddenByFilters { return "\(total) \(total == 1 ? "session" : "sessions") hidden by filters" }
+        return "No sessions yet"
+    }
+
+    private var detail: String {
+        if !connection.isLive {
+            return "\(connection.message)\n\nStart it with `ainb hangar daemon run`, or retry once it is up."
+        }
+        if hiddenByFilters {
+            return "Nothing matches the active filter\(activeFilters.count == 1 ? "" : "s"): \(activeFilters.joined(separator: ", "))."
+        }
+        return "The daemon is connected and reports no sessions. Start one with `ainb run`, and it will appear here."
+    }
+
+    private var activeFilters: [String] { FleetRosterEmptyState.activeFilterNames(filters) }
+
+    /// Named explicitly, because a filter the operator cannot see is the whole
+    /// reason this state was confusing. Static so it can be tested without
+    /// standing up a view.
+    static func activeFilterNames(_ filters: FleetRosterFilters) -> [String] {
+        var active: [String] = []
+        if filters.attentionOnly { active.append("needs you") }
+        if filters.focus != .all { active.append("focus \(filters.focus.label.lowercased())") }
+        if let lifecycle = filters.lifecycle { active.append("lifecycle \(lifecycle.rawValue.lowercased())") }
+        if let provider = filters.provider { active.append("provider \(provider.rawValue)") }
+        if let management = filters.management { active.append("management \(management.rawValue.lowercased())") }
+        if let transport = filters.transportHealth { active.append("transport \(transport.rawValue.lowercased())") }
+        // No structural filter is set, so a search term is the only thing left
+        // that can be hiding rows.
+        return active.isEmpty ? ["a search term"] : active
+    }
+}
+
 /// Turns the scanner's project key into something readable in a narrow panel.
 ///
 /// That key is the project's absolute path with the separators mangled to

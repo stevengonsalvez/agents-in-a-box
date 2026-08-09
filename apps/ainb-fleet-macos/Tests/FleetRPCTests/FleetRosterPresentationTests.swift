@@ -169,4 +169,24 @@ final class FleetRosterPresentationTests: XCTestCase {
     private func session(key: String, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
         FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
+    /// The roster went permanently empty because `attentionOnly` persisted from
+    /// the other window while the notch showed no control for it, and the empty
+    /// state said only "No matching sessions". Naming the active filter is what
+    /// makes that recoverable, so the naming itself is pinned.
+    func testEmptyStateNamesTheFiltersThatAreHidingRows() {
+        var filters = FleetRosterFilters.all
+        filters.attentionOnly = true
+        XCTAssertEqual(FleetRosterEmptyState.activeFilterNames(filters), ["needs you"])
+
+        filters.provider = .claude
+        filters.lifecycle = .idle
+        XCTAssertEqual(
+            FleetRosterEmptyState.activeFilterNames(filters),
+            ["needs you", "lifecycle idle", "provider claude"],
+            "every active filter is named, so nothing hides a row invisibly"
+        )
+
+        // Nothing structural set: a search term is the only thing left.
+        XCTAssertEqual(FleetRosterEmptyState.activeFilterNames(.all), ["a search term"])
+    }
 }
