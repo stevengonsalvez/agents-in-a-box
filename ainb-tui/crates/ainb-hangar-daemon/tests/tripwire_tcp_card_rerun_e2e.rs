@@ -36,7 +36,7 @@ const CARD_TITLE: &str = "Rerunlifecycletripwire";
 
 /// Open the `Run ▾` menu over the focused card and launch headless (`Enter`
 /// re-sent — a lone key can drop after a screen change).
-fn launch_headless(sess: &TuiSession, scale: u64) {
+fn launch_headless(sess: &TuiSession, scale: u64, which: &str, home: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut opened = false;
     while Instant::now() < deadline {
@@ -50,24 +50,49 @@ fn launch_headless(sess: &TuiSession, scale: u64) {
             opened = true;
             break;
         }
+        // Focus sitting on an EMPTY column can never open this menu, because
+        // `Enter` opens it over a focused CARD. Nudge focus right and retry,
+        // rather than spending the whole deadline pressing Enter at a column
+        // that has nothing in it.
+        //
+        // This is what makes the rerun leg self-correcting. A finished card
+        // auto-moves to the Done column while the focus cursor stays behind on
+        // the now-empty Todo column, and walking focus with a fixed number of
+        // blind keypresses assumes both that the card has already moved and
+        // that no keypress dropped. When either assumption failed, focus
+        // stopped on an empty column and this loop pressed Enter at nothing
+        // until it timed out.
+        if sess.capture().contains("— empty —") {
+            sess.send_key("Right");
+        }
     }
     // Name the FIRST thing that did not happen, not the last. `Enter` opens
     // this menu over a FOCUSED CARD, so when the board holds no card there is
     // nothing for it to open and "Run ▾ never opened" is a true statement about
     // the wrong step. That message sent three separate investigations after a
     // menu bug when every observed failure was actually an empty board.
-    let capture = sess.capture();
-    assert!(
-        opened,
-        "{}:\n{capture}",
-        if capture.contains("— empty —") {
-            "the board is EMPTY, so there was no card to open `Run ▾` over: the card \
-             never reached this TUI (check it is talking to the seeded hangar, not \
-             another one)"
-        } else {
-            "a card is on the board but the `Run ▾` menu never opened"
-        }
-    );
+    //
+    // The store state is reported too, because "the board is empty" alone does
+    // not say WHICH half is broken. The caller already proved the card RENDERED
+    // before the first launch, so an empty board here means the card was lost
+    // between then and now, not that it never arrived, and the store tells us
+    // whether it is the data or only the view that lost it.
+    if !opened {
+        let capture = sess.capture();
+        let in_store = board_card_by_title(home, CARD_TITLE).is_some();
+        let diagnosis = match (capture.contains("— empty —"), in_store) {
+            (true, true) => {
+                "the board is EMPTY but the card IS in the store, so the VIEW lost a card \
+                 the data still has"
+            }
+            (true, false) => {
+                "the board is EMPTY and the card is GONE from the store, so this is a data \
+                 loss, not a render bug"
+            }
+            (false, _) => "a card is on the board but the `Run ▾` menu never opened",
+        };
+        panic!("{which}: {diagnosis}:\n{capture}");
+    }
     sess.send_enter(); // headless launch → hangar/board_card_run
 }
 
@@ -118,7 +143,7 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
 
     // RUN #1: launch, wait for done, capture the first run's slug + assert its
     // durable branch exists (the committing run left commits).
-    launch_headless(&sess, scale);
+    launch_headless(&sess, scale, "run #1 launch", pipe.home());
     let slug1 = wait_for_done(pipe.home(), CARD_TITLE, scale)
         .unwrap_or_else(|| panic!("run #1 never reached done:\n{}", sess.capture()));
     let branch1 = worktree_branch(&slug1);
@@ -127,19 +152,17 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
         "run #1 must leave a durable branch {branch1}"
     );
 
-    // The finished card auto-moved into the Done column (the last column), but the
-    // focus cursor stayed on the now-empty Todo column. Walk focus right — the
-    // board clamps at the last column — so the Done card is focused before the
-    // rerun (else Run ▾ has no card to open over).
-    for _ in 0..5 {
-        sess.send_key("Right");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // The finished card auto-moves into the Done column while the focus cursor
+    // stays on the now-empty Todo column, so focus has to walk right before the
+    // rerun. That used to be five blind `Right` presses on 100 ms sleeps, which
+    // assumed the card had already landed in Done and that no keypress dropped;
+    // `launch_headless` now walks focus itself, deadline-bounded, and only when
+    // the focused column is demonstrably empty.
 
     // RERUN: Enter on the now-FINISHED card opens the same Run ▾ picker and
     // launches a fresh headless run. The claim guard permits it precisely because
     // run #1 is terminal (no pending task holds the per-(issue, agent) slot).
-    launch_headless(&sess, scale);
+    launch_headless(&sess, scale, "run #2 launch (the RERUN)", pipe.home());
 
     // POSITIVE (fresh run): a DISTINCT task short-id appears — the rerun enqueued
     // a new row, not a replay of run #1.
