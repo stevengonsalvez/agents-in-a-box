@@ -1,16 +1,32 @@
--- Hangar migration 0082: collapse repeat hook firings for ONE logical request
+-- Hangar migration 0084: collapse repeat hook firings for ONE logical request
 -- onto ONE `attention` row.
 --
--- Numbered 0082, not 0080 or 0081. Both of those versions are already applied
--- on live databases, from a sibling branch: 80 as "fleet event retention" and
--- 81 as "fleet event observed at". `_sqlx_migrations` records each with its own
--- checksum, so shipping different content under either version fails sqlx's
--- checksum validation and refuses to open the store on boot -- observed live as
--- `migration 81 was previously applied but has been modified`.
+-- Numbered 0084 because 0080 through 0083 are taken on main: 80 "fleet event
+-- retention", 81 "fleet event observed at", 82 "fleet acp session config",
+-- 83 "fleet chat channels". This file has been renumbered twice while it sat on
+-- a branch, from 0081 to 0082 to 0084, each time because main claimed the
+-- number first.
 --
--- Pick the next free version, never backfill a lower one: a version below an
--- already-applied migration produces the sibling failure mode,
--- `migration N was previously applied but is missing in the resolved migrations`.
+-- Two distinct failures come from getting this wrong, and both were observed
+-- live while developing this migration:
+--
+--   * Reusing a taken version ships different content under a version already
+--     recorded in `_sqlx_migrations` with its own checksum. sqlx refuses to
+--     open the store: `migration 81 was previously applied but has been
+--     modified`.
+--   * Two files sharing a version in the same tree is worse, because git merges
+--     them cleanly (the filenames differ, so there is no textual conflict) and
+--     the break only appears at runtime as
+--     `UNIQUE constraint failed: _sqlx_migrations.version`.
+--
+-- So: always take the next free version, and never backfill a lower one, which
+-- produces the third variant, `migration N was previously applied but is
+-- missing in the resolved migrations`. Do not skip ahead to a high placeholder
+-- either; `store.rs` refuses to migrate when an applied version exceeds the
+-- highest embedded one.
+--
+-- Before merging a branch that adds a migration, diff the NUMBERS against the
+-- target, not just the files. A clean merge proves nothing here.
 --
 -- # The defect
 --
