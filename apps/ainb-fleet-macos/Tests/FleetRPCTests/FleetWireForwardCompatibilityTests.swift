@@ -85,4 +85,63 @@ final class FleetWireForwardCompatibilityTests: XCTestCase {
         XCTAssertEqual(snapshot.sessions.first?.provider, .unknown)
         XCTAssertEqual(snapshot.sessions.first?.lifecycle, .running)
     }
+
+    /// An older daemon omits the model keys entirely. They must land as nil, not
+    /// as "", so the roster can tell "never observed" from "observed as blank".
+    func testSessionDecodesWithoutModelKeys() throws {
+        let session = try JSONDecoder().decode(FleetSession.self, from: Data(Self.sessionJSON().utf8))
+        XCTAssertNil(session.model)
+        XCTAssertNil(session.reasoningEffort)
+        XCTAssertNil(session.modelUpdatedAt)
+    }
+
+    /// The three keys are snake_case on the wire. This also pins that they are
+    /// declared without an initialiser: a `let model: String? = nil` compiles,
+    /// is skipped by the synthesized decoder, and would make this fail with nil.
+    func testSessionDecodesModelKeys() throws {
+        let json = Self.sessionJSON(
+            extra: #""model":"claude-opus-5","reasoning_effort":"xhigh","model_updated_at":1700000000000,"#
+        )
+        let session = try JSONDecoder().decode(FleetSession.self, from: Data(json.utf8))
+        XCTAssertEqual(session.model, "claude-opus-5")
+        XCTAssertEqual(session.reasoningEffort, "xhigh")
+        XCTAssertEqual(session.modelUpdatedAt, 1_700_000_000_000)
+    }
+
+    /// Absent optionals must not re-encode as explicit nulls, or a full-session
+    /// sample added to `CanonicalFixtureTests` would fail its round-trip gate.
+    func testSessionOmitsAbsentModelKeysWhenEncoded() throws {
+        let session = try JSONDecoder().decode(FleetSession.self, from: Data(Self.sessionJSON().utf8))
+        let encoded = String(decoding: try FleetWire.encoder().encode(session), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("model"), "an absent model must not be re-encoded at all")
+        XCTAssertFalse(encoded.contains("reasoning_effort"))
+    }
+
+    /// End to end for the part the client owns: a daemon snapshot carrying the
+    /// snake_case keys must come out the other side as the chip the operator
+    /// reads. A key renamed on either side fails here rather than rendering a
+    /// permanently empty chip that looks like a session with no model.
+    func testSnapshotModelKeysReachTheRosterChip() throws {
+        let json = """
+        {"head_revision":9,"sessions":[\(Self.sessionJSON(
+            extra: #""model":"claude-opus-5","reasoning_effort":"xhigh","model_updated_at":1700000000000,"#
+        ))]}
+        """
+        let snapshot = try FleetWire.decoder().decode(FleetSnapshot.self, from: Data(json.utf8))
+        let session = try XCTUnwrap(snapshot.sessions.first)
+        XCTAssertEqual(FleetRosterPresentation.modelLabel(for: session), "opus-5 · xhigh")
+        XCTAssertTrue(FleetRosterPresentation.matches(session, search: "opus", filters: .all))
+    }
+
+    private static func sessionJSON(extra: String = "") -> String {
+        """
+        {"session_key":"claude:s1","provider":"claude","provider_session_id":null,
+         "tmux_target":null,"process_start_fingerprint":null,
+         "cwd":"/repo","display_name":null,"lifecycle":"RUNNING","attention":"NONE",
+         "current_request_fingerprint":null,"current_request":null,"management":"MANAGED",
+         "transport_health":"HEALTHY","capabilities":{"structured_answer":false,"approvals":false,"send_prompt":false,"continue_turn":false,"retry":false,"interrupt":false,"start":false,"stop":false,"restart":false,"kill":false,"archive":false,"tmux_attach":true,"tmux_text":true,"verified_picker":false},"provenance":"authoritative","confidence":"HIGH",
+         \(extra)"discovered_at":1,"last_observed_at":2,"lifecycle_updated_at":2,"attention_updated_at":2,
+         "version":1,"updated_revision":7}
+        """
+    }
 }

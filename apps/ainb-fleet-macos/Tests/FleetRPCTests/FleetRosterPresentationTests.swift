@@ -166,8 +166,95 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(event.deepLink.absoluteString, "ainbfleet://session/codex%2Fa%3Fb%23c")
     }
 
-    private func session(key: String, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
-        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
+    private func session(key: String, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1, model: String? = nil, reasoningEffort: String? = nil, modelUpdatedAt: Int64? = nil) -> FleetSession {
+        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision, model: model, reasoningEffort: reasoningEffort, modelUpdatedAt: modelUpdatedAt)
+    }
+
+    func testModelLabelRendersPair() {
+        let value = session(key: "claude:1", lifecycle: .running, model: "claude-opus-5", reasoningEffort: "xhigh")
+        XCTAssertEqual(FleetRosterPresentation.modelLabel(for: value), "opus-5 · xhigh")
+    }
+
+    func testModelLabelRendersModelOnly() {
+        let value = session(key: "codex:1", lifecycle: .running, model: "gpt-5.6-terra")
+        XCTAssertEqual(
+            FleetRosterPresentation.modelLabel(for: value),
+            "gpt-5.6-terra",
+            "only Claude's vendor prefix is stripped; every other id stays verbatim"
+        )
+    }
+
+    func testModelLabelRendersEffortOnly() {
+        let value = session(key: "claude:2", lifecycle: .running, reasoningEffort: "high")
+        XCTAssertEqual(FleetRosterPresentation.modelLabel(for: value), "high effort")
+    }
+
+    /// Absence must be absence. Returning "" (or "unknown", or a dash) makes the
+    /// row render a chip that looks like a reported value, which is exactly the
+    /// failure this rule exists to prevent.
+    func testModelLabelIsNilWhenAbsent() {
+        XCTAssertNil(FleetRosterPresentation.modelLabel(for: session(key: "legacy:1", lifecycle: .running)))
+        XCTAssertNil(
+            FleetRosterPresentation.modelLabel(for: session(key: "legacy:2", lifecycle: .running, model: "  ", reasoningEffort: "")),
+            "a blank string from the daemon is still nothing observed"
+        )
+    }
+
+    /// Claude only refreshes the pair at the end of a turn, so a long-running
+    /// session legitimately drifts. Past fifteen minutes the chip is history and
+    /// the row must say so rather than present it as current.
+    func testModelStaleWhenRunningAndOlderThanFifteenMinutes() {
+        let observedAt: Int64 = 1_700_000_000_000
+        let fresh = session(key: "fresh", lifecycle: .running, observedAt: observedAt, model: "claude-opus-5", modelUpdatedAt: observedAt - 899_000)
+        let stale = session(key: "stale", lifecycle: .running, observedAt: observedAt, model: "claude-opus-5", modelUpdatedAt: observedAt - 901_000)
+        let finished = session(key: "done", lifecycle: .turnComplete, observedAt: observedAt, model: "claude-opus-5", modelUpdatedAt: observedAt - 901_000)
+
+        XCTAssertFalse(FleetRosterPresentation.modelIsStale(for: fresh))
+        XCTAssertTrue(FleetRosterPresentation.modelIsStale(for: stale))
+        XCTAssertFalse(FleetRosterPresentation.modelIsStale(for: finished), "only a running session can have drifted since its last turn")
+        XCTAssertNotNil(FleetRosterPresentation.modelAsOfLabel(for: stale))
+        XCTAssertNil(
+            FleetRosterPresentation.modelAsOfLabel(for: session(key: "never", lifecycle: .running, model: "claude-opus-5")),
+            "no observation time means no as-of phrase to show"
+        )
+    }
+
+    /// Both roster surfaces read this. A session with nothing observed must read
+    /// EXACTLY as it did before the chip existed, or the chip has taught
+    /// VoiceOver to announce a model that was never reported.
+    func testRowAccessibilityValueOnlyGrowsWhenAModelWasObserved() {
+        let connection = FleetConnectionState.live(daemonVersion: "test", writeCompatible: true)
+        let bare = session(key: "claude:none", lifecycle: .idle, attention: .ask)
+        XCTAssertEqual(
+            FleetRosterPresentation.rowAccessibilityValue(for: bare, connection: connection),
+            FleetRosterPresentation.semanticStatus(for: bare, connection: connection)
+        )
+
+        let reported = session(key: "claude:one", lifecycle: .idle, attention: .ask, model: "claude-opus-5", reasoningEffort: "xhigh", modelUpdatedAt: 1)
+        XCTAssertEqual(
+            FleetRosterPresentation.rowAccessibilityValue(for: reported, connection: connection),
+            "\(FleetRosterPresentation.semanticStatus(for: reported, connection: connection)), opus-5 · xhigh"
+        )
+        XCTAssertEqual(FleetRosterPresentation.modelHelp(for: reported), "opus-5 · xhigh", "a current chip needs no tooltip beyond itself")
+    }
+
+    /// The detail surface has the room to always carry the observation age, so
+    /// an operator can tell a live pair from one pinned by a long turn.
+    func testModelDetailCarriesTheObservationAge() {
+        let value = session(key: "claude:1", lifecycle: .running, observedAt: 1_700_000_000_000, model: "claude-opus-5", reasoningEffort: "high", modelUpdatedAt: 1_699_999_000_000)
+        let detail = FleetRosterPresentation.modelDetail(for: value)
+        XCTAssertEqual(detail?.hasPrefix("opus-5 · high · as of "), true, detail ?? "nil")
+        XCTAssertNil(FleetRosterPresentation.modelDetail(for: session(key: "claude:2", lifecycle: .running)))
+    }
+
+    func testSearchMatchesOnModel() {
+        let value = session(key: "codex:1", lifecycle: .running, model: "claude-opus-5")
+        XCTAssertTrue(FleetRosterPresentation.matches(value, search: "opus", filters: .all))
+        XCTAssertFalse(FleetRosterPresentation.matches(value, search: "sonnet", filters: .all))
+        XCTAssertFalse(
+            FleetRosterPresentation.matches(session(key: "codex:2", lifecycle: .running), search: "opus", filters: .all),
+            "a session with no model must not match a model query"
+        )
     }
     /// The roster went permanently empty because `attentionOnly` persisted from
     /// the other window while the notch showed no control for it, and the empty
