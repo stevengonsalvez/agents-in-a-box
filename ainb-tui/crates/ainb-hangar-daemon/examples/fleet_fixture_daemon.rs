@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                             event_type: &event_type,
                             payload: &payload,
                             observed_at,
+                            transcript_model: None,
                         },
                     )
                     .await

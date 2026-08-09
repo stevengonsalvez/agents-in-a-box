@@ -43,10 +43,12 @@
 //! fault leaves the cursor before the failed line so a later pass replays it.
 //! A failed ingest never downs the daemon.
 
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, classify};
+use ainb_fleet_core::read::{ModelInfo, TranscriptDialect, last_model_info};
 use ainb_fleet_core::types::{Session, SessionSource};
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
@@ -121,6 +123,39 @@ where
     Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
+/// Whether this transcript is a Codex rollout, judged by the file rather than by
+/// the provider label on the event.
+///
+/// Codex writes `~/.codex/sessions/<y>/<m>/<d>/rollout-<ts>-<uuid>.jsonl`. The
+/// `agent` field on a hook line is NOT a reliable provider signal: measured
+/// against the real event log, 9 sessions whose transcript is a codex rollout
+/// carry `agent: "claude"`, because their opening hook predates that field. The
+/// filename is stable across every one of them.
+fn is_codex_rollout(transcript_path: &str) -> bool {
+    std::path::Path::new(transcript_path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.starts_with("rollout-"))
+}
+
+/// Whether this hook line names a SUBAGENT's transcript rather than the
+/// session's own.
+///
+/// A `SubagentStop` carries an EMPTY `agent_type`, which reads as the main
+/// thread to anything that only checks for absence. Reading the session's
+/// `transcript_path` on such a line would credit the session with the
+/// subagent's turn, so this gate is checked alongside the `agent_type` one.
+fn has_agent_transcript(payload: &serde_json::Value) -> bool {
+    ["/payload/agent_transcript_path", "/agent_transcript_path"]
+        .iter()
+        .any(|pointer| {
+            payload
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| !path.is_empty())
+        })
+}
+
 /// The attention ingest producer — owns the paths + the write handles.
 pub struct AttentionIngest {
     pool: SqlitePool,
@@ -129,6 +164,14 @@ pub struct AttentionIngest {
     events_jsonl: PathBuf,
     /// This producer's OWN durable byte-offset cursor (a plain u64 text file).
     cursor_path: PathBuf,
+    /// Sessions whose transcript this process has already tailed for a model.
+    ///
+    /// Lets a row show its model on the session's FIRST event instead of waiting
+    /// for the turn to end, without a DB round trip per line. Deliberately
+    /// unbounded and deliberately not durable: it holds one session id per
+    /// session the daemon has ever seen (a few thousand on a busy host), and a
+    /// restart costs one extra bounded read per live session.
+    model_seeded: tokio::sync::Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +195,69 @@ impl AttentionIngest {
             events,
             events_jsonl,
             cursor_path,
+            model_seeded: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// Whether this is the first line this process has seen for `session_id`.
+    /// Records the sighting as it tests, so exactly one line per session claims
+    /// the early read.
+    async fn first_sight_of(&self, session_id: &str) -> bool {
+        self.model_seeded.lock().await.insert(session_id.to_string())
+    }
+
+    /// The session's own model + effort, tailed from its transcript, or `None`
+    /// when this line does not qualify for the read.
+    ///
+    /// See [`is_codex_rollout`] for why the path, not the agent label, picks the
+    /// parser.
+    ///
+    /// Bounded and rare by construction. `Stop` is ~5% of hook lines on a live
+    /// host (1091 against 20336 `PreToolUse`), plus one read the first time a
+    /// session is seen so its row is not blank until its first turn ends. The
+    /// read itself is the shared 320-row tail, off the async runtime.
+    ///
+    /// Gated the same way [`crate::fleet::apply_hook`] gates its own read: a
+    /// subagent's transcript describes the subagent, not the session, and
+    /// attributing one to the other is invisible in every log.
+    async fn transcript_model(
+        &self,
+        line: &HookEventLine,
+        payload: &serde_json::Value,
+    ) -> Option<ModelInfo> {
+        // The FILE decides the dialect, the agent label only breaks a tie. Codex
+        // rollouts are always `rollout-*.jsonl`, and measured against the real
+        // event log, 9 codex sessions carry `agent: "claude"` because their
+        // opening hook predates the agent field. Trusting the label there hands a
+        // codex rollout to the claude parser, which finds no `assistant` record
+        // and silently drops the effort while the model still arrives from the
+        // hook: a row reading `gpt-5.6-terra` with no effort, and nothing red.
+        let dialect = if is_codex_rollout(&line.transcript_path) {
+            TranscriptDialect::Codex
+        } else {
+            match line.agent.as_str() {
+                "claude" => TranscriptDialect::Claude,
+                "codex" => TranscriptDialect::Codex,
+                // Any other provider writes a transcript this daemon cannot read.
+                _ => return None,
+            }
+        };
+        if line.transcript_path.is_empty()
+            || !crate::fleet::is_main_thread(payload)
+            || has_agent_transcript(payload)
+            || !(line.event_type == "Stop" || self.first_sight_of(&line.session_id).await)
+        {
+            return None;
+        }
+        let path = PathBuf::from(&line.transcript_path);
+        tokio::task::spawn_blocking(move || {
+            last_model_info(&path, dialect, |raw| {
+                crate::fleet::model_token(raw).is_some()
+            })
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Tail the event log from the durable cursor, classify each qualifying line,
@@ -305,6 +410,11 @@ impl AttentionIngest {
             line.event_type.as_str()
         };
         if !line.session_id.is_empty() {
+            // Taken HERE, before the observation is built, and so before the
+            // `is_qualifying` early-return below: a read placed after that gate
+            // would miss the patch it needs to ride on for every non-qualifying
+            // event, which is most of them.
+            let transcript_model = self.transcript_model(&line, &payload).await;
             let observation = crate::fleet::HookObservation {
                 event_id: event_id.clone(),
                 provider: &line.agent,
@@ -313,6 +423,7 @@ impl AttentionIngest {
                 event_type: semantic_event,
                 payload: &payload,
                 observed_at: if line.ts > 0 { line.ts } else { now_ms },
+                transcript_model,
             };
             let reduced =
                 match crate::fleet::apply_hook(&self.pool, &self.events, observation).await {
@@ -745,6 +856,175 @@ mod tests {
         assert_eq!(line.event_type, "Notification");
         assert!(line.matcher.is_empty());
         assert!(line.transcript_path.is_empty());
+    }
+
+    /// The model + effort the ingest pipeline landed on a session's Fleet row.
+    async fn row_model_pair(store: &Store, session_key: &str) -> (Option<String>, Option<String>) {
+        let session =
+            ainb_hangar_store::repo::fleet::FleetRepo::get_session(store.pool(), session_key)
+                .await
+                .expect("session query")
+                .expect("session exists");
+        (session.model, session.reasoning_effort)
+    }
+
+    /// The whole capture path, end to end: a real hook line, a real transcript
+    /// on disk, and the model reaching the Fleet row that the macOS roster
+    /// renders.
+    ///
+    /// `PreToolUse` is deliberate. It is NOT a qualifying attention event, so it
+    /// returns early well before the classifier — which is exactly why the
+    /// transcript read has to sit ahead of that gate. Move it below and this
+    /// test goes red instead of the model silently never appearing.
+    #[tokio::test]
+    async fn hook_line_seeds_the_model_from_its_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","message":{"model":"claude-opus-5"},"effort":"high"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                concat!(
+                    r#"{{"agent":"claude","cwd":"/repo","event_type":"PreToolUse","matcher":null,"#,
+                    r#""session_id":"sid-model","transcript_path":"{}","payload":{{}},"#,
+                    r#""ts":1700000000000}}"#,
+                    "\n"
+                ),
+                transcript.display()
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_001_000).await;
+
+        assert_eq!(
+            row_model_pair(&store, "claude:sid-model").await,
+            (Some("claude-opus-5".to_string()), Some("high".to_string())),
+            "the transcript's newest real model must reach the Fleet row"
+        );
+    }
+
+    /// A codex rollout mislabelled `agent: "claude"` must still be read with the
+    /// CODEX parser.
+    ///
+    /// This is a measured shape, not a hypothetical: running the real event log
+    /// through this pipeline produced 9 sessions keyed `claude:<uuid>` whose
+    /// transcript is a codex rollout, because their opening hook predates the
+    /// `agent` field. Dispatching the parser on that label handed the rollout to
+    /// the claude parser, which finds no `assistant` record and returns nothing,
+    /// so the row showed a model (the hook supplies it) with the effort silently
+    /// missing, and every test still passed.
+    #[tokio::test]
+    async fn a_codex_rollout_is_read_as_codex_even_when_labelled_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        // The filename is what identifies a rollout.
+        let transcript = dir.path().join("rollout-2026-08-09T20-25-19-019fe7fc.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra","effort":"high"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                concat!(
+                    // NOTE the lie: a codex rollout under an agent of "claude".
+                    r#"{{"agent":"claude","cwd":"/repo","event_type":"PreToolUse","matcher":null,"#,
+                    r#""session_id":"sid-rollout","transcript_path":"{}","payload":{{}},"#,
+                    r#""ts":1700000000000}}"#,
+                    "\n"
+                ),
+                transcript.display()
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_001_000).await;
+
+        assert_eq!(
+            row_model_pair(&store, "claude:sid-rollout").await,
+            (Some("gpt-5.6-terra".to_string()), Some("high".to_string())),
+            "the rollout's turn_context must be parsed as codex despite the agent label"
+        );
+    }
+
+    /// A `SubagentStop` names the SUBAGENT's transcript beside an EMPTY
+    /// `agent_type`, which reads as the main thread to anything that only checks
+    /// for absence. Its model must not be credited to the session.
+    ///
+    /// Both gates are exercised, on their own sessions, because either one alone
+    /// would make the realistic shape pass: `sid-sub` is the live shape (caught
+    /// by the `agent_type` gate) and `sid-sub-notype` omits `agent_type`
+    /// entirely, so ONLY the `agent_transcript_path` gate can stop it.
+    #[tokio::test]
+    async fn subagent_stop_does_not_seed_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\"}}\n",
+        )
+        .unwrap();
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let path = transcript.display();
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                concat!(
+                    r#"{{"agent":"claude","cwd":"/repo","event_type":"SubagentStop","matcher":null,"#,
+                    r#""session_id":"sid-sub","transcript_path":"{path}","#,
+                    r#""payload":{{"agent_type":"","agent_transcript_path":"{path}"}},"#,
+                    r#""ts":1700000000000}}"#,
+                    "\n",
+                    r#"{{"agent":"claude","cwd":"/repo","event_type":"SubagentStop","matcher":null,"#,
+                    r#""session_id":"sid-sub-notype","transcript_path":"{path}","#,
+                    r#""payload":{{"agent_transcript_path":"{path}"}},"#,
+                    r#""ts":1700000000000}}"#,
+                    "\n"
+                ),
+                path = path
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_001_000).await;
+
+        for session_key in ["claude:sid-sub", "claude:sid-sub-notype"] {
+            assert_eq!(
+                row_model_pair(&store, session_key).await,
+                (None, None),
+                "{session_key}: a subagent's transcript must never be read as the session's own"
+            );
+        }
     }
 
     fn ingest_for(store: &Store, events_jsonl: &Path, cursor: &Path) -> AttentionIngest {
