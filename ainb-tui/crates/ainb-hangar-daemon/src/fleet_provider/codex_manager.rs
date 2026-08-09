@@ -922,10 +922,37 @@ fn parse_ps_row(line: &str) -> Option<PsRow<'_>> {
 
 /// Whether an argv is a codex app-server invocation from us or the plugin broker.
 ///
-/// Requires both `bin/codex` and `app-server`. The desktop Codex/ChatGPT app runs
-/// `.../ChatGPT.app/Contents/Resources/codex` (no `bin/codex`), so it never matches.
+/// Anchored on argv STRUCTURE, not substrings. The executable must be an installed
+/// `.../bin/codex` — either exec'd directly or run as `node <path>/bin/codex`, the
+/// two shapes `ps` reports — and `app-server` must be a distinct token, not a
+/// fragment of some other word.
+///
+/// This used to be `args.contains("bin/codex") && args.contains("app-server")` over
+/// the whole command line, with `ppid == 1` as the only other filter, evaluated
+/// every 60s. Any detached process that merely QUOTED both strings — a `tail` of a
+/// log path, a `grep`, an editor, a shell one-liner — became a SIGTERM then SIGKILL
+/// target within two seconds.
+///
+/// The desktop Codex/ChatGPT app (`.../ChatGPT.app/Contents/Resources/codex`) is
+/// still excluded: its parent directory is not `bin`.
 fn is_codex_app_server(args: &str) -> bool {
-    args.contains("bin/codex") && args.contains("app-server")
+    let mut tokens = args.split_whitespace();
+    let Some(argv0) = tokens.next() else {
+        return false;
+    };
+    // `node .../bin/codex` puts the real executable in argv[1].
+    if !is_installed_codex(argv0) && !tokens.next().is_some_and(is_installed_codex) {
+        return false;
+    }
+    tokens.any(|token| token == "app-server")
+}
+
+/// Is `path` an installed `.../bin/codex` executable, by path components rather
+/// than by substring?
+fn is_installed_codex(path: &str) -> bool {
+    let path = Path::new(path);
+    path.file_name().is_some_and(|name| name == "codex")
+        && path.parent().and_then(Path::file_name).is_some_and(|dir| dir == "bin")
 }
 
 /// Socket of a `codex app-server --listen unix://<socket>` row.
@@ -1145,6 +1172,9 @@ struct ReapOutcome {
     escalated: usize,
     /// Still alive after SIGKILL, or impossible to signal at all.
     survived: usize,
+    /// Left alone because ownership could not be proved (see [`OwnedPid`]) — a
+    /// codex belonging to another home, another user, or another tool.
+    unproven: usize,
 }
 
 /// Signal delivery seam: `(pid, signal)` where `None` is the liveness probe.
@@ -1152,6 +1182,93 @@ struct ReapOutcome {
 /// Injected so the SIGTERM → SIGKILL escalation is testable without real processes.
 /// `Send + Sync` because the reap sweep is held across awaits inside a spawned task.
 type Signaller<'a> = &'a (dyn Fn(u32, Option<Signal>) -> Result<(), Errno> + Send + Sync);
+
+/// A pid this daemon has PROVED it may signal.
+///
+/// The only constructor outside this module's tests is
+/// [`OwnedPid::holding_socket`], and [`deliver`] is the only path that sends a real
+/// signal, so "kill a process we do not own" is a type error rather than a review
+/// miss. A liveness probe (`kill(pid, 0)`) needs no proof: it changes nothing.
+#[derive(Debug)]
+struct OwnedPid(u32);
+
+impl OwnedPid {
+    /// Prove `pid` is one of THIS home's codex app-servers, or refuse to signal it.
+    ///
+    /// The proof is possession: the process must hold a unix socket bound to
+    /// `socket` (`<hangar home>/codex-app-server.sock`) under the current uid.
+    /// A server orphaned by a crashed daemon of this home still reports that bound
+    /// name even after its socket file has been replaced, which is exactly the leak
+    /// the sweep exists to clear; a codex belonging to another `$AINB_HANGAR_HOME`,
+    /// another user, or another tool entirely can never satisfy it.
+    ///
+    /// Fails closed: no `lsof`, an unreadable process, or any other ambiguity
+    /// answers `None` and the caller spares the process.
+    fn holding_socket(pid: u32, socket: &Path) -> Option<Self> {
+        pid_holds_socket(pid, socket).then_some(Self(pid))
+    }
+}
+
+/// The ONLY path that delivers a real signal: it needs an [`OwnedPid`].
+fn deliver(owned: &OwnedPid, signal: Signal, send: Signaller<'_>) -> Result<(), Errno> {
+    send(owned.0, Some(signal))
+}
+
+/// Ownership-proof seam, injected so the escalation stays testable without real
+/// sockets. Synchronous by design: it shells out to `lsof` for at most a handful of
+/// candidates on a 60s sweep (~40ms each), which is not worth an async seam.
+type Prover<'a> = &'a (dyn Fn(u32) -> Option<OwnedPid> + Send + Sync);
+
+/// Does `pid` hold a unix socket bound to `socket`, under the current uid?
+///
+/// `lsof -a -p <pid> -u <uid> -U -F n` lists the bound NAME of every unix socket the
+/// process holds; `-a` ANDs the pid and uid filters, so another user's process
+/// answers empty. Matching the bound name rather than looking the path up
+/// (`lsof -- <path>`) is deliberate: an orphan whose socket file was replaced by a
+/// successor still reports the name it bound.
+///
+/// (Duplicated in `ainb-plugin-notifyd::procs` and `ainb_core::cli::hangar`: this
+/// crate cannot depend on either, the dependency runs the other way.)
+fn pid_holds_socket(pid: u32, socket: &Path) -> bool {
+    let uid = nix::unistd::Uid::current().as_raw().to_string();
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-u", &uid, "-U", "-F", "n"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|name| socket_names_match(name, socket))
+}
+
+/// Compare a bound socket name from `lsof` to the path we expect.
+///
+/// Exact match first: the daemon binds the very path it resolved. The fallback
+/// re-resolves both parent directories so a home reached through a symlink
+/// (`/tmp` -> `/private/tmp` on macOS) still matches; the socket file itself is not
+/// canonicalized because an orphan's path may already have been replaced.
+fn socket_names_match(name: &str, expected: &Path) -> bool {
+    if Path::new(name) == expected {
+        return true;
+    }
+    let real_dir = |p: &Path| p.parent().and_then(|dir| std::fs::canonicalize(dir).ok());
+    match (
+        real_dir(Path::new(name)),
+        real_dir(expected),
+        Path::new(name).file_name(),
+        expected.file_name(),
+    ) {
+        (Some(a), Some(b), Some(x), Some(y)) => a == b && x == y,
+        _ => false,
+    }
+}
 
 fn nix_signal(pid: u32, signal: Option<Signal>) -> Result<(), Errno> {
     let raw = i32::try_from(pid).map_err(|_| Errno::EINVAL)?;
@@ -1182,7 +1299,13 @@ async fn wait_for_exit(
     }
 }
 
-/// SIGTERM every target, confirm death, and SIGKILL whatever survives the grace.
+/// SIGTERM every PROVEN target, confirm death, and SIGKILL whatever survives the
+/// grace.
+///
+/// `prove` runs twice per target: once before the SIGTERM and again before the
+/// escalation, because a target that exits during the grace can have its pid
+/// recycled by an unrelated process, which must not inherit our SIGKILL. A target
+/// that cannot be proved is left alone and counted in `unproven`.
 ///
 /// The previous version counted a successful SIGTERM as a reap without ever looking
 /// again, so a server ignoring SIGTERM was reported reaped on every 60s sweep while
@@ -1191,11 +1314,20 @@ async fn terminate_orphans(
     targets: &[u32],
     timing: ReapTiming,
     signal: Signaller<'_>,
+    prove: Prover<'_>,
 ) -> ReapOutcome {
     let mut outcome = ReapOutcome::default();
     let mut signalled = Vec::with_capacity(targets.len());
     for pid in targets {
-        match signal(*pid, Some(Signal::SIGTERM)) {
+        let Some(owned) = prove(*pid) else {
+            outcome.unproven += 1;
+            tracing::debug!(
+                pid,
+                "sparing a codex app-server we cannot prove belongs to this home"
+            );
+            continue;
+        };
+        match deliver(&owned, Signal::SIGTERM, signal) {
             Ok(()) => signalled.push(*pid),
             // Gone between the `ps` read and the signal, not an error.
             Err(Errno::ESRCH) => outcome.reaped += 1,
@@ -1211,7 +1343,16 @@ async fn terminate_orphans(
 
     let mut killed = Vec::with_capacity(stubborn.len());
     for pid in &stubborn {
-        match signal(*pid, Some(Signal::SIGKILL)) {
+        // Re-prove: the SIGTERM may have worked and the pid been recycled.
+        let Some(owned) = prove(*pid) else {
+            outcome.unproven += 1;
+            tracing::debug!(
+                pid,
+                "sparing a SIGTERM survivor we can no longer prove is ours"
+            );
+            continue;
+        };
+        match deliver(&owned, Signal::SIGKILL, signal) {
             Ok(()) => killed.push(*pid),
             // Exited during the SIGKILL loop itself: reaped, but not by us escalating.
             Err(Errno::ESRCH) => outcome.reaped += 1,
@@ -1238,10 +1379,18 @@ async fn terminate_orphans(
 /// stays at ppid==1 once its spawner dies. Such a server is spared only while a live
 /// proxy consumes its socket AND the Hangar home behind that socket still has a
 /// running daemon (see [`adoption_is_credible`]); the holder of our own live socket
-/// and this process are spared unconditionally by [`reap_targets`]. Each target is
-/// SIGTERMed, confirmed dead, then SIGKILLed if it outlives the grace period.
-/// Best-effort: an unreadable process table reaps nothing. Returns how many
-/// processes were confirmed gone.
+/// and this process are spared unconditionally by [`reap_targets`].
+///
+/// Selection is not authority: every surviving candidate must then PROVE it is ours
+/// by holding a socket bound to `live_socket` under our uid ([`OwnedPid`]) before it
+/// is signalled at all. That is what confines the sweep to this
+/// `$AINB_HANGAR_HOME`'s own leaked servers. A codex belonging to another home is
+/// now left running even when its daemon is dead: leaking an orphan is cheap,
+/// killing another stack's live app-server is not.
+///
+/// Each proven target is SIGTERMed, confirmed dead, then SIGKILLed if it outlives
+/// the grace period. Best-effort: an unreadable process table reaps nothing.
+/// Returns how many processes were confirmed gone.
 pub async fn reap_orphaned_codex_servers(live_socket: &Path) -> usize {
     let Some(ps_output) = ps_process_table().await else {
         return 0;
@@ -1253,12 +1402,16 @@ pub async fn reap_orphaned_codex_servers(live_socket: &Path) -> usize {
     let listeners = socket_listener_pids(live_socket).await;
     let targets = reap_targets(&candidates, listeners.as_deref(), std::process::id());
 
-    let outcome = terminate_orphans(&targets, ReapTiming::PRODUCTION, &nix_signal).await;
-    if outcome.reaped > 0 || outcome.survived > 0 {
+    let outcome = terminate_orphans(&targets, ReapTiming::PRODUCTION, &nix_signal, &|pid| {
+        OwnedPid::holding_socket(pid, live_socket)
+    })
+    .await;
+    if outcome.reaped > 0 || outcome.survived > 0 || outcome.unproven > 0 {
         tracing::info!(
             reaped = outcome.reaped,
             escalated = outcome.escalated,
             survived = outcome.survived,
+            unproven = outcome.unproven,
             candidates = candidates.len(),
             "reaped orphaned codex app-server processes"
         );
@@ -1888,6 +2041,166 @@ mod tests {
         assert!(codex_orphans_to_reap(desktop, |_| true).is_empty());
     }
 
+    /// Quoting the markers is not being them. Every line below contains both
+    /// `bin/codex` and `app-server` and was a SIGTERM/SIGKILL target under the old
+    /// substring matcher.
+    #[test]
+    fn codex_orphans_ignores_argv_that_merely_quotes_the_markers() {
+        for line in [
+            "  4242     1 tail -f /Users/x/logs/bin/codex app-server.log",
+            "  4243     1 /bin/sh -c echo /opt/bin/codex app-server",
+            "  4244     1 grep -R app-server /opt/homebrew/bin/codex",
+            "  4245     1 /usr/bin/vim /Users/x/notes/bin/codex app-server.md",
+            // A wrapper that is not codex itself, however codex-shaped its name.
+            "  4246     1 /opt/bin/codex-wrapper app-server --listen unix:///tmp/a.sock",
+            // `app-server` as a fragment rather than a token.
+            "  4247     1 /opt/bin/codex app-server-shim --listen unix:///tmp/a.sock",
+        ] {
+            assert!(
+                codex_orphans_to_reap(line, |_| true).is_empty(),
+                "must not target: {line}"
+            );
+            assert_eq!(
+                live_codex_app_server_count(line),
+                0,
+                "must not count: {line}"
+            );
+        }
+
+        // The real shapes still match, from both `codex ...` and `node .../codex ...`.
+        let real = "  501     1 /Users/x/.nvm/versions/node/v20/bin/codex app-server --listen unix:///t/a.sock\n";
+        assert_eq!(codex_orphans_to_reap(real, |_| true), vec![501]);
+        let via_node = "  502     1 node /Users/x/.nvm/versions/node/v20/bin/codex app-server --listen unix:///t/b.sock\n";
+        assert_eq!(codex_orphans_to_reap(via_node, |_| true), vec![502]);
+    }
+
+    /// The same defect against the real kernel: a real detached process whose argv
+    /// merely CONTAINS both markers must not appear in a sweep of the real process
+    /// table.
+    #[tokio::test]
+    async fn real_process_quoting_the_codex_argv_is_never_a_reap_target() {
+        let marker = format!("/ainb-decoy-{}/bin/codex app-server", std::process::id());
+        // `sh -c SCRIPT name args...` puts the markers in argv without ever
+        // executing anything called codex.
+        let pid = spawn_orphan(
+            &format!("sh -c \"while :; do sleep 0.2; done\" {marker}"),
+            &marker,
+        );
+        let _cleanup = KillOnDrop(vec![pid]);
+
+        let ps_output = ps_process_table().await.expect("process table");
+        assert!(
+            ps_output.contains(&marker),
+            "the decoy must be visible in the process table"
+        );
+        assert!(
+            !codex_orphans_to_reap(&ps_output, adoption_is_credible).contains(&pid),
+            "a process that merely quotes `bin/codex` + `app-server` must never be reaped"
+        );
+    }
+
+    /// A real process we own that holds `socket` open: the listener is bound here
+    /// and handed to a `sleep` child as its stdin, so `lsof` reports the child
+    /// holding that bound name. Killed by its exact pid on drop.
+    struct SocketDecoy {
+        _listener: std::os::unix::net::UnixListener,
+        child: std::process::Child,
+    }
+
+    impl SocketDecoy {
+        fn holding(socket: &Path) -> Self {
+            let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind decoy");
+            let handed = listener.try_clone().expect("clone decoy socket");
+            let child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::from(std::os::fd::OwnedFd::from(handed)))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn decoy");
+            Self {
+                _listener: listener,
+                child,
+            }
+        }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for SocketDecoy {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// End-to-end through the real entry point: a real detached ppid==1 process
+    /// that is a perfect codex-app-server match by argv, but belongs to another
+    /// Hangar home, survives a real sweep untouched.
+    ///
+    /// This is the live incident in miniature. It is deliberately green-only: the
+    /// pre-fix code reached the machine-wide process table with no ownership
+    /// precondition, so running this against the unfixed reaper on a developer
+    /// machine would SIGKILL real app-servers. The red proof for that defect is at
+    /// the unit level, where nothing is signalled for real.
+    #[tokio::test]
+    async fn real_sweep_spares_a_codex_app_server_from_another_home() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let theirs = tempfile::tempdir().unwrap();
+        let ours = tempfile::tempdir().unwrap();
+        let script = theirs.path().join("bin").join("codex");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nwhile :; do sleep 0.2; done\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Their socket, their home, no daemon.pid: an abandoned orphan by every
+        // measure the selection layer applies, and still not ours to kill.
+        let their_socket = theirs.path().join("codex-app-server.sock");
+        let marker = format!("app-server --listen unix://{}", their_socket.display());
+        let stranger = spawn_orphan(&format!("\"{}\" {marker}", script.display()), &marker);
+        let _cleanup = KillOnDrop(vec![stranger]);
+
+        let ps_output = ps_process_table().await.expect("process table");
+        assert!(
+            codex_orphans_to_reap(&ps_output, adoption_is_credible).contains(&stranger),
+            "the fixture must be selected by the pure layer, or it proves nothing"
+        );
+
+        let reaped = reap_orphaned_codex_servers(&ours.path().join("codex-app-server.sock")).await;
+        assert_eq!(reaped, 0, "a foreign home's app-server must not be reaped");
+        assert!(
+            pid_is_running(stranger),
+            "pid {stranger} was killed by a sweep that does not own it"
+        );
+    }
+
+    /// The ownership proof itself, against real processes and a real `lsof`: only
+    /// the holder of THIS home's socket can be signalled.
+    #[test]
+    fn ownership_proof_accepts_only_this_homes_socket_holder() {
+        let mine = tempfile::tempdir().unwrap();
+        let theirs = tempfile::tempdir().unwrap();
+        let my_socket = mine.path().join("codex-app-server.sock");
+        let their_socket = theirs.path().join("codex-app-server.sock");
+        let ours = SocketDecoy::holding(&my_socket);
+        let stranger = SocketDecoy::holding(&their_socket);
+
+        assert!(
+            OwnedPid::holding_socket(ours.pid(), &my_socket).is_some(),
+            "the holder of this home's socket is ours to signal"
+        );
+        assert!(
+            OwnedPid::holding_socket(stranger.pid(), &my_socket).is_none(),
+            "a codex serving another home must never be signalled"
+        );
+        // A live process holding no socket at all (pid 1) proves nothing either.
+        assert!(OwnedPid::holding_socket(1, &my_socket).is_none());
+        assert!(OwnedPid::holding_socket(dead_pid(), &my_socket).is_none());
+    }
+
     /// Scriptable stand-in for a process table: who is alive, and which signals
     /// each pid ignores.
     struct FakeProcesses {
@@ -1935,6 +2248,14 @@ mod tests {
         }
     }
 
+    /// Ownership stand-in for the escalation tests, which are about SIGTERM →
+    /// SIGKILL mechanics against synthetic pids that hold no socket. The proof
+    /// itself is exercised against real processes in
+    /// [`ownership_proof_accepts_only_this_homes_socket_holder`].
+    fn proven(pid: u32) -> Option<OwnedPid> {
+        Some(OwnedPid(pid))
+    }
+
     /// Same shape as `ReapTiming::PRODUCTION`, three orders of magnitude faster.
     const TEST_TIMING: ReapTiming = ReapTiming {
         term_grace: Duration::from_millis(15),
@@ -1949,9 +2270,12 @@ mod tests {
         // looked at again, so it survived every 60s sweep.
         processes.ignores_term.insert(777);
 
-        let outcome = terminate_orphans(&[501, 777, 999], TEST_TIMING, &|pid, signal| {
-            processes.signal(pid, signal)
-        })
+        let outcome = terminate_orphans(
+            &[501, 777, 999],
+            TEST_TIMING,
+            &|pid, signal| processes.signal(pid, signal),
+            &proven,
+        )
         .await;
 
         assert_eq!(
@@ -1959,7 +2283,8 @@ mod tests {
             ReapOutcome {
                 reaped: 3,
                 escalated: 1,
-                survived: 0
+                survived: 0,
+                unproven: 0
             }
         );
         // The compliant orphan is SIGTERMed, probed once, and never escalated.
@@ -1980,9 +2305,12 @@ mod tests {
         processes.ignores_term.insert(501);
         processes.ignores_kill.insert(501);
 
-        let outcome = terminate_orphans(&[501], TEST_TIMING, &|pid, signal| {
-            processes.signal(pid, signal)
-        })
+        let outcome = terminate_orphans(
+            &[501],
+            TEST_TIMING,
+            &|pid, signal| processes.signal(pid, signal),
+            &proven,
+        )
         .await;
 
         assert_eq!(
@@ -1990,9 +2318,39 @@ mod tests {
             ReapOutcome {
                 reaped: 0,
                 escalated: 0,
-                survived: 1
+                survived: 1,
+                unproven: 0
             }
         );
+    }
+
+    /// An unproven target is never signalled at all — not even the SIGTERM.
+    #[tokio::test]
+    async fn an_unproven_target_is_spared_entirely() {
+        let processes = FakeProcesses::new(&[501]);
+
+        let outcome = terminate_orphans(
+            &[501],
+            TEST_TIMING,
+            &|pid, signal| processes.signal(pid, signal),
+            &|_| None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            ReapOutcome {
+                reaped: 0,
+                escalated: 0,
+                survived: 0,
+                unproven: 1
+            }
+        );
+        assert!(
+            processes.delivered(501).is_empty(),
+            "an unproven pid must not even be probed for liveness by the reaper"
+        );
+        assert!(processes.alive.lock().unwrap().contains(&501));
     }
 
     /// SIGKILLs whatever the real-process test spawned, however the test ends.
@@ -2099,7 +2457,11 @@ mod tests {
             kill_confirm: Duration::from_millis(1_000),
             poll: Duration::from_millis(25),
         };
-        let outcome = terminate_orphans(&[server], timing, &nix_signal).await;
+        // `proven` stands in for the ownership proof: this fixture is a shell
+        // script, so it holds no `codex-app-server.sock` to prove ownership with.
+        // What is under test here is the SIGTERM → SIGKILL escalation against a
+        // real TERM-trapping process; the proof has its own real-process test.
+        let outcome = terminate_orphans(&[server], timing, &nix_signal, &proven).await;
         assert_eq!(outcome.reaped, 1, "{outcome:?}");
         assert_eq!(
             outcome.survived, 0,
