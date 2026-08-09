@@ -209,10 +209,16 @@ const MODEL_TOKEN_MAX: usize = 64;
 /// writes `claude-opus-5`; the bracket carries the context window, not the model
 /// identity. Both producers must therefore collapse onto one token, or a single
 /// session renders two different models depending on which one observed it last.
-/// Widening the charset to admit brackets would do the opposite — it would let
-/// the two spellings coexist as distinct values — and rejecting the bracketed
-/// form outright would cost every Claude row its model until the turn ends,
-/// since the hook is the only producer that fires mid-turn.
+/// Widening the charset to admit brackets would do the opposite: it would let
+/// the two spellings coexist as distinct values.
+///
+/// Rejecting the bracketed form outright would leave a NEW Claude session blank
+/// until its first turn ends. Claude reports a model on exactly one hook,
+/// `SessionStart` (measured: 46 occurrences in a 54826-payload window, every one
+/// of them a `SessionStart`, and 38 of the 46 spelled with the bracket). At that
+/// moment the session's transcript exists but holds no assistant record yet, so
+/// the transcript producer has nothing to return and the hook is the only
+/// source. Stripping is what lets the row name its model from the start.
 pub(crate) fn model_token(raw: &str) -> Option<String> {
     if raw.is_empty() || raw.len() > MODEL_TOKEN_MAX {
         return None;
