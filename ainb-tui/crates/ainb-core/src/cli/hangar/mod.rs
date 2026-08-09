@@ -8635,25 +8635,129 @@ fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
     }
 }
 
-/// `hangar daemon stop`: signal the EXACT recorded pid, then remove the file.
+/// Resolve the daemon's control socket: `<hangar_home>/hangar.sock` — the one the
+/// RPC server binds, and the proof of identity `stop` demands before signalling.
+fn daemon_socket_path() -> Result<std::path::PathBuf> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(home.join("hangar.sock"))
+}
+
+/// A pid this process has PROVED it may signal.
 ///
-/// Reads the pid back from the PID file and sends `SIGTERM` to that exact
-/// process (never a name-based `pkill`). A stale pid file (process already gone)
-/// is cleaned up; an absent file is reported as "not running".
+/// The only constructor is [`OwnedPid::holding_socket`] and the only signal path
+/// takes one, so "signal whatever integer the pid file happened to contain" is a
+/// type error. A pid file is a claim, not proof: the recorded process may have died
+/// without cleaning up and had its pid recycled by something unrelated — the
+/// classic way an automated `stop` takes down an innocent process.
+#[derive(Debug, PartialEq, Eq)]
+struct OwnedPid(u32);
+
+impl OwnedPid {
+    /// Prove `pid` is this home's daemon: it must hold a unix socket bound to
+    /// `socket` (`<hangar home>/hangar.sock`) under the current uid. Fails closed —
+    /// no `lsof`, an unreadable process, or any ambiguity answers `None`.
+    fn holding_socket(pid: u32, socket: &std::path::Path) -> Option<Self> {
+        pid_holds_socket(pid, socket).then_some(Self(pid))
+    }
+}
+
+/// Does `pid` hold a unix socket bound to `socket`, under the current uid?
+///
+/// `lsof -a -p <pid> -u <uid> -U -F n` lists the bound NAME of every unix socket
+/// the process holds; `-a` ANDs the pid and uid filters, so another user's process
+/// answers empty. (The same proof lives in `ainb-hangar-daemon`'s codex reaper and
+/// in `ainb-plugin-notifyd`; neither crate can be depended on from here without
+/// inverting the dependency graph.)
+fn pid_holds_socket(pid: u32, socket: &std::path::Path) -> bool {
+    let uid = nix::unistd::Uid::current().as_raw().to_string();
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-u", &uid, "-U", "-F", "n"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|name| socket_names_match(name, socket))
+}
+
+/// Compare a bound socket name from `lsof` to the path we expect. Exact match
+/// first; the fallback re-resolves both parent directories so a home reached
+/// through a symlink (`/tmp` -> `/private/tmp` on macOS) still matches.
+fn socket_names_match(name: &str, expected: &std::path::Path) -> bool {
+    let name = std::path::Path::new(name);
+    if name == expected {
+        return true;
+    }
+    let real_dir = |p: &std::path::Path| p.parent().and_then(|dir| std::fs::canonicalize(dir).ok());
+    match (
+        real_dir(name),
+        real_dir(expected),
+        name.file_name(),
+        expected.file_name(),
+    ) {
+        (Some(a), Some(b), Some(x), Some(y)) => a == b && x == y,
+        _ => false,
+    }
+}
+
+/// What `stop` is allowed to do about the pid recorded in the pid file.
+#[derive(Debug, PartialEq, Eq)]
+enum StopDecision {
+    /// No usable pid recorded: absent, empty, or unparseable file.
+    NotRecorded,
+    /// The recorded pid is not running — a stale file to clean up.
+    Stale(u32),
+    /// Running, but it cannot be proved to be this home's daemon. Left alone.
+    Unproven(u32),
+    /// Running and proved ours.
+    Signal(OwnedPid),
+}
+
+/// Decide what `stop` may do, given the pid file and the socket that proves
+/// ownership. Split out from [`run_daemon_stop`] so the decision is testable
+/// against real decoy processes without signalling anything.
+fn stop_decision(pid_path: &std::path::Path, socket: &std::path::Path) -> StopDecision {
+    match read_daemon_pid(pid_path) {
+        None => StopDecision::NotRecorded,
+        Some(pid) if !pid_is_running(pid) => StopDecision::Stale(pid),
+        Some(pid) => match OwnedPid::holding_socket(pid, socket) {
+            Some(owned) => StopDecision::Signal(owned),
+            None => StopDecision::Unproven(pid),
+        },
+    }
+}
+
+/// `hangar daemon stop`: signal the EXACT recorded pid once it has PROVED it is
+/// this home's daemon, then remove the file.
+///
+/// The pid is read back from the PID file and must then be shown to hold
+/// `<hangar home>/hangar.sock` under our uid ([`OwnedPid`]) before any signal is
+/// sent (never a name-based `pkill`, and never a bare pid-file integer). A stale
+/// pid file (process already gone) is cleaned up; an absent file is reported as
+/// "not running"; an unprovable pid is reported and left running.
 ///
 /// Waits (bounded) for the process to actually exit, then records the exit
 /// breadcrumb on its behalf: see [`record_daemon_stop_breadcrumb`].
 fn run_daemon_stop() -> Result<()> {
     let pid_path = daemon_pid_path()?;
+    let socket = daemon_socket_path()?;
     // Drop the version record too — a stopped daemon has no running version, and
     // a lingering file would make `status` compare against a dead daemon.
     if let Ok(vpath) = daemon_version_path() {
         std::fs::remove_file(&vpath).ok();
     }
-    match read_daemon_pid(&pid_path) {
-        Some(pid) if pid_is_running(pid) => {
+    match stop_decision(&pid_path, &socket) {
+        StopDecision::Signal(owned) => {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
+            let pid = owned.0;
             kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
                 .with_context(|| format!("send SIGTERM to pid {pid}"))?;
             let died = wait_for_pid_exit(pid, DAEMON_STOP_GRACE);
@@ -8673,11 +8777,23 @@ fn run_daemon_stop() -> Result<()> {
                 );
             }
         }
-        Some(pid) => {
+        StopDecision::Unproven(pid) => {
+            // Fail closed. Either the daemon has not bound its socket yet, `lsof`
+            // is unavailable, or — the case this exists for — the recorded pid now
+            // belongs to somebody else entirely. Keep the pid file: it is the only
+            // record of what was claimed, and a `start` must not race a daemon that
+            // may still be coming up.
+            println!(
+                "hangar daemon: refusing to signal pid {pid} — it does not hold {} \
+                 (not this home's daemon, or the socket is not bound yet)",
+                socket.display()
+            );
+        }
+        StopDecision::Stale(pid) => {
             std::fs::remove_file(&pid_path).ok();
             println!("hangar daemon: not running (cleaned up stale pid {pid})");
         }
-        None => {
+        StopDecision::NotRecorded => {
             println!("hangar daemon: not running");
         }
     }
@@ -10175,6 +10291,117 @@ mod tests {
     use super::*;
     use crate::cli::registry::CommandRegistry;
     use clap::FromArgMatches;
+
+    /// A real process we own that holds `socket` open: the listener is bound here
+    /// and handed to a `sleep` child as its stdin, so `lsof` reports the child
+    /// holding that bound name — the same evidence a real daemon leaves. Killed by
+    /// its exact pid on drop; never by name.
+    struct SocketDecoy {
+        _listener: std::os::unix::net::UnixListener,
+        child: std::process::Child,
+    }
+
+    impl SocketDecoy {
+        fn holding(socket: &std::path::Path) -> Self {
+            let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind decoy");
+            let handed = listener.try_clone().expect("clone decoy socket");
+            let child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                    handed,
+                )))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn decoy");
+            Self {
+                _listener: listener,
+                child,
+            }
+        }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for SocketDecoy {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// `stop` reads a pid out of a file and used to SIGTERM it on sight. A daemon
+    /// that died without cleaning up leaves that pid free to be recycled by an
+    /// unrelated process, which then eats the signal. Ownership must be proved
+    /// against this home's `hangar.sock` first.
+    #[test]
+    fn stop_refuses_a_pid_that_does_not_hold_this_homes_socket() {
+        let mine = tempfile::tempdir().expect("tempdir");
+        let theirs = tempfile::tempdir().expect("tempdir");
+        let socket = mine.path().join("hangar.sock");
+        let pid_path = mine.path().join("hangar").join("daemon.pid");
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+
+        // A live process that holds nothing: the recycled-pid case.
+        let stranger = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stranger");
+        let stranger_pid = stranger.id();
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _cleanup = KillOnDrop(stranger);
+        std::fs::write(&pid_path, format!("{stranger_pid}\n")).unwrap();
+        assert_eq!(
+            stop_decision(&pid_path, &socket),
+            StopDecision::Unproven(stranger_pid)
+        );
+
+        // A live daemon of a DIFFERENT hangar home: also never ours to signal.
+        let foreign = SocketDecoy::holding(&theirs.path().join("hangar.sock"));
+        std::fs::write(&pid_path, format!("{}\n", foreign.pid())).unwrap();
+        assert_eq!(
+            stop_decision(&pid_path, &socket),
+            StopDecision::Unproven(foreign.pid())
+        );
+    }
+
+    /// The other half: the guard must not make `stop` useless. The process holding
+    /// THIS home's socket is signalled, and the dead/absent cases still resolve.
+    #[test]
+    fn stop_signals_the_pid_holding_this_homes_socket() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let socket = home.path().join("hangar.sock");
+        let pid_path = home.path().join("hangar").join("daemon.pid");
+        std::fs::create_dir_all(pid_path.parent().unwrap()).unwrap();
+
+        assert_eq!(stop_decision(&pid_path, &socket), StopDecision::NotRecorded);
+
+        let daemon = SocketDecoy::holding(&socket);
+        std::fs::write(&pid_path, format!("{}\n", daemon.pid())).unwrap();
+        assert_eq!(
+            stop_decision(&pid_path, &socket),
+            StopDecision::Signal(OwnedPid(daemon.pid()))
+        );
+
+        // A recorded pid that is not running stays a stale-file cleanup, not a
+        // signal — the ownership proof never even runs.
+        let mut gone = std::process::Command::new("true").spawn().expect("spawn true");
+        let dead_pid = gone.id();
+        gone.wait().expect("wait true");
+        std::fs::write(&pid_path, format!("{dead_pid}\n")).unwrap();
+        assert_eq!(
+            stop_decision(&pid_path, &socket),
+            StopDecision::Stale(dead_pid)
+        );
+    }
 
     /// The skew helper flags a differing recorded version, and stays quiet for
     /// a match, an absent record, or an empty one (absence is not skew).
