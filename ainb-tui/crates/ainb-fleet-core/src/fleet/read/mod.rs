@@ -17,9 +17,9 @@ pub use errors::{API_ERROR_PATTERNS, detect_error_signals};
 /// boundary via the `ainb-core::fleet::read` re-export.
 pub use jsonl_tail::is_turn_end_stop_reason;
 pub use jsonl_tail::{
-    AskUserQuestionData, LastAssistantInfo, cwd_to_project_slug, last_api_error_from_jsonl,
-    last_ask_user_question, last_assistant_info, last_narrative_snapshot,
-    latest_transcript_for_cwd, wait_for_turn_end,
+    AskUserQuestionData, LastAssistantInfo, ModelInfo, TranscriptDialect, cwd_to_project_slug,
+    last_api_error_from_jsonl, last_ask_user_question, last_assistant_info, last_model_info,
+    last_narrative_snapshot, latest_transcript_for_cwd, wait_for_turn_end,
 };
 pub use needs::{
     ClassifyInput, ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint, WaitContext,

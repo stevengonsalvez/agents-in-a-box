@@ -480,6 +480,75 @@ pub fn last_assistant_info(path: &Path) -> Option<LastAssistantInfo> {
     None
 }
 
+/// What a session's own transcript says it is running.
+///
+/// The two fields are read from ONE record, so they always describe the same
+/// turn. A provider that reports only one of them leaves the other `None`;
+/// `None` means "never observed", never "default".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelInfo {
+    /// Provider-reported model id, verbatim.
+    pub model: Option<String>,
+    /// Provider-reported reasoning effort, verbatim.
+    pub effort: Option<String>,
+}
+
+/// Which transcript dialect a session writes.
+///
+/// The two providers spell the same pair differently and on differently-typed
+/// records, so the backward walk has to know which it is reading. The dialect
+/// comes from the hook line's provider, not from sniffing the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptDialect {
+    /// `~/.claude/projects/<slug>/<uuid>.jsonl` — `type == "assistant"`, model at
+    /// `/message/model`, effort at the top-level `/effort`.
+    Claude,
+    /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — `type == "turn_context"`,
+    /// both fields under `/payload`.
+    Codex,
+}
+
+/// The newest model + effort this transcript reports, bounded to the newest
+/// [`MAX_TAIL_ROWS`] rows.
+///
+/// `accepts_model` is the caller's own notion of a usable model id (in the daemon,
+/// the storage clamp). The walk CONTINUES PAST a record it rejects rather than
+/// giving up: Claude writes `<synthetic>` for its own internal turns, and a
+/// recent live sample had it on half the assistant records — bailing on the first
+/// one would report "no model" for most active sessions.
+pub fn last_model_info(
+    path: &Path,
+    dialect: TranscriptDialect,
+    accepts_model: impl Fn(&str) -> bool,
+) -> Option<ModelInfo> {
+    let lines = read_tail_lines(path, MAX_TAIL_ROWS)?;
+    let (row_type, model_at, effort_at) = match dialect {
+        TranscriptDialect::Claude => ("assistant", "/message/model", "/effort"),
+        TranscriptDialect::Codex => ("turn_context", "/payload/model", "/payload/effort"),
+    };
+    for row in lines.iter().rev() {
+        let Ok(value) = serde_json::from_str::<Value>(row) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some(row_type) {
+            continue;
+        }
+        let Some(model) = value.pointer(model_at).and_then(Value::as_str) else {
+            continue;
+        };
+        if !accepts_model(model) {
+            continue;
+        }
+        return Some(ModelInfo {
+            model: Some(model.to_string()),
+            // Read from the SAME record as the model: a pair split across two
+            // turns could claim a model/effort combination that never ran.
+            effort: value.pointer(effort_at).and_then(Value::as_str).map(str::to_string),
+        });
+    }
+    None
+}
+
 /// The deepest lookback any caller in this module asks for — the final window of
 /// [`last_ask_user_question`] and [`last_narrative_snapshot`]'s 20→320 walk.
 const MAX_TAIL_ROWS: usize = 320;
@@ -702,6 +771,82 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stand-in for the daemon's storage clamp: real ids pass, Claude's
+    /// `<synthetic>` placeholder does not.
+    fn plausible_model(raw: &str) -> bool {
+        !raw.is_empty() && !raw.starts_with('<')
+    }
+
+    /// Write `rows` as a JSONL transcript and return its path (plus the tempdir,
+    /// which must outlive the read).
+    fn transcript(rows: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("transcript.jsonl");
+        std::fs::write(&path, format!("{}\n", rows.join("\n"))).expect("write transcript");
+        (dir, path)
+    }
+
+    /// Claude writes `<synthetic>` for its own internal turns — half of one
+    /// recent live sample. Bailing on the newest rejected record would report "no
+    /// model" for most active sessions, so the walk must keep going.
+    #[test]
+    fn claude_transcript_yields_model_skipping_synthetic() {
+        let (_dir, path) = transcript(&[
+            r#"{"type":"assistant","message":{"model":"claude-opus-5"},"effort":"high"}"#,
+            r#"{"type":"user","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+        ]);
+
+        assert_eq!(
+            last_model_info(&path, TranscriptDialect::Claude, plausible_model),
+            Some(ModelInfo {
+                model: Some("claude-opus-5".to_string()),
+                effort: Some("high".to_string()),
+            }),
+            "the newest REAL assistant record wins; the synthetic ones are walked past"
+        );
+    }
+
+    /// Codex spells the pair on a `turn_context` record, both fields under
+    /// `/payload` — the dialect the rollout files actually use.
+    #[test]
+    fn codex_rollout_turn_context_yields_effort() {
+        let (_dir, path) = transcript(&[
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.5-old","effort":"low"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra","effort":"high"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#,
+        ]);
+
+        assert_eq!(
+            last_model_info(&path, TranscriptDialect::Codex, plausible_model),
+            Some(ModelInfo {
+                model: Some("gpt-5.6-terra".to_string()),
+                effort: Some("high".to_string()),
+            }),
+            "the newest turn_context wins, and its pair is read from that one record"
+        );
+    }
+
+    /// A transcript with nothing the dialect recognises reports absence rather
+    /// than a guess, and a missing file is not an error either.
+    #[test]
+    fn last_model_info_is_none_without_a_matching_record() {
+        let (_dir, path) = transcript(&[r#"{"type":"user","message":{"content":"go"}}"#]);
+        assert_eq!(
+            last_model_info(&path, TranscriptDialect::Claude, plausible_model),
+            None
+        );
+        assert_eq!(
+            last_model_info(
+                &path.with_file_name("absent.jsonl"),
+                TranscriptDialect::Claude,
+                plausible_model
+            ),
+            None
+        );
+    }
 
     #[test]
     fn slugs_a_typical_cwd() {
