@@ -56,6 +56,9 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// `lsof` output parsing shared by every ownership proof, so the three call
+/// sites that decide whether a pid is ours cannot drift apart.
+pub mod lsof;
 /// Comment `@mention` grammar (`mention://` links + bare `@handle`) and the
 /// per-target routing outcome vocabulary (multica parity #2-rest). The pure
 /// half; resolution + writes live in `ainb_hangar_store::service::mention`.

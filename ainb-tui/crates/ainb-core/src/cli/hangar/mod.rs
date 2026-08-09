@@ -8684,6 +8684,7 @@ fn pid_holds_socket(pid: u32, socket: &std::path::Path) -> bool {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix('n'))
+        .map(ainb_hangar_core::lsof::strip_type_suffix)
         .any(|name| socket_names_match(name, socket))
 }
 
