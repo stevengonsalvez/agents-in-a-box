@@ -243,6 +243,15 @@ private struct FleetNotchView: View {
                     .accessibilityLabel("Quit Fleet")
                 }
 
+                // Active filters are shown even when rows still match, so a
+                // persisted one is never invisible. The roster going empty was
+                // only the loudest symptom; a filter quietly trimming the list
+                // is the same problem, just harder to notice.
+                FleetActiveFilterChips(
+                    filters: presentation.preferences.filters,
+                    clear: { presentation.preferences.filters = .all }
+                )
+
                 Picker("Fleet view", selection: $navigation.route) {
                     ForEach(FleetNotchRoute.allCases) { route in
                         Text(route.title).tag(route)
@@ -1631,6 +1640,43 @@ private struct FleetUsageStats {
         return best
     }
 }
+/// A visible reminder of every filter currently trimming the roster.
+///
+/// The notch exposes controls for provider and focus only, but the persisted
+/// filter set also carries attention, lifecycle, management and transport,
+/// which the separate window can set. Without this strip those are invisible
+/// until the list empties, which is exactly how a stale `attentionOnly` hid
+/// every session with nothing on screen to explain it.
+private struct FleetActiveFilterChips: View {
+    let filters: FleetRosterFilters
+    let clear: () -> Void
+
+    var body: some View {
+        let names = FleetRosterEmptyState.activeFilterNames(filters)
+        // `.all` yields the search-term placeholder, which is not a filter.
+        if filters != .all {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                ForEach(names, id: \.self) { name in
+                    Text(name)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(FleetNotchPalette.control, in: Capsule())
+                }
+                Button("Clear", action: clear)
+                    .font(.system(size: 9.5))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(FleetNotchPalette.mint)
+                    .accessibilityIdentifier("fleet.notch.clear-filters")
+                Spacer()
+            }
+        }
+    }
+}
+
 /// Says WHY the roster is empty, and offers the action that fixes it.
 ///
 /// "No matching sessions" was true but useless: it did not distinguish a
