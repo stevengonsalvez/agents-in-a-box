@@ -427,6 +427,16 @@ private struct FleetNotchSessionRow: View {
                         .font(.caption2)
                         .foregroundStyle(FleetNotchPalette.muted)
                         .lineLimit(1)
+                    // Omitted entirely when the daemon has never observed a
+                    // model: a placeholder here would read as reported data.
+                    if let modelLabel = FleetRosterPresentation.modelLabel(for: session) {
+                        Text(modelLabel)
+                            .font(.caption2)
+                            .foregroundStyle(FleetNotchPalette.muted)
+                            .opacity(FleetRosterPresentation.modelIsStale(for: session) ? 0.55 : 1)
+                            .lineLimit(1)
+                            .help(FleetRosterPresentation.modelHelp(for: session) ?? modelLabel)
+                    }
                 }
                 Spacer(minLength: 8)
                 VStack(alignment: .trailing, spacing: 5) {
@@ -448,7 +458,7 @@ private struct FleetNotchSessionRow: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier("fleet.notch.row.\(session.sessionKey)")
         .accessibilityLabel(identity.accessibilityLabel)
-        .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: connection))
+        .accessibilityValue(FleetRosterPresentation.rowAccessibilityValue(for: session, connection: connection))
     }
 
     private var metadata: String {
@@ -527,6 +537,12 @@ private struct FleetNotchDetail: View {
                 Text(FleetRosterPresentation.semanticStatus(for: session, connection: store.connectionState))
                     .font(.caption)
                     .foregroundStyle(FleetNotchPalette.muted)
+            }
+            if let model = FleetRosterPresentation.modelDetail(for: session) {
+                Text(model)
+                    .font(.caption2)
+                    .foregroundStyle(FleetNotchPalette.muted)
+                    .opacity(FleetRosterPresentation.modelIsStale(for: session) ? 0.6 : 1)
             }
             if let notice = store.controlNotice {
                 Text(notice)

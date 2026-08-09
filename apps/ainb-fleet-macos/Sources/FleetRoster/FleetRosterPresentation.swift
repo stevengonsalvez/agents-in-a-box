@@ -96,6 +96,82 @@ enum FleetRosterPresentation {
         "\(session.lifecycle.rawValue.replacingOccurrences(of: "_", with: " ")) · \(session.attention.rawValue)"
     }
 
+    /// How long a running session may go without a fresh model observation
+    /// before the chip is presented as historical rather than current. Claude
+    /// only refreshes the pair at the end of a turn, so a long turn is expected
+    /// to drift; fifteen minutes is past that.
+    static let modelStaleAfterMilliseconds: Int64 = 900_000
+
+    /// The model/effort pair as one chip, or nil when the daemon has never
+    /// observed either. Absence renders as absence: callers must omit the chip
+    /// entirely rather than substitute a dash or "unknown", which would read as
+    /// reported data.
+    static func modelLabel(for session: FleetSession) -> String? {
+        let model = reported(session.model).map(shortModelName)
+        let effort = reported(session.reasoningEffort)
+        switch (model, effort) {
+        case let (.some(model), .some(effort)): return "\(model) · \(effort)"
+        case let (.some(model), .none): return model
+        case let (.none, .some(effort)): return "\(effort) effort"
+        case (.none, .none): return nil
+        }
+    }
+
+    /// True when a live session's pair is old enough that it describes a past
+    /// turn. Compared against the daemon's own clock, never the client's.
+    static func modelIsStale(for session: FleetSession) -> Bool {
+        session.lifecycle == .running
+            && session.lastObservedAt - (session.modelUpdatedAt ?? 0) > modelStaleAfterMilliseconds
+    }
+
+    /// Freshness of the model observation for help text, e.g. "22 minutes ago".
+    /// nil when the daemon never reported one.
+    static func modelAsOfLabel(for session: FleetSession, now: Date = Date()) -> String? {
+        guard let updatedAt = session.modelUpdatedAt, updatedAt > 0 else { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(
+            for: Date(timeIntervalSince1970: TimeInterval(updatedAt) / 1_000),
+            relativeTo: now
+        )
+    }
+
+    /// The pair with the age of the observation, for a detail surface that has
+    /// the room for it. nil when nothing was ever observed.
+    static func modelDetail(for session: FleetSession) -> String? {
+        guard let label = modelLabel(for: session) else { return nil }
+        guard let asOf = modelAsOfLabel(for: session) else { return label }
+        return "\(label) · as of \(asOf)"
+    }
+
+    /// Tooltip for the model chip. Only a stale chip earns an explanation; a
+    /// current one would just repeat the chip back at the operator.
+    static func modelHelp(for session: FleetSession) -> String? {
+        guard let label = modelLabel(for: session) else { return nil }
+        guard modelIsStale(for: session), let asOf = modelAsOfLabel(for: session) else { return label }
+        return "\(label), as of \(asOf)"
+    }
+
+    /// The row's VoiceOver value. A session with no observed model reads exactly
+    /// as it did before the chip existed, so the chip cannot make a row that
+    /// reports nothing sound like it reports something.
+    static func rowAccessibilityValue(for session: FleetSession, connection: FleetConnectionState) -> String {
+        let status = semanticStatus(for: session, connection: connection)
+        guard let help = modelHelp(for: session) else { return status }
+        return "\(status), \(help)"
+    }
+
+    private static func reported(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// Every provider id is left verbatim except Claude's redundant vendor
+    /// prefix, which costs a third of the chip's width on every Claude row.
+    private static func shortModelName(_ value: String) -> String {
+        value.hasPrefix("claude-") ? String(value.dropFirst("claude-".count)) : value
+    }
+
     static func statusSymbol(for session: FleetSession, connection: FleetConnectionState) -> String {
         guard connection.isLive else { return "exclamationmark.triangle" }
         if session.management == .degraded || session.transportHealth != .healthy { return "exclamationmark.circle" }
@@ -126,6 +202,7 @@ enum FleetRosterPresentation {
             identity.repository,
             identity.worktree ?? "",
             identity.branch ?? "",
+            session.model ?? "",
         ]
         return (query.isEmpty || searchable.contains { $0.lowercased().contains(query) })
             && filters.focus.matches(session)

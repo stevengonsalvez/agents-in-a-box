@@ -80,6 +80,16 @@ struct FleetSessionDetailView: View {
                     detail("Transport", session.transportHealth.rawValue)
                     detail("Last observed", FleetRosterPresentation.freshnessLabel(for: session))
                 }
+                // Omitted entirely when the daemon has never observed a model,
+                // so an empty row is never mistaken for a reported value.
+                if let model = FleetRosterPresentation.modelLabel(for: session) {
+                    GridRow {
+                        detail("Model", model)
+                        if let asOf = FleetRosterPresentation.modelAsOfLabel(for: session) {
+                            detail(FleetRosterPresentation.modelIsStale(for: session) ? "Model as of (stale)" : "Model as of", asOf)
+                        }
+                    }
+                }
             }
         }
         .padding(16)

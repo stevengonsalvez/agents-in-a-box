@@ -296,7 +296,14 @@ struct FleetSession: Codable, Equatable {
     let attentionUpdatedAt: Int64
     let version: Int64
     let updatedRevision: Int64
-    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", provider, providerSessionID = "provider_session_id", tmuxTarget = "tmux_target", processStartFingerprint = "process_start_fingerprint", cwd, displayName = "display_name", lifecycle, activeWorkCount = "active_work_count", attention, currentRequestFingerprint = "current_request_fingerprint", currentRequest = "current_request", management, transportHealth = "transport_health", capabilities, provenance, confidence, discoveredAt = "discovered_at", lastObservedAt = "last_observed_at", lifecycleUpdatedAt = "lifecycle_updated_at", attentionUpdatedAt = "attention_updated_at", version, updatedRevision = "updated_revision" }
+    /// Provider-reported model id, verbatim. Absent until the daemon has
+    /// actually observed one: nil means "never observed", never "default model".
+    /// Declared WITHOUT an initialiser on purpose -- a `let` carrying one is
+    /// skipped by the synthesized decoder and would be permanently nil.
+    let model: String?
+    let reasoningEffort: String?
+    let modelUpdatedAt: Int64?
+    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", provider, providerSessionID = "provider_session_id", tmuxTarget = "tmux_target", processStartFingerprint = "process_start_fingerprint", cwd, displayName = "display_name", lifecycle, activeWorkCount = "active_work_count", attention, currentRequestFingerprint = "current_request_fingerprint", currentRequest = "current_request", management, transportHealth = "transport_health", capabilities, provenance, confidence, discoveredAt = "discovered_at", lastObservedAt = "last_observed_at", lifecycleUpdatedAt = "lifecycle_updated_at", attentionUpdatedAt = "attention_updated_at", version, updatedRevision = "updated_revision", model, reasoningEffort = "reasoning_effort", modelUpdatedAt = "model_updated_at" }
 }
 
 struct FleetSnapshot: Codable, Equatable {

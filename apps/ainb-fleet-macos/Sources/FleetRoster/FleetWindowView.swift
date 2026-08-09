@@ -540,6 +540,14 @@ private struct FleetRosterRow: View {
                         .font(.caption2)
                         .foregroundStyle(FleetPalette.muted)
                         .lineLimit(1)
+                    if let modelLabel {
+                        Text(modelLabel)
+                            .font(.caption2)
+                            .foregroundStyle(FleetPalette.muted)
+                            .opacity(isModelStale ? 0.55 : 1)
+                            .lineLimit(1)
+                            .help(FleetRosterPresentation.modelHelp(for: session) ?? modelLabel)
+                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -550,7 +558,17 @@ private struct FleetRosterRow: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier("fleet.row.\(session.sessionKey)")
         .accessibilityLabel(identity.accessibilityLabel)
-        .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: connection))
+        .accessibilityValue(FleetRosterPresentation.rowAccessibilityValue(for: session, connection: connection))
+    }
+
+    /// nil renders no chip at all: the daemon reports a model only once it has
+    /// seen one, and a placeholder would read as a reported value.
+    private var modelLabel: String? {
+        FleetRosterPresentation.modelLabel(for: session)
+    }
+
+    private var isModelStale: Bool {
+        FleetRosterPresentation.modelIsStale(for: session)
     }
 
     private var statusColor: Color {
