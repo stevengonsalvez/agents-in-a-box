@@ -78,7 +78,34 @@ fn pid_holds_socket(pid: u32, socket: &Path) -> bool {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix('n'))
+        .map(strip_lsof_type_suffix)
         .any(|name| socket_names_match(name, socket))
+}
+
+/// Drop the ` type=STREAM` that Linux `lsof` appends to a unix socket's NAME.
+///
+/// macOS emits the bare path, Linux does not:
+///
+/// ```text
+/// macOS   n/tmp/x/notify.sock
+/// Linux   n/tmp/x/notify.sock type=STREAM
+/// ```
+///
+/// Without this the name never equals the expected path on Linux, so
+/// [`pid_holds_socket`] answers `false` for every pid. Because the proof fails
+/// closed that is silent: reaping degrades to a no-op rather than erroring, and
+/// only `reap_signals_a_notifyd_serving_this_home` notices.
+///
+/// Split from the RIGHT, and only when the tail is a socket type lsof actually
+/// emits. Position alone is not enough: a directory legitimately named
+/// `odd type=dir` would otherwise truncate the path at the wrong point, and the
+/// resulting name matches nothing, which fails closed and spares a pid we own.
+fn strip_lsof_type_suffix(name: &str) -> &str {
+    const LSOF_SOCKET_TYPES: [&str; 3] = ["STREAM", "DGRAM", "SEQPACKET"];
+    match name.rsplit_once(" type=") {
+        Some((path, tail)) if LSOF_SOCKET_TYPES.contains(&tail) => path,
+        _ => name,
+    }
 }
 
 /// Compare a bound socket name from `lsof` to the path we expect.
@@ -725,6 +752,39 @@ mod tests {
             lsof_dump(decoy.pid()),
         );
         assert!(report.spared_unproven.is_empty());
+    }
+
+    /// Both platforms' `lsof -F n` shapes, so the Linux one cannot regress on a
+    /// macOS-only machine. The real bug this guards: Linux appends
+    /// ` type=STREAM`, the name never matched, and because the proof fails
+    /// closed, reaping degraded to a silent no-op on every Linux host.
+    #[test]
+    fn lsof_type_suffix_is_stripped_on_every_platform_shape() {
+        // Linux
+        assert_eq!(
+            strip_lsof_type_suffix("/tmp/x/notify.sock type=STREAM"),
+            "/tmp/x/notify.sock"
+        );
+        // macOS: bare path, must pass through untouched
+        assert_eq!(
+            strip_lsof_type_suffix("/tmp/x/notify.sock"),
+            "/tmp/x/notify.sock"
+        );
+        // Other socket types Linux may report
+        assert_eq!(
+            strip_lsof_type_suffix("/tmp/x/approve.sock type=DGRAM"),
+            "/tmp/x/approve.sock"
+        );
+        // A path containing the marker: strip only the appended suffix
+        assert_eq!(
+            strip_lsof_type_suffix("/tmp/odd type=dir/notify.sock type=STREAM"),
+            "/tmp/odd type=dir/notify.sock"
+        );
+        // No suffix on such a path: leave it whole
+        assert_eq!(
+            strip_lsof_type_suffix("/tmp/odd type=dir/notify.sock"),
+            "/tmp/odd type=dir/notify.sock"
+        );
     }
 
     fn classified(class: DaemonClass, pid: u32) -> ClassifiedDaemon {
