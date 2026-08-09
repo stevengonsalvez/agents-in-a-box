@@ -62,6 +62,12 @@ pub mod cancel;
 /// `~/.claude`, so the unsandboxed daemon resolves the token and injects it as
 /// ONE env var, for the `claude` backend only.
 pub mod claude_cred;
+/// The fleet copilot's guardrail gate and its confirm cards (buzz-port part 2).
+///
+/// The classifier and the argument projection are `ainb-fleet-tools`'; the
+/// parking, the expiry, the activity feed and the copilot's authorship live
+/// here, because only the daemon owns the store and the event broker.
+pub mod copilot;
 /// Fresh-home boot seed: lay down the default workspace + runtime + one starter
 /// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
 /// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
@@ -99,6 +105,8 @@ pub mod fleet;
 pub mod fleet_provider;
 /// Bounded live provider-quota projection for the public Fleet RPC.
 pub mod fleet_quota;
+/// Hourly `fleet_event` retention: payload eviction, row delete, byte ceiling.
+pub mod fleet_retention;
 /// Bounded canonical Usage projection for the public Fleet RPC.
 pub mod fleet_usage;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
@@ -480,6 +488,23 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // and deadline paths run, so the outcomes cannot drift.
     crate::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink()).await;
 
+    // The confirm-card TTL, swept once at boot. The park's own bound is a
+    // `tokio` timer inside a copilot turn, and a timer dies with the process:
+    // without this, a card left open by a SIGKILLed or upgraded daemon keeps
+    // rendering as answerable on every client for as long as the row exists,
+    // and approving it returns a success receipt for a destructive tool call
+    // with no waiter left to run it.
+    match ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo::sweep_expired(
+        store.pool(),
+        ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock),
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(swept) => tracing::warn!(swept, "expired confirm cards left open by a prior daemon"),
+        Err(error) => tracing::error!(%error, "could not sweep expired confirm cards at boot"),
+    }
+
     // The ACP agent pool. Installed BEFORE the socket accepts a connection so
     // `fleet/acp_session_create` can never answer "no pool" on a daemon that
     // has one; nothing is spawned until the first prompt reaches it.
@@ -494,6 +519,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // Tmux reconciliation keeps unhooked and standalone provider sessions in
     // the canonical Fleet roster as degraded rows with exact pane identity.
     let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
+
+    // Two slow janitors, each on its OWN clock rather than folded into the 3s
+    // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
+    // sessions were dead EXITED rows that every snapshot scanned, and
+    // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
+    // Both are pure cleanup with no deadline, so neither belongs on a hot path.
+    let _fleet_archiver = crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
+    let _fleet_retention = crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
 
     // Managed Codex transport starts independently from daemon readiness. A
     // missing or incompatible Codex binary leaves hook and tmux observation

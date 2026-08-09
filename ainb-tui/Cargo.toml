@@ -28,9 +28,11 @@ members = [
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",
     "crates/ainb-hangar-proto",
+    "crates/ainb-hangar-client",
     "crates/ainb-hangar-sandbox",
     "crates/ainb-hangar-daemon",
     "crates/ainb-acp",
+    "crates/ainb-fleet-tools",
     "crates/ainb-plugin-hangar",
     "xtask",
 ]

@@ -408,6 +408,71 @@ async fn double_send_is_idempotent_and_a_mismatched_replay_is_rejected() {
     );
 }
 
+/// Attribution: `sender` is what the recipient's re-prime corpus attributes the
+/// message to and what every chat UI renders, so a copilot-authored send must
+/// not be indistinguishable from a human one. An absent actor still means the
+/// operator, which is what every human surface sends.
+#[tokio::test]
+async fn a_copilot_send_is_recorded_as_copilot_and_an_absent_actor_as_the_operator() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:one").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let human = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "ship it",
+                "request_id": "req-human",
+            }),
+        )
+        .await;
+    let copilot = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "status?",
+                "request_id": "req-copilot",
+                "actor": "copilot",
+            }),
+        )
+        .await;
+    assert!(human["error"].is_null(), "{human}");
+    assert!(copilot["error"].is_null(), "{copilot}");
+
+    for (response, expected) in [(&human, "operator"), (&copilot, "copilot")] {
+        let id = response["result"]["message_id"].as_str().expect("message id");
+        let sender: String = sqlx::query_scalar("SELECT sender FROM fleet_message WHERE id = ?")
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            sender, expected,
+            "a copilot write must never wear the operator's name: {response}"
+        );
+    }
+
+    let blank = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "x",
+                "request_id": "req-blank",
+                "actor": "   ",
+            }),
+        )
+        .await;
+    assert_eq!(
+        blank["error"]["code"], -32602,
+        "a blank actor would render as nobody: {blank}"
+    );
+}
+
 /// I3: an N-target send writes one delivery row per recipient, each resolving
 /// to exactly one terminal state with an enumerated detail, and the receipts
 /// are queryable per (message, recipient).
@@ -748,6 +813,71 @@ async fn unresolvable_after_id_is_invalid_params_on_list_and_subscribe() {
 }
 
 /// An oversized `limit` is clamped to the named page maximum, not honoured.
+/// A supplied scope must name a recipient of the SAME send. Codex review,
+/// 2026-08-08: `--target session:B --scope session:A` prompted B while filing
+/// the message in A's timeline, so a caller could write into any session's
+/// history with input nothing validated.
+#[tokio::test]
+async fn a_scope_that_does_not_name_a_recipient_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:a").await;
+    seed_session(&store, "claude:b").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let stolen = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:b"],
+                "scope_key": "session:claude:a",
+                "text": "file this in someone else's timeline",
+                "request_id": "req-scope-steal",
+            }),
+        )
+        .await;
+    assert_eq!(stolen["error"]["code"], -32602, "{stolen}");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_message")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "a refused send must persist nothing");
+
+    // A session scope cannot carry a fan-out, and an unknown prefix is refused
+    // rather than silently minted into the timeline.
+    for (scope, targets) in [
+        ("session:claude:a", vec!["claude:a", "claude:b"]),
+        ("channel:not-in-part-1", vec!["claude:a"]),
+    ] {
+        let refused = client
+            .call(
+                methods::FLEET_MESSAGE_SEND,
+                serde_json::json!({
+                    "targets": targets,
+                    "scope_key": scope,
+                    "text": "nope",
+                    "request_id": format!("req-{scope}"),
+                }),
+            )
+            .await;
+        assert_eq!(refused["error"]["code"], -32602, "scope {scope}: {refused}");
+    }
+
+    // The honest form still works: the recipient's own scope.
+    let ok = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:b"],
+                "scope_key": "session:claude:b",
+                "text": "addressed to the session it names",
+                "request_id": "req-scope-ok",
+            }),
+        )
+        .await;
+    assert!(ok["error"].is_null(), "{ok}");
+}
+
 #[tokio::test]
 async fn oversized_limit_is_clamped() {
     let dir = tempfile::tempdir().unwrap();

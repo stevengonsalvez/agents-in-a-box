@@ -984,7 +984,20 @@ impl InteractiveSessionManager {
     /// legitimately has `source_repository == worktree_path`. We therefore
     /// re-run the repository lookup and only claim `(broken)` when it genuinely
     /// finds nothing.
+    ///
+    /// An ATC control directory is checked FIRST, before every other rule. It
+    /// is a real, healthy session root that is deliberately not a git worktree,
+    /// so it would otherwise fall all the way through to `(broken)` and become
+    /// indistinguishable from a dead worktree. Running the check first (rather
+    /// than just ahead of the sentinel) also keeps an instance whose name
+    /// happens to contain `--` from being chopped by the legacy-layout rule:
+    /// `sanitize_instance_name` permits `-`, and the ATC shape is the stronger
+    /// signal.
     pub fn derive_workspace_name(worktree_path: &Path, source_repository: &Path) -> String {
+        if let Some(instance) = Self::atc_instance_name(worktree_path) {
+            return format!("atc:{instance}");
+        }
+
         let from_dir = worktree_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -1013,6 +1026,43 @@ impl InteractiveSessionManager {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string()
+    }
+
+    /// Recognise an ATC control directory and return its instance name.
+    ///
+    /// ATC spawns its session with `--repo <atc_root>/<name>`, so the session
+    /// root is the instance directory itself: a direct child of the ATC root
+    /// carrying a `meta.json`. That is deliberately NOT a git worktree, which
+    /// is why the ordinary derivation has nothing to name it with.
+    ///
+    /// The root is resolved through [`crate::fleet::atc::paths::atc_root`], the
+    /// same function the rest of ATC uses, so `AINB_HOME` is honoured and no
+    /// home path is baked in. An unresolvable home (no `$AINB_HOME`, no home
+    /// directory) is simply "not ATC" rather than an error: this is a render
+    /// path and must never fail.
+    ///
+    /// The `meta.json` requirement is what keeps the check narrow. A stray
+    /// directory under the ATC root that was never provisioned is not claimed.
+    fn atc_instance_name(worktree_path: &Path) -> Option<String> {
+        // A git checkout is never an ATC control dir, whatever it sits under.
+        // Without this, a real repository that happened to live beside the ATC
+        // instances would take the ATC name while its bucket key still came
+        // from the repository lookup, so the two would disagree about the same
+        // row. ATC dirs have no `.git` at all, so this costs nothing.
+        if worktree_path.join(".git").exists() {
+            return None;
+        }
+        let root = crate::fleet::atc::paths::atc_root().ok()?;
+        if let Some(name) = crate::fleet::atc::instance_name_for_cwd_in(&root, worktree_path) {
+            return Some(name);
+        }
+        // The parent comparison is literal, so a symlinked home (macOS
+        // `/tmp` -> `/private/tmp`, the shape tempdir-based tests produce)
+        // misses even though the two paths are the same directory. Retry once
+        // against the canonical forms before giving up.
+        let root = root.canonicalize().ok()?;
+        let path = worktree_path.canonicalize().ok()?;
+        crate::fleet::atc::instance_name_for_cwd_in(&root, &path)
     }
 
     /// THE workspace-name derivation: repository lookup + naming in one call.
@@ -2104,6 +2154,110 @@ mod tests {
             InteractiveSessionManager::derive_workspace_name(dead, dead),
             InteractiveSessionManager::BROKEN_WORKSPACE_NAME
         );
+    }
+
+    /// An ATC control directory is a healthy session root that is deliberately
+    /// NOT a git worktree, so every rule in `derive_workspace_name` used to
+    /// miss and it rendered as `(broken)`: a live ATC instance was
+    /// indistinguishable from a dead worktree in the TUI and in `ainb list`.
+    #[test]
+    fn atc_control_dir_renders_as_an_atc_instance() {
+        // AINB_HOME is process-global; serialise with every other env-mutating
+        // test in the crate via the shared lock.
+        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+
+        let home = tempfile::tempdir().expect("tempdir");
+        // Save and restore rather than blindly removing: a runner that sets
+        // AINB_HOME itself would otherwise have it deleted by this test, and
+        // every later test in the process would resolve against the wrong home.
+        let prior_home = std::env::var_os("AINB_HOME");
+        std::env::set_var("AINB_HOME", home.path());
+
+        // `atc_root()` is `$AINB_HOME/atc`. Note this is NOT the same
+        // convention as `SessionStore::storage_path()`, which treats AINB_HOME
+        // as the PARENT of `.agents-in-a-box/`.
+        let atc_root = home.path().join("atc");
+
+        // A provisioned instance: a direct child of the ATC root carrying the
+        // meta.json that `atc setup` writes.
+        let instance = atc_root.join("main");
+        std::fs::create_dir_all(&instance).unwrap();
+        std::fs::write(instance.join("meta.json"), "{}").unwrap();
+
+        // The loaders collapse `source_repository` onto `worktree_path`
+        // whenever the repository lookup finds nothing, which is exactly the
+        // shape an ATC dir produces.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(&instance, &instance),
+            "atc:main"
+        );
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&instance),
+            "atc:main"
+        );
+
+        // An instance name may legally contain `-`, so `--` is reachable. The
+        // ATC check runs before the legacy `<repo>--<branch>--<id>` rule, so
+        // the name survives whole instead of being chopped at the first `--`.
+        let hyphenated = atc_root.join("ops--main");
+        std::fs::create_dir_all(&hyphenated).unwrap();
+        std::fs::write(hyphenated.join("meta.json"), "{}").unwrap();
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&hyphenated),
+            "atc:ops--main"
+        );
+
+        // A directory under the ATC root that was never provisioned (no
+        // meta.json) is not claimed, and still reports the sentinel.
+        let stray = atc_root.join("not-an-instance");
+        std::fs::create_dir_all(&stray).unwrap();
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&stray),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+
+        // A genuinely dead worktree elsewhere on disk is untouched.
+        let dead = home.path().join("shotclubhouse_shotclubhouse_fix_all-bugs");
+        std::fs::create_dir_all(&dead).unwrap();
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&dead),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+
+        // And an ordinary ainb worktree still derives from its own layout.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(
+                Path::new("/wt/by-name/nanoclaw--ops-main--5950b4bd"),
+                Path::new("/repos/nanoclaw"),
+            ),
+            "nanoclaw"
+        );
+
+        // The canonical-path fallback: a symlinked home is the shape tempdir
+        // fixtures produce on macOS (/tmp -> /private/tmp), and the literal
+        // parent comparison misses it. Point AINB_HOME at a symlink but ask
+        // about the REAL path, so only the canonicalize retry can answer.
+        #[cfg(unix)]
+        {
+            let link = home.path().parent().unwrap().join(format!(
+                "atc-symlink-{}",
+                home.path().file_name().unwrap().to_string_lossy()
+            ));
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(home.path(), &link).expect("symlink");
+            std::env::set_var("AINB_HOME", &link);
+            assert_eq!(
+                InteractiveSessionManager::workspace_name_for(&instance),
+                "atc:main",
+                "the canonicalize fallback did not resolve a symlinked AINB_HOME"
+            );
+            let _ = std::fs::remove_file(&link);
+        }
+
+        match prior_home {
+            Some(v) => std::env::set_var("AINB_HOME", v),
+            None => std::env::remove_var("AINB_HOME"),
+        }
     }
 
     // ── Real git fixtures ───────────────────────────────────────────────

@@ -569,9 +569,16 @@ struct FleetUsageSummaryParams: Codable, Equatable {
     let period: FleetUsagePeriod
 }
 
-enum FleetUsageSummaryState: String, Codable, Equatable {
+enum FleetUsageSummaryState: String, Encodable, Equatable {
     case scanning, ready, partial, unavailable
 }
+
+// Usage state gates a whole panel, and both the summary and the dashboard embed
+// it. Left as a plain synthesized `Codable` it threw on any value this build did
+// not know, so a daemon adding one state blanked the entire panel rather than
+// degrading it. Unknown degrades to `.unavailable`: the panel then renders its
+// explanatory empty state instead of over-promising `.ready` with no data.
+extension FleetUsageSummaryState: TolerantWireEnum { static var wireFallback: Self { .unavailable } }
 
 struct FleetUsageBucket: Codable, Equatable {
     let inputTokens: UInt64
@@ -640,6 +647,110 @@ struct FleetUsageSummaryResult: Codable, Equatable {
         case startAt = "start_at"
         case endAt = "end_at"
         case totals, daily, providers, models, projects, detail
+    }
+}
+
+// MARK: - fleet/usage_dashboard
+
+struct FleetUsageDashboardParams: Codable, Equatable { init() {} }
+
+struct FleetHeatmapCell: Codable, Equatable {
+    let date: String
+    let callCount: UInt64
+    let costUSD: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case callCount = "call_count"
+        case costUSD = "cost_usd"
+    }
+}
+
+struct FleetUsageWeeklyBucket: Codable, Equatable {
+    let weekStart: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case weekStart = "week_start"
+        case bucket
+    }
+}
+
+struct FleetUsageSessionBucket: Codable, Equatable {
+    let sessionID: String
+    let provider: String
+    let project: String
+    let bucket: FleetUsageBucket
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case provider, project, bucket
+    }
+}
+
+struct FleetUsageBranchBucket: Codable, Equatable {
+    let branch: String
+    let bucket: FleetUsageBucket
+}
+
+struct FleetUsageNamedBucket: Codable, Equatable {
+    let name: String
+    let callCount: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case callCount = "call_count"
+    }
+}
+
+struct FleetUsageForecast: Codable, Equatable {
+    let projected30dCostUSD: Double?
+    let projected30dTokens: UInt64
+    let avgDailyCostUSD: Double?
+    let avgDailyTokens: UInt64
+    let sampleDays: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case projected30dCostUSD = "projected_30d_cost_usd"
+        case projected30dTokens = "projected_30d_tokens"
+        case avgDailyCostUSD = "avg_daily_cost_usd"
+        case avgDailyTokens = "avg_daily_tokens"
+        case sampleDays = "sample_days"
+    }
+}
+
+struct FleetUsageDashboardResult: Codable, Equatable {
+    let state: FleetUsageSummaryState
+    let generatedAt: Int64?
+    let startAt: Int64?
+    let endAt: Int64?
+    let costComplete: Bool
+    let totals: FleetUsageBucket?
+    let weekly: [FleetUsageWeeklyBucket]
+    let heatmap: [FleetHeatmapCell]
+    let forecast: FleetUsageForecast?
+    let providers: [FleetUsageProviderBucket]
+    let models: [FleetUsageModelBucket]
+    let projects: [FleetUsageProjectBucket]
+    let sessions: [FleetUsageSessionBucket]
+    let branches: [FleetUsageBranchBucket]
+    let tools: [FleetUsageNamedBucket]
+    let mcpServers: [FleetUsageNamedBucket]
+    let shellCommands: [FleetUsageNamedBucket]
+    let detail: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case generatedAt = "generated_at"
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case costComplete = "cost_complete"
+        case totals, weekly, heatmap, forecast
+        case providers, models, projects, sessions, branches
+        case tools
+        case mcpServers = "mcp_servers"
+        case shellCommands = "shell_commands"
+        case detail
     }
 }
 
@@ -778,6 +889,251 @@ struct AtcListResult: Codable, Equatable {
         case instances
         case schedulerOwnership = "scheduler_ownership"
     }
+}
+
+// MARK: - Fleet chat, copilot and guardrails (buzz-port part 2)
+//
+// These frames are CAPABILITY-ONLY until the daemon advertises
+// fleet.chat.read / .write / fleet.copilot.configure / fleet.confirm.answer:
+// part 2's methods answer -32601 in a daemon built between phases, so nothing
+// here may be reached without checking the negotiated catalogue first.
+//
+// Every enum below is a TolerantWireEnum for the same reason the provider and
+// lifecycle enums are: these are ONE value inside a decoded array, so a token
+// this build has never heard of must degrade that one value, never fail the
+// whole page and blank the pane. The fallbacks are chosen fail-SAFE, which for
+// a confirm card means "not answerable" and for an activity class means "warn
+// louder", never the reverse.
+
+enum FleetChannelKind: String, Encodable, Equatable { case copilot, broadcast, unknown }
+// A channel whose kind this build cannot name is still a channel with a
+// timeline, so it stays listed rather than vanishing from the sidebar.
+extension FleetChannelKind: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+enum FleetCopilotProvider: String, Encodable, Equatable { case claude, codex, unknown }
+extension FleetCopilotProvider: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+enum FleetConfirmState: String, Encodable, Equatable { case open, approved, denied, expired, unknown }
+// NOT `.open`: a card in a state this build cannot name must never render as
+// answerable, or the UI offers an approve button for a lifecycle it does not
+// understand. Unknown is terminal-looking on purpose.
+extension FleetConfirmState: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+enum FleetActivityClass: String, Encodable, Equatable { case read, write, destructive, unknown }
+// An unknown guardrail class over-warns rather than under-warns: rendering a
+// future class as `unknown` next to the destructive styling is recoverable,
+// silently rendering it as a harmless read is not.
+extension FleetActivityClass: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+enum FleetActivityOutcome: String, Encodable, Equatable { case ok, denied, expired, error, unknown }
+extension FleetActivityOutcome: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+struct FleetChannel: Codable, Equatable {
+    let id: String
+    let kind: FleetChannelKind
+    let name: String
+    let scopeKey: String
+    let recipients: [String]
+    let createdAt: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, name, recipients
+        case scopeKey = "scope_key"
+        case createdAt = "created_at"
+    }
+}
+
+struct FleetChannelCreateParams: Codable, Equatable {
+    let kind: FleetChannelKind
+    let name: String
+    let recipients: [String]?
+}
+
+struct FleetChannelCreateResult: Codable, Equatable {
+    let channel: FleetChannel
+}
+
+struct FleetChannelListResult: Codable, Equatable {
+    let channels: [FleetChannel]
+}
+
+/// Params for `fleet/copilot_configure`.
+///
+/// There is deliberately no permission-mode field: the mode is daemon config
+/// and a settable one would be a remote off-switch for the guardrails.
+struct FleetCopilotConfigureParams: Codable, Equatable {
+    let provider: FleetCopilotProvider
+    let model: String?
+    let reasoningEffort: String?
+    let persona: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, model, persona
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
+struct FleetCopilotConfigureResult: Codable, Equatable {
+    let sessionKey: String
+    let provider: FleetCopilotProvider
+    let model: String?
+    let reasoningEffort: String?
+    let personaSet: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, model
+        case sessionKey = "session_key"
+        case reasoningEffort = "reasoning_effort"
+        case personaSet = "persona_set"
+    }
+}
+
+/// One guardrail confirm card: a copilot tool call held for an operator.
+///
+/// NOT an ACP permission request — those stay attention rows answered through
+/// `fleet/action`, and the two must not be merged in the UI.
+struct FleetConfirm: Codable, Equatable {
+    let confirmID: String
+    let scopeKey: String
+    let tool: String
+    let arguments: JSONValue
+    let targetSessionKey: String?
+    let state: FleetConfirmState
+    let createdAt: Int64
+    let expiresAt: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case tool, arguments, state
+        case confirmID = "confirm_id"
+        case scopeKey = "scope_key"
+        case targetSessionKey = "target_session_key"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+    }
+
+    /// Only an `open` card may be answered. An unknown state is not open, so
+    /// this is also the guard for a token from a newer daemon.
+    var isAnswerable: Bool { state == .open }
+}
+
+struct FleetConfirmListResult: Codable, Equatable {
+    let confirms: [FleetConfirm]
+}
+
+/// The answer to a confirm card, internally tagged on the wire (`answer`),
+/// mirroring `ControlAction`'s `action` tag.
+///
+/// This is a frame this client AUTHORS, so an unrecognised tag throws rather
+/// than degrading: tolerance is for values the daemon sends us.
+enum FleetConfirmAnswer: Equatable {
+    case approve
+    case deny
+    case edit(arguments: JSONValue)
+}
+
+struct FleetConfirmAnswerParams: Codable, Equatable {
+    let confirmID: String
+    let answer: FleetConfirmAnswer
+
+    private enum CodingKeys: String, CodingKey {
+        case confirmID = "confirm_id"
+        case answer, arguments
+    }
+
+    init(confirmID: String, answer: FleetConfirmAnswer) {
+        self.confirmID = confirmID
+        self.answer = answer
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        confirmID = try container.decode(String.self, forKey: .confirmID)
+        switch try container.decode(String.self, forKey: .answer) {
+        case "approve": answer = .approve
+        case "deny": answer = .deny
+        case "edit": answer = .edit(arguments: try container.decode(JSONValue.self, forKey: .arguments))
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .answer, in: container, debugDescription: "unknown confirm answer \(other)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(confirmID, forKey: .confirmID)
+        switch answer {
+        case .approve: try container.encode("approve", forKey: .answer)
+        case .deny: try container.encode("deny", forKey: .answer)
+        case let .edit(arguments):
+            try container.encode("edit", forKey: .answer)
+            try container.encode(arguments, forKey: .arguments)
+        }
+    }
+}
+
+struct FleetConfirmAnswerResult: Codable, Equatable {
+    let confirmID: String
+    let state: FleetConfirmState
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case confirmID = "confirm_id"
+    }
+}
+
+/// Payload of the `fleet/confirm_event` notification.
+struct FleetConfirmEventParams: Codable, Equatable {
+    let confirm: FleetConfirm
+}
+
+/// One append-only copilot activity row.
+///
+/// `seq` is the commit-ordered cursor and the ONLY paging key; `id` is stable
+/// identity and never an ordering key.
+struct FleetActivityRow: Codable, Equatable {
+    let seq: Int64
+    let id: String
+    let scopeKey: String
+    let tool: String
+    let activityClass: FleetActivityClass
+    let targetSessionKey: String?
+    let outcome: FleetActivityOutcome
+    let detail: String?
+    let createdAt: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case seq, id, tool, outcome, detail
+        case activityClass = "class"
+        case scopeKey = "scope_key"
+        case targetSessionKey = "target_session_key"
+        case createdAt = "created_at"
+    }
+}
+
+struct FleetActivityListParams: Codable, Equatable {
+    let scopeKey: String?
+    let afterSeq: Int64?
+    let limit: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case limit
+        case scopeKey = "scope_key"
+        case afterSeq = "after_seq"
+    }
+}
+
+struct FleetActivityListResult: Codable, Equatable {
+    let activities: [FleetActivityRow]
+    let nextAfterSeq: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case activities
+        case nextAfterSeq = "next_after_seq"
+    }
+}
+
+/// Payload of the `fleet/activity_event` notification.
+struct FleetActivityEventParams: Codable, Equatable {
+    let activity: FleetActivityRow
 }
 
 enum FleetWire {

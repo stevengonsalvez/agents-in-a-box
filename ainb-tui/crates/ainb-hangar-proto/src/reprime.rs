@@ -1,5 +1,10 @@
 //! The resume prelude: fixed header + fenced, escaped corpus (graft 7, I15).
 //!
+//! Lives in the pure proto crate because it has TWO callers now: `ainb-acp`
+//! (which re-exports it at its original path) renders it as the resume prelude,
+//! and `ainb-fleet-tools` wraps every read-tool result in it before the copilot
+//! sees agent-authored text. One renderer, no second dialect of the fence.
+//!
 //! When an adapter cannot `session/load`, the daemon rebuilds context by
 //! prepending this prelude to the next prompt. Message bodies are UNTRUSTED
 //! text (including agent-authored replies, and part 2 hands the copilot
@@ -53,7 +58,7 @@ const FOOTER: &str = "=== end ainb chat context ===";
 /// own replies, ordered by `seq`; see the plan's Scope + threading rules).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusRow {
-    /// `"operator"` or a `session_key`.
+    /// `"operator"`, `"copilot"`, or a `session_key`.
     pub sender: String,
     /// `user` | `agent` | `marker`.
     pub kind: String,
@@ -68,28 +73,44 @@ pub struct CorpusRow {
 /// admitted set is emitted oldest-first so the adapter reads the conversation
 /// in order.
 pub fn render_prelude(rows: &[CorpusRow]) -> String {
-    let mut budget = PRELUDE_MAX_BYTES.saturating_sub(HEADER.len() + FOOTER.len() + 2);
-    let mut admitted: Vec<String> = Vec::new();
-    for row in rows.iter().rev().take(REPRIME_ROWS) {
-        let line = render_row(row);
-        let cost = line.len() + 1;
-        if cost > budget {
-            break;
-        }
-        budget -= cost;
-        admitted.push(line);
-    }
-    admitted.reverse();
+    let admitted = rows_that_fit(rows.iter().rev());
+    let kept = &rows[rows.len() - admitted..];
 
-    let mut out = String::with_capacity(PRELUDE_MAX_BYTES.min(1024 + admitted.len() * 64));
+    let mut out = String::with_capacity(PRELUDE_MAX_BYTES.min(1024 + kept.len() * 64));
     out.push_str(HEADER);
     out.push('\n');
-    for line in admitted {
-        out.push_str(&line);
+    for row in kept {
+        out.push_str(&render_row(row));
         out.push('\n');
     }
     out.push_str(FOOTER);
     out
+}
+
+/// How many of `rows` fit inside the prelude's caps, taken in iteration order.
+///
+/// The caps are TWO ([`REPRIME_ROWS`] and [`PRELUDE_MAX_BYTES`]) and only the
+/// first is arithmetic a caller can redo for itself, so a caller that guesses
+/// the count states a number the fence does not honour. Exposed rather than
+/// inlined so both questions come off one budget:
+///
+/// * `rows.iter().rev()` — what [`render_prelude`] admits, newest-first, which
+///   is what a re-prime wants (drop the OLDEST context).
+/// * `rows.iter()` — the leading rows a FORWARD-paging reader can show, which is
+///   what a cursor wants: a row dropped off the front of a forward page is a row
+///   the cursor never comes back to.
+pub fn rows_that_fit<'a>(rows: impl IntoIterator<Item = &'a CorpusRow>) -> usize {
+    let mut budget = PRELUDE_MAX_BYTES.saturating_sub(HEADER.len() + FOOTER.len() + 2);
+    let mut fit = 0;
+    for row in rows.into_iter().take(REPRIME_ROWS) {
+        let cost = render_row(row).len() + 1;
+        if cost > budget {
+            break;
+        }
+        budget -= cost;
+        fit += 1;
+    }
+    fit
 }
 
 fn render_row(row: &CorpusRow) -> String {
@@ -259,6 +280,18 @@ mod tests {
             "the newest row survived"
         );
         assert!(!first.starts_with("0:"), "the oldest row was dropped first");
+    }
+
+    /// The count [`rows_that_fit`] reports IS the count the renderer emits.
+    /// Anything else and a caller states a row count the fence never honoured.
+    #[test]
+    fn the_reported_fit_is_the_rendered_record_count() {
+        let corpus: Vec<CorpusRow> = (0..REPRIME_ROWS)
+            .map(|index| row("operator", &format!("{index}:{}", "B".repeat(3000))))
+            .collect();
+        let rendered = records(&render_prelude(&corpus)).len();
+        assert!(rendered < REPRIME_ROWS, "the byte cap actually bit");
+        assert_eq!(rows_that_fit(corpus.iter().rev()), rendered);
     }
 
     /// The row cap is enforced by the renderer, so a caller that hands over a

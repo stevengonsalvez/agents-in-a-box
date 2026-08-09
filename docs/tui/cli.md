@@ -2014,20 +2014,25 @@ Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / d
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
-  approve       Approve a session's pending permission request (no arg: list waiters)
-  deny          Deny a session's pending permission request (no arg: list waiters)
+  approve       Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
+  deny          Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
   standup       Live fleet status: every claude session across ainb + peers + bg jobs
   broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
   msg           Chat bus: persisted messages with per-recipient delivery receipts
   acp           ACP sessions: daemon-owned headless agents that answer on the chat bus
   transcript    Page or follow one session's full execution transcript
+  channel       Chat channels: a named scope with a recipient set
+  copilot       The fleet copilot session's per-session adapter config
+  confirm       Guardrail confirm cards: copilot tool calls held for a human
+  activity      The append-only copilot activity feed
   sequence      Ordered prompts with ack between steps
   needs         Center control panel — sessions blocked on input / errors / idle / waiting
+  archived      Sessions the daemon retired out of the live roster (still browsable)
   cost          Per-session / model / day / group spend rollups + budget caps
   daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
   daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
   runtime       Install the standalone Fleet daemon and provider hooks
-  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
   bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
   enrich-cache  Content-addressed enrich cache (the producer's write path)
   help          Print this message or the help of the given subcommand(s)
@@ -2046,17 +2051,18 @@ EXAMPLES:
   ainb fleet transcript <key> --follow  Stream one session's execution log
   ainb fleet sequence "step 1" "step 2"     Ordered prompts with ack between steps
   ainb fleet approve               List sessions waiting on a permission decision
+  ainb fleet approve --full        Same listing, untruncated tool input + cwd
   ainb fleet approve <session-id>  Approve that session's pending permission request
   ainb fleet deny <session-id> --reason "not now"   Deny it, with a reason
 ```
 
 ### `ainb fleet approve`
 
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet approve --help
-Approve a session's pending permission request (no arg: list waiters)
+Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet approve [OPTIONS] [session-id]
 
@@ -2066,16 +2072,17 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 
 ### `ainb fleet deny`
 
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 ```console
 $ ainb fleet deny --help
-Deny a session's pending permission request (no arg: list waiters)
+Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
 
 Usage: ainb fleet deny [OPTIONS] [session-id]
 
@@ -2085,6 +2092,7 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
+      --full             When listing, print the complete tool input and cwd, not a preview
   -h, --help             Print help
 ```
 
@@ -2289,6 +2297,200 @@ Options:
 Refuses without --export unless --no-export is explicit. Only source='acp' rows are eligible; nothing else in the provider-event ledger is ever touched.
 ```
 
+### `ainb fleet channel`
+
+Chat channels: a named scope with a recipient set
+
+```console
+$ ainb fleet channel --help
+Chat channels: a named scope with a recipient set
+
+Usage: ainb fleet channel [OPTIONS] <COMMAND>
+
+Commands:
+  create  Mint a channel and its channel:<id> scope
+  list    List channels and their members
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet channel create`
+
+Mint a channel and its channel:<id> scope
+
+```console
+$ ainb fleet channel create --help
+Mint a channel and its channel:<id> scope
+
+Usage: ainb fleet channel create [OPTIONS] --name <name>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --kind <kind>            copilot (an ACP session answers on it) or broadcast [default: broadcast] [possible values: copilot, broadcast]
+      --name <name>            Human-readable channel name
+      --recipient <recipient>  Member session_key (repeat); none for a copilot channel
+  -h, --help                   Print help
+```
+
+#### `ainb fleet channel list`
+
+List channels and their members
+
+```console
+$ ainb fleet channel list --help
+List channels and their members
+
+Usage: ainb fleet channel list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb fleet copilot`
+
+The fleet copilot session's per-session adapter config
+
+```console
+$ ainb fleet copilot --help
+The fleet copilot session's per-session adapter config
+
+Usage: ainb fleet copilot [OPTIONS] <COMMAND>
+
+Commands:
+  configure  Set the copilot's provider, model, reasoning effort and persona
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet copilot configure`
+
+Set the copilot's provider, model, reasoning effort and persona
+
+```console
+$ ainb fleet copilot configure --help
+Set the copilot's provider, model, reasoning effort and persona
+
+Usage: ainb fleet copilot configure [OPTIONS] --provider <provider>
+
+Options:
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --provider <provider>
+          Adapter family [possible values: claude, codex]
+      --model <model>
+          Adapter model id
+      --reasoning-effort <reasoning-effort>
+          Adapter reasoning-effort token
+      --persona-file <persona-file>
+          File holding the copilot system prompt
+  -h, --help
+          Print help
+
+There is no permission-mode flag. The mode is daemon config, pinned at session/new and re-asserted after load; a per-session override would be a remote off-switch for the whole permission surface.
+```
+
+### `ainb fleet confirm`
+
+Guardrail confirm cards: copilot tool calls held for a human
+
+```console
+$ ainb fleet confirm --help
+Guardrail confirm cards: copilot tool calls held for a human
+
+Usage: ainb fleet confirm [OPTIONS] <COMMAND>
+
+Commands:
+  list    List the open cards, oldest first
+  answer  Answer one card: approve (default), --deny, or --edit
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet confirm list`
+
+List the open cards, oldest first
+
+```console
+$ ainb fleet confirm list --help
+List the open cards, oldest first
+
+Usage: ainb fleet confirm list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --scope <scope>    Filter to one scope key
+  -h, --help             Print help
+```
+
+#### `ainb fleet confirm answer`
+
+Answer one card: approve (default), --deny, or --edit
+
+```console
+$ ainb fleet confirm answer --help
+Answer one card: approve (default), --deny, or --edit
+
+Usage: ainb fleet confirm answer [OPTIONS] <confirm_id>
+
+Arguments:
+  <confirm_id>  The card to answer
+
+Options:
+      --deny             Refuse; the suspended tool result resolves as denied
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --edit <edit>      Approve with these JSON arguments INSTEAD of the proposed ones
+  -h, --help             Print help
+
+A card is single-use: answering an already-answered or already-expired card exits 1, and never runs the tool a second time.
+```
+
+### `ainb fleet activity`
+
+The append-only copilot activity feed
+
+```console
+$ ainb fleet activity --help
+The append-only copilot activity feed
+
+Usage: ainb fleet activity [OPTIONS] <COMMAND>
+
+Commands:
+  list  Page the feed by its commit-ordered seq, oldest first
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet activity list`
+
+Page the feed by its commit-ordered seq, oldest first
+
+```console
+$ ainb fleet activity list --help
+Page the feed by its commit-ordered seq, oldest first
+
+Usage: ainb fleet activity list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --scope <scope>    Filter to one scope key
+      --after <after>    Return rows strictly after this seq
+      --limit <limit>    Page size (clamped to the daemon's maximum) [default: 50]
+  -h, --help             Print help
+```
+
 ### `ainb fleet sequence`
 
 Ordered prompts with ack between steps
@@ -2324,6 +2526,22 @@ Options:
       --idle-min <idle-min>  Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)
       --no-enrich            Skip AI enrichment — 0-token HUD (env AINB_FLEET_ENRICH=0)
   -h, --help                 Print help
+```
+
+### `ainb fleet archived`
+
+Sessions the daemon retired out of the live roster (still browsable)
+
+```console
+$ ainb fleet archived --help
+Sessions the daemon retired out of the live roster (still browsable)
+
+Usage: ainb fleet archived [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <limit>    Maximum rows to list, most recently observed first [default: 50]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet cost`
@@ -2409,11 +2627,11 @@ Options:
 
 ### `ainb fleet atc`
 
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 ```console
 $ ainb fleet atc --help
-Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)
+Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
 
 Usage: ainb fleet atc [OPTIONS] <COMMAND>
 
@@ -2421,6 +2639,7 @@ Commands:
   setup     Provision an ATC instance: CLAUDE.md policy + meta + heartbeat timer + session
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
+  repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
@@ -2488,6 +2707,46 @@ Arguments:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb fleet atc repair`
+
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
+
+```console
+$ ainb fleet atc repair --help
+Re-assert the heartbeat scheduler for an existing instance, typically when `atc status` reports `program MISSING` or `atc list` shows BROKEN because the binary moved and the unit's program no longer resolves.
+
+It READS meta.json and never writes it, so a customised interval or idle-pause survives, and it leaves policy, CLAUDE.md, the hooks and the session alone. That is what makes it safe on a live instance, and why it exists instead of re-running setup, which rebuilds meta.json from defaults and spawns a session.
+
+It leaves exactly one scheduler active, the daemon cron or the local timer, never both, and refuses rather than reaching a state it cannot vouch for. Note what that means per branch:
+
+- heartbeat ENABLED, daemon takes it: the local timer unit is REMOVED.
+- heartbeat ENABLED, daemon does not: the local unit is rebuilt against the current PATH. It refuses without writing anything if the rebuilt unit still could not fire, or if a reachable daemon will not release the cron.
+- heartbeat DISABLED in meta.json: this is destructive. The local timer unit is DELETED and the daemon cron is unregistered, because a disabled heartbeat with a live scheduler is the state repair exists to resolve.
+
+Non-zero exit does not always mean nothing changed: the pre-write refusals leave the instance untouched, but a failure verifying the unit after install, or a daemon that refuses the unregister after the units were removed, exits non-zero with the change already made. The message says which.
+
+--dry-run writes nothing and is never GREENER than a real run: it previews the conservative local-timer path and reports the daemon fields as unknown, because whether the daemon would take the heartbeat depends on registration succeeding, which a read-only preview cannot determine.
+
+Usage: ainb fleet atc repair [OPTIONS] <name>
+
+Arguments:
+  <name>
+          Instance name
+
+Options:
+      --dry-run
+          Report what repair would do without writing anything
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb fleet atc list`

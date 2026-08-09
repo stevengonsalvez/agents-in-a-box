@@ -28,7 +28,7 @@ use ainb_plugin_types_sessions::{
     BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, ScanProgressEvent,
     SessionUsage, TokenBucket, UsageData,
 };
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Minimum gap between progress emits. Caps emission to 10 events/s and
@@ -249,6 +249,11 @@ pub(crate) struct ScanCtx<'a> {
     /// parse, but has no fingerprint for the memo to compare.
     pub(crate) stat_failures: u32,
     pub(crate) counters: ScanCounters,
+    /// When set, each file's calls go here instead of being returned up
+    /// the walk, and the walk accumulates nothing. This is what lets
+    /// [`scan_windows`] hold only one file's calls at a time; every
+    /// other entry point leaves it `None` and is unaffected.
+    pub(crate) calls_sink: Option<&'a mut dyn FnMut(Vec<ProviderCall>)>,
 }
 
 impl<'a> ScanCtx<'a> {
@@ -265,6 +270,7 @@ impl<'a> ScanCtx<'a> {
             stable_calls: Vec::new(),
             stat_failures: 0,
             counters: ScanCounters::default(),
+            calls_sink: None,
         }
     }
 
@@ -284,6 +290,7 @@ impl<'a> ScanCtx<'a> {
             stable_calls: Vec::new(),
             stat_failures: 0,
             counters: ScanCounters::default(),
+            calls_sink: None,
         }
     }
 
@@ -303,6 +310,7 @@ impl<'a> ScanCtx<'a> {
             stable_calls: Vec::new(),
             stat_failures: 0,
             counters: ScanCounters::default(),
+            calls_sink: None,
         }
     }
 }
@@ -631,6 +639,409 @@ pub(crate) fn scan_incremental(
             uncached_calls,
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Windowed, aggregates-only scan
+// ---------------------------------------------------------------------------
+
+/// A half-open reporting window, `[start, end)`, in UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageWindow {
+    /// Inclusive lower bound.
+    pub start: DateTime<Utc>,
+    /// Exclusive upper bound.
+    pub end: DateTime<Utc>,
+}
+
+/// One aggregated row: a dimension key, its bucket, and whether *every*
+/// call behind it carried a published price.
+///
+/// `complete_cost` is not derivable from `bucket.cost_usd`. Costs
+/// accumulate with [`add_cost_nanos`], which coalesces — one priced call
+/// among a thousand unpriced ones still yields `Some`. A consumer that
+/// reads the cost without consulting this flag reports a total that
+/// silently omits the unpriced calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageRow {
+    /// Dimension key: an ISO date, model name, project name, or provider.
+    pub key: String,
+    /// Tokens, counts and coalesced cost for this key.
+    pub bucket: TokenBucket,
+    /// `true` when every call behind `bucket` carried a published price.
+    pub complete_cost: bool,
+}
+
+/// One session's aggregate.
+///
+/// Separate from [`UsageRow`] because a session is identified by three
+/// fields, not one key, and a consumer needs them apart: the composite
+/// cannot be re-split, since a project label may itself contain a colon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRow {
+    /// Source provider.
+    pub provider: Provider,
+    /// Project label this session belongs to.
+    pub project: String,
+    /// Provider-assigned session id.
+    pub session_id: String,
+    /// Tokens, counts and coalesced cost for this session.
+    pub bucket: TokenBucket,
+    /// `true` when every call in this session carried a published price.
+    pub complete_cost: bool,
+}
+
+/// One window's bounded aggregate.
+///
+/// Deliberately carries no [`ProviderCall`]: this is the whole point of
+/// [`scan_windows`].
+///
+/// Rows arrive in [`emit`]'s order: dates ascending, everything else
+/// ranked. Capping belongs to the consumer.
+///
+/// Every cost-bearing row carries its own `complete_cost` because cost
+/// coalesces during accumulation and completeness must not. See
+/// [`UsageRow`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowUsage {
+    /// Whole-window totals, with distinct session/project counts.
+    pub totals: TokenBucket,
+    /// `true` when every call in the window carried a published price.
+    pub totals_complete_cost: bool,
+    /// One row per UTC day present, ascending; `key` is the ISO date.
+    pub daily: Vec<UsageRow>,
+    /// One row per ISO week present, ascending; `key` is the Monday's
+    /// ISO date, matching [`week_start`].
+    pub weekly: Vec<UsageRow>,
+    /// One row per model.
+    pub models: Vec<UsageRow>,
+    /// One row per project.
+    pub projects: Vec<UsageRow>,
+    /// One row per provider.
+    pub providers: Vec<UsageRow>,
+    /// One row per branch. Only calls carrying a non-empty branch
+    /// contribute, mirroring [`fold`].
+    pub branches: Vec<UsageRow>,
+    /// One row per session, most recently active first.
+    pub sessions: Vec<SessionRow>,
+    /// Tool-name call counts. No cost, so no completeness.
+    pub tools: Vec<NamedUsage>,
+    /// MCP-server call counts. Always empty for now: [`emit`] leaves
+    /// mcp attribution to the consumer (see this module's header).
+    pub mcp_servers: Vec<NamedUsage>,
+    /// Shell-command call counts, keyed on the RAW `input.command`.
+    ///
+    /// A command line carries absolute paths and can carry credentials,
+    /// so a consumer that publishes this MUST reduce it first. The
+    /// daemon's fleet-usage projection ships only the program name.
+    pub shell_commands: Vec<NamedUsage>,
+}
+
+/// Per-dimension "was every call priced" tracking. Separate from the
+/// buckets because cost coalesces and completeness must not.
+#[derive(Default)]
+struct CompletenessAcc {
+    overall: Option<bool>,
+    daily: BTreeMap<NaiveDate, bool>,
+    weekly: BTreeMap<NaiveDate, bool>,
+    models: BTreeMap<String, bool>,
+    projects: BTreeMap<String, bool>,
+    providers: BTreeMap<&'static str, bool>,
+    branches: BTreeMap<String, bool>,
+    /// Keyed by [`session_key`], the same composite [`fold`] buckets
+    /// sessions under.
+    sessions: BTreeMap<String, bool>,
+    /// Scratch buffer the session key is formatted into, so the hot path
+    /// allocates only when a session is seen for the first time. Same
+    /// reason [`and_into_str`] exists.
+    session_key_buf: String,
+}
+
+impl CompletenessAcc {
+    fn ingest(&mut self, call: &ProviderCall) {
+        let priced = call.cost_usd.is_some();
+        let day = call.timestamp.date_naive();
+        *self.overall.get_or_insert(true) &= priced;
+        and_into(&mut self.daily, day, priced);
+        and_into(&mut self.weekly, week_start(day), priced);
+        and_into_str(&mut self.models, &call.model, priced);
+        and_into_str(&mut self.projects, &call.project, priced);
+        and_into(&mut self.providers, call.provider.as_str(), priced);
+        // Mirror `fold`: a blank branch is not bucketed, so it must not
+        // create a phantom completeness entry either.
+        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+            and_into_str(&mut self.branches, branch, priced);
+        }
+        write_session_key(
+            &mut self.session_key_buf,
+            call.provider,
+            &call.project,
+            &call.session_id,
+        );
+        and_into_str(&mut self.sessions, &self.session_key_buf, priced);
+    }
+}
+
+/// The composite key [`fold`] buckets sessions under. Written into a
+/// caller-owned buffer so the per-call path does not allocate.
+fn write_session_key(buf: &mut String, provider: Provider, project: &str, session_id: &str) {
+    use std::fmt::Write as _;
+    buf.clear();
+    let _ = write!(buf, "{}:{project}:{session_id}", provider.as_str());
+}
+
+fn and_into<K: Ord>(map: &mut BTreeMap<K, bool>, key: K, priced: bool) {
+    map.entry(key).and_modify(|complete| *complete &= priced).or_insert(priced);
+}
+
+/// Same, but only allocates the first time a key is seen. The entry API
+/// would demand an owned `String` per call; this loop runs once per call
+/// per window, so on a 200k-call corpus that is ~1M avoidable allocations.
+fn and_into_str(map: &mut BTreeMap<String, bool>, key: &str, priced: bool) {
+    if let Some(complete) = map.get_mut(key) {
+        *complete &= priced;
+    } else {
+        map.insert(key.to_string(), priced);
+    }
+}
+
+/// One window's running state.
+///
+/// Holds an [`AggState`] whose `calls` are cleared after every absorb, so
+/// the fold/emit machinery is reused verbatim while nothing accumulates.
+/// `call_count` is tracked here because [`emit`] derives it from
+/// `calls.len()`, which is exactly the vector being thrown away.
+struct WindowAcc {
+    window: UsageWindow,
+    calls_seen: usize,
+    /// Per-provider state only. The whole-window rollup is the sum of
+    /// these, recovered in [`Self::finish`] — keeping a fourth parallel
+    /// `AggState` would mean folding every call twice.
+    by_provider: BTreeMap<&'static str, (AggState, usize)>,
+    completeness: CompletenessAcc,
+}
+
+impl WindowAcc {
+    fn new(window: UsageWindow) -> Self {
+        Self {
+            window,
+            calls_seen: 0,
+            by_provider: BTreeMap::new(),
+            completeness: CompletenessAcc::default(),
+        }
+    }
+
+    /// Fold one chunk (in practice, one session file) into this window.
+    ///
+    /// The chunk's in-window calls are cloned once, then *moved* into their
+    /// provider partitions — never cloned per dimension. That matters when
+    /// a caller hands over one big chunk instead of streaming per file.
+    fn ingest(&mut self, chunk: &[ProviderCall]) {
+        let mut by_provider: BTreeMap<&'static str, Vec<ProviderCall>> = BTreeMap::new();
+        let mut taken = 0usize;
+        for call in chunk
+            .iter()
+            .filter(|call| call.timestamp >= self.window.start && call.timestamp < self.window.end)
+        {
+            self.completeness.ingest(call);
+            taken += 1;
+            by_provider.entry(call.provider.as_str()).or_default().push(call.clone());
+        }
+        if taken == 0 {
+            return;
+        }
+        self.calls_seen += taken;
+        for (provider, calls) in by_provider {
+            let entry =
+                self.by_provider.entry(provider).or_insert_with(|| (AggState::default(), 0));
+            entry.1 += calls.len();
+            absorb_and_release(&mut entry.0, calls);
+        }
+    }
+
+    fn finish(self) -> WindowUsage {
+        let complete = |flag: Option<&bool>| flag.copied().unwrap_or(true);
+        let calls_seen = self.calls_seen;
+        let completeness = self.completeness;
+
+        // The window rollup is the sum of its provider partitions. `absorb`
+        // is associative and the partitions are disjoint and exhaustive, so
+        // this equals folding every call into one state — see
+        // `absorb_is_associative_across_three_way_partition`. The clone is of
+        // a calls-free `AggState`, i.e. the accumulator maps only.
+        let mut whole = AggState::default();
+        let mut providers = Vec::with_capacity(self.by_provider.len());
+        for (provider, (state, count)) in self.by_provider {
+            whole.absorb(state.clone());
+            let mut emitted = emit(state);
+            emitted.grand_total.call_count = count;
+            providers.push(UsageRow {
+                complete_cost: complete(completeness.providers.get(provider)),
+                key: provider.to_string(),
+                bucket: emitted.grand_total,
+            });
+        }
+
+        let mut emitted = emit(whole);
+        emitted.grand_total.call_count = calls_seen;
+
+        let mut session_key = String::new();
+        WindowUsage {
+            totals: emitted.grand_total,
+            totals_complete_cost: completeness.overall.unwrap_or(true),
+            daily: emitted
+                .daily
+                .into_iter()
+                .map(|(date, bucket)| UsageRow {
+                    key: date.to_string(),
+                    bucket,
+                    complete_cost: complete(completeness.daily.get(&date)),
+                })
+                .collect(),
+            weekly: emitted
+                .weekly
+                .into_iter()
+                .map(|(week, bucket)| UsageRow {
+                    key: week.to_string(),
+                    bucket,
+                    complete_cost: complete(completeness.weekly.get(&week)),
+                })
+                .collect(),
+            models: emitted
+                .models
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: complete(completeness.models.get(&row.model)),
+                    key: row.model,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            projects: emitted
+                .projects
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: complete(completeness.projects.get(&row.name)),
+                    key: row.name,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            providers,
+            branches: emitted
+                .branches
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: complete(completeness.branches.get(&row.branch)),
+                    key: row.branch,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            sessions: emitted
+                .sessions
+                .into_iter()
+                .map(|row| {
+                    write_session_key(
+                        &mut session_key,
+                        row.provider,
+                        &row.project,
+                        &row.session_id,
+                    );
+                    SessionRow {
+                        complete_cost: complete(completeness.sessions.get(&session_key)),
+                        provider: row.provider,
+                        project: row.project,
+                        session_id: row.session_id,
+                        bucket: row.bucket,
+                    }
+                })
+                .collect(),
+            tools: emitted.tools,
+            mcp_servers: emitted.mcp_servers,
+            shell_commands: emitted.shell_commands,
+        }
+    }
+}
+
+/// Aggregate an in-memory call set into one window, without touching disk.
+///
+/// The pure core of [`scan_windows`], with the same accumulators and the
+/// same completeness rules, exposed for callers that already hold their calls
+/// and for tests that need to drive the real projection rather than a
+/// hand-built fixture. The windowed analogue of [`aggregate`].
+#[must_use]
+pub fn window_usage(calls: &[ProviderCall], window: UsageWindow) -> WindowUsage {
+    let mut acc = WindowAcc::new(window);
+    acc.ingest(calls);
+    acc.finish()
+}
+
+/// Merge `calls` into `state` and immediately drop the retained vector.
+///
+/// [`AggState::absorb`] is documented and property-tested to satisfy
+/// `emit(fold(a) ⊕ fold(b)) == emit(fold(a ++ b))`, so folding chunk by
+/// chunk gives byte-identical buckets to one full fold — see
+/// `absorb_of_random_two_way_partition_is_byte_identical_to_aggregate`.
+/// Only `calls` itself is unwanted, and the caller re-derives the one
+/// thing [`emit`] needs from it (`call_count`).
+fn absorb_and_release(state: &mut AggState, calls: Vec<ProviderCall>) {
+    state.absorb(fold(calls));
+    state.calls = Vec::new();
+}
+
+/// Scan the providers once and return only bounded per-window aggregates.
+///
+/// The memory contract is the reason this exists. [`scan_since`] returns a
+/// [`UsageData`] whose `calls` vector holds every call in the window —
+/// measured at 218,012 calls / 778 MB for 30 days on a real host, 85% of
+/// it `user_message` text that no bucket reads. A consumer that only wants
+/// totals pays that, then pays again for every clone it makes.
+///
+/// Here each file's calls are folded into the windows and dropped
+/// immediately, so peak memory is one file's calls plus the accumulators
+/// (single-digit MB) rather than the whole corpus.
+///
+/// Files older than the earliest window are never read, reusing
+/// [`ScanCtx::minimum_mtime_nanos`]. Windows may overlap; each call lands
+/// in every window that contains it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_windows(roots: &ProviderRoots, windows: &[UsageWindow]) -> Vec<WindowUsage> {
+    let mut accs: Vec<WindowAcc> = windows.iter().copied().map(WindowAcc::new).collect();
+    if accs.is_empty() {
+        return Vec::new();
+    }
+    let earliest = windows
+        .iter()
+        .map(|w| w.start.timestamp_nanos_opt().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+    let minimum_mtime_nanos = u64::try_from(earliest).unwrap_or(0);
+
+    let mut cache = None;
+    let mut reporter = ProgressReporter::noop();
+    let returned = {
+        let mut sink = |calls: Vec<ProviderCall>| {
+            for acc in &mut accs {
+                acc.ingest(&calls);
+            }
+        };
+        let mut ctx = ScanCtx::full_since(&mut cache, minimum_mtime_nanos);
+        ctx.calls_sink = Some(&mut sink);
+        walk_cached_providers(roots, &mut ctx, &mut reporter)
+    };
+
+    // Anything the walk still handed back — a provider whose read path
+    // does not consult the sink, plus Gemini / Cursor, which have no
+    // per-file cached path to hang one on — folds in here. Identical
+    // aggregates either way; routing through the sink only decides
+    // whether the calls are held one file at a time or all at once.
+    for chunk in [returned, parse_uncached_providers(roots)] {
+        if !chunk.is_empty() {
+            for acc in &mut accs {
+                acc.ingest(&chunk);
+            }
+        }
+    }
+
+    accs.into_iter().map(WindowAcc::finish).collect()
 }
 
 /// Count `.jsonl` files in the Claude layout: `<root>/<project>/<session>.jsonl`.
@@ -1513,6 +1924,522 @@ mod tests {
             user_message: String::new(),
             branch: Some("main".into()),
         }
+    }
+
+    /// Like [`call`], but lets a test vary the dimensions the windowed
+    /// aggregate keys on.
+    fn dim_call(
+        provider: Provider,
+        project: &str,
+        session: &str,
+        model: &str,
+        ts: i64,
+        input: u64,
+        cost: Option<f64>,
+    ) -> ProviderCall {
+        ProviderCall {
+            model: model.into(),
+            ..call(provider, project, session, ts, input, input * 2, cost)
+        }
+    }
+
+    /// What the consumer computes today: filter to the window, run the
+    /// existing [`aggregate`], and read the dimensions off it. This is the
+    /// behaviour [`scan_windows`] must reproduce exactly.
+    fn oracle(calls: &[ProviderCall], window: UsageWindow) -> WindowUsage {
+        let mine: Vec<ProviderCall> = calls
+            .iter()
+            .filter(|c| c.timestamp >= window.start && c.timestamp < window.end)
+            .cloned()
+            .collect();
+        let all_priced = |rows: &[&ProviderCall]| rows.iter().all(|c| c.cost_usd.is_some());
+        let pick = |f: &dyn Fn(&ProviderCall) -> String, key: &str| {
+            all_priced(&mine.iter().filter(|c| f(c) == key).collect::<Vec<_>>())
+        };
+
+        let mut by_provider: BTreeMap<String, Vec<ProviderCall>> = BTreeMap::new();
+        for c in &mine {
+            by_provider.entry(c.provider.as_str().to_string()).or_default().push(c.clone());
+        }
+        let providers = by_provider
+            .into_iter()
+            .map(|(key, group)| UsageRow {
+                complete_cost: group.iter().all(|c| c.cost_usd.is_some()),
+                bucket: aggregate(group).grand_total,
+                key,
+            })
+            .collect();
+
+        let projected = aggregate(mine.clone());
+        WindowUsage {
+            totals_complete_cost: all_priced(&mine.iter().collect::<Vec<_>>()),
+            totals: projected.grand_total,
+            daily: projected
+                .daily
+                .into_iter()
+                .map(|(date, bucket)| UsageRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| c.timestamp.date_naive() == date)
+                            .collect::<Vec<_>>(),
+                    ),
+                    key: date.to_string(),
+                    bucket,
+                })
+                .collect(),
+            models: projected
+                .models
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: pick(&|c| c.model.clone(), &row.model),
+                    key: row.model,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            projects: projected
+                .projects
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: pick(&|c| c.project.clone(), &row.name),
+                    key: row.name,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            providers,
+            weekly: projected
+                .weekly
+                .into_iter()
+                .map(|(week, bucket)| UsageRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| week_start(c.timestamp.date_naive()) == week)
+                            .collect::<Vec<_>>(),
+                    ),
+                    key: week.to_string(),
+                    bucket,
+                })
+                .collect(),
+            branches: projected
+                .branches
+                .into_iter()
+                .map(|row| UsageRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| c.branch.as_deref() == Some(row.branch.as_str()))
+                            .collect::<Vec<_>>(),
+                    ),
+                    key: row.branch,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            sessions: projected
+                .sessions
+                .into_iter()
+                .map(|row| SessionRow {
+                    complete_cost: all_priced(
+                        &mine
+                            .iter()
+                            .filter(|c| {
+                                c.provider == row.provider
+                                    && c.project == row.project
+                                    && c.session_id == row.session_id
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    provider: row.provider,
+                    project: row.project,
+                    session_id: row.session_id,
+                    bucket: row.bucket,
+                })
+                .collect(),
+            tools: projected.tools,
+            mcp_servers: projected.mcp_servers,
+            shell_commands: projected.shell_commands,
+        }
+    }
+
+    fn fold_in_chunks(calls: &[ProviderCall], window: UsageWindow, chunk: usize) -> WindowUsage {
+        let mut acc = WindowAcc::new(window);
+        for part in calls.chunks(chunk) {
+            acc.ingest(part);
+        }
+        acc.finish()
+    }
+
+    fn spread_of_calls() -> Vec<ProviderCall> {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day); // midnight UTC
+        vec![
+            dim_call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                "opus",
+                base + 60,
+                10,
+                Some(0.5),
+            ),
+            dim_call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                "opus",
+                base + 120,
+                20,
+                Some(0.25),
+            ),
+            dim_call(
+                Provider::Claude,
+                "beta",
+                "s2",
+                "sonnet",
+                base + 180,
+                30,
+                None,
+            ),
+            dim_call(
+                Provider::Codex,
+                "alpha",
+                "s3",
+                "gpt",
+                base + day + 60,
+                40,
+                Some(1.5),
+            ),
+            dim_call(
+                Provider::Codex,
+                "gamma",
+                "s4",
+                "gpt",
+                base + day + 120,
+                50,
+                Some(0.75),
+            ),
+            dim_call(
+                Provider::Claude,
+                "beta",
+                "s2",
+                "sonnet",
+                base + 2 * day + 60,
+                60,
+                Some(2.0),
+            ),
+            dim_call(
+                Provider::Claude,
+                "delta",
+                "s5",
+                "opus",
+                base + 3 * day + 60,
+                70,
+                None,
+            ),
+        ]
+    }
+
+    fn window_over(calls: &[ProviderCall], from_days: i64) -> UsageWindow {
+        let last = calls.iter().map(|c| c.timestamp).max().expect("calls");
+        UsageWindow {
+            start: last - Duration::days(from_days),
+            end: last + Duration::seconds(1),
+        }
+    }
+
+    /// The load-bearing guarantee: folding chunk-by-chunk and throwing the
+    /// calls away must land on exactly what the existing one-shot
+    /// [`aggregate`] produces. Every chunk size must agree, because chunk
+    /// boundaries are file boundaries in the real scan and must not be
+    /// observable in the numbers.
+    #[test]
+    fn windowed_folding_matches_a_one_shot_aggregate() {
+        let calls = spread_of_calls();
+        for days in [0, 1, 2, 30] {
+            let window = window_over(&calls, days);
+            let want = oracle(&calls, window);
+            for chunk in 1..=calls.len() {
+                assert_eq!(
+                    fold_in_chunks(&calls, window, chunk),
+                    want,
+                    "window={days}d chunk={chunk}: chunked fold diverged from aggregate()"
+                );
+            }
+        }
+    }
+
+    /// Distinct session and project counts cannot be recovered by adding
+    /// per-chunk counts — the accumulators have to union sets. A corpus
+    /// where the same session and project recur in different chunks is
+    /// what tells the two apart.
+    #[test]
+    fn distinct_counts_survive_chunking() {
+        let calls = spread_of_calls();
+        let window = window_over(&calls, 30);
+        let got = fold_in_chunks(&calls, window, 1);
+        assert_eq!(got.totals.session_count, 5, "5 distinct sessions");
+        assert_eq!(got.totals.project_count, 4, "4 distinct projects");
+        assert_eq!(
+            got.totals.call_count,
+            calls.len(),
+            "call_count survives emit()"
+        );
+    }
+
+    /// `cost_usd` coalesces, so it can be `Some` while some calls were
+    /// unpriced. Completeness must be an AND, not a presence check —
+    /// otherwise the consumer publishes a total that omits the unpriced
+    /// calls without saying so.
+    #[test]
+    fn completeness_is_not_the_same_question_as_cost_presence() {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day);
+        let calls = vec![
+            dim_call(
+                Provider::Claude,
+                "p",
+                "s1",
+                "opus",
+                base + 60,
+                10,
+                Some(1.0),
+            ),
+            dim_call(Provider::Claude, "p", "s1", "opus", base + 120, 10, None),
+        ];
+        let window = window_over(&calls, 1);
+        let got = fold_in_chunks(&calls, window, 1);
+
+        assert!(
+            got.totals.cost_usd.is_some(),
+            "one priced call still yields a cost"
+        );
+        assert!(
+            !got.totals_complete_cost,
+            "but the window is NOT fully priced"
+        );
+        assert_eq!(got.daily.len(), 1);
+        assert!(!got.daily[0].complete_cost, "the day is not fully priced");
+        assert!(
+            !got.models[0].complete_cost,
+            "the model is not fully priced"
+        );
+        assert!(
+            !got.projects[0].complete_cost,
+            "the project is not fully priced"
+        );
+        assert!(
+            !got.providers[0].complete_cost,
+            "the provider is not fully priced"
+        );
+    }
+
+    /// The whole point: nothing accumulates. If a chunk's calls survive the
+    /// fold, memory grows with the corpus and `scan_windows` is pointless.
+    #[test]
+    fn folding_a_chunk_does_not_retain_it() {
+        let calls = spread_of_calls();
+        let mut state = AggState::default();
+        for part in calls.chunks(2) {
+            absorb_and_release(&mut state, part.to_vec());
+            assert!(
+                state.calls.is_empty(),
+                "calls must be released after every chunk, not held to the end"
+            );
+        }
+        assert_eq!(
+            state.grand_total.input_tokens,
+            calls.iter().map(|c| c.input_tokens).sum::<u64>(),
+            "releasing the calls must not lose their contribution"
+        );
+    }
+
+    /// A call belongs to every window that contains it, and to no other.
+    #[test]
+    fn overlapping_windows_each_see_their_own_calls() {
+        let calls = spread_of_calls();
+        let narrow = window_over(&calls, 0);
+        let wide = window_over(&calls, 30);
+        let got = scan_windows_from(&calls, &[narrow, wide]);
+        assert_eq!(
+            got[0].totals.call_count, 1,
+            "only the newest call is inside 0 days"
+        );
+        assert_eq!(
+            got[1].totals.call_count,
+            calls.len(),
+            "all calls are inside 30 days"
+        );
+        assert_eq!(got[0], oracle(&calls, narrow));
+        assert_eq!(got[1], oracle(&calls, wide));
+    }
+
+    /// Drive the same accumulators `scan_windows` uses, without a corpus on
+    /// disk — the filesystem walk is covered separately.
+    fn scan_windows_from(calls: &[ProviderCall], windows: &[UsageWindow]) -> Vec<WindowUsage> {
+        let mut accs: Vec<WindowAcc> = windows.iter().copied().map(WindowAcc::new).collect();
+        for part in calls.chunks(2) {
+            for acc in &mut accs {
+                acc.ingest(part);
+            }
+        }
+        accs.into_iter().map(WindowAcc::finish).collect()
+    }
+
+    /// Completeness must AND across a key, not take the last call's answer.
+    ///
+    /// This is the hazard that makes `complete_cost` exist at all: costs
+    /// accumulate through `add_cost_nanos`, which coalesces `None`, so a key
+    /// holding one priced call among unpriced ones still reports `Some` for its
+    /// bucket. Only the AND-accumulator distinguishes "this really cost $X"
+    /// from "this cost at least $X and we cannot see the rest".
+    ///
+    /// Every fixture here deliberately MIXES priced and unpriced calls under a
+    /// single key. A test whose keys are internally homogeneous passes just as
+    /// well against a plain `insert`, which is exactly the blind spot this
+    /// closes.
+    ///
+    /// BOTH orderings are exercised. "Last call wins" happens to agree with the
+    /// AND whenever the unpriced call comes last, so a single ordering leaves
+    /// the bug alive in one direction.
+    #[test]
+    fn a_mixed_key_reports_a_coalesced_cost_but_never_claims_it_is_complete() {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day);
+        let priced = call(
+            Provider::Claude,
+            "alpha",
+            "s1",
+            base + 60,
+            10,
+            20,
+            Some(0.5),
+        );
+        let unpriced = call(Provider::Claude, "alpha", "s1", base + 120, 10, 20, None);
+
+        // One session, one branch, one day, one week, either way round.
+        for (order, calls) in [
+            ("priced first", vec![priced.clone(), unpriced.clone()]),
+            ("unpriced first", vec![unpriced, priced]),
+        ] {
+            let got = window_usage(
+                &calls,
+                UsageWindow {
+                    start: DateTime::from_timestamp(base, 0).unwrap(),
+                    end: DateTime::from_timestamp(base + day, 0).unwrap(),
+                },
+            );
+
+            let session = got.sessions.first().expect("one session");
+            assert_eq!(
+                session.bucket.cost_usd,
+                Some(0.5),
+                "{order}: the bucket really does coalesce to a partial sum, \
+                 which is why the flag is needed"
+            );
+            assert!(
+                !session.complete_cost,
+                "{order}: a session mixing priced and unpriced calls must not \
+                 claim a complete cost"
+            );
+
+            for (label, rows) in [
+                ("daily", &got.daily),
+                ("weekly", &got.weekly),
+                ("branches", &got.branches),
+                ("models", &got.models),
+                ("projects", &got.projects),
+                ("providers", &got.providers),
+            ] {
+                let row = rows.first().unwrap_or_else(|| panic!("{order}: one {label} row"));
+                assert!(
+                    !row.complete_cost,
+                    "{order}/{label}: an unpriced call anywhere under a key must \
+                     clear its completeness"
+                );
+            }
+            assert!(
+                !got.totals_complete_cost,
+                "{order}: the whole-window flag must fall too"
+            );
+        }
+    }
+
+    /// The mirror: an all-priced key must still report complete, or the gate
+    /// above would be satisfied by hard-coding `false` everywhere.
+    #[test]
+    fn a_fully_priced_key_still_reports_a_complete_cost() {
+        let day = 86_400i64;
+        let base = 1_760_000_000i64 - (1_760_000_000 % day);
+        let calls = vec![
+            call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                base + 60,
+                10,
+                20,
+                Some(0.5),
+            ),
+            call(
+                Provider::Claude,
+                "alpha",
+                "s1",
+                base + 120,
+                10,
+                20,
+                Some(0.25),
+            ),
+        ];
+        let got = window_usage(
+            &calls,
+            UsageWindow {
+                start: DateTime::from_timestamp(base, 0).unwrap(),
+                end: DateTime::from_timestamp(base + day, 0).unwrap(),
+            },
+        );
+
+        assert!(got.sessions.first().expect("one session").complete_cost);
+        assert!(got.weekly.first().expect("one week").complete_cost);
+        assert!(got.branches.first().expect("one branch").complete_cost);
+        assert!(got.totals_complete_cost);
+    }
+
+    /// End-to-end over a real corpus on disk: `scan_windows` must agree with
+    /// running the existing `scan` and projecting it the old way.
+    #[test]
+    fn scan_windows_matches_the_existing_scan_over_a_real_corpus() {
+        let fx = IncrFixture::new();
+        fx.write_file(
+            "proj-a",
+            "s1.jsonl",
+            &[
+                claude_line("2026-03-01T01:00:00Z", "s1", 10, 20),
+                claude_line("2026-03-01T02:00:00Z", "s1", 30, 40),
+            ],
+        );
+        fx.write_file(
+            "proj-b",
+            "s2.jsonl",
+            &[claude_line("2026-03-02T01:00:00Z", "s2", 50, 60)],
+        );
+        fx.write_file(
+            "proj-b",
+            "s3.jsonl",
+            &[claude_line("2026-03-03T01:00:00Z", "s3", 70, 80)],
+        );
+
+        let window = UsageWindow {
+            start: "2026-02-01T00:00:00Z".parse().unwrap(),
+            end: "2026-04-01T00:00:00Z".parse().unwrap(),
+        };
+        let baseline = scan(&fx.roots);
+        assert!(!baseline.calls.is_empty(), "fixture must actually parse");
+
+        assert_eq!(
+            scan_windows(&fx.roots, &[window]),
+            vec![oracle(&baseline.calls, window)],
+            "scan_windows diverged from scan() + the old projection"
+        );
     }
 
     #[test]

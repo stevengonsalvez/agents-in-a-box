@@ -228,6 +228,8 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let result = client()
         .message_send(FleetMessageSendParams {
             scope_key: matches.get_one::<String>("scope").cloned(),
+            // The CLI IS the operator's hand; the daemon's default says so.
+            actor: None,
             targets,
             text,
             request_id,

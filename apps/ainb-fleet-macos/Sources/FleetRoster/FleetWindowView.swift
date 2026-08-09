@@ -445,7 +445,7 @@ struct FleetAnswerQueue: View {
     }
 }
 
-private struct FleetInterviewDeck {
+struct FleetInterviewDeck {
     let session: FleetSession
     let questions: [FleetInterviewQuestion]
     let nativePicker: Bool
@@ -480,7 +480,7 @@ private struct FleetInterviewDeck {
     }
 }
 
-private struct FleetInterviewQuestion: Identifiable {
+struct FleetInterviewQuestion: Identifiable {
     let id: String
     let header: String
     let text: String
@@ -488,7 +488,7 @@ private struct FleetInterviewQuestion: Identifiable {
     let multiSelect: Bool
 }
 
-private extension Array {
+extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }

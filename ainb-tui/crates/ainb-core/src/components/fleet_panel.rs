@@ -269,6 +269,14 @@ impl FleetPanelState {
         reduction.intent
     }
 
+    /// Whether the copilot chat is the open mode, which makes the panel a
+    /// repaint source: the chat polls on the frame tick, and the paint loop is
+    /// dirty-gated, so an open chat with no repaint reason loads once and then
+    /// never sees another message.
+    pub const fn chat_open(&self) -> bool {
+        self.canonical.is_chat_open()
+    }
+
     /// Whether canonical pane currently captures modal input.
     pub fn canonical_modal_open(&self) -> bool {
         self.canonical.is_modal_open()
@@ -305,6 +313,73 @@ impl FleetPanelState {
     /// Queue reducer update from a detached action worker.
     pub fn canonical_update_sink(&self) -> Arc<Mutex<Vec<FleetEvent>>> {
         Arc::clone(&self.canonical_updates)
+    }
+
+    /// Perform one copilot-chat effect on a detached worker.
+    ///
+    /// The single executor for the chat surface, called from BOTH doors: the
+    /// key path (`app::events`) and the frame tick below, which is what makes
+    /// a reply arrive without the operator pressing anything. The chat reducer
+    /// latches an in-flight flag before emitting, so the per-frame tick cannot
+    /// spawn a worker per repaint.
+    pub fn dispatch_chat_intent(
+        &mut self,
+        intent: ainb_plugin_hangar::screen::fleet_chat::ChatIntent,
+    ) {
+        use ainb_plugin_hangar::screen::fleet_chat::ChatIntent;
+
+        let sink = self.canonical_update_sink();
+        let spawned = std::thread::Builder::new().name("ainb-fleet-chat".into()).spawn(move || {
+            // A WRITE always ends by paging: the surface's own in-flight latch
+            // is cleared by the page, and the operator sees the durable row the
+            // daemon actually stored rather than an optimistic local echo.
+            let (write_failure, scope_key) = match intent {
+                ChatIntent::Refresh { scope_key } => (None, scope_key),
+                ChatIntent::Send {
+                    scope_key,
+                    target_session_key,
+                    text,
+                    request_id,
+                } => {
+                    let params = ainb_hangar_proto::fleet::FleetMessageSendParams {
+                        scope_key: Some(scope_key.clone()),
+                        // Absent, so the daemon records `operator`. A copilot
+                        // write never originates at a human's keyboard.
+                        actor: None,
+                        targets: vec![target_session_key],
+                        text,
+                        request_id,
+                    };
+                    let failure = crate::fleet::control::chat_send_blocking(params).err();
+                    (failure, Some(scope_key))
+                }
+                ChatIntent::ConfirmAnswer(params) => {
+                    let confirm_id = params.confirm_id.clone();
+                    let failure = crate::fleet::control::chat_confirm_answer_blocking(params)
+                        .err()
+                        .map(|detail| format!("answering {confirm_id}: {detail}"));
+                    (failure, None)
+                }
+            };
+            let mut events = Vec::new();
+            if let Some(detail) = write_failure {
+                events.push(FleetEvent::ChatSendFailed { detail });
+            }
+            events.push(match crate::fleet::control::chat_page_blocking(scope_key) {
+                Ok(snapshot) => FleetEvent::ChatSnapshot(snapshot),
+                Err(detail) => FleetEvent::ChatFailed { detail },
+            });
+            if let Ok(mut updates) = sink.lock() {
+                updates.extend(events);
+            }
+        });
+        if let Err(error) = spawned {
+            if let Ok(mut updates) = self.canonical_updates.lock() {
+                updates.push(FleetEvent::ChatFailed {
+                    detail: format!("chat worker did not start: {error}"),
+                });
+            }
+        }
     }
 
     fn seed_canonical_from_legacy_rows(&mut self) {
@@ -903,6 +978,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let reduction = reduce_fleet(&state.canonical, FleetEvent::Tick(now_ms));
     state.canonical = reduction.state;
+    // The tick's intent used to be dropped here, which was harmless while
+    // nothing emitted one. The copilot chat polls on this tick, so dropping it
+    // would leave a chat screen that never loads and never says why.
+    if let Some(FleetIntent::Chat(intent)) = reduction.intent {
+        state.dispatch_chat_intent(intent);
+    }
 
     let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(area.width, area.height);
     let content_top = 1;
@@ -975,7 +1056,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .unwrap_or("no attachment");
     frame.render_widget(
         Paragraph::new(format!(
-            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  B broadcast  q/Esc back"
+            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  m chat  B broadcast  q/Esc back"
         ))
         .style(Style::default().fg(MUTED_GRAY)),
         Rect::new(

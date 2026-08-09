@@ -114,6 +114,79 @@ const DELIVERY_COLUMNS: &str = "message_id, session_key, state, fingerprint, det
 pub struct FleetMessageRepo;
 
 impl FleetMessageRepo {
+    /// Insert one daemon-authored message inside a CALLER'S transaction.
+    ///
+    /// The turn-end write set (agent reply, delivery receipt, cleared open
+    /// turn) commits together or not at all, and this is its message half; see
+    /// [`super::fleet_acp_session::FleetAcpSessionRepo::commit_turn_end`].
+    /// There is no `request_id` replay path here on purpose: a daemon-authored
+    /// reply carries no idempotency token, so there is nothing to absorb.
+    pub(crate) async fn insert_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        message: &NewFleetMessage,
+    ) -> Result<FleetMessageRow, sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO fleet_message \
+             (id, request_id, request_fingerprint, scope_key, origin_message_id, sender, kind, body, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&message.id)
+        .bind(&message.request_id)
+        .bind(&message.request_fingerprint)
+        .bind(&message.scope_key)
+        .bind(&message.origin_message_id)
+        .bind(&message.sender)
+        .bind(&message.kind)
+        .bind(&message.body)
+        .bind(message.created_at)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM fleet_message WHERE id = ?"
+        ))
+        .bind(&message.id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .as_ref()
+        .map(message_from)
+        .transpose()?
+        .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    /// Claim AND resolve one `PENDING` leg in a CALLER'S transaction.
+    ///
+    /// One statement, not the two-step claim [`Self::claim_delivery`] +
+    /// [`Self::resolve_delivery`] pair the cross-process resolvers use: inside
+    /// one transaction the intermediate claimed-but-unresolved state is never
+    /// observable, so it buys nothing. The single winner is decided by exactly
+    /// the same predicate (`state = 'PENDING' AND fingerprint IS NULL`), so a
+    /// leg convergence already owns is refused here as well.
+    pub(crate) async fn resolve_pending_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        message_id: &str,
+        session_key: &str,
+        fingerprint: &str,
+        state: &str,
+        detail: Option<&str>,
+        resolved_at: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE fleet_message_delivery \
+             SET state = ?, detail = ?, resolved_at = ?, fingerprint = ? \
+             WHERE message_id = ? AND session_key = ? AND state = 'PENDING' \
+               AND fingerprint IS NULL",
+        )
+        .bind(state)
+        .bind(detail)
+        .bind(resolved_at)
+        .bind(fingerprint)
+        .bind(message_id)
+        .bind(session_key)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Insert one message carrying no delivery legs (daemon-authored rows: the
     /// agent replies and markers that answer a prompt rather than address one).
     pub async fn insert_message(

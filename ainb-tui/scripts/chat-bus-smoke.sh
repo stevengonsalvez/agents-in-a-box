@@ -8,6 +8,8 @@
 #   ./scripts/chat-bus-smoke.sh            # every journey (CI / release smoke)
 #   ./scripts/chat-bus-smoke.sh j2         # one journey, for recording
 #   ./scripts/chat-bus-smoke.sh j1 j5c     # a subset
+#   ./scripts/chat-bus-smoke.sh j6         # the real TUI, the operating surface
+#   ./scripts/chat-bus-smoke.sh j7         # the real TUI's copilot chat screen
 #   ./scripts/chat-bus-smoke.sh --keep j4  # leave the scratch world behind
 #
 # What it stands up (nothing touches the operator's real hangar or tmux):
@@ -22,6 +24,11 @@
 #   * ACP adapters: the real ones when they are installed AND credentialled,
 #     otherwise the `fake_acp_adapter` fixture from `ainb-acp`. The mode is
 #     printed in the banner, never guessed at by the reader.
+#   * for J6 and J7, the REAL `ainb tui` in a session of its own on that private
+#     server. Every other journey drives the daemon and the CLI; those two drive
+#     the OPERATING SURFACE, because part 1 shipped a bus the TUI consumed
+#     without anything ever opening it. J6 reads the Fleet panel's roster; J7
+#     opens the copilot CHAT on it and operates the conversation.
 #
 # How the tmux sessions become fleet sessions: they are NOT seeded into the
 # store. The daemon's own tmux reconciler (`spawn_tmux_reconciler`, every 3 s)
@@ -70,7 +77,11 @@ TURN_DEADLINE_MS="${AINB_SMOKE_TURN_DEADLINE_MS:-45000}"
 KEEP_ROOT=0
 DAEMON_PID=""
 BG_PIDS=()
+# The three fake-agent panes, and ONLY those: J1 asserts a delivery in every
+# member of this array, so J6's TUI pane is tracked separately rather than
+# appended here.
 TMUX_SESSIONS=()
+TUI_SESSION=""
 declare -a RESULT_LINES=()
 FAILED=0
 SKIP_REASON=""
@@ -107,6 +118,12 @@ dump_diagnostics() {
     printf '%s[pane %s]%s\n' "$c_yellow" "$session" "$c_off"
     tmux_cmd capture-pane -p -t "$session" 2>&1 | tail -25 || true
   done
+  # The whole screen, not a tail: a red J6 is nearly always "what was actually
+  # on the operating surface", and the answer is the top of the pane.
+  if [[ -n "$TUI_SESSION" ]]; then
+    printf '%s[TUI pane %s]%s\n' "$c_yellow" "$TUI_SESSION" "$c_off"
+    tmux_cmd capture-pane -p -t "$TUI_SESSION" 2>&1 || true
+  fi
   printf '%s[daemon stdout/stderr tail]%s\n' "$c_yellow" "$c_off"
   tail -40 "$LOG_DIR/daemon.out" 2>/dev/null || true
   local structured
@@ -135,6 +152,7 @@ cleanup() {
   for session in "${TMUX_SESSIONS[@]:-}"; do
     [[ -n "$session" ]] && tmux_cmd kill-session -t "$session" 2>/dev/null
   done
+  [[ -n "$TUI_SESSION" ]] && tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null
   if [[ "$KEEP_ROOT" == 1 ]]; then
     log "scratch world kept at $ROOT"
   else
@@ -185,6 +203,21 @@ rpc() { # method [params-json]
 # runbook answers "why did this not deliver" from that column, so the smoke
 # reads it directly, READ-ONLY, and says so wherever it does.
 db() { sqlite3 -readonly "$DB" "$1"; }
+
+# The ONE writer in this file, and it seeds a PRECONDITION, never an outcome.
+#
+# J7 needs an open guardrail confirm card on screen. A card is minted by
+# `ainb_hangar_daemon::copilot::gate`, called from the copilot's own tool
+# bridge — and that bridge is not built yet, so NOTHING on the wire, in the CLI
+# or in the TUI can open one. Seeding the row is the only way to reach the
+# surface under test at all.
+#
+# What that costs is scoped and stated: the row is the precondition, and every
+# assertion AFTER it is real product behaviour on the real wire — the panel
+# decoding the card through `fleet/confirm_list`, rendering it answerable, and
+# `y` resolving it through `fleet/confirm_answer`. The day the tool bridge
+# lands, this seed is replaced by a copilot tool call and nothing else moves.
+db_write() { sqlite3 "$DB" "$1"; }
 
 delivery_state()  { db "SELECT state FROM fleet_message_delivery WHERE message_id='$1' AND session_key='$2';"; }
 delivery_detail() { db "SELECT COALESCE(detail,'') FROM fleet_message_delivery WHERE message_id='$1' AND session_key='$2';"; }
@@ -459,22 +492,52 @@ resolve_tmux_targets() {
   (( ${#TMUX_KEYS[@]} == 3 ))
 }
 
-setup_world() {
-  mkdir -p "$BIN_DIR" "$LOG_DIR" "$SCRATCH_HOME" "$HANGAR_HOME/hangar" "$TMUX_DIR"
+# Every first-run surface, pre-answered. A CLI verb only ever met the
+# onboarding wizard, so this used to be one file; the TUI (J6) meets all of
+# them, and each one intercepts keystrokes until it is satisfied.
+#
+# Runs AFTER `build_binaries` because the onboarding record has to name the
+# version of the binary under test — see below.
+seed_first_run_records() {
   # A completed onboarding record so no first-run wizard can intercept a CLI
   # verb (same trap the tmux tripwires document).
+  #
+  # The version is READ FROM THE BINARY, never a literal: `needs_onboarding`
+  # (ainb-core/src/config/onboarding.rs) re-runs the wizard when the record's
+  # MAJOR version differs from the binary's, so a placeholder like `smoke` is
+  # indistinguishable from major 0 and the wizard fires anyway — invisible to
+  # every CLI journey, and fatal to J6, whose `f` the wizard swallows.
   mkdir -p "$SCRATCH_HOME/.agents-in-a-box/config"
-  cat >"$SCRATCH_HOME/.agents-in-a-box/config/onboarding.toml" <<'TOML'
+  local version
+  version="$("$BIN_DIR/ainb" --version | awk '{print $2}')"
+  cat >"$SCRATCH_HOME/.agents-in-a-box/config/onboarding.toml" <<TOML
 completed = true
 completed_at = "2026-05-11T00:00:00+00:00"
-version = "smoke"
+version = "$version"
 skipped_dependencies = []
 git_directories = []
 TOML
+
+  # …and a DISMISSED notify-install record, for the same reason one screen up.
+  #
+  # `notifyd::Paths::from_home` (crates/ainb-plugin-notifyd/src/paths.rs)
+  # resolves `AINB_HANGAR_HOME` BEFORE `AINB_HOME`, and this world sets both.
+  # Seeded under only one base, the "install the notify hooks?" offer fires on
+  # first paint and its MODAL swallows the `f` that opens the Fleet panel — J6
+  # would then fail on a first-run prompt while looking like a Fleet bug.
+  # Written under BOTH bases so the seeding never depends on which var wins.
+  local notify_record='{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}'
+  printf '%s' "$notify_record" >"$HANGAR_HOME/install.json"
+  printf '%s' "$notify_record" >"$SCRATCH_HOME/.agents-in-a-box/install.json"
+}
+
+setup_world() {
+  mkdir -p "$BIN_DIR" "$LOG_DIR" "$SCRATCH_HOME" "$HANGAR_HOME/hangar" "$TMUX_DIR"
   write_rpc_client
   write_fake_agent
   write_turn_script
   build_binaries || return 1
+  seed_first_run_records
   resolve_adapters
   start_tmux_sessions
   start_daemon || return 1
@@ -488,8 +551,11 @@ TOML
 # FAKE_ACP_HANG_PROMPTS entry). Journeys that need an open turn send this.
 HANG_TEXT="SMOKE_HANG_PROMPT"
 
-new_acp_session() { # provider -> prints "<session_key> <scope_key>"
-  ainb_cli --format json fleet acp create --provider "$1" --cwd "$ROOT" |
+# The cwd defaults to the scratch root. J6 overrides it because the Fleet card's
+# identity line is the cwd's basename, and that is what makes its assertion
+# specific to its own row.
+new_acp_session() { # provider [cwd] -> prints "<session_key> <scope_key>"
+  ainb_cli --format json fleet acp create --provider "$1" --cwd "${2:-$ROOT}" |
     jqr '"\(.session_key) \(.scope_key)"'
 }
 
@@ -988,9 +1054,344 @@ journey_j5e() {
   log "   DELIVERED + REJECTED/target_unknown in one request, message persisted"
 }
 
+# ---- J6: the operating surface --------------------------------------------
+
+# Chrome the panel itself paints (`ainb-core/src/components/fleet_panel.rs`),
+# so a match means the Fleet panel is ON SCREEN, not merely that the TUI booted.
+FLEET_PANEL_MARKER='Fleet ·'
+# The cold-launch home screen's own banner (`components/home_screen_v2.rs`).
+# Waiting for it before the keypress is what makes "one press of f" an honest
+# claim: a key sent into a terminal that has not painted yet is a key nobody can
+# prove was seen. Spaced letters ON PURPOSE — the setup wizard's own splash says
+# "Welcome to Agents in a Box!", so the unspaced name would match a screen that
+# eats `f` rather than the screen that acts on it.
+HOME_SCREEN_MARKER='A I N B'
+
+tui_pane()     { tmux_cmd capture-pane -p -t "$TUI_SESSION"; }
+tui_pane_has() { tui_pane | grep -qF -- "$1"; }
+
+journey_j6() {
+  banner "J6 · the operating surface" \
+    "a chat-bus ACP session is VISIBLE in the real Fleet panel of a cold-launched \`ainb tui\`, opened by ONE press of \`f\`"
+
+  "$BIN_DIR/ainb" tui --help >/dev/null 2>&1 || {
+    skip "this ainb has no \`tui\` subcommand: there is no operating surface to drive"
+    return 77
+  }
+
+  # Deliberately NOT setting `AINB_FLEET_DISABLE_TMUX_DISCOVERY`: it gates the
+  # DAEMON's reconciler (`ainb-hangar-daemon/src/fleet.rs`), and this world runs
+  # ONE daemon that J1/J5c/J5e need discovery from. Setting it on the TUI child
+  # would be a no-op anyway — the TUI is a snapshot reader, not a discoverer. So
+  # the three fake `claude` panes DO share the roster, and J6 earns its
+  # specificity by anchoring on its own card instead of on an empty panel.
+  local project="$ROOT/j6-project"
+  local identity="j6-project"
+  mkdir -p "$project"
+
+  local created session_key
+  created="$(new_acp_session "$ACP_PROVIDER" "$project")" || { fail "acp create failed"; return 1; }
+  read -r session_key _ <<<"$created"
+  [[ "$session_key" == acp:* ]] || { fail "expected an acp: session key, got [$session_key]"; return 1; }
+  step "session_key=$session_key cwd=$project"
+
+  step "cold-launching the REAL \`ainb tui\` on the private tmux server"
+  TUI_SESSION="ainb-smoke-tui-$RUN_ID"
+  # NOT the `ainb-smoke-$RUN_ID-` prefix the fake agents use: `resolve_tmux_targets`
+  # selects on that prefix, and a TUI pane joining the roster would break its
+  # exactly-3 check. 200x50 so the panel renders its wide two-column form.
+  tmux_cmd new-session -d -s "$TUI_SESSION" -x 200 -y 50 \
+    "env -u TMUX HOME=$SCRATCH_HOME AINB_HOME=$SCRATCH_HOME/.agents-in-a-box \
+       AINB_HANGAR_HOME=$HANGAR_HOME TMUX_TMPDIR=$TMUX_DIR PATH=$BIN_DIR:$PATH \
+       AINB_DISABLE_PLUGINS=1 AINB_CODEX_MANAGED=0 \
+       CLAUDE_PEERS_DB=$ROOT/j6-peers.db AINB_FLEET_JOBS_DIR=$ROOT/j6-jobs \
+       $BIN_DIR/ainb tui"
+  wait_until 60 "the TUI to paint its home screen" tui_pane_has "$HOME_SCREEN_MARKER" || return 1
+
+  step "pressing \`f\` ONCE, the way a user opens Fleet"
+  tmux_cmd send-keys -t "$TUI_SESSION" f
+  # A retry loop here would be a lie: pressing `f` until something happens is
+  # exactly how a modal eating the first one goes unnoticed.
+  wait_until 30 "the Fleet panel to open on the FIRST \`f\` (a modal in the way would eat it)" \
+    tui_pane_has "$FLEET_PANEL_MARKER" || return 1
+
+  # The panel opens on the `Needs input` lens, and a freshly minted ACP session
+  # needs nothing, so its card is filtered out until the operator widens the
+  # lens. `5` is not a workaround: it is the key the panel's OWN empty state
+  # prints ("Press 5 for All"), so this is still the path a user walks.
+  step "pressing \`5\` for the All lens, the key the panel's empty state names"
+  tmux_cmd send-keys -t "$TUI_SESSION" 5
+  wait_until 45 "the card for $session_key ($identity) to appear in the panel" \
+    tui_pane_has "$identity" || return 1
+
+  # `render_session_card` (ainb-plugin-hangar/src/screen/fleet.rs) paints each
+  # roster entry as four lines: a top border, status + age, the identity, then
+  # `<branch>  ·  <provider>  ·  <attachment>`. The provider cell is read from
+  # the line AFTER this journey's own identity line, which is what stops the
+  # assertion passing on an incidental `acp` elsewhere in the pane — the session
+  # key, the scratch paths and any other journey's row all contain one.
+  #
+  # The identity match is ANCHORED at the card's left border (`│` at column 0,
+  # the `▶ `/`  ` marker at column 2) because `capture-pane` returns the whole
+  # screen on one physical line per row: the roster header and the detail pane
+  # to the right of the divider both repeat this identity, and an unanchored
+  # match lands on one of those and reads a provider cell from the wrong column.
+  local pane card identity_line provider_line provider_cell provider_token
+  pane="$(tui_pane)"
+  # `|| true` because this grep legitimately finds nothing when the card is
+  # rendered in a shape this anchor does not know about, and `set -e` would turn
+  # that into a bare abort with no reason instead of the `fail` two lines down.
+  card="$(printf '%s\n' "$pane" | grep -m1 -A1 -E "^│ +(▶ )?$identity( |$)" || true)"
+  identity_line="$(printf '%s\n' "$card" | head -1)"
+  provider_line="$(printf '%s\n' "$card" | tail -1)"
+  [[ -n "$identity_line" && "$provider_line" != "$identity_line" ]] ||
+    { fail "no roster card for $identity in the Fleet panel: [$identity_line]"; return 1; }
+  provider_cell="$(printf '%s' "$provider_line" | awk -F'  ·  ' '{print $2}' | tr -d '[:space:]')"
+  provider_token="$(printf '%s' "$provider_cell" | tr '[:upper:]' '[:lower:]')"
+
+  # Echoed, not just asserted: a recording of this run should SHOW the operator's
+  # own two lines, the same way J1 echoes the delivered pane text. Trimmed at the
+  # `││` seam between the roster column and the detail pane, and squeezed, so the
+  # card reads as one line instead of 200 columns of card padding.
+  step "card identity, as the operator sees it:$(printf '%s' "$identity_line" | awk -F'││' '{print $1}' | tr -s ' ')"
+  step "card provider row, as the operator sees it:$(printf '%s' "$provider_line" | awk -F'││' '{print $1}' | tr -s ' ')"
+
+  # `unknown` first: it is the SILENT degradation this journey exists for. The
+  # panel maps the wire token in one place and falls back rather than failing,
+  # so an unmapped provider looks like a live session with a shrugging label.
+  [[ "$provider_token" != unknown ]] ||
+    { fail "the Fleet card labelled $session_key [$provider_cell]: an unmapped wire token degraded to the silent fallback"; return 1; }
+  assert_eq "acp" "$provider_token" "the Fleet card must name the ACP session's provider" || return 1
+
+  local roster
+  roster="$(printf '%s\n' "$pane" | grep -m1 -F -- "$FLEET_PANEL_MARKER" | tr -s ' ')"
+  tmux_cmd send-keys -t "$TUI_SESSION" Escape
+  tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null || true
+  TUI_SESSION=""
+
+  log "   Fleet opened on the first \`f\` ·$roster· card [$identity] labelled [$provider_cell]"
+}
+
+# ---- J7: the copilot chat, on the operating surface -----------------------
+
+# Chrome the chat screen itself paints (`ainb-plugin-hangar/src/screen/fleet_chat.rs`),
+# so a match means the copilot CHAT is on screen, not merely that Fleet opened.
+CHAT_SCREEN_MARKER='Fleet chat · #copilot'
+# The composer's own help line. The header above paints while the screen is
+# still LOADING, so waiting for this instead is what makes the keys that follow
+# land on a surface that can receive them.
+CHAT_COMPOSER_MARKER='Enter sends · Tab confirm cards'
+# The cards help line, which the pane prints only once focus IS on the cards.
+CHAT_CARDS_MARKER='↑↓ card · y approve'
+
+# The newest copilot channel AS THE DAEMON REPORTS IT, through the CLI's own
+# `fleet/channel_list` round trip.
+#
+# Deliberately NOT read off the pane: the thing under test is whether the screen
+# shows the scope the daemon minted, and a reader that took its expected value
+# from the screen would agree with any string the screen chose to print. The
+# first version of this surface hardcoded `channel:copilot` and read an empty
+# timeline forever while every one of its unit tests stayed green.
+copilot_scope() {
+  ainb_cli --format json fleet channel list |
+    jq -r '[.channels[] | select(.kind == "copilot")] | last | .scope_key // empty'
+}
+have_copilot_channel() { [[ -n "$(copilot_scope)" ]]; }
+
+# One timeline row, ANCHORED on the attribution column.
+#
+# `render_timeline` paints a fixed-width 12-column author label, then `│ `, then
+# the body, precisely so a reader can name the row it means. A pane-wide grep
+# for the body would match the composer still echoing what the operator typed,
+# and — the failure this journey exists for — would pass even if both authors
+# rendered under the same name.
+chat_row() { # label body -> the whole row, or empty
+  tui_pane | grep -m1 -E "^ *$1 +│ $2" || true
+}
+chat_row_present() { [[ -n "$(chat_row "$1" "$2")" ]]; }
+
+# The open confirm card's own row: `render_cards` paints
+# `<cursor> [<state>] <tool>  <arguments>  <hint>`.
+chat_card_row() { tui_pane | grep -m1 -E '^ *(▶ )?\[OPEN\] +kill ' || true; }
+chat_card_present() { [[ -n "$(chat_card_row)" ]]; }
+
+journey_j7() {
+  banner "J7 · the copilot chat" \
+    "the real chat screen on a cold-launched \`ainb tui\`: the DAEMON's channel scope on screen, the operator's own message in the conversation, two authors on DISTINCT rows, and an open confirm card answered from the pane"
+
+  "$BIN_DIR/ainb" tui --help >/dev/null 2>&1 || {
+    skip "this ainb has no \`tui\` subcommand: there is no operating surface to drive"
+    return 77
+  }
+  # Part 2's dispatch arms, probed on the WIRE. A part 1 daemon answers -32601
+  # here, and failing on that would report an unimplemented phase as a
+  # regression. Same posture as J3's Phase 6 probe: absence skips with a reason,
+  # and the probe flips itself the day the arms land, with no edit here.
+  local probe
+  probe="$(rpc fleet/channel_list)"
+  if [[ "$(printf '%s' "$probe" | jqr '.error.code // empty')" == "-32601" ]]; then
+    skip "this daemon has no part 2 chat dispatch (fleet/channel_list is not a method)"
+    return 77
+  fi
+
+  local project="$ROOT/j7-project"
+  mkdir -p "$project"
+
+  step "cold-launching the REAL \`ainb tui\` on the private tmux server"
+  TUI_SESSION="ainb-smoke-chat-$RUN_ID"
+  # `-c "$project"`: the chat screen creates the copilot's ACP session against
+  # the TUI's OWN cwd, and the daemon pins a scope to the cwd that first claimed
+  # it. A scratch dir keeps that fact inside this run's world. NOT the
+  # `ainb-smoke-$RUN_ID-` prefix the fake agents use — `resolve_tmux_targets`
+  # selects on that, and a TUI pane joining the roster breaks its exactly-3
+  # check. 200x50 so the chat renders its full-height form.
+  tmux_cmd new-session -d -s "$TUI_SESSION" -x 200 -y 50 -c "$project" \
+    "env -u TMUX HOME=$SCRATCH_HOME AINB_HOME=$SCRATCH_HOME/.agents-in-a-box \
+       AINB_HANGAR_HOME=$HANGAR_HOME TMUX_TMPDIR=$TMUX_DIR PATH=$BIN_DIR:$PATH \
+       AINB_DISABLE_PLUGINS=1 AINB_CODEX_MANAGED=0 \
+       CLAUDE_PEERS_DB=$ROOT/j7-peers.db AINB_FLEET_JOBS_DIR=$ROOT/j7-jobs \
+       $BIN_DIR/ainb tui"
+  wait_until 60 "the TUI to paint its home screen" tui_pane_has "$HOME_SCREEN_MARKER" || return 1
+
+  # Each key pressed ONCE, after waiting for the screen that receives it. A
+  # retry loop is how a modal swallowing the first press goes unnoticed, which
+  # is a real bug this suite has already caught.
+  step "pressing \`f\` ONCE, the way a user opens Fleet"
+  tmux_cmd send-keys -t "$TUI_SESSION" f
+  wait_until 30 "the Fleet panel to open on the FIRST \`f\`" \
+    tui_pane_has "$FLEET_PANEL_MARKER" || return 1
+  step "pressing \`m\` ONCE, the way a user opens the copilot chat"
+  tmux_cmd send-keys -t "$TUI_SESSION" m
+  wait_until 30 "the chat to open on the FIRST \`m\` (a modal in the way would eat it)" \
+    tui_pane_has "$CHAT_SCREEN_MARKER" || return 1
+  wait_until 60 "the chat to finish loading (its composer help line)" \
+    tui_pane_has "$CHAT_COMPOSER_MARKER" || return 1
+
+  step "reading the channel scope back from the DAEMON, independently of the screen"
+  wait_until 45 "the daemon to report the copilot channel the screen asked it to mint" \
+    have_copilot_channel || return 1
+  local scope
+  scope="$(copilot_scope)"
+  case "$scope" in
+    channel:copilot)
+      fail "the chat is bound to a hardcoded channel:copilot; the daemon mints channel:<ulid>"
+      return 1 ;;
+    channel:?*) ;;
+    *) fail "expected a channel:<ulid> scope from fleet/channel_list, got [$scope]"; return 1 ;;
+  esac
+  # The header CELL, not the header ROW. `capture-pane` returns one physical
+  # line per screen row, and anything floating to the right of the chat (a
+  # "Workspaces loaded" toast at column 150, say) lands on the same line. So the
+  # comparison is anchored at the START of the row and bounded by a space: the
+  # header must read EXACTLY this and nothing else, which a `contains` on the
+  # scope would not prove — the scope string appears in the status line too.
+  local expected_header="$CHAT_SCREEN_MARKER · $scope"
+  local header
+  header="$(tui_pane | grep -m1 -E "^ *$CHAT_SCREEN_MARKER · " | sed 's/^ *//')"
+  step "chat header, as the operator sees it: ${header:0:${#expected_header}}"
+  assert_eq "$expected_header" "${header:0:${#expected_header}}" \
+    "the chat must name the scope the DAEMON minted, not one of its own" || return 1
+  case "${header:${#expected_header}:1}" in
+    ''|' ') ;;
+    *) fail "the chat header does not end at the daemon's scope: [$header]"; return 1 ;;
+  esac
+
+  # The session the channel's membership actually resolves to
+  # (`FleetAcpSessionRepo::get_live_by_scope`), read READ-ONLY from the store:
+  # nothing on the v2 wire projects a scope onto its ACP session, and the
+  # screen's own status line is part of what is under test, so it cannot be the
+  # source of the target either.
+  step "resolving the copilot session the chat created on that scope"
+  local live_session_sql="SELECT session_key FROM fleet_acp_session WHERE scope_key='$scope' AND state IN ('ACTIVE','IDLE');"
+  wait_until 60 "the chat to create the copilot's ACP session" \
+    bash -c "[[ -n \"\$(sqlite3 -readonly '$DB' \"$live_session_sql\")\" ]]" || return 1
+  local target
+  target="$(db "$live_session_sql")"
+
+  step "typing in the composer and pressing Enter ONCE, the way an operator asks"
+  local operator_text="what is blocked right now"
+  tmux_cmd send-keys -t "$TUI_SESSION" -l "$operator_text"
+  tmux_cmd send-keys -t "$TUI_SESSION" Enter
+  wait_until 60 "the operator's message to reach the conversation, attributed to the operator" \
+    chat_row_present YOU "$operator_text" || return 1
+
+  # A COPILOT-authored line, minted by the DAEMON from the `actor` the wire
+  # carries — the same field `copilot::post_channel_message` sets. Sent over
+  # `fleet/message_send` directly because part 2 ships no CLI verb that writes
+  # as the copilot, exactly as J5d speaks `fleet/action` for the same reason.
+  step "posting a COPILOT-authored line on the wire the daemon's own copilot writes on"
+  local copilot_text="session one is waiting on an approval"
+  local posted
+  posted="$(rpc fleet/message_send "$(jq -nc --arg scope "$scope" --arg target "$target" \
+    --arg text "$copilot_text" --arg request "j7-copilot-$RUN_ID" \
+    '{scope_key:$scope, actor:"copilot", targets:[$target], text:$text, request_id:$request}')")"
+  [[ -n "$(printf '%s' "$posted" | jqr '.result.message_id // empty')" ]] ||
+    { fail "the copilot line was not accepted by the daemon: $posted"; return 1; }
+  wait_until 60 "the copilot's line to reach the conversation, attributed to the copilot" \
+    chat_row_present COPILOT "$copilot_text" || return 1
+
+  local operator_row copilot_row
+  operator_row="$(chat_row YOU "$operator_text")"
+  copilot_row="$(chat_row COPILOT "$copilot_text")"
+  # Echoed, not merely asserted: a recording of this run should SHOW the two
+  # attributed rows, the way J1 echoes the delivered pane text.
+  step "operator row, as the operator sees it:$(printf '%s' "$operator_row" | tr -s ' ')"
+  step "copilot row, as the operator sees it:$(printf '%s' "$copilot_row" | tr -s ' ')"
+  [[ "$operator_row" != "$copilot_row" ]] ||
+    { fail "the two authors rendered as the same row"; return 1; }
+  # The masquerade check, BOTH ways. The wire carries the author precisely so a
+  # copilot write cannot wear a human's name, and that guarantee dies at the
+  # last inch if the panel paints either row under the other's label.
+  [[ -z "$(chat_row YOU "$copilot_text")" ]] ||
+    { fail "the copilot's line is also attributed to the operator: a copilot write can wear a human's name"; return 1; }
+  [[ -z "$(chat_row COPILOT "$operator_text")" ]] ||
+    { fail "the operator's line is also attributed to the copilot"; return 1; }
+
+  step "seeding ONE open confirm card (a precondition the copilot's tool bridge will mint; see db_write)"
+  local confirm_id="j7-card-$RUN_ID"
+  # `expires_at` far in the future on purpose: `list_open` and `resolve` BOTH
+  # carry an `expires_at > now` term, so a card whose TTL has lapsed is
+  # invisible and unanswerable by design, and a short one here would test the
+  # clock rather than the pane.
+  db_write "INSERT INTO fleet_confirm
+      (confirm_id, scope_key, tool, arguments, target_session_key, state,
+       edited_arguments, created_at, expires_at, answered_at)
+    VALUES
+      ('$confirm_id', '$scope', 'kill', '{\"session\":\"${TMUX_KEYS[0]}\"}',
+       '${TMUX_KEYS[0]}', 'open', NULL, $(date +%s)000, 4000000000000, NULL);" ||
+    { fail "could not seed the confirm card"; return 1; }
+  wait_until 45 "the card to reach the pane" chat_card_present || return 1
+  local card_row
+  card_row="$(chat_card_row)"
+  step "confirm card, as the operator sees it:$(printf '%s' "$card_row" | tr -s ' ')"
+  assert_contains "$card_row" "y approve" \
+    "an OPEN card must render as ANSWERABLE, not as a card the operator can only read" || return 1
+
+  step "pressing \`Tab\` ONCE to focus the cards"
+  tmux_cmd send-keys -t "$TUI_SESSION" Tab
+  wait_until 20 "focus to reach the cards (their own help line)" \
+    tui_pane_has "$CHAT_CARDS_MARKER" || return 1
+  step "pressing \`y\` ONCE to approve, from the pane"
+  tmux_cmd send-keys -t "$TUI_SESSION" y
+  wait_until 45 "the daemon to record the answer" \
+    bash -c "[[ \"\$(sqlite3 -readonly '$DB' \"SELECT state FROM fleet_confirm WHERE confirm_id='$confirm_id'\")\" != open ]]" || return 1
+  local card_state
+  card_state="$(db "SELECT state FROM fleet_confirm WHERE confirm_id='$confirm_id';")"
+  assert_eq "approved" "$card_state" \
+    "\`y\` from the pane must approve the card through fleet/confirm_answer" || return 1
+  wait_until 30 "the answered card to LEAVE the pane" \
+    tui_pane_has "CONFIRM CARDS · none open" || return 1
+
+  tmux_cmd send-keys -t "$TUI_SESSION" Escape
+  tmux_cmd kill-session -t "$TUI_SESSION" 2>/dev/null || true
+  TUI_SESSION=""
+
+  log "   chat opened on one \`f\` + one \`m\` · scope [$scope] on screen · YOU and COPILOT on distinct rows · card [$confirm_id] answered [$card_state]"
+}
+
 # --------------------------------------------------------------------- driver
 
-ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e)
+ALL_JOURNEYS=(j1 j2 j3 j4 j5a j5b j5c j5d j5e j6 j7)
 
 run_journey() {
   local name="$1"
@@ -1016,10 +1417,10 @@ main() {
   while (( $# )); do
     case "$1" in
       --keep) KEEP_ROOT=1 ;;
-      -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
+      -h|--help) sed -n '2,50p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
       all) selected+=("${ALL_JOURNEYS[@]}") ;;
       j5) selected+=(j5a j5b j5c j5d j5e) ;;
-      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e) selected+=("$1") ;;
+      j1|j2|j3|j4|j5a|j5b|j5c|j5d|j5e|j6|j7) selected+=("$1") ;;
       *) log "unknown journey: $1 (try: ${ALL_JOURNEYS[*]}, j5, all)"; exit 2 ;;
     esac
     shift

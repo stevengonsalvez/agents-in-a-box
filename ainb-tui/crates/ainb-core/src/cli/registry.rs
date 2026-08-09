@@ -2213,6 +2213,131 @@ impl CliCommand for FleetCommand {
                          DURING the turn, not after it",
                 ),
             );
+        // Part 2's chat surface: channels, the copilot's per-session config,
+        // the guardrail confirm cards and the activity feed. Every one of these
+        // is the CLI leg of a `fleet/*` method that landed with it, per the
+        // repo's CLI-parity rule.
+        let channel = Command::new("channel")
+            .about("Chat channels: a named scope with a recipient set")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("create")
+                    .about("Mint a channel and its channel:<id> scope")
+                    .arg(
+                        clap::Arg::new("kind")
+                            .long("kind")
+                            .value_parser(["copilot", "broadcast"])
+                            .default_value("broadcast")
+                            .help("copilot (an ACP session answers on it) or broadcast"),
+                    )
+                    .arg(
+                        clap::Arg::new("name")
+                            .long("name")
+                            .required(true)
+                            // A channel name may LEAD with a dash ("#-ops"),
+                            // and clap would otherwise read it as an unknown
+                            // flag: the same trap `msg send --text` hit.
+                            .allow_hyphen_values(true)
+                            .help("Human-readable channel name"),
+                    )
+                    .arg(
+                        clap::Arg::new("recipient")
+                            .long("recipient")
+                            .action(clap::ArgAction::Append)
+                            .help("Member session_key (repeat); none for a copilot channel"),
+                    ),
+            )
+            .subcommand(Command::new("list").about("List channels and their members"));
+        let copilot = Command::new("copilot")
+            .about("The fleet copilot session's per-session adapter config")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("configure")
+                    .about("Set the copilot's provider, model, reasoning effort and persona")
+                    .arg(
+                        clap::Arg::new("provider")
+                            .long("provider")
+                            .required(true)
+                            .value_parser(["claude", "codex"])
+                            .help("Adapter family"),
+                    )
+                    .arg(clap::Arg::new("model").long("model").help("Adapter model id"))
+                    .arg(
+                        clap::Arg::new("reasoning-effort")
+                            .long("reasoning-effort")
+                            .help("Adapter reasoning-effort token"),
+                    )
+                    .arg(
+                        clap::Arg::new("persona-file")
+                            .long("persona-file")
+                            .help("File holding the copilot system prompt"),
+                    )
+                    // Named in the help because it is the setting an operator
+                    // will most plausibly reach for, and the daemon REFUSES it
+                    // rather than dropping it silently.
+                    .after_help(
+                        "There is no permission-mode flag. The mode is daemon config, pinned at \
+                         session/new and re-asserted after load; a per-session override would be \
+                         a remote off-switch for the whole permission surface.",
+                    ),
+            );
+        let confirm = Command::new("confirm")
+            .about("Guardrail confirm cards: copilot tool calls held for a human")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("list")
+                    .about("List the open cards, oldest first")
+                    .arg(clap::Arg::new("scope").long("scope").help("Filter to one scope key")),
+            )
+            .subcommand(
+                Command::new("answer")
+                    .about("Answer one card: approve (default), --deny, or --edit")
+                    .arg(clap::Arg::new("confirm_id").required(true).help("The card to answer"))
+                    .arg(
+                        clap::Arg::new("deny")
+                            .long("deny")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Refuse; the suspended tool result resolves as denied"),
+                    )
+                    .arg(
+                        clap::Arg::new("edit")
+                            .long("edit")
+                            // A JSON object can begin with a dash-prefixed value
+                            // once quoting is involved; free text takes the same
+                            // negation every other free-text argument here does.
+                            .allow_hyphen_values(true)
+                            .help("Approve with these JSON arguments INSTEAD of the proposed ones"),
+                    )
+                    .after_help(
+                        "A card is single-use: answering an already-answered or already-expired \
+                         card exits 1, and never runs the tool a second time.",
+                    ),
+            );
+        let activity = Command::new("activity")
+            .about("The append-only copilot activity feed")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("list")
+                    .about("Page the feed by its commit-ordered seq, oldest first")
+                    .arg(clap::Arg::new("scope").long("scope").help("Filter to one scope key"))
+                    .arg(
+                        clap::Arg::new("after")
+                            .long("after")
+                            .value_parser(clap::value_parser!(i64))
+                            .help("Return rows strictly after this seq"),
+                    )
+                    .arg(
+                        clap::Arg::new("limit")
+                            .long("limit")
+                            .value_parser(clap::value_parser!(u32))
+                            .default_value("50")
+                            .help("Page size (clamped to the daemon's maximum)"),
+                    ),
+            );
         let sequence = Command::new("sequence")
             .about("Ordered prompts with ack between steps")
             .arg(
@@ -2258,6 +2383,15 @@ impl CliCommand for FleetCommand {
                     .about("Read a cached suggestion by enrich_key (exit non-zero on miss)")
                     .arg(clap::Arg::new("key").long("key").required(true)),
             );
+        let archived = Command::new("archived")
+            .about("Sessions the daemon retired out of the live roster (still browsable)")
+            .arg(
+                clap::Arg::new("limit")
+                    .long("limit")
+                    .value_parser(clap::value_parser!(i64))
+                    .default_value("50")
+                    .help("Maximum rows to list, most recently observed first"),
+            );
         let cost = Command::new("cost")
             .about("Per-session / model / day / group spend rollups + budget caps")
             .arg(
@@ -2301,15 +2435,23 @@ impl CliCommand for FleetCommand {
                     .default_value("")
                     .help("Optional reason relayed to the agent with the decision"),
             )
+            // Listing-only flag, registered on both verbs because either one
+            // with no session-id renders the same pending queue.
+            .arg(
+                clap::Arg::new("full")
+                    .long("full")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("When listing, print the complete tool input and cwd, not a preview"),
+            )
         };
-        let approve = decision_args(
-            Command::new("approve")
-                .about("Approve a session's pending permission request (no arg: list waiters)"),
-        );
-        let deny = decision_args(
-            Command::new("deny")
-                .about("Deny a session's pending permission request (no arg: list waiters)"),
-        );
+        let approve = decision_args(Command::new("approve").about(
+            "Approve a session's pending permission request \
+             (no arg: list every waiter with worktree, tool, input and age)",
+        ));
+        let deny = decision_args(Command::new("deny").about(
+            "Deny a session's pending permission request \
+             (no arg: list every waiter with worktree, tool, input and age)",
+        ));
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2339,8 +2481,13 @@ impl CliCommand for FleetCommand {
                 .subcommand(msg)
                 .subcommand(acp)
                 .subcommand(transcript)
+                .subcommand(channel)
+                .subcommand(copilot)
+                .subcommand(confirm)
+                .subcommand(activity)
                 .subcommand(sequence)
                 .subcommand(needs)
+                .subcommand(archived)
                 .subcommand(cost)
                 .subcommand(daemon)
                 .subcommand(daemons)
@@ -2359,6 +2506,7 @@ impl CliCommand for FleetCommand {
                      ainb fleet transcript <key> --follow  Stream one session's execution log\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
+                     ainb fleet approve --full        Same listing, untruncated tool input + cwd\n  \
                      ainb fleet approve <session-id>  Approve that session's pending permission request\n  \
                      ainb fleet deny <session-id> --reason \"not now\"   Deny it, with a reason",
                 ),
@@ -2386,7 +2534,7 @@ fn build_atc_command() -> Command {
         );
 
     Command::new("atc")
-        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / teardown)")
+        .about("Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -2431,6 +2579,49 @@ fn build_atc_command() -> Command {
             Command::new("status")
                 .about("Report one ATC instance (meta + timer + session liveness)")
                 .arg(clap::Arg::new("name").required(true)),
+        )
+        .subcommand(
+            Command::new("repair")
+                .about("Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)")
+                .long_about(
+                    "Re-assert the heartbeat scheduler for an existing instance, typically when \
+                     `atc status` reports `program MISSING` or `atc list` shows BROKEN because the \
+                     binary moved and the unit's program no longer resolves.\n\n\
+                     It READS meta.json and never writes it, so a customised interval or \
+                     idle-pause survives, and it leaves policy, CLAUDE.md, the hooks and the \
+                     session alone. That is what makes it safe on a live instance, and why it \
+                     exists instead of re-running setup, which rebuilds meta.json from defaults \
+                     and spawns a session.\n\n\
+                     It leaves exactly one scheduler active, the daemon cron or the local timer, \
+                     never both, and refuses rather than reaching a state it cannot vouch for. \
+                     Note what that means per branch:\n\n\
+                     - heartbeat ENABLED, daemon takes it: the local timer unit is REMOVED.\n\
+                     - heartbeat ENABLED, daemon does not: the local unit is rebuilt against the \
+                     current PATH. It refuses without writing anything if the rebuilt unit still \
+                     could not fire, or if a reachable daemon will not release the cron.\n\
+                     - heartbeat DISABLED in meta.json: this is destructive. The local timer unit \
+                     is DELETED and the daemon cron is unregistered, because a disabled heartbeat \
+                     with a live scheduler is the state repair exists to resolve.\n\n\
+                     Non-zero exit does not always mean nothing changed: the pre-write refusals \
+                     leave the instance untouched, but a failure verifying the unit after install, \
+                     or a daemon that refuses the unregister after the units were removed, exits \
+                     non-zero with the change already made. The message says which.\n\n\
+                     --dry-run writes nothing and is never GREENER than a real run: it previews \
+                     the conservative local-timer path and reports the daemon fields as unknown, \
+                     because whether the daemon would take the heartbeat depends on registration \
+                     succeeding, which a read-only preview cannot determine.",
+                )
+                .arg(
+                    clap::Arg::new("name")
+                        .required(true)
+                        .help("Instance name"),
+                )
+                .arg(
+                    clap::Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Report what repair would do without writing anything"),
+                ),
         )
         .subcommand(Command::new("list").about("List all provisioned ATC instances"))
         .subcommand(
@@ -2775,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_sixteen_subcommands_including_the_chat_bus_verbs() {
+    fn fleet_exposes_twenty_one_subcommands_including_the_chat_bus_verbs() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -2793,10 +2984,15 @@ mod tests {
             names,
             [
                 "acp",
+                "activity",
                 "approve",
+                "archived",
                 "atc",
                 "bridge",
                 "broadcast",
+                "channel",
+                "confirm",
+                "copilot",
                 "cost",
                 "daemon",
                 "daemons",
@@ -2813,8 +3009,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            16,
-            "expected 16 fleet subcommands, got {names:?}"
+            21,
+            "expected 21 fleet subcommands, got {names:?}"
         );
     }
 
@@ -2981,5 +3177,45 @@ mod tests {
             add_args.get_one::<String>("url").map(String::as_str),
             Some("file:///tmp/m.json")
         );
+    }
+
+    /// A duplicate subcommand name is exactly how the build broke on
+    /// 2026-08-08: two PRs each added an `atc repair` verb in different regions
+    /// of this file, git merged both without a conflict, and main stopped
+    /// compiling. clap itself is happy to register the same name twice and
+    /// silently dispatch to the first, so this is the cheap structural guard.
+    #[test]
+    fn atc_registers_no_duplicate_subcommand_names() {
+        let atc = build_atc_command();
+        let mut seen = std::collections::BTreeSet::new();
+        for sub in atc.get_subcommands() {
+            let name = sub.get_name().to_string();
+            assert!(
+                seen.insert(name.clone()),
+                "`atc` registers the subcommand `{name}` twice; two implementations of one verb \
+                 merged without conflicting"
+            );
+        }
+    }
+
+    /// Replaces the parse-level coverage lost when the duplicate registration
+    /// was deleted: the instance name is required, so a bare `atc repair` must
+    /// fail at argument parsing rather than at runtime.
+    #[test]
+    fn atc_repair_requires_an_instance_name() {
+        assert!(
+            build_atc_command().try_get_matches_from(["atc", "repair"]).is_err(),
+            "`atc repair` with no instance name must not parse"
+        );
+        let m = build_atc_command()
+            .try_get_matches_from(["atc", "repair", "tower", "--dry-run"])
+            .expect("`atc repair <name> --dry-run` parses");
+        let (name, args) = m.subcommand().expect("repair subcommand");
+        assert_eq!(name, "repair");
+        assert_eq!(
+            args.get_one::<String>("name").map(String::as_str),
+            Some("tower")
+        );
+        assert!(args.get_flag("dry-run"));
     }
 }

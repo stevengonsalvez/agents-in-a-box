@@ -174,6 +174,198 @@ final class FleetDaemonContractTests: XCTestCase {
         XCTAssertEqual(snapshot.headRevision, 1)
     }
 
+    // MARK: - Shared chat fixtures (buzz-port part 2)
+    //
+    // The SAME files the Rust `chat_fixtures` test round-trips
+    // (ainb-tui/crates/ainb-hangar-proto/fixtures/chat). One fixture set, two
+    // suites: a field that drifts on one side goes red on the other instead of
+    // being found by an operator. Read from the repo, never copied here — a
+    // copy is how two suites agree with each other and disagree with the wire.
+
+    /// Decode one shared fixture and assert it re-encodes to the same JSON.
+    private func assertFixtureRoundTrips<T: Codable>(_ name: String, as type: T.Type, file: StaticString = #filePath, line: UInt = #line) throws -> T {
+        let original = try Self.chatFixture(named: name)
+        let decoded = try FleetWire.decoder().decode(T.self, from: original)
+        let encoded = try FleetWire.encoder().encode(decoded)
+        XCTAssertEqual(
+            try JSONSerialization.data(withJSONObject: JSONSerialization.jsonObject(with: original), options: [.sortedKeys]),
+            try JSONSerialization.data(withJSONObject: JSONSerialization.jsonObject(with: encoded), options: [.sortedKeys]),
+            "\(name) does not round-trip",
+            file: file,
+            line: line
+        )
+        return decoded
+    }
+
+    private static func chatFixturesDirectory() -> URL {
+        var repository = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { repository.deleteLastPathComponent() }
+        return repository.appendingPathComponent("ainb-tui/crates/ainb-hangar-proto/fixtures/chat")
+    }
+
+    private static func chatFixture(named name: String) throws -> Data {
+        try Data(contentsOf: chatFixturesDirectory().appendingPathComponent(name))
+    }
+
+    /// Every fixture the tests below decode. Rust's
+    /// `every_fixture_is_claimed_by_a_type` reads the same directory against its
+    /// own bound-type list, so it only ever catches drift on the RUST side; this
+    /// is the mirror that makes a fixture added (or deleted) without a Swift
+    /// decoder go red here too.
+    private static let decodedChatFixtures: Set<String> = [
+        "channel_create_params.json",
+        "channel_create_result.json",
+        "channel_list_result.json",
+        "copilot_configure_params.json",
+        "copilot_configure_result.json",
+        "confirm_list_result.json",
+        "confirm_answer_approve_params.json",
+        "confirm_answer_edit_params.json",
+        "confirm_answer_result.json",
+        "confirm_event.json",
+        "activity_list_params.json",
+        "activity_list_result.json",
+        "activity_event.json",
+    ]
+
+    func testEveryChatFixtureIsDecodedBySwift() throws {
+        let present = try FileManager.default
+            .contentsOfDirectory(at: Self.chatFixturesDirectory(), includingPropertiesForKeys: nil)
+            .map(\.lastPathComponent)
+            .filter { $0.hasSuffix(".json") }
+
+        XCTAssertEqual(
+            Set(present),
+            Self.decodedChatFixtures,
+            "fixtures/chat and the Swift-decoded set disagree"
+        )
+        XCTAssertEqual(present.count, Self.decodedChatFixtures.count, "duplicate fixture name")
+
+        // And the set is not aspirational: each name really loads.
+        for name in Self.decodedChatFixtures {
+            XCTAssertNoThrow(try Self.chatFixture(named: name), "\(name) is not readable")
+        }
+    }
+
+    func testChatChannelFixturesDecodeAndMintAChannelScope() throws {
+        let params = try assertFixtureRoundTrips("channel_create_params.json", as: FleetChannelCreateParams.self)
+        XCTAssertEqual(params.kind, .broadcast)
+        XCTAssertEqual(params.recipients?.count, 3)
+
+        let created = try assertFixtureRoundTrips("channel_create_result.json", as: FleetChannelCreateResult.self)
+        XCTAssertEqual(created.channel.scopeKey, "channel:\(created.channel.id)")
+
+        let listed = try assertFixtureRoundTrips("channel_list_result.json", as: FleetChannelListResult.self)
+        XCTAssertEqual(listed.channels.first?.kind, .copilot)
+        XCTAssertEqual(listed.channels.first?.recipients, [])
+        XCTAssertTrue(listed.channels.allSatisfy { $0.scopeKey.hasPrefix("channel:") })
+    }
+
+    func testCopilotConfigureFixturesCarryNoPermissionMode() throws {
+        let params = try assertFixtureRoundTrips("copilot_configure_params.json", as: FleetCopilotConfigureParams.self)
+        XCTAssertEqual(params.provider, .claude)
+        XCTAssertEqual(params.reasoningEffort, "medium")
+
+        // The absence is the contract: a settable permission mode would be a
+        // remote off-switch for the guardrails.
+        let raw = try JSONSerialization.jsonObject(with: try Self.chatFixture(named: "copilot_configure_params.json")) as? [String: Any]
+        for forbidden in ["permission_mode", "permissionMode", "mode"] {
+            XCTAssertNil(raw?[forbidden], "\(forbidden) must never appear on copilot_configure")
+        }
+
+        let result = try assertFixtureRoundTrips("copilot_configure_result.json", as: FleetCopilotConfigureResult.self)
+        XCTAssertTrue(result.personaSet)
+    }
+
+    func testConfirmFixturesDecodeThroughTheFullLifecycle() throws {
+        let list = try assertFixtureRoundTrips("confirm_list_result.json", as: FleetConfirmListResult.self)
+        XCTAssertEqual(list.confirms.count, 2)
+        XCTAssertTrue(list.confirms[0].isAnswerable)
+        XCTAssertGreaterThan(list.confirms[0].expiresAt, list.confirms[0].createdAt)
+        XCTAssertNil(list.confirms[1].targetSessionKey)
+
+        let approve = try assertFixtureRoundTrips("confirm_answer_approve_params.json", as: FleetConfirmAnswerParams.self)
+        XCTAssertEqual(approve.answer, .approve)
+
+        let edit = try assertFixtureRoundTrips("confirm_answer_edit_params.json", as: FleetConfirmAnswerParams.self)
+        guard case let .edit(arguments) = edit.answer else {
+            return XCTFail("expected an edit answer")
+        }
+        XCTAssertEqual(arguments.value("provider")?.stringValue, "codex")
+
+        let answered = try assertFixtureRoundTrips("confirm_answer_result.json", as: FleetConfirmAnswerResult.self)
+        XCTAssertEqual(answered.state, .approved)
+
+        let event = try assertFixtureRoundTrips("confirm_event.json", as: FleetConfirmEventParams.self)
+        XCTAssertEqual(event.confirm.state, .expired)
+        XCTAssertFalse(event.confirm.isAnswerable)
+    }
+
+    func testActivityFixturesPageByCommitSeq() throws {
+        let params = try assertFixtureRoundTrips("activity_list_params.json", as: FleetActivityListParams.self)
+        XCTAssertEqual(params.afterSeq, 41)
+
+        let result = try assertFixtureRoundTrips("activity_list_result.json", as: FleetActivityListResult.self)
+        XCTAssertEqual(result.activities.map(\.activityClass), [.write, .destructive])
+        XCTAssertEqual(result.activities.last?.outcome, .expired)
+        XCTAssertEqual(result.nextAfterSeq, result.activities.last?.seq)
+        XCTAssertEqual(result.activities.map(\.seq), result.activities.map(\.seq).sorted())
+
+        let event = try assertFixtureRoundTrips("activity_event.json", as: FleetActivityEventParams.self)
+        XCTAssertEqual(event.activity.activityClass, .read)
+        XCTAssertNil(event.activity.detail)
+    }
+
+    /// The part-2 mirror of `testProviderDecodeIsTolerantAndKnowsAcp`: an event
+    /// kind this build has never heard of degrades that ONE value instead of
+    /// failing the page, and it never degrades into an actionable state.
+    func testPartTwoEventKindDecodeIsTolerantAndFailsSafe() throws {
+        func decode<T: Decodable>(_ raw: String, as type: T.Type) throws -> T {
+            try FleetWire.decoder().decode(T.self, from: Data("\"\(raw)\"".utf8))
+        }
+        XCTAssertEqual(try decode("copilot", as: FleetChannelKind.self), .copilot)
+        XCTAssertEqual(try decode("some-future-kind", as: FleetChannelKind.self), .unknown)
+        XCTAssertEqual(try decode("some-future-provider", as: FleetCopilotProvider.self), .unknown)
+        XCTAssertEqual(try decode("some-future-state", as: FleetConfirmState.self), .unknown)
+        XCTAssertEqual(try decode("some-future-class", as: FleetActivityClass.self), .unknown)
+        XCTAssertEqual(try decode("some-future-outcome", as: FleetActivityOutcome.self), .unknown)
+
+        // A whole frame carrying unknown tokens still decodes, and the card it
+        // describes is NOT offered as answerable.
+        let frame = Data(#"{"confirm":{"confirm_id":"01J0FUTURE","scope_key":"channel:copilot","tool":"future_tool","arguments":{},"state":"quarantined","created_at":1,"expires_at":2}}"#.utf8)
+        let event = try FleetWire.decoder().decode(FleetConfirmEventParams.self, from: frame)
+        XCTAssertEqual(event.confirm.state, .unknown)
+        XCTAssertFalse(event.confirm.isAnswerable)
+
+        let row = Data(#"{"activity":{"seq":1,"id":"01J0FUTURE","scope_key":"channel:copilot","tool":"future_tool","class":"quantum","outcome":"pending","created_at":1}}"#.utf8)
+        let activity = try FleetWire.decoder().decode(FleetActivityEventParams.self, from: row)
+        XCTAssertEqual(activity.activity.activityClass, .unknown)
+        XCTAssertEqual(activity.activity.outcome, .unknown)
+    }
+
+    /// A part-2 capability is advertised exactly when its dispatch arm exists.
+    /// This is the client-side half of the Rust advertisement test, and it is
+    /// the assertion a UI depends on: gating a chat surface on the catalogue is
+    /// only safe if the catalogue never names a method that answers -32601.
+    ///
+    /// It asserted the NEGATIVE while the arms were unlanded. Flipping it is
+    /// the point rather than a chore: the day the arms land, this test is what
+    /// says the client may now offer the surface.
+    func testRealDaemonAdvertisesPartTwoCapabilitiesWithTheirArms() async throws {
+        let fixture = try FixtureDaemon()
+        defer { fixture.stop() }
+        let connection = try await fixture.authenticatedConnection()
+        defer { Task { await connection.close() } }
+
+        let result = try await connection.negotiate()
+        for capability in ["fleet.chat.write", "fleet.chat.read", "fleet.copilot.configure", "fleet.confirm.answer"] {
+            XCTAssertTrue(
+                result.capabilityIDs.contains(capability),
+                "\(capability) has a dispatch arm but is not advertised, so a UI gating on the catalogue stays dark"
+            )
+        }
+    }
+
     private static func nextFleetEvent(from stream: AsyncStream<FleetIncoming>) async throws -> FleetEvent {
         var iterator = stream.makeAsyncIterator()
         while let incoming = await iterator.next() {

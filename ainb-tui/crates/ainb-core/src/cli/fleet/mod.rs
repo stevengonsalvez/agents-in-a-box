@@ -10,10 +10,12 @@ use crate::cli::OutputFormat;
 
 pub mod acp;
 pub mod approve;
+pub mod archived;
 pub mod atc;
 pub mod bridge;
 pub mod broadcast;
 pub mod budget_alert;
+pub mod chat;
 pub mod cost;
 pub mod daemon;
 pub mod daemons;
@@ -42,6 +44,11 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("msg", sub)) => msg::execute(sub, format).await,
         Some(("acp", sub)) => acp::execute(sub, format).await,
         Some(("transcript", sub)) => acp::execute_transcript(sub, format).await,
+        // Part 2's chat surface, all four verb families in one module.
+        Some(("channel", sub)) => chat::execute_channel(sub, format).await,
+        Some(("copilot", sub)) => chat::execute_copilot(sub, format).await,
+        Some(("confirm", sub)) => chat::execute_confirm(sub, format).await,
+        Some(("activity", sub)) => chat::execute_activity(sub, format).await,
         Some(("sequence", sub)) => sequence::execute(sub, format).await,
         Some(("needs", sub)) => needs::execute(sub, format).await,
         Some(("runtime", sub)) => runtime::execute(sub, format).await,
@@ -51,6 +58,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("atc", sub)) => atc::execute(sub, format).await,
         Some(("bridge", sub)) => bridge::execute(sub, format).await,
         Some(("enrich-cache", sub)) => enrich_cache::execute(sub, format).await,
+        Some(("archived", sub)) => archived::execute(sub, format).await,
         _ => bail!("unknown `ainb fleet` subcommand — try `ainb fleet --help`"),
     }
 }

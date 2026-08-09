@@ -25,6 +25,7 @@ pub mod context_menu;
 pub mod control_center;
 pub mod daemon_health;
 pub mod fleet;
+pub mod fleet_chat;
 pub mod inbox;
 pub mod issue_list;
 pub mod kanban;

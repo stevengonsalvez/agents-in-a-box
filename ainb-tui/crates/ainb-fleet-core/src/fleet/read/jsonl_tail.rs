@@ -3,7 +3,6 @@
 // Watches ~/.claude/projects/<cwd-slug>/<session-id>.jsonl using `notify`.
 // Returns when the next assistant turn ends or the timeout fires.
 
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -288,13 +287,13 @@ pub struct LastAssistantInfo {
 /// also contains that ask's result (if it was answered) — the per-window
 /// closure check is therefore complete.
 pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
-    let lines = read_lines(path)?;
-    if lines.is_empty() {
+    let rows = parse_rows(&read_tail_lines(path, MAX_TAIL_ROWS)?);
+    if rows.is_empty() {
         return None;
     }
-    for window in [20usize, 40, 80, 160, 320] {
-        let start = lines.len().saturating_sub(window);
-        if let Some(aq) = find_open_ask_user_question(&lines[start..]) {
+    for window in LOOKBACK_WINDOWS {
+        let start = rows.len().saturating_sub(window);
+        if let Some(aq) = find_open_ask_user_question(&rows[start..]) {
             return Some(aq);
         }
         if start == 0 {
@@ -304,15 +303,36 @@ pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
     None
 }
 
+/// The exponential lookback shared by [`last_ask_user_question`] and
+/// [`last_narrative_snapshot`]: cheap for an active session (signal lives in the
+/// last few rows), resilient when the tail is all `tool_result` noise.
+const LOOKBACK_WINDOWS: [usize; 5] = [20, 40, 80, 160, 320];
+
+/// Decode each tail row ONCE, keeping `None` for rows that are not JSON.
+///
+/// The windows above are nested, so parsing inside them re-decoded the newest 20
+/// rows five times over, and `find_open_ask_user_question` decoded every row in
+/// its window twice more (once for [`resolved_tool_use_ids`], once for its own
+/// reverse walk) — roughly 1,240 decodes to examine 320 rows. On a real
+/// transcript a row is a whole tool result (~15 KB), so that was megabytes of
+/// redundant `serde_json` per call, and it is what dominated a `sample(1)`
+/// profile of a pegged daemon (`SliceRead::skip_to_escape` was the top symbol).
+///
+/// A non-JSON row stays in place as `None` rather than being filtered out, so
+/// window arithmetic still counts rows the way the transcript does.
+fn parse_rows(lines: &[String]) -> Vec<Option<Value>> {
+    lines.iter().map(|row| serde_json::from_str::<Value>(row).ok()).collect()
+}
+
 /// Collect the set of `tool_use` ids that have a matching `tool_result` in
 /// `rows` — i.e. tool calls that have been RESOLVED. Claude emits a
 /// `tool_result` block (on a `user`-role row) carrying the original call's
 /// `tool_use_id` for every completed tool call, so membership here means that
 /// call is closed. Used to tell an OPEN AskUserQuestion from an answered one.
-fn resolved_tool_use_ids(rows: &[String]) -> std::collections::HashSet<String> {
+fn resolved_tool_use_ids(rows: &[Option<Value>]) -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
     for row in rows {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
@@ -334,10 +354,10 @@ fn resolved_tool_use_ids(rows: &[String]) -> std::collections::HashSet<String> {
 /// whose `id` has NO matching `tool_result` (see [`resolved_tool_use_ids`]). An
 /// ask block with no `id` (older/edge transcript shapes) is treated as open,
 /// preserving the pre-closure behaviour for transcripts that never carried ids.
-fn find_open_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
+fn find_open_ask_user_question(rows: &[Option<Value>]) -> Option<AskUserQuestionData> {
     let resolved = resolved_tool_use_ids(rows);
     for row in rows.iter().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -416,9 +436,13 @@ pub fn ask_data_from_tool_input(input: &Value) -> Option<AskUserQuestionData> {
 }
 
 /// Probe the transcript for the last assistant turn's timing + stop reason.
-/// Used by the IDLE classifier.
+///
+/// Used by the IDLE classifier. Bounded to the newest [`MAX_TAIL_ROWS`] rows: a
+/// transcript whose last 320 rows contain no assistant row is not a session this
+/// classifier has anything to say about, and the previous unbounded backward
+/// walk paid a full-file read to establish that.
 pub fn last_assistant_info(path: &Path) -> Option<LastAssistantInfo> {
-    let lines = read_lines(path)?;
+    let lines = read_tail_lines(path, MAX_TAIL_ROWS)?;
     if lines.is_empty() {
         return None;
     }
@@ -468,10 +492,89 @@ pub fn last_assistant_info(path: &Path) -> Option<LastAssistantInfo> {
     None
 }
 
-fn read_lines(path: &Path) -> Option<Vec<String>> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    Some(reader.lines().map_while(Result::ok).collect())
+/// The deepest lookback any caller in this module asks for — the final window of
+/// [`last_ask_user_question`] and [`last_narrative_snapshot`]'s 20→320 walk.
+const MAX_TAIL_ROWS: usize = 320;
+
+/// Hard ceiling on one tail read.
+///
+/// A transcript row is a whole tool result, so rows are not uniformly small and
+/// a row count alone does not bound memory. Live transcripts on a busy host
+/// reach 130 MB+; this is what keeps a classify pass off that curve. If 4 MiB
+/// does not span `max_rows` rows, the caller gets fewer rows — deliberately, the
+/// byte ceiling is the point.
+const MAX_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Ceiling on the grow-and-retry when a single row does not fit
+/// [`MAX_TAIL_BYTES`].
+///
+/// Returning no rows is worse than reading more: every probe in this module
+/// goes blind, so a session blocked on an AskUserQuestion silently stops
+/// appearing in `ainb fleet needs`. Escalating trades that for a bounded read.
+/// Still far below the 137 MB transcripts this function exists to avoid
+/// slurping, so the guarantee it was written for survives.
+const MAX_TAIL_ESCALATION_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The last `max_rows` complete lines of `path`, read from the END.
+///
+/// Every consumer in this module walks backward from the newest row and stops
+/// within a few hundred rows. Reading the whole file to serve that was O(file)
+/// per call, twice per `needs::classify`, once per hook line — the daemon's
+/// single largest CPU cost (`serde_json` string scanning dominated a `sample(1)`
+/// profile of a pegged daemon).
+///
+/// Seeks to `min(len, MAX_TAIL_BYTES)` before EOF and reads forward from there,
+/// so cost is bounded by the window rather than by the transcript. When the read
+/// starts mid-file its first line is almost certainly a fragment of a row that
+/// began earlier, so it is discarded rather than handed to a JSON parser.
+fn read_tail_lines(path: &Path, max_rows: usize) -> Option<Vec<String>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.seek(SeekFrom::End(0)).ok()?;
+    let mut want = len.min(MAX_TAIL_BYTES);
+
+    loop {
+        let start = len - want;
+        let mut buf = vec![0u8; usize::try_from(want).ok()?];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+
+        // Ask the file whether we landed on a row boundary instead of assuming we
+        // did not. Guessing costs a real row: a window that happens to begin
+        // exactly after a newline has a COMPLETE first line, and dropping it
+        // silently discards the oldest row of the lookback.
+        let opened_on_boundary = start == 0 || {
+            let mut prev = [0u8; 1];
+            file.seek(SeekFrom::Start(start - 1)).ok()?;
+            file.read_exact(&mut prev).ok()?;
+            prev[0] == b'\n'
+        };
+
+        // Assemble the whole window before decoding: a backward seek can land
+        // inside a multi-byte char, and slicing bytes as UTF-8 would panic.
+        // `from_utf8_lossy` over the complete buffer confines any damage to the
+        // leading fragment, which the trim below then drops anyway.
+        let text = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        if !opened_on_boundary && !lines.is_empty() {
+            lines.drain(..1);
+        }
+
+        // A single row can exceed the whole window — a tool_result carrying a big
+        // file read or base64 image. Then the window holds one fragment, the trim
+        // empties it, and every probe goes blind: an open AskUserQuestion emitted
+        // just before such a row would never raise its badge. Grow and retry
+        // rather than report "no rows", but stay bounded, because the entire point
+        // of this function is that a 137 MB transcript is never read whole.
+        if !lines.is_empty() || want == len || want >= MAX_TAIL_ESCALATION_BYTES {
+            if lines.len() > max_rows {
+                lines.drain(..lines.len() - max_rows);
+            }
+            return Some(lines);
+        }
+        want = want.saturating_mul(4).min(len).min(MAX_TAIL_ESCALATION_BYTES);
+    }
 }
 
 /// Fallback ERR detection from the transcript. Reverse-scans the newest
@@ -483,12 +586,11 @@ pub fn last_api_error_from_jsonl(
     window: usize,
     at_ms: i64,
 ) -> Option<(String, String)> {
-    let lines = read_lines(path)?;
+    let lines = read_tail_lines(path, window)?;
     if lines.is_empty() {
         return None;
     }
-    let start = lines.len().saturating_sub(window);
-    for row in lines[start..].iter().rev() {
+    for row in lines.iter().rev() {
         let sigs = crate::fleet::read::errors::detect_error_signals(row, at_ms);
         if let Some(crate::fleet::types::Signal::ApiError { pattern, raw, .. }) =
             sigs.into_iter().next()
@@ -512,15 +614,13 @@ fn parse_ts_ms(s: &str) -> Option<i64> {
 /// content. Cheap for active sessions (signal lives in the last few rows);
 /// resilient when the tail is full of tool_result noise.
 pub fn last_narrative_snapshot(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    if lines.is_empty() {
+    let rows = parse_rows(&read_tail_lines(path, MAX_TAIL_ROWS)?);
+    if rows.is_empty() {
         return None;
     }
-    for window in [20usize, 40, 80, 160, 320] {
-        let start = lines.len().saturating_sub(window);
-        if let Some(snap) = synthesize_from_rows(&lines[start..]) {
+    for window in LOOKBACK_WINDOWS {
+        let start = rows.len().saturating_sub(window);
+        if let Some(snap) = synthesize_from_rows(&rows[start..]) {
             return Some(snap);
         }
         if start == 0 {
@@ -530,10 +630,10 @@ pub fn last_narrative_snapshot(path: &Path) -> Option<String> {
     None
 }
 
-fn synthesize_from_rows(rows: &[String]) -> Option<String> {
+fn synthesize_from_rows(rows: &[Option<Value>]) -> Option<String> {
     // Walk backwards; first assistant row with text-or-tool wins.
     for row in rows.iter().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(row) else {
+        let Some(v) = row else {
             continue;
         };
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -638,7 +738,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"go"}}"#.to_string(),
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running tests."},{"type":"tool_use","name":"Bash","input":{"command":"cargo test --lib"}}]}}"#.to_string(),
         ];
-        let s = synthesize_from_rows(&rows).expect("synthesised");
+        let s = synthesize_from_rows(&parse_rows(&rows)).expect("synthesised");
         assert!(s.contains("Bash"), "got: {s}");
         assert!(s.contains("cargo test"), "got: {s}");
     }
@@ -648,7 +748,7 @@ mod tests {
         let rows = vec![
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Investigating the RLS chain on auth.audit_log inserts."}]}}"#.to_string(),
         ];
-        let s = synthesize_from_rows(&rows).expect("synthesised");
+        let s = synthesize_from_rows(&parse_rows(&rows)).expect("synthesised");
         assert!(s.contains("Investigating"), "got: {s}");
         assert!(s.contains("RLS"), "got: {s}");
     }
@@ -656,7 +756,7 @@ mod tests {
     #[test]
     fn synth_skips_user_rows() {
         let rows = vec![r#"{"type":"user","message":{"content":"hello"}}"#.to_string()];
-        assert!(synthesize_from_rows(&rows).is_none());
+        assert!(synthesize_from_rows(&parse_rows(&rows)).is_none());
     }
 
     #[test]
@@ -782,6 +882,172 @@ mod tests {
         let hit = last_api_error_from_jsonl(&path, 40, 0);
         let _ = std::fs::remove_file(&path);
         assert!(hit.is_none());
+    }
+
+    // --- bounded tail read (the whole-transcript-slurp fix) --------------
+
+    /// Write `rows` to a temp transcript, run `f`, clean up.
+    fn with_transcript<T>(tag: &str, rows: &[String], f: impl Fn(&Path) -> T) -> T {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join(format!(
+            "ainb-tail-{tag}-{}-{:p}.jsonl",
+            std::process::id(),
+            rows
+        ));
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut file = std::io::BufWriter::new(file);
+            for r in rows {
+                writeln!(file, "{r}").unwrap();
+            }
+        }
+        let out = f(&path);
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    /// The load-bearing property: cost is bounded by the WINDOW, not the file.
+    /// Delete the `drain` in `read_tail_lines` and this goes red.
+    #[test]
+    fn tail_returns_only_the_newest_rows_of_a_long_transcript() {
+        let rows: Vec<String> = (0..5_000).map(|i| format!(r#"{{"n":{i}}}"#)).collect();
+        with_transcript("window", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            assert_eq!(tail.len(), MAX_TAIL_ROWS, "window must cap the row count");
+            assert_eq!(
+                tail[0], r#"{"n":4680}"#,
+                "must be the NEWEST rows, not the oldest"
+            );
+            assert_eq!(
+                tail[MAX_TAIL_ROWS - 1],
+                r#"{"n":4999}"#,
+                "last row is the last row"
+            );
+        });
+    }
+
+    /// A file smaller than the window is returned whole, with no leading row
+    /// eaten by the mid-file fragment trim.
+    #[test]
+    fn a_short_transcript_keeps_its_very_first_row() {
+        let rows: Vec<String> = (0..3).map(|i| format!(r#"{{"n":{i}}}"#)).collect();
+        with_transcript("short", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            assert_eq!(tail, vec![r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#]);
+        });
+    }
+
+    /// The byte ceiling, not the row count, is what bounds a transcript of fat
+    /// rows — and the row split by the backward seek must never reach a parser.
+    #[test]
+    fn the_byte_ceiling_bounds_fat_rows_and_drops_the_split_fragment() {
+        // 8 rows x 1 MiB = 8 MiB, double MAX_TAIL_BYTES.
+        let rows: Vec<String> = (0..8)
+            .map(|i| format!(r#"{{"n":{i},"pad":"{}"}}"#, "x".repeat(1024 * 1024)))
+            .collect();
+        with_transcript("fat", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            assert!(
+                tail.len() < 8,
+                "byte ceiling must bite before the row count does"
+            );
+            assert!(!tail.is_empty(), "but it must still return the newest rows");
+            for row in &tail {
+                serde_json::from_str::<Value>(row)
+                    .expect("every returned row must be a COMPLETE line, never a fragment");
+            }
+        });
+    }
+
+    /// A row bigger than the whole window must not blind the probe.
+    ///
+    /// The window holds one fragment of that row, the mid-file trim empties it,
+    /// and every caller returns None — so a session blocked on an ask emitted
+    /// just before a huge tool_result silently vanishes from `ainb fleet needs`.
+    #[test]
+    fn a_row_larger_than_the_window_still_yields_the_newest_rows() {
+        let mut rows: Vec<String> = (0..5)
+            .map(|i| format!(r#"{{"n":{i},"pad":"{}"}}"#, "x".repeat(512 * 1024)))
+            .collect();
+        // The newest row on its own is bigger than MAX_TAIL_BYTES.
+        rows.push(format!(
+            r#"{{"n":"huge","pad":"{}"}}"#,
+            "y".repeat(5 * 1024 * 1024)
+        ));
+        with_transcript("oversized", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            assert!(
+                !tail.is_empty(),
+                "an oversized newest row must not blind the probe"
+            );
+            let newest: Value = serde_json::from_str(tail.last().unwrap())
+                .expect("the newest row must come back COMPLETE, not as a fragment");
+            assert_eq!(newest["n"], "huge");
+        });
+    }
+
+    /// A window that opens exactly after a newline has a COMPLETE first row.
+    /// Dropping it on the assumption that it is a fragment silently loses the
+    /// oldest row of the lookback.
+    #[test]
+    fn a_window_opening_on_a_row_boundary_keeps_its_first_row() {
+        // Rows sized so the 4 MiB window lands exactly on a newline: each row is
+        // exactly 65_536 bytes including its newline, so 4 MiB tiles into 64 of
+        // them. Scaffolding measured rather than hardcoded.
+        const ROW: usize = 65_536;
+        // Zero-padded so every row is the same width; quoted because JSON has no
+        // leading zeros.
+        let scaffold = format!(r#"{{"i":"{:03}","p":""}}"#, 0).len();
+        let body = "z".repeat(ROW - 1 - scaffold);
+        let rows: Vec<String> =
+            (0..80).map(|i| format!(r#"{{"i":"{i:03}","p":"{body}"}}"#)).collect();
+        assert_eq!(
+            rows[0].len() + 1,
+            ROW,
+            "fixture must tile the window exactly"
+        );
+        with_transcript("boundary", &rows, |path| {
+            let tail = read_tail_lines(path, MAX_TAIL_ROWS).expect("tail");
+            for row in &tail {
+                serde_json::from_str::<Value>(row)
+                    .expect("every row must be complete, including the first");
+            }
+            assert_eq!(
+                tail.len(),
+                64,
+                "a boundary-aligned window loses no row to the trim"
+            );
+        });
+    }
+
+    /// A multi-byte char straddling the seek point must not panic or corrupt a
+    /// surviving row (see the `from_utf8_lossy` note in `read_tail_lines`).
+    #[test]
+    fn a_seek_into_a_multibyte_char_does_not_panic() {
+        let rows: Vec<String> =
+            (0..400).map(|i| format!(r#"{{"n":{i},"s":"日本語えもじ🎉"}}"#)).collect();
+        with_transcript("utf8", &rows, |path| {
+            let tail = read_tail_lines(path, 10).expect("tail");
+            assert_eq!(tail.len(), 10);
+            for row in &tail {
+                serde_json::from_str::<Value>(row).expect("rows stay valid UTF-8 JSON");
+            }
+        });
+    }
+
+    /// End-to-end: the ask must still be found when it sits in the tail of a
+    /// transcript far larger than the window.
+    #[test]
+    fn an_ask_in_a_huge_transcript_is_still_found() {
+        let mut rows: Vec<String> = (0..5_000).map(|i| format!(r#"{{"n":{i}}}"#)).collect();
+        rows.push(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_big","name":"AskUserQuestion","input":{"questions":[{"question":"Still there?","options":[{"label":"yes"}]}]}}]}}"#
+                .to_string(),
+        );
+        with_transcript("bigask", &rows, |path| {
+            let aq = last_ask_user_question(path).expect("ask in the tail is found");
+            assert_eq!(aq.question, "Still there?");
+        });
     }
 
     // --- open-ask lifecycle (the sticky-ASK-forever fix) -----------------

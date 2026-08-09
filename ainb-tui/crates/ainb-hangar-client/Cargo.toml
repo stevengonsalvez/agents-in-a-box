@@ -1,0 +1,33 @@
+[package]
+name = "ainb-hangar-client"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The ONE client onto the hangar daemon's unix socket: auth/hello, Content-Length JSON-RPC, and the retained fleet / message / transcript subscriptions. Extracted from ainb-core so the TUI, the CLI and the copilot's MCP tool server all dial the daemon through the same code (ainb-core depends on ainb-hangar-daemon, so nothing below it can depend back on ainb-core)."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "hangar", "json-rpc", "client", "fleet"]
+
+[lib]
+name = "ainb_hangar_client"
+path = "src/lib.rs"
+
+[dependencies]
+# The wire shapes. Pure data crate, so the client adds no vocabulary of its own.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# Hangar home resolution (`hangar_home`) for the socket + token file paths.
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+tokio = { workspace = true }
+# `Serialize`/`DeserializeOwned` bound `call_typed`, so a caller has to name the
+# proto types rather than hand-build JSON for an arbitrary method.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The fake-socket tests bind a `UnixListener` in a temporary directory.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

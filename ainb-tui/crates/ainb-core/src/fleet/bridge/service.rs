@@ -12,25 +12,35 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::fleet::unit_program;
+
 const LABEL: &str = "com.agentsinabox.phone-bridge";
 const SYSTEMD_UNIT: &str = "ainb-phone-bridge.service";
 
 /// Resolved paths used to build the service definition.
 #[derive(Debug, Clone)]
 pub struct ServicePaths {
-    /// Absolute path to the running `ainb` binary (ProgramArguments[0]).
-    pub ainb_bin: PathBuf,
+    /// The `ainb` binary the unit's command runs. Bare `ainb` unless
+    /// `$AINB_BIN` overrides it, see [`resolve_paths`]. NOT necessarily
+    /// `argv[0]`: on launchd that is the shell wrapping this command.
+    pub ainb_bin: String,
     /// `~/.agents-in-a-box/phone-bridge.log`.
     pub log_path: PathBuf,
     /// Optional config override to propagate into the unit env.
     pub config_override: Option<String>,
 }
 
-/// Resolve the service paths from the current process. The binary is the
-/// canonical absolute path to the running `ainb` so the service runs the exact
-/// binary the operator installed from.
+/// Resolve the service paths from the current process.
+///
+/// The binary is deliberately NOT `current_exe()`: that freezes a
+/// version-scoped absolute path (a `/opt/homebrew/Cellar/ainb/<version>/libexec`
+/// directory, `~/.cargo/bin/ainb`) into the unit, and the next
+/// `brew upgrade ainb` deletes it, so launchd exits 78 `EX_CONFIG` and parks
+/// the bridge in the penalty box forever. Bare `ainb` is looked up again at
+/// every launch, by the shell the unit runs it through (see [`daemon_argv`]);
+/// `$AINB_BIN` remains the explicit override. See issue #608.
 pub fn resolve_paths() -> Result<ServicePaths> {
-    let ainb_bin = std::env::current_exe().context("resolving the current ainb binary path")?;
+    let ainb_bin = unit_program::ainb_bin_from(std::env::var("AINB_BIN").ok().as_deref());
     let mut log_path = dirs::home_dir().context("no home directory")?;
     log_path.push(".agents-in-a-box");
     log_path.push("phone-bridge.log");
@@ -42,14 +52,19 @@ pub fn resolve_paths() -> Result<ServicePaths> {
     })
 }
 
-/// ProgramArguments / ExecStart argv: `<ainb> fleet bridge run`. No token, ever.
+/// The command the daemon runs: `<ainb> fleet bridge run`. No token, ever.
+const DAEMON_ARGS: [&str; 3] = ["fleet", "bridge", "run"];
+
+/// launchd `ProgramArguments`: `/bin/sh -c "exec <ainb> fleet bridge run"`.
+///
+/// The shell wrapper is load-bearing, not cosmetic. launchd resolves
+/// `ProgramArguments[0]` against its OWN job environment and ignores the
+/// plist's `EnvironmentVariables` PATH entirely, so a bare `ainb` there does
+/// not spawn at all, which is worse than the pinned path it replaces. Probed against
+/// launchd with this exact plist shape: bare `argv[0]` with the plist PATH set
+/// exits 78 `EX_CONFIG` and never runs, `/bin/sh -c "exec …"` exits 0.
 fn daemon_argv(paths: &ServicePaths) -> Vec<String> {
-    vec![
-        paths.ainb_bin.to_string_lossy().into_owned(),
-        "fleet".to_string(),
-        "bridge".to_string(),
-        "run".to_string(),
-    ]
+    unit_program::shell_wrapped_argv(&paths.ainb_bin, &DAEMON_ARGS)
 }
 
 // ── macOS launchd ───────────────────────────────────────────────────────────
@@ -66,8 +81,7 @@ fn launchd_plist_path() -> Result<PathBuf> {
 /// (token never present, argv correct, env scoped).
 #[must_use]
 pub fn build_plist(paths: &ServicePaths) -> String {
-    let path_env = std::env::var("PATH")
-        .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".to_string());
+    let path_env = unit_program::unit_path_env();
     let home = dirs::home_dir().unwrap_or_default();
     let argv = daemon_argv(paths)
         .into_iter()
@@ -102,8 +116,12 @@ pub fn build_plist(paths: &ServicePaths) -> String {
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<!-- 60s, not 10s: with the shell wrapper launchd always spawns something,
+	     so a missing ainb is now an exit 127 that KeepAlive retries rather
+	     than a spawn failure that parks the job. The install-time check is
+	     the real guard; this bounds the log growth if one slips past. -->
 	<key>ThrottleInterval</key>
-	<integer>10</integer>
+	<integer>60</integer>
 	<key>LowPriorityIO</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -122,11 +140,17 @@ pub fn build_plist(paths: &ServicePaths) -> String {
     )
 }
 
+/// systemd resolves `%` specifiers inside unit values, so a literal `%` in a
+/// PATH or config path has to be doubled or the whole assignment is corrupted.
+fn systemd_escape(s: &str) -> String {
+    s.replace('%', "%%")
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn install_launchd(paths: &ServicePaths) -> Result<PathBuf> {
+fn install_launchd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     let plist_path = launchd_plist_path()?;
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -136,13 +160,17 @@ fn install_launchd(paths: &ServicePaths) -> Result<PathBuf> {
     }
     std::fs::write(&plist_path, build_plist(paths))
         .with_context(|| format!("writing {}", plist_path.display()))?;
-    // Idempotent reload: unload (ignore errors), then load.
+    // Idempotent reload: unload (ignore errors), then load. The unload runs
+    // even when we will not re-load, so a previously-good unit does not keep
+    // running against a definition that has since gone stale.
     let _ = std::process::Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .output();
-    let _ = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .output();
+    if activate {
+        let _ = std::process::Command::new("launchctl")
+            .args(["load", &plist_path.to_string_lossy()])
+            .output();
+    }
     Ok(plist_path)
 }
 
@@ -171,21 +199,23 @@ fn systemd_unit_path() -> Result<PathBuf> {
 /// Render the systemd user unit. Public for unit testing.
 #[must_use]
 pub fn build_systemd_unit(paths: &ServicePaths) -> String {
+    // Same shell wrapper as the plist, for the same reason. systemd.service(5)
+    // is explicit that a non-absolute ExecStart is NOT looked up on $PATH:
+    // "Systemd has never looked at the PATH variable for resolving non
+    // absolute binaries", it uses a fixed compile-time list
+    // (/usr/local/bin:/usr/bin:/bin) that misses ~/.cargo/bin and
+    // ~/.local/bin. A bare `ainb` would fail 203/EXEC on every start.
+    // ExecStart is therefore an absolute /bin/sh, and the unit's own PATH
+    // (which the shell DOES honour) is what finds ainb, at every launch.
     let exec_start = daemon_argv(paths)
         .iter()
-        .map(|a| {
-            if a.contains(char::is_whitespace) {
-                format!("\"{a}\"")
-            } else {
-                a.clone()
-            }
-        })
+        .map(|a| systemd_escape(&unit_program::shell_quote(a)))
         .collect::<Vec<_>>()
         .join(" ");
     let config_env = paths
         .config_override
         .as_ref()
-        .map(|c| format!("Environment=AINB_CONFIG_PATH={c}\n"))
+        .map(|c| format!("Environment=\"AINB_CONFIG_PATH={}\"\n", systemd_escape(c)))
         .unwrap_or_default();
     format!(
         "[Unit]\n\
@@ -195,20 +225,22 @@ pub fn build_systemd_unit(paths: &ServicePaths) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=\"PATH={path}\"\n\
          {config_env}\
          ExecStart={exec_start}\n\
          Restart=always\n\
-         RestartSec=10\n\
+         RestartSec=60\n\
          StandardOutput=append:{log}\n\
          StandardError=append:{log}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         log = paths.log_path.display(),
+        path = systemd_escape(&unit_program::unit_path_env()),
     )
 }
 
-fn install_systemd(paths: &ServicePaths) -> Result<PathBuf> {
+fn install_systemd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     let unit_path = systemd_unit_path()?;
     if let Some(parent) = unit_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -221,9 +253,11 @@ fn install_systemd(paths: &ServicePaths) -> Result<PathBuf> {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", SYSTEMD_UNIT])
-        .output();
+    if activate {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", SYSTEMD_UNIT])
+            .output();
+    }
     Ok(unit_path)
 }
 
@@ -245,12 +279,46 @@ fn teardown_systemd() -> Result<Option<PathBuf>> {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// Provision the daemon service for the current platform. Idempotent.
+///
+/// The unit is always written, but it is only STARTED when its program
+/// resolves. Starting one we already know is broken is not harmless: the shell
+/// wrapper means the scheduler spawns successfully and `exec ainb` exits 127,
+/// so `KeepAlive` / `Restart=always` respawn it forever into an unrotated log.
+/// Writing it inactive leaves the operator a unit to reload once PATH is fixed.
 pub fn install() -> Result<PathBuf> {
     let paths = resolve_paths()?;
+    let activate = unit_would_be_unrunnable(&paths).is_none();
     if cfg!(target_os = "macos") {
-        install_launchd(&paths)
+        install_launchd(&paths, activate)
     } else {
-        install_systemd(&paths)
+        install_systemd(&paths, activate)
+    }
+}
+
+/// `Some(warning)` when the unit `install` would write names a program that
+/// does not resolve, so the caller can say so instead of reporting a success
+/// that can never start.
+///
+/// Pinning `current_exe()` used to make this true by construction; resolving
+/// at launch time does not, so it is checked. Mirrors
+/// [`crate::fleet::atc::timer::install_would_be_unrunnable`].
+#[must_use]
+pub fn install_would_be_unrunnable() -> Option<String> {
+    unit_would_be_unrunnable(&resolve_paths().ok()?)
+}
+
+fn unit_would_be_unrunnable(paths: &ServicePaths) -> Option<String> {
+    let unit = if cfg!(target_os = "macos") {
+        build_plist(paths)
+    } else {
+        build_systemd_unit(paths)
+    };
+    match unit_program::unit_program_health(&unit) {
+        unit_program::ProgramHealth::Missing(p) => Some(format!(
+            "'{p}' is not on the PATH the bridge will run with, so the daemon cannot start. \
+             Install ainb somewhere on PATH, or set AINB_BIN to its full path and re-run install."
+        )),
+        _ => None,
     }
 }
 
@@ -264,30 +332,40 @@ pub fn uninstall() -> Result<Option<PathBuf>> {
 }
 
 /// Human-readable install status for the current platform.
+///
+/// A unit file existing is NOT the same as a working bridge: if the binary it
+/// points at has moved (a `brew upgrade` deleting the old Cellar directory),
+/// launchd exits 78 `EX_CONFIG` and parks the job forever while `installed`
+/// keeps claiming health. So the program is resolved too. See issue #608.
 pub fn status() -> Result<String> {
-    if cfg!(target_os = "macos") {
-        let p = launchd_plist_path()?;
-        Ok(format!(
-            "launchd: {} ({})",
-            if p.exists() {
-                "installed"
-            } else {
-                "not installed"
-            },
-            p.display()
-        ))
+    let (kind, unit) = if cfg!(target_os = "macos") {
+        ("launchd", launchd_plist_path()?)
     } else {
-        let p = systemd_unit_path()?;
-        Ok(format!(
-            "systemd: {} ({})",
-            if p.exists() {
-                "installed"
-            } else {
-                "not installed"
-            },
-            p.display()
-        ))
+        ("systemd", systemd_unit_path()?)
+    };
+    let health = unit_program::unit_program_health_at(&unit);
+    if matches!(health, unit_program::ProgramHealth::NoUnit) {
+        return Ok(format!("{kind}: not installed ({})", unit.display()));
     }
+    // The advice has to match how much we actually know. MISSING is a verdict;
+    // UNKNOWN means the unit did not parse, which is not evidence that the
+    // bridge is broken, and telling someone to reinstall a running service on
+    // that basis is its own false positive.
+    let note = match &health {
+        unit_program::ProgramHealth::Missing(program) => format!(
+            ", program MISSING ({program})\n  \
+             the bridge can never start: re-run `ainb fleet bridge install` to repoint it"
+        ),
+        unit_program::ProgramHealth::Unreadable(why) => format!(
+            ", program UNKNOWN ({why})\n  \
+             could not verify the program this unit runs; inspect {} by hand",
+            unit.display()
+        ),
+        unit_program::ProgramHealth::Resolves(_) | unit_program::ProgramHealth::NoUnit => {
+            String::new()
+        }
+    };
+    Ok(format!("{kind}: installed ({}){note}", unit.display()))
 }
 
 #[cfg(test)]
@@ -296,19 +374,22 @@ mod tests {
 
     fn paths() -> ServicePaths {
         ServicePaths {
-            ainb_bin: PathBuf::from("/usr/local/bin/ainb"),
+            ainb_bin: "ainb".to_string(),
             log_path: PathBuf::from("/home/u/.agents-in-a-box/phone-bridge.log"),
             config_override: None,
         }
     }
 
+    /// A Cellar path for a version that cannot be installed, so the "moved
+    /// binary" assertions never depend on what this host happens to have.
+    const GONE: &str = "/opt/homebrew/Cellar/ainb/0.0.0-uninstalled/libexec/ainb";
+
     #[test]
     fn plist_argv_is_fleet_bridge_run_and_carries_no_token() {
         let xml = build_plist(&paths());
-        assert!(xml.contains("<string>/usr/local/bin/ainb</string>"));
-        assert!(xml.contains("<string>fleet</string>"));
-        assert!(xml.contains("<string>bridge</string>"));
-        assert!(xml.contains("<string>run</string>"));
+        assert!(xml.contains("<string>/bin/sh</string>"));
+        assert!(xml.contains("<string>-c</string>"));
+        assert!(xml.contains("<string>exec ainb fleet bridge run</string>"));
         // No token leakage: nothing token-ish in the rendered plist.
         let lower = xml.to_lowercase();
         assert!(!lower.contains("token"), "plist must never embed a token");
@@ -337,7 +418,7 @@ mod tests {
     #[test]
     fn systemd_exec_start_is_fleet_bridge_run() {
         let unit = build_systemd_unit(&paths());
-        assert!(unit.contains("ExecStart=/usr/local/bin/ainb fleet bridge run"));
+        assert!(unit.contains("ExecStart=/bin/sh -c 'exec ainb fleet bridge run'"));
         assert!(unit.contains("Restart=always"));
         assert!(!unit.to_lowercase().contains("token"));
     }
@@ -347,6 +428,202 @@ mod tests {
         let mut p = paths();
         p.config_override = Some("/custom/config.toml".to_string());
         let unit = build_systemd_unit(&p);
-        assert!(unit.contains("Environment=AINB_CONFIG_PATH=/custom/config.toml"));
+        assert!(unit.contains("Environment=\"AINB_CONFIG_PATH=/custom/config.toml\""));
+    }
+
+    /// Regression for issue #608: `ainb fleet bridge install` on a homebrew
+    /// install pinned the Cellar VERSION directory, which the next
+    /// `brew upgrade` deletes. Nothing derived from `current_exe()` may reach
+    /// a unit.
+    #[test]
+    fn units_do_not_pin_an_absolute_binary_path() {
+        let resolved = resolve_paths().expect("resolve_paths");
+        let plist = build_plist(&resolved);
+        let unit = build_systemd_unit(&resolved);
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let exe = exe.display().to_string();
+        assert!(!plist.contains(&exe), "plist pinned current_exe: {plist}");
+        assert!(
+            !unit.contains(&exe),
+            "systemd unit pinned current_exe: {unit}"
+        );
+
+        // Absent an explicit $AINB_BIN override, the program the unit actually
+        // runs carries no directory component, so there is no Cellar/cargo
+        // prefix that a later upgrade can invalidate.
+        if std::env::var("AINB_BIN").unwrap_or_default().is_empty() {
+            for text in [&plist, &unit] {
+                let program = unit_program::unit_program_health(text)
+                    .program()
+                    .map(str::to_string)
+                    .expect("program");
+                assert_eq!(program, "ainb", "program should be bare, got {program}");
+            }
+        }
+    }
+
+    /// launchd will NOT PATH-search `ProgramArguments[0]`; it resolves it
+    /// against its own job environment and ignores the plist's
+    /// `EnvironmentVariables` PATH. So the plist must hand it an absolute
+    /// `/bin/sh` and let the shell, which does honour PATH, find `ainb`.
+    /// A bare `ainb` here would not spawn at all.
+    #[test]
+    fn launchd_gets_an_absolute_program_and_defers_lookup_to_the_shell() {
+        let plist = build_plist(&paths());
+        let argv0 = plist
+            .split_once("<key>ProgramArguments</key>")
+            .and_then(|(_, rest)| rest.split_once("<string>"))
+            .and_then(|(_, rest)| rest.split_once("</string>"))
+            .map(|(v, _)| v.trim().to_string())
+            .expect("argv[0]");
+        assert_eq!(argv0, "/bin/sh");
+        assert!(
+            std::path::Path::new(&argv0).is_absolute(),
+            "launchd cannot spawn a non-absolute argv[0]"
+        );
+        // And the PATH the shell will use is still written into the plist.
+        assert!(plist.contains("<key>PATH</key>"));
+    }
+
+    /// systemd resolves a non-absolute ExecStart against a fixed compile-time
+    /// list, NEVER the unit's own Environment=PATH ("Systemd has never looked
+    /// at the PATH variable for resolving non absolute binaries",
+    /// systemd.service(5)). So ExecStart must be an absolute /bin/sh, and the
+    /// PATH the unit carries is for the shell, which does honour it.
+    #[test]
+    fn systemd_defers_lookup_to_the_shell_and_carries_its_path() {
+        let expected = unit_program::unit_path_env();
+        let unit = build_systemd_unit(&paths());
+        assert!(
+            unit.contains("ExecStart=/bin/sh -c "),
+            "ExecStart must be an absolute shell: {unit}"
+        );
+        assert!(
+            !unit.contains("ExecStart=ainb"),
+            "a bare ExecStart fails 203/EXEC: {unit}"
+        );
+        assert!(
+            unit.contains(&format!("Environment=\"PATH={expected}\"")),
+            "systemd unit carries no PATH: {unit}"
+        );
+    }
+
+    /// The regression the bare-ExecStart version shipped: systemd could not
+    /// start the unit, and status resolved the same bare name against the
+    /// unit's inert PATH and called it healthy.
+    #[test]
+    fn a_systemd_unit_is_never_reported_healthy_on_a_path_systemd_ignores() {
+        let mut p = paths();
+        p.ainb_bin = GONE.to_string();
+        let unit = build_systemd_unit(&p);
+        assert_eq!(
+            unit_program::unit_program_health(&unit),
+            unit_program::ProgramHealth::Missing(GONE.into()),
+            "moved binary not flagged in systemd unit: {unit}"
+        );
+    }
+
+    /// The decision `status()` makes: a unit whose program has moved is
+    /// flagged, a resolvable one is not. Run over whole units in both flavours
+    /// so the bare case is judged against the unit's own PATH.
+    #[test]
+    fn status_flags_a_unit_whose_program_is_missing() {
+        use unit_program::ProgramHealth;
+
+        // Repoint the binary at the one place it appears in each flavour: the
+        // shell command string for launchd, the ExecStart line for systemd.
+        let repoint = |to: &str| {
+            let mut p = paths();
+            p.ainb_bin = to.to_string();
+            [build_plist(&p), build_systemd_unit(&p)]
+        };
+
+        for stale in repoint(GONE) {
+            assert_eq!(
+                unit_program::unit_program_health(&stale),
+                ProgramHealth::Missing(GONE.into()),
+                "moved binary not flagged: {stale}"
+            );
+        }
+        // `ls`, not `sh`: a shell name is treated as a wrapper and unwrapped,
+        // so it cannot stand in for an ordinary resolvable binary here.
+        for healthy in repoint("ls") {
+            assert_eq!(
+                unit_program::unit_program_health(&healthy),
+                ProgramHealth::Resolves("ls".into()),
+                "resolvable binary wrongly flagged: {healthy}"
+            );
+        }
+    }
+
+    /// The wrapper must not become a blindfold: `/bin/sh` always resolves, so
+    /// a detector reading `argv[0]` would certify every broken bridge as
+    /// healthy: the exact bug class #608 is about.
+    #[test]
+    fn the_shell_wrapper_does_not_hide_a_dead_binary_from_status() {
+        let mut p = paths();
+        p.ainb_bin = GONE.to_string();
+        let plist = build_plist(&p);
+        assert!(
+            plist.contains("<string>/bin/sh</string>"),
+            "premise: {plist}"
+        );
+        assert_eq!(
+            unit_program::unit_program_health(&plist).program(),
+            Some(GONE)
+        );
+    }
+
+    /// UNKNOWN is not a verdict of failure. Telling someone to reinstall a
+    /// running bridge because we could not parse its unit is its own false
+    /// positive, the same class this change exists to remove.
+    #[test]
+    fn an_unparsable_unit_is_not_told_it_can_never_start() {
+        let health = unit_program::unit_program_health("hand edited, not a unit");
+        assert!(matches!(health, unit_program::ProgramHealth::Unreadable(_)));
+        let note = health.problem().expect("problem");
+        assert!(note.contains("UNKNOWN"));
+        assert!(
+            !note.contains("can never start"),
+            "UNKNOWN must not assert a failure it cannot determine: {note}"
+        );
+    }
+
+    /// systemd resolves `%` specifiers inside unit values, and splits an
+    /// unquoted assignment at whitespace. Both would corrupt a real config
+    /// path.
+    #[test]
+    fn systemd_env_assignments_are_quoted_and_percent_escaped() {
+        let mut p = paths();
+        p.config_override = Some("/home/u/My Configs/50%/config.toml".to_string());
+        let unit = build_systemd_unit(&p);
+        assert!(
+            unit.contains("Environment=\"AINB_CONFIG_PATH=/home/u/My Configs/50%%/config.toml\""),
+            "config env not quoted and escaped: {unit}"
+        );
+        // The PATH line gets the same treatment.
+        assert!(!unit.lines().any(|l| l.starts_with("Environment=PATH=")));
+    }
+
+    /// Crash-recovery latency should not silently differ by platform.
+    #[test]
+    fn both_platforms_use_the_same_restart_backoff() {
+        assert!(build_plist(&paths()).contains("<integer>60</integer>"));
+        assert!(build_systemd_unit(&paths()).contains("RestartSec=60"));
+    }
+
+    /// A stale unit installed by an older ainb has no shell wrapper at all.
+    /// It must still be judged on its pinned binary, not reported unreadable.
+    #[test]
+    fn a_legacy_unwrapped_unit_is_still_flagged() {
+        let legacy = format!(
+            "<key>ProgramArguments</key>\n<array>\n\t<string>{GONE}</string>\n\t\
+             <string>fleet</string>\n\t<string>bridge</string>\n\t<string>run</string>\n</array>"
+        );
+        assert_eq!(
+            unit_program::unit_program_health(&legacy),
+            unit_program::ProgramHealth::Missing(GONE.into())
+        );
     }
 }

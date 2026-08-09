@@ -29,6 +29,8 @@ pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
 pub const FLEET_CAPABILITY_USAGE_READ: &str = "fleet.usage.read";
 /// Negotiated capability for bounded live provider-quota summaries.
 pub const FLEET_CAPABILITY_QUOTA_READ: &str = "fleet.quota.read";
+/// Negotiated capability for the rich usage dashboard with 53-week history.
+pub const FLEET_CAPABILITY_DASHBOARD_READ: &str = "fleet.dashboard.read";
 /// Negotiated capability for runtime and provider-hook health.
 pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
 /// Negotiated capability required for chat-bus message sends.
@@ -57,6 +59,31 @@ pub const FLEET_CAPABILITY_ACP_SPAWN: &str = "fleet.acp.spawn";
 /// needs per-connection granted capabilities, which is a v3 surface change.
 pub const FLEET_CAPABILITY_TRANSCRIPT_PRUNE: &str = "fleet.transcript.prune";
 
+/// Negotiated capability required to mint a chat channel (buzz-port part 2).
+///
+/// DEFINED here, deliberately ABSENT from [`FLEET_PROTOCOL_CAPABILITY_IDS`]:
+/// part 2's dispatch arms do not exist yet, so advertising it would promise a
+/// method that answers -32601. It is appended to the catalogue in the same
+/// change that lands `fleet/channel_create`, which is exactly the rule the
+/// chat-bus capabilities followed in part 1.
+pub const FLEET_CAPABILITY_CHAT_WRITE: &str = "fleet.chat.write";
+/// Negotiated capability required to read channels, confirms and activity.
+///
+/// Defined-but-unadvertised, per [`FLEET_CAPABILITY_CHAT_WRITE`].
+pub const FLEET_CAPABILITY_CHAT_READ: &str = "fleet.chat.read";
+/// Negotiated capability required for `fleet/copilot_configure`.
+///
+/// Defined-but-unadvertised, per [`FLEET_CAPABILITY_CHAT_WRITE`]. Gates a
+/// PRIVILEGED surface: the persona it carries is a system prompt for an agent
+/// holding destructive tools.
+pub const FLEET_CAPABILITY_COPILOT_CONFIGURE: &str = "fleet.copilot.configure";
+/// Negotiated capability required to answer a guardrail confirm card.
+///
+/// Defined-but-unadvertised, per [`FLEET_CAPABILITY_CHAT_WRITE`]. Distinct
+/// from `fleet.action.execute`: ACP permission requests stay part 1's
+/// attention rows answered through `fleet/action`.
+pub const FLEET_CAPABILITY_CONFIRM_ANSWER: &str = "fleet.confirm.answer";
+
 /// Fleet capability identifiers advertised during protocol negotiation.
 ///
 /// The chat-bus capability consts above are part of the frozen v2 surface but
@@ -65,6 +92,12 @@ pub const FLEET_CAPABILITY_TRANSCRIPT_PRUNE: &str = "fleet.transcript.prune";
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_ACP_SPAWN,
     FLEET_CAPABILITY_ACTION_EXECUTE,
+    // Part 2 phase A2 landed the six chat/copilot dispatch arms, so their
+    // capabilities are advertised in the SAME change, per the rule below.
+    FLEET_CAPABILITY_CHAT_READ,
+    FLEET_CAPABILITY_CHAT_WRITE,
+    FLEET_CAPABILITY_CONFIRM_ANSWER,
+    FLEET_CAPABILITY_COPILOT_CONFIGURE,
     FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
     FLEET_CAPABILITY_MESSAGE_READ,
@@ -82,6 +115,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_TRANSCRIPT_READ,
     FLEET_CAPABILITY_RUNTIME_READ,
     FLEET_CAPABILITY_USAGE_READ,
+    FLEET_CAPABILITY_DASHBOARD_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -684,6 +718,158 @@ pub struct FleetUsageSummaryResult {
     pub detail: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// fleet/usage_dashboard
+// ---------------------------------------------------------------------------
+
+/// Maximum weekly buckets the daemon returns for a dashboard response.
+pub const FLEET_DASHBOARD_MAX_WEEKLY_BUCKETS: usize = 53;
+/// Maximum heatmap cells (one per day, 53 weeks).
+pub const FLEET_DASHBOARD_MAX_HEATMAP_CELLS: usize = 371;
+/// Maximum session/branch/tool/mcp/shell breakdown buckets.
+pub const FLEET_DASHBOARD_MAX_DIMENSION_BUCKETS: usize = 20;
+
+/// Parameters for `fleet/usage_dashboard`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetUsageDashboardParams {}
+
+/// One heatmap cell representing a single calendar day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetHeatmapCell {
+    /// ISO-8601 UTC calendar date.
+    pub date: String,
+    /// Number of distinct API calls on this day.
+    pub call_count: u64,
+    /// Canonical USD cost when fully priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// One weekly usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageWeeklyBucket {
+    /// ISO-8601 UTC date of Monday starting this week.
+    pub week_start: String,
+    /// Weekly aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One session usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageSessionBucket {
+    /// Session identity (provider:project:session_id).
+    pub session_id: String,
+    /// Provider for this session.
+    pub provider: String,
+    /// Project for this session.
+    pub project: String,
+    /// Session aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One branch usage bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageBranchBucket {
+    /// Git branch name.
+    pub branch: String,
+    /// Branch aggregate.
+    pub bucket: FleetUsageBucket,
+}
+
+/// One named dimension bucket (tools, MCP servers, shell commands).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageNamedBucket {
+    /// Dimension key (tool name, MCP server, shell command).
+    pub name: String,
+    /// Number of calls using this dimension.
+    pub call_count: u64,
+}
+
+/// Simple linear forecast from trailing daily data.
+///
+/// Averages are taken over CALENDAR days in the trailing window, not over the
+/// days that happen to have data: the next 30 days will contain idle days too,
+/// so an active-days-only divisor would quote a working-day rate and overstate
+/// an intermittent user's projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageForecast {
+    /// Projected cost for the next 30 days in USD, when fully priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_30d_cost_usd: Option<f64>,
+    /// Projected total tokens for the next 30 days.
+    pub projected_30d_tokens: u64,
+    /// Mean cost per calendar day across `sample_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_daily_cost_usd: Option<f64>,
+    /// Mean tokens per calendar day across `sample_days`.
+    pub avg_daily_tokens: u64,
+    /// The divisor actually used: calendar days spanned by the trailing window,
+    /// capped at 7 and floored at 1 so a first-day user is not diluted across a
+    /// week they were not present for.
+    pub sample_days: u32,
+}
+
+/// Bounded rich dashboard result for `fleet/usage_dashboard`.
+///
+/// Extends `fleet/usage_summary` with 53-week history, heatmap, forecast,
+/// and additional breakdowns. `fleet/usage_summary` remains the stable
+/// lightweight endpoint for quick checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetUsageDashboardResult {
+    /// Current dashboard availability.
+    pub state: FleetUsageSummaryState,
+    /// Time the daemon generated this dashboard, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<i64>,
+    /// Inclusive window start, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<i64>,
+    /// Exclusive window end, in epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<i64>,
+    /// Whether every included call has a canonical USD rate.
+    pub cost_complete: bool,
+    /// Aggregate for the full 53-week window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<FleetUsageBucket>,
+    /// Weekly buckets, chronologically ordered.
+    #[serde(default)]
+    pub weekly: Vec<FleetUsageWeeklyBucket>,
+    /// Daily activity heatmap cells for 53 weeks.
+    #[serde(default)]
+    pub heatmap: Vec<FleetHeatmapCell>,
+    /// Linear forecast from trailing data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<FleetUsageForecast>,
+    /// Provider breakdowns.
+    #[serde(default)]
+    pub providers: Vec<FleetUsageProviderBucket>,
+    /// Top model breakdowns.
+    #[serde(default)]
+    pub models: Vec<FleetUsageModelBucket>,
+    /// Top project breakdowns.
+    #[serde(default)]
+    pub projects: Vec<FleetUsageProjectBucket>,
+    /// Top session breakdowns.
+    #[serde(default)]
+    pub sessions: Vec<FleetUsageSessionBucket>,
+    /// Top branch breakdowns.
+    #[serde(default)]
+    pub branches: Vec<FleetUsageBranchBucket>,
+    /// Top tool usage counts.
+    #[serde(default)]
+    pub tools: Vec<FleetUsageNamedBucket>,
+    /// Top MCP server usage counts.
+    #[serde(default)]
+    pub mcp_servers: Vec<FleetUsageNamedBucket>,
+    /// Top shell command usage counts.
+    #[serde(default)]
+    pub shell_commands: Vec<FleetUsageNamedBucket>,
+    /// Safe daemon status detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// One live provider quota window. `used_percent` is provider-reported, so
 /// clients derive remaining quota as `100 - used_percent` without guessing a
 /// token cap.
@@ -1134,7 +1320,9 @@ pub struct FleetMessage {
     /// Replies only: the message id this row answers (the thread join).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_message_id: Option<String>,
-    /// `operator` or a `session_key`.
+    /// `operator`, `copilot`, or a `session_key` — the daemon's record of who
+    /// wrote it, taken from [`FleetMessageSendParams::actor`] and never from
+    /// the body.
     pub sender: String,
     /// Message kind.
     pub kind: FleetMessageKind,
@@ -1172,6 +1360,18 @@ pub struct FleetMessageSendParams {
     /// direct send and mints `broadcast:<ulid>` for a multi-target send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_key: Option<String>,
+    /// Who this message is FROM, persisted as [`FleetMessage::sender`] and
+    /// replayed into the recipient's re-prime corpus. Absent means `operator`,
+    /// which is what every human surface sends.
+    ///
+    /// Not a permission and not a claim the daemon trusts for authorisation —
+    /// the socket token already authenticated the caller. It exists so a
+    /// copilot-authored send is DISTINGUISHABLE from a human one at the two
+    /// surfaces that matter (the receiving agent's corpus and the chat UIs);
+    /// without it a copilot steered by a prompt injection asks another agent to
+    /// act while wearing the operator's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Recipient session keys; every target must already exist.
     pub targets: Vec<String>,
     /// Message body.
@@ -1349,6 +1549,378 @@ pub struct FleetTranscriptEventParams {
     pub chunk: FleetTranscriptChunk,
 }
 
+/// The scope-key grammar, parsed.
+///
+/// Scopes are MINTED STRINGS, not a schema: `fleet_message.scope_key` is plain
+/// text and this enum is the only place the vocabulary is written down. Part 1
+/// minted `session:<key>` and `broadcast:<ulid>`; part 2 adds `channel:<id>`
+/// with no schema change.
+///
+/// `fleet/message_send` validates a CALLER-SUPPLIED scope against the
+/// recipients it claims to address, and fails closed on a prefix it does not
+/// know, so a new scope kind has to be admitted here deliberately. The rule
+/// per kind:
+///
+/// * [`Session`](Self::Session) — the named session must be the send's single
+///   recipient, otherwise a caller files a message in someone else's timeline.
+/// * [`Broadcast`](Self::Broadcast) — more than one recipient.
+/// * [`Channel`](Self::Channel) — every recipient must be a MEMBER of that
+///   channel. The membership lookup is the store's, so the check lives with
+///   the handler; this type only says the prefix is legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetScope<'a> {
+    /// `session:<session_key>` — one session's own timeline.
+    Session(&'a str),
+    /// `broadcast:<ulid>` — one daemon-minted fan-out.
+    Broadcast(&'a str),
+    /// `channel:<id>` — a named channel with a recipient set (part 2).
+    Channel(&'a str),
+}
+
+impl<'a> FleetScope<'a> {
+    /// Parse a scope key, or `None` when the prefix is not in the grammar.
+    ///
+    /// `None` is the fail-closed answer: an unknown prefix is refused, never
+    /// minted, so an unrecognised scope can never quietly become a timeline.
+    #[must_use]
+    pub fn parse(scope_key: &'a str) -> Option<Self> {
+        let scope = scope_key.trim();
+        let (kind, rest) = scope.split_once(':')?;
+        if rest.is_empty() {
+            return None;
+        }
+        match kind {
+            "session" => Some(Self::Session(rest)),
+            "broadcast" => Some(Self::Broadcast(rest)),
+            "channel" => Some(Self::Channel(rest)),
+            _ => None,
+        }
+    }
+}
+
+/// Maximum recipients one channel may carry.
+///
+/// A channel fan-out is ONE `fleet/message_send` with N delivery legs, so the
+/// channel ceiling is the send ceiling: a channel that cannot be addressed in
+/// a single send is a channel whose messages silently only reach a prefix of
+/// its members.
+pub const FLEET_CHANNEL_RECIPIENTS_MAX: usize = FLEET_MESSAGE_TARGETS_MAX;
+/// Maximum channel name length, in bytes.
+pub const FLEET_CHANNEL_NAME_MAX: usize = 128;
+/// Maximum copilot persona length, in bytes.
+///
+/// The persona is a system prompt for an agent holding destructive tools, so
+/// it is bounded like any other operator-supplied blob that is replayed into
+/// every session start.
+pub const FLEET_COPILOT_PERSONA_MAX: usize = 8 * 1024;
+/// Maximum rows one `fleet/activity_list` page may return.
+pub const FLEET_ACTIVITY_LIST_MAX: u32 = 200;
+
+/// What a chat channel is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetChannelKind {
+    /// The standing copilot channel: an ACP session whose scope IS the channel.
+    Copilot,
+    /// A named fan-out channel over an explicit recipient set.
+    Broadcast,
+}
+
+/// One chat channel and the scope it mints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetChannel {
+    /// Daemon-minted stable channel identity.
+    pub id: String,
+    /// Channel kind.
+    pub kind: FleetChannelKind,
+    /// Human-readable channel name.
+    pub name: String,
+    /// The minted scope, always `channel:<id>`.
+    pub scope_key: String,
+    /// Member session keys; empty for a copilot channel.
+    pub recipients: Vec<String>,
+    /// Creation time in epoch milliseconds.
+    pub created_at: i64,
+}
+
+/// Parameters for `fleet/channel_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetChannelCreateParams {
+    /// Channel kind.
+    pub kind: FleetChannelKind,
+    /// Human-readable name, at most [`FLEET_CHANNEL_NAME_MAX`] bytes.
+    pub name: String,
+    /// Member session keys, at most [`FLEET_CHANNEL_RECIPIENTS_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipients: Option<Vec<String>>,
+}
+
+/// Result for `fleet/channel_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetChannelCreateResult {
+    /// The persisted channel, carrying its minted `channel:<id>` scope.
+    pub channel: FleetChannel,
+}
+
+/// Parameters for `fleet/channel_list`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetChannelListParams {}
+
+/// Result for `fleet/channel_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetChannelListResult {
+    /// Channels in creation order.
+    pub channels: Vec<FleetChannel>,
+}
+
+/// Adapter family backing the copilot session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCopilotProvider {
+    /// `claude-agent-acp`.
+    Claude,
+    /// `codex-acp`.
+    Codex,
+}
+
+/// Parameters for `fleet/copilot_configure`.
+///
+/// There is deliberately NO permission-mode field. Part 1 pins the mode at
+/// `session/new` and re-asserts it after load precisely because an ambient
+/// `bypassPermissions` disables the whole permission surface; a settable mode
+/// here would be a remote off-switch for the guardrails, reachable by anyone
+/// holding [`FLEET_CAPABILITY_COPILOT_CONFIGURE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCopilotConfigureParams {
+    /// Adapter family.
+    pub provider: FleetCopilotProvider,
+    /// Adapter model id; `None` leaves the daemon's static config in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Adapter reasoning effort token; `None` leaves the static config alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// System prompt, at most [`FLEET_COPILOT_PERSONA_MAX`] bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+}
+
+/// Result for `fleet/copilot_configure`.
+///
+/// The persona is NOT echoed: it is a privileged blob, and a read-back is a
+/// second place it can leak from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCopilotConfigureResult {
+    /// The copilot session the config was written to.
+    pub session_key: String,
+    /// Adapter family now in force.
+    pub provider: FleetCopilotProvider,
+    /// Model override now in force, when one is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning-effort override now in force, when one is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Whether a persona override is stored.
+    pub persona_set: bool,
+}
+
+/// Lifecycle of one guardrail confirm card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetConfirmState {
+    /// Awaiting an operator; the copilot's tool result is suspended.
+    Open,
+    /// Answered approve (possibly with edited arguments).
+    Approved,
+    /// Answered deny.
+    Denied,
+    /// Reached `expires_at` unanswered; resolved to the tool as denied.
+    Expired,
+}
+
+/// One guardrail confirm card: a copilot tool call held for an operator.
+///
+/// NOT an ACP permission request. Those stay part 1's attention rows answered
+/// through `fleet/action` with fingerprint staleness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirm {
+    /// Daemon-minted stable card identity.
+    pub confirm_id: String,
+    /// Scope the card belongs to, normally the copilot `channel:<id>`.
+    pub scope_key: String,
+    /// The MCP tool the copilot asked to run.
+    pub tool: String,
+    /// The tool arguments, PROJECTED to the keys the tool's schema declares.
+    ///
+    /// The classifier ignores unknown argument keys by contract, which protects
+    /// the machine verdict and leaves the human's unprotected: this value is
+    /// rendered on the operator's confirm card, so a model-authored
+    /// `justification` / `reason` / `operator_approved` key riding along would
+    /// be arguing its own case to the person approving a destructive action.
+    ///
+    /// The daemon's obligation, enforced where the card is minted: project
+    /// through `ainb_fleet_tools::server::project_arguments` (a filter over the
+    /// tool table's declared `properties`) BEFORE persisting, so an undeclared
+    /// key never reaches a card at all.
+    pub arguments: serde_json::Value,
+    /// The session the tool would act on, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_key: Option<String>,
+    /// Card lifecycle.
+    pub state: FleetConfirmState,
+    /// Creation time in epoch milliseconds.
+    pub created_at: i64,
+    /// Server-side expiry in epoch milliseconds; strictly shorter than part
+    /// 1's per-turn deadline so the deadline never converges a turn out from
+    /// under a pending card.
+    pub expires_at: i64,
+}
+
+/// Parameters for `fleet/confirm_list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirmListParams {
+    /// Optional exact scope filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
+}
+
+/// Result for `fleet/confirm_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirmListResult {
+    /// Open cards, oldest first.
+    pub confirms: Vec<FleetConfirm>,
+}
+
+/// The answer to a confirm card, internally tagged like [`ControlAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+pub enum FleetConfirmAnswer {
+    /// Run the tool with the arguments as proposed.
+    Approve,
+    /// Refuse; the suspended tool result resolves as denied.
+    Deny,
+    /// Run the tool with operator-edited arguments.
+    Edit {
+        /// The arguments to run INSTEAD of the proposed ones.
+        arguments: serde_json::Value,
+    },
+}
+
+/// Parameters for `fleet/confirm_answer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirmAnswerParams {
+    /// The card being answered.
+    pub confirm_id: String,
+    /// Approve, deny, or approve with edited arguments.
+    #[serde(flatten)]
+    pub answer: FleetConfirmAnswer,
+}
+
+/// Result for `fleet/confirm_answer`.
+///
+/// A card is SINGLE-USE: answering an already-answered or already-expired
+/// `confirm_id` is a typed error, never a second execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirmAnswerResult {
+    /// The card that was answered.
+    pub confirm_id: String,
+    /// Its terminal state.
+    pub state: FleetConfirmState,
+}
+
+/// Payload of the `fleet/confirm_event` notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetConfirmEventParams {
+    /// The card at its new state (opened, answered, or expired).
+    pub confirm: FleetConfirm,
+}
+
+/// Guardrail class of one copilot tool invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetActivityClass {
+    /// Reads fleet state; runs automatically.
+    Read,
+    /// Writes to a session; runs automatically and always logs a row.
+    Write,
+    /// Interrupt / kill / archive; always confirmed.
+    Destructive,
+}
+
+/// How one copilot tool invocation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetActivityOutcome {
+    /// The tool ran.
+    Ok,
+    /// An operator denied the confirm card.
+    Denied,
+    /// The confirm card expired unanswered.
+    Expired,
+    /// The tool ran and failed.
+    Error,
+}
+
+/// One append-only copilot activity row.
+///
+/// `seq` is the commit-ordered cursor SQLite assigns inside the write
+/// transaction, exactly as `fleet_message.seq` is; `id` is stable external
+/// identity and is never an ordering key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetActivityRow {
+    /// Commit-ordered cursor.
+    pub seq: i64,
+    /// Daemon-minted stable row identity.
+    pub id: String,
+    /// Scope the action was taken in.
+    pub scope_key: String,
+    /// The MCP tool invoked.
+    pub tool: String,
+    /// Guardrail class the classifier assigned.
+    pub class: FleetActivityClass,
+    /// The session acted on, when the tool named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_key: Option<String>,
+    /// Outcome.
+    pub outcome: FleetActivityOutcome,
+    /// Short human detail; never the model's justification text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Creation time in epoch milliseconds.
+    pub created_at: i64,
+}
+
+/// Parameters for `fleet/activity_list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetActivityListParams {
+    /// Optional exact scope filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
+    /// Return rows strictly after this commit-ordered `seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<i64>,
+    /// Requested row count, clamped to [`FLEET_ACTIVITY_LIST_MAX`].
+    pub limit: u32,
+}
+
+/// Result for `fleet/activity_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetActivityListResult {
+    /// Rows in ascending commit order.
+    pub activities: Vec<FleetActivityRow>,
+    /// Cursor for the next page, or `null` when this page is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_seq: Option<i64>,
+}
+
+/// Payload of the `fleet/activity_event` notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetActivityEventParams {
+    /// The committed row.
+    pub activity: FleetActivityRow,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1450,12 +2022,59 @@ mod tests {
             FLEET_CAPABILITY_USAGE_READ,
             FLEET_CAPABILITY_QUOTA_READ,
             FLEET_CAPABILITY_RUNTIME_READ,
+            FLEET_CAPABILITY_DASHBOARD_READ,
         ] {
             assert!(
                 FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
                 "{id:?} has dispatch arms but is not advertised"
             );
         }
+        // Part 2 phase A2 landed all six of its dispatch arms, so all four of
+        // its capabilities moved into the catalogue in that same change. The
+        // rule is unchanged and still runs both ways: a capability is
+        // advertised WITH its handler, never before it.
+        for id in [
+            FLEET_CAPABILITY_CHAT_WRITE,
+            FLEET_CAPABILITY_CHAT_READ,
+            FLEET_CAPABILITY_COPILOT_CONFIGURE,
+            FLEET_CAPABILITY_CONFIRM_ANSWER,
+        ] {
+            assert!(
+                FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
+                "{id:?} has dispatch arms but is not advertised"
+            );
+        }
+    }
+
+    /// The scope grammar, including the channel prefix part 2 mints.
+    ///
+    /// `fleet/message_send` fails CLOSED on a prefix it cannot parse, so this
+    /// is the deliberate admission part 1's refusal predicted: a channel scope
+    /// is legal grammar, and the recipients-are-members check belongs to the
+    /// handler that can read the membership.
+    #[test]
+    fn scope_grammar_parses_channel_and_refuses_the_unknown() {
+        assert_eq!(
+            FleetScope::parse("session:acp:01J0KEY"),
+            Some(FleetScope::Session("acp:01J0KEY"))
+        );
+        assert_eq!(
+            FleetScope::parse("broadcast:01J0BCAST"),
+            Some(FleetScope::Broadcast("01J0BCAST"))
+        );
+        assert_eq!(
+            FleetScope::parse("channel:copilot"),
+            Some(FleetScope::Channel("copilot"))
+        );
+        assert_eq!(
+            FleetScope::parse("  channel:01J0CH  "),
+            Some(FleetScope::Channel("01J0CH"))
+        );
+        // Fail closed: an unknown prefix, a bare word, an empty tail.
+        assert_eq!(FleetScope::parse("thread:01J0"), None);
+        assert_eq!(FleetScope::parse("copilot"), None);
+        assert_eq!(FleetScope::parse("channel:"), None);
+        assert_eq!(FleetScope::parse(""), None);
     }
 
     fn round_trip<T>(value: &T)
@@ -1503,10 +2122,27 @@ mod tests {
         });
         round_trip(&FleetMessageSendParams {
             scope_key: None,
+            actor: None,
             targets: vec!["acp:01J0KEY".to_string()],
             text: "hello".to_string(),
             request_id: "req-1".to_string(),
         });
+        round_trip(&FleetMessageSendParams {
+            scope_key: None,
+            actor: Some("copilot".to_string()),
+            targets: vec!["acp:01J0KEY".to_string()],
+            text: "hello".to_string(),
+            request_id: "req-1".to_string(),
+        });
+        // An older client omits the key entirely; that must still decode, and
+        // it must mean the operator rather than failing the frame.
+        let legacy: FleetMessageSendParams = serde_json::from_value(serde_json::json!({
+            "targets": ["acp:01J0KEY"],
+            "text": "hello",
+            "request_id": "req-1"
+        }))
+        .expect("a pre-actor frame still decodes");
+        assert!(legacy.actor.is_none());
         round_trip(&FleetMessageSendResult {
             message_id: "01J0MSG".to_string(),
             deliveries: vec![FleetMessageDelivery {
@@ -1643,5 +2279,67 @@ mod tests {
         .unwrap();
         // Delivery states reuse the durable receipt vocabulary verbatim.
         assert_eq!(delivery["state"], "REJECTED");
+    }
+
+    #[test]
+    fn usage_dashboard_wire_contract_round_trips() {
+        round_trip(&FleetUsageDashboardParams {});
+        round_trip(&FleetUsageDashboardResult {
+            state: FleetUsageSummaryState::Ready,
+            generated_at: Some(1_700_000_000_000),
+            start_at: Some(1_668_000_000_000),
+            end_at: Some(1_700_000_000_000),
+            cost_complete: false,
+            totals: Some(FleetUsageBucket {
+                input_tokens: 500_000,
+                cache_creation_tokens: 10_000,
+                cache_read_tokens: 20_000,
+                output_tokens: 100_000,
+                reasoning_tokens: 5_000,
+                call_count: 42,
+                session_count: 7,
+                project_count: 3,
+                cost_usd: Some(12.50),
+            }),
+            weekly: vec![FleetUsageWeeklyBucket {
+                week_start: "2026-07-28".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            heatmap: vec![FleetHeatmapCell {
+                date: "2026-08-06".to_string(),
+                call_count: 15,
+                cost_usd: Some(2.30),
+            }],
+            forecast: Some(FleetUsageForecast {
+                projected_30d_cost_usd: Some(125.00),
+                projected_30d_tokens: 5_000_000,
+                avg_daily_cost_usd: Some(4.17),
+                avg_daily_tokens: 166_667,
+                sample_days: 7,
+            }),
+            providers: vec![],
+            models: vec![],
+            projects: vec![],
+            sessions: vec![FleetUsageSessionBucket {
+                session_id: "claude:myproject:sess-1".to_string(),
+                provider: "claude".to_string(),
+                project: "myproject".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            branches: vec![FleetUsageBranchBucket {
+                branch: "feat/my-feature".to_string(),
+                bucket: FleetUsageBucket::default(),
+            }],
+            tools: vec![FleetUsageNamedBucket {
+                name: "Edit".to_string(),
+                call_count: 100,
+            }],
+            mcp_servers: vec![],
+            shell_commands: vec![FleetUsageNamedBucket {
+                name: "cargo test".to_string(),
+                call_count: 30,
+            }],
+            detail: None,
+        });
     }
 }
