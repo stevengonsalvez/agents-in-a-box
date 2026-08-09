@@ -620,6 +620,27 @@ mod tests {
         }
     }
 
+    /// Raw `lsof` output for `pid`'s unix sockets, for failure messages only.
+    ///
+    /// Mirrors the argv [`pid_holds_socket`] uses, and reports the exit status and
+    /// stderr it discards, so a red test says which of the two it hit: no name to
+    /// match, or a name that did not match.
+    fn lsof_dump(pid: u32) -> String {
+        let uid = nix::unistd::Uid::current().as_raw().to_string();
+        match Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-u", &uid, "-U", "-F", "n"])
+            .output()
+        {
+            Ok(out) => format!(
+                "  status={}\n  stdout={:?}\n  stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => format!("  lsof failed to spawn: {e}"),
+        }
+    }
+
     /// One orphan row for `pid`, as `scan()` would classify a stranger notifyd.
     fn orphan_row(pid: u32) -> Vec<ClassifiedDaemon> {
         vec![ClassifiedDaemon {
@@ -678,12 +699,30 @@ mod tests {
         // The recording signaller never actually kills, so the decoy survives the
         // grace and the escalation fires too — both signals prove the target was
         // accepted by the ownership proof at both decision points.
+        //
+        // On a mismatch, dump what the proof actually saw. A bare `left == right`
+        // says only that nothing was signalled, which is indistinguishable from
+        // the proof failing for an environmental reason: `pid_holds_socket` folds
+        // a missing `lsof`, a non-zero exit and an unparsable name into the same
+        // `false`. The raw output separates "lsof cannot name this socket here"
+        // from "the matching logic is wrong".
         assert_eq!(
             delivered,
             vec![
                 (decoy.pid(), Signal::SIGTERM),
                 (decoy.pid(), Signal::SIGKILL)
-            ]
+            ],
+            "ownership proof did not hold for the decoy.\n\
+             spared_unproven={:?}\n\
+             expected socket={}\n\
+             pid_holds_socket={}\n\
+             raw lsof -a -p {} -u {} -U -F n:\n{}",
+            report.spared_unproven,
+            my_paths.socket.display(),
+            pid_holds_socket(decoy.pid(), &my_paths.socket),
+            decoy.pid(),
+            nix::unistd::Uid::current().as_raw(),
+            lsof_dump(decoy.pid()),
         );
         assert!(report.spared_unproven.is_empty());
     }
