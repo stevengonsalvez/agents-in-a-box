@@ -127,6 +127,7 @@ impl FleetHangar {
                     event_type,
                     payload: &payload,
                     observed_at,
+                    transcript_model: None,
                 },
             ))
             .expect("apply authoritative Fleet hook");

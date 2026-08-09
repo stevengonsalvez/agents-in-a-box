@@ -147,6 +147,10 @@ mod tests {
             attention_authority: "inferred".to_string(),
             transport_updated_at: 0,
             transport_authority: "inferred".to_string(),
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            model_authority: "inferred".to_string(),
             version: 1,
             updated_revision: 0,
         }
