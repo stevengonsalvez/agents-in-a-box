@@ -120,27 +120,73 @@ write_settings() {
   rm -f "$SBX_WORK/.claude/settings.json" 2>/dev/null || true
 }
 
+# Block until a socket is actually bound, or until the process that should bind
+# it dies, or until we run out of patience.
+#
+# A fixed `sleep` here reports "absent" for a socket that is merely still coming
+# up, which reads exactly like a broken build. That cost a real debugging
+# detour: notifyd was healthy and binding normally, and the script said it was
+# not. Poll the thing we actually care about instead of guessing a duration, and
+# when it genuinely fails, print the log rather than leaving the caller to hunt.
+#
+#   $1 socket path   $2 label   $3 pid to watch (may be empty)   $4 timeout secs
+wait_for_socket() {
+  local sock="$1" label="$2" pid="${3:-}" budget="${4:-30}" waited=0
+  while [ "$waited" -lt "$budget" ]; do
+    [ -S "$sock" ] && { info "$label ready (${waited}s)"; return 0; }
+    if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+      info "$label FAILED: pid $pid exited before binding $(basename "$sock")"
+      tail -5 "$SBX_HOME/hangar/logs/${label}.log" 2>/dev/null | sed 's/^/      /'
+      return 1
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  info "$label TIMEOUT: $(basename "$sock") not bound after ${budget}s"
+  tail -5 "$SBX_HOME/hangar/logs/${label}.log" 2>/dev/null | sed 's/^/      /'
+  return 1
+}
+
 # --- commands ---------------------------------------------------------------
 cmd_up() {
   guard
   mkdir -p "$SBX_HOME/hangar/logs" "$SBX_WORK"
-  # Fresh DB on purpose: a snapshot of the live DB carries sibling-branch
-  # migrations (80, 81) whose files this branch does not have, and sqlx then
-  # refuses to open it. A fresh DB is built from THIS branch's migrations only.
+  # Fresh DB on purpose: a snapshot of the live DB carries migrations from other
+  # branches whose files this branch does not have, and sqlx then refuses to
+  # open it. A fresh DB is built from THIS branch's migrations only.
   [ -d "$SBX_WORK/.git" ] || { git -C "$SBX_WORK" init -q; : > "$SBX_WORK/README.md"; }
   write_settings
 
   info "home    $SBX_HOME"
   info "project $SBX_WORK"
-  env $(sbx_env) "$AINB" hangar daemon start 2>&1 | sed 's/^/  /'
+  local rc=0
+  # Capture the launcher's own exit status. Piping straight into `sed` would
+  # report sed's status instead, and we would then wait a full socket budget on
+  # a daemon that already refused to start.
+  local start_out start_rc
+  start_out=$(env $(sbx_env) "$AINB" hangar daemon start 2>&1); start_rc=$?
+  printf '%s\n' "$start_out" | sed 's/^/  /'
+  if [ "$start_rc" -ne 0 ]; then
+    info "hangar daemon FAILED to launch (exit $start_rc), not waiting for its socket"
+    rc=1
+  else
+    wait_for_socket "$SBX_HOME/hangar.sock" "hangar" \
+      "$(cat "$SBX_HOME/hangar/daemon.pid" 2>/dev/null | tr -d '[:space:]')" 45 || rc=1
+  fi
+
   # notifyd: spawn directly, never `restart` (see header note 2).
   if [ ! -S "$SBX_HOME/notify.sock" ]; then
     env $(sbx_env) nohup "$AINB" notifyd run >"$SBX_HOME/hangar/logs/notifyd.log" 2>&1 &
     echo $! > "$SBX_HOME/notifyd.sbxpid"
-    sleep 3
-    info "notifyd pid $(cat "$SBX_HOME/notifyd.sbxpid")"
+    local npid; npid=$(cat "$SBX_HOME/notifyd.sbxpid")
+    info "notifyd pid $npid"
+    # notifyd binds notify.sock first, then approve.sock; wait for BOTH, because
+    # the interview path needs the approve socket and only the broker binds it.
+    wait_for_socket "$SBX_HOME/notify.sock"  "notifyd" "$npid" 30 || rc=1
+    wait_for_socket "$SBX_HOME/approve.sock" "notifyd" "$npid" 30 || rc=1
   fi
   cmd_status
+  [ "$rc" -eq 0 ] || info "NOT READY: see the log lines above before running a test"
+  return "$rc"
 }
 
 cmd_status() {
