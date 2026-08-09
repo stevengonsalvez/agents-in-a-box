@@ -2414,6 +2414,144 @@ mod tests {
         );
     }
 
+    /// `discovered_at` records when the row was FIRST written and nothing may
+    /// move it afterwards.
+    ///
+    /// Not a cosmetic property. The daemon breaks a tie between two rows
+    /// claiming one tmux pane with `discovered_at` precisely because no sweep
+    /// writes it (`fleet::pane_claim_rank`): `last_observed_at` cannot decide
+    /// alone, since the missing-sweep's own write bumps the loser's to the
+    /// winner's value and the resulting tie inverted pane ownership every tick.
+    /// Making `discovered_at` mutable would silently restore that inversion from
+    /// another crate, so the invariant is pinned here, where it lives.
+    ///
+    /// `update_session` rewrites the column on every applied event; this holds
+    /// only because it binds the row's own value straight back and `apply_patch`
+    /// never touches it.
+    #[tokio::test]
+    async fn discovered_at_records_first_sight_and_never_moves_again() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-first",
+                "claude:s-1",
+                100,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    tmux_target: Some("demo:1.1".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    transport_health: Some("HEALTHY".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            FleetRepo::get_session(pool, "claude:s-1").await.unwrap().unwrap().discovered_at,
+            100
+        );
+
+        // Every later authority, and the shape the missing-sweep writes.
+        for (id, at, authority) in [
+            ("e-hook", 500, ObservationAuthority::Authoritative),
+            ("e-missing", 900, ObservationAuthority::Authoritative),
+            ("e-inferred", 1_300, ObservationAuthority::Inferred),
+        ] {
+            FleetRepo::apply_event(
+                pool,
+                &event(
+                    id,
+                    "claude:s-1",
+                    at,
+                    authority,
+                    FleetSessionPatch {
+                        transport_health: Some(
+                            if at == 900 { "UNAVAILABLE" } else { "HEALTHY" }.to_string(),
+                        ),
+                        ..FleetSessionPatch::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        // A backwards-dated event, which must not drag it down either.
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-late-arrival",
+                "claude:s-1",
+                50,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    display_name: Some("renamed".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let row = FleetRepo::get_session(pool, "claude:s-1").await.unwrap().unwrap();
+        assert_eq!(
+            row.discovered_at, 100,
+            "discovered_at is first sight, so no event may move it in either direction"
+        );
+        assert!(
+            row.last_observed_at > row.discovered_at,
+            "while last_observed_at does move, which is why it cannot break a pane tie alone"
+        );
+
+        // The two writers that bypass `apply_event` entirely.
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-managed",
+                "claude:managed",
+                1_400,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    management_state: Some("MANAGED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-legacy",
+                "claude:legacy",
+                1_500,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    management_state: Some("DEGRADED".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        FleetRepo::supersede_session(pool, "claude:legacy", "claude:managed", 9_000)
+            .await
+            .unwrap()
+            .expect("supersede applies");
+        FleetRepo::archive_session(pool, "claude:s-1", 9_999).await.unwrap();
+
+        for (key, expected) in [("claude:legacy", 1_500), ("claude:s-1", 100)] {
+            assert_eq!(
+                FleetRepo::get_session(pool, key).await.unwrap().unwrap().discovered_at,
+                expected,
+                "neither superseding nor archiving may restamp {key}"
+            );
+        }
+    }
+
     /// An archived session keeps its browsable timeline; a superseded duplicate
     /// still does not get one of its own.
     ///
