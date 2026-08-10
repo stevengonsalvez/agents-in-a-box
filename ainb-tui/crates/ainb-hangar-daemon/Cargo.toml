@@ -199,6 +199,10 @@ tokio-util = { workspace = true }
 # This lets the integration suite consume the one canonical fake-bd source of
 # truth instead of duplicating the script writer (P2.2 REFACTOR intent).
 ainb-hangar-daemon = { path = ".", features = ["test-support", "test-clock"] }
+# `copilot_gate_live` drives the copilot's REAL MCP tool server against a REAL
+# daemon over a real socket, so it needs the same client the tool server binary
+# builds in production. Dev-only: the daemon never dials itself.
+ainb-hangar-client = { path = "../ainb-hangar-client" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",

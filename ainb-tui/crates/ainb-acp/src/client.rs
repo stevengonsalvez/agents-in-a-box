@@ -51,7 +51,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, CloseSessionRequest, ContentBlock, InitializeRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    McpServer, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionModeRequest, TextContent,
@@ -424,9 +424,26 @@ impl AdapterProcess {
     /// `session/new` plus the I13 mode assertion and the static config
     /// application. Returns the adapter's id.
     pub async fn new_session(&self, cwd: &Path) -> Result<String, AcpError> {
-        let reply =
-            send_within_spawn_timeout(&self.connection, "session/new", NewSessionRequest::new(cwd))
-                .await?;
+        self.new_session_with_mcp(cwd, &[]).await
+    }
+
+    /// [`Self::new_session`] with MCP servers attached to the session.
+    ///
+    /// PER SESSION, deliberately not per adapter: adapter processes are pooled
+    /// across sessions, so a tool table hung off [`AdapterConfig`] would hand
+    /// the fleet's destructive tools to every ordinary agent session sharing
+    /// that process. Only the copilot's session asks for them.
+    pub async fn new_session_with_mcp(
+        &self,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
+    ) -> Result<String, AcpError> {
+        let reply = send_within_spawn_timeout(
+            &self.connection,
+            "session/new",
+            NewSessionRequest::new(cwd).mcp_servers(mcp_servers.to_vec()),
+        )
+        .await?;
         let session_id = reply.session_id.to_string();
         if let Err(error) = self.apply_static_config(&session_id, reply.modes.as_ref()).await {
             // The adapter created the session before we refused it. Left open it
@@ -449,6 +466,21 @@ impl AdapterProcess {
     /// claude mode assertion and silently degrade to re-prime, so `session/load`
     /// would never actually be used.
     pub async fn load_session(&self, session_id: &str, cwd: &Path) -> Result<(), AcpError> {
+        self.load_session_with_mcp(session_id, cwd, &[]).await
+    }
+
+    /// [`Self::load_session`] with MCP servers attached to the session.
+    ///
+    /// Re-declared on load for the same reason the config options are: adapter
+    /// state does not survive a load. A resumed copilot session that skipped
+    /// this would come back with no tools at all, which reads as a copilot that
+    /// silently stopped being able to do anything.
+    pub async fn load_session_with_mcp(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
+    ) -> Result<(), AcpError> {
         if !self.supports_load {
             return Err(AcpError::LoadUnsupported {
                 adapter: self.provider.clone(),
@@ -457,7 +489,7 @@ impl AdapterProcess {
         let reply = send_within_spawn_timeout(
             &self.connection,
             "session/load",
-            LoadSessionRequest::new(session_id.to_string(), cwd),
+            LoadSessionRequest::new(session_id.to_string(), cwd).mcp_servers(mcp_servers.to_vec()),
         )
         .await?;
         self.apply_static_config(session_id, reply.modes.as_ref()).await
