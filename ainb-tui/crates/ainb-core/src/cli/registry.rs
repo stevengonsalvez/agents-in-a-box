@@ -2073,6 +2073,19 @@ impl CliCommand for FleetCommand {
                             .help("Explicit scope key (default: the recipient's own scope)"),
                     )
                     .arg(
+                        clap::Arg::new("origin")
+                            .long("origin")
+                            // Free-text as far as clap is concerned, and the
+                            // daemon is the thing that decides whether the id
+                            // is real: a dash-prefixed value must reach it as
+                            // a refusal, not die here as an unknown flag.
+                            .allow_hyphen_values(true)
+                            .help(
+                                "Reply into this message's thread (read back with \
+                                 `msg list --origin`)",
+                            ),
+                    )
+                    .arg(
                         clap::Arg::new("request-id")
                             .long("request-id")
                             .help("Idempotency token; a replay with different content is refused"),
@@ -2248,7 +2261,45 @@ impl CliCommand for FleetCommand {
                             .help("Member session_key (repeat); none for a copilot channel"),
                     ),
             )
-            .subcommand(Command::new("list").about("List channels and their members"));
+            .subcommand(Command::new("list").about("List channels and their members"))
+            .subcommand(
+                Command::new("send")
+                    .about(
+                        "Send one message to every member of a channel, with per-member receipts",
+                    )
+                    .arg(
+                        clap::Arg::new("channel")
+                            .long("channel")
+                            .required(true)
+                            // The id and the minted scope are both printed by
+                            // `channel list`, and both are accepted here; a
+                            // dash-prefixed value must reach the lookup as a
+                            // refusal rather than die as an unknown flag.
+                            .allow_hyphen_values(true)
+                            .help("Channel id or its channel:<id> scope"),
+                    )
+                    .arg(
+                        clap::Arg::new("text")
+                            .long("text")
+                            // Same trap as `msg send --text`: a body may LEAD
+                            // with a dash ("-y do the thing"), and clap would
+                            // otherwise eat it as an unknown flag. `-` alone
+                            // still means stdin.
+                            .allow_hyphen_values(true)
+                            .help("Message body, or `-` to read stdin"),
+                    )
+                    .arg(
+                        clap::Arg::new("request-id")
+                            .long("request-id")
+                            .help("Idempotency token; a replay with different content is refused"),
+                    )
+                    .after_help(
+                        "The recipient list is the CHANNEL's membership, resolved from the daemon. \
+                         Exit 0 means the message was persisted and every leg reached a terminal \
+                         state, NOT that any member received it: read deliveries[].state and \
+                         deliveries[].detail for the per-member outcome.",
+                    ),
+            );
         let copilot = Command::new("copilot")
             .about("The fleet copilot session's per-session adapter config")
             .subcommand_required(true)

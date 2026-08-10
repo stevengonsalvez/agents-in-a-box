@@ -170,7 +170,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
 /// otherwise buffer the whole file in this process only to have the daemon
 /// refuse it. One byte past the limit is read deliberately, so "exactly at the
 /// limit" and "over it" are distinguishable without reading the rest.
-fn resolve_text(raw: Option<&String>) -> Result<String, CliFailure> {
+pub(crate) fn resolve_text(raw: Option<&String>) -> Result<String, CliFailure> {
     let Some(raw) = raw else {
         return Err(CliFailure::bad_input(
             "--text is required (use `-` to read stdin)",
@@ -231,6 +231,11 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             // The CLI IS the operator's hand; the daemon's default says so.
             actor: None,
             targets,
+            // Threading is a message id, and the daemon is the only thing that
+            // can say whether this one exists in the scope being written. The
+            // CLI passes it through rather than pre-judging it, so `--origin`
+            // fails with the daemon's own reason.
+            origin_message_id: matches.get_one::<String>("origin").cloned(),
             text,
             request_id,
         })
@@ -245,7 +250,7 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     } else {
         println!("message {}", result.message_id);
         for delivery in &result.deliveries {
-            println!("  {} {:?}", delivery.session_key, delivery.state);
+            println!("  {}", render_delivery(delivery));
         }
     }
     Ok(())
@@ -318,6 +323,28 @@ async fn follow(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
     }
 }
 
+/// One delivery leg as one terminal-safe line: recipient, state, and the
+/// daemon's REASON when it has one.
+///
+/// The reason is the difference between a receipt an operator can act on and
+/// one they can only stare at: `REJECTED` alone does not say whether to retry
+/// or to go and look at the session, `REJECTED … target_not_running` does.
+pub(crate) fn render_delivery(delivery: &ainb_hangar_proto::fleet::FleetMessageDelivery) -> String {
+    // The protocol's word, not a fourth private copy of it: the daemon writes
+    // this token, the TUI pane paints it, and this line prints it, so an
+    // operator watching two surfaces reads ONE vocabulary.
+    let state = ainb_hangar_proto::fleet::receipt_status_token(delivery.state);
+    match delivery.detail.as_deref().map(str::trim).filter(|detail| !detail.is_empty()) {
+        Some(detail) => format!(
+            "{:<10} {} · {}",
+            state,
+            escape_control(&delivery.session_key),
+            escape_control(detail)
+        ),
+        None => format!("{:<10} {}", state, escape_control(&delivery.session_key)),
+    }
+}
+
 /// Render one message as EXACTLY one line of terminal-safe text.
 ///
 /// Message bodies are attacker-influenced: anything on the bus can send one,
@@ -329,8 +356,14 @@ async fn follow(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
 ///
 /// This is the LOSSY surface by design; `--format json` is the lossless one.
 fn render_message(message: &FleetMessage) -> String {
+    // A reply says which message it answers. Without it a thread read
+    // (`msg list --origin <id>`) is indistinguishable from a scope read, and
+    // the one fact the thread view exists to show is the linkage.
+    let thread = message.origin_message_id.as_deref().map_or_else(String::new, |origin| {
+        format!(" ->{}", escape_control(origin))
+    });
     format!(
-        "{} [{}] {}: {}",
+        "{}{thread} [{}] {}: {}",
         escape_control(&message.id),
         escape_control(&message.scope_key),
         escape_control(&message.sender),
@@ -411,5 +444,23 @@ mod tests {
     #[test]
     fn a_literal_backslash_is_escaped_too() {
         assert!(render_message(&message(r"C:\n")).ends_with(r"C:\\n"));
+    }
+
+    /// A threaded reply names its origin, and a root message does not: the
+    /// linkage is the only thing that distinguishes a thread read from a scope
+    /// read on this surface.
+    #[test]
+    fn a_reply_renders_the_message_it_answers() {
+        let mut reply = message("on it");
+        reply.origin_message_id = Some("01J0ORIGIN".to_string());
+        let rendered = render_message(&reply);
+        assert!(
+            rendered.starts_with("01J0MSG ->01J0ORIGIN ["),
+            "a reply does not name its origin: {rendered}"
+        );
+        assert!(
+            !render_message(&message("on it")).contains("->"),
+            "a root message claimed a thread join it does not have"
+        );
     }
 }

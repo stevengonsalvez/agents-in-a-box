@@ -51,6 +51,7 @@ pub async fn execute_channel(matches: &clap::ArgMatches, format: OutputFormat) -
     match matches.subcommand() {
         Some(("create", sub)) => channel_create(sub, format).await,
         Some(("list", _)) => channel_list(format).await,
+        Some(("send", sub)) => channel_send(sub, format).await,
         _ => CliFailure::bad_input("unknown `ainb fleet channel` verb: try --help").exit(),
     }
 }
@@ -93,6 +94,90 @@ async fn channel_list(format: OutputFormat) -> Result<()> {
     } else {
         for channel in &result.channels {
             println!("{}", render_channel(channel));
+        }
+    }
+    Ok(())
+}
+
+/// Send one message into a channel, addressed to its whole membership.
+///
+/// The membership is RESOLVED from the daemon, never asked for on the command
+/// line. `fleet/message_send` refuses a target that is not a member, so a
+/// caller who had to type `--target` per member would be maintaining a copy of
+/// the channel's roster in their shell history, and every send after a
+/// membership change would be refused for a reason that reads like a bug.
+///
+/// The fan-out is ONE send with N legs (part 2's Phase C rule), so the answer
+/// is one message id and one receipt per recipient.
+async fn channel_send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_proto::fleet::{FleetMessageSendParams, FleetMessageSendResult};
+
+    let wanted = matches.get_one::<String>("channel").cloned().unwrap_or_default();
+    if wanted.trim().is_empty() {
+        CliFailure::bad_input("--channel is required").exit();
+    }
+    let wanted = wanted.trim();
+    let text = match crate::cli::fleet::msg::resolve_text(matches.get_one::<String>("text")) {
+        Ok(text) => text,
+        Err(failure) => failure.exit(),
+    };
+    if text.trim().is_empty() {
+        CliFailure::bad_input("message text must not be empty").exit();
+    }
+
+    let listed: FleetChannelListResult =
+        call(methods::FLEET_CHANNEL_LIST, &serde_json::json!({})).await;
+    // By id OR by the minted scope, because both are printed by `channel list`
+    // and an operator will paste whichever their eye landed on.
+    let Some(channel) = listed
+        .channels
+        .into_iter()
+        .find(|channel| channel.id == wanted || channel.scope_key == wanted)
+    else {
+        CliFailure::bad_input(format!(
+            "no channel with id or scope {wanted:?}; list them with `ainb fleet channel list`"
+        ))
+        .exit();
+    };
+    if channel.recipients.is_empty() {
+        CliFailure::bad_input(format!(
+            "channel {:?} has no members to send to",
+            escape_control(&channel.name)
+        ))
+        .exit();
+    }
+    // A caller that supplies no --request-id gets a fresh one, exactly like
+    // `msg send`: a retried shell command is a NEW message, not a surprise
+    // idempotent replay.
+    let request_id = matches.get_one::<String>("request-id").cloned().unwrap_or_else(|| {
+        format!(
+            "cli:{}",
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen)
+        )
+    });
+    let result: FleetMessageSendResult = call(
+        methods::FLEET_MESSAGE_SEND,
+        &FleetMessageSendParams {
+            scope_key: Some(channel.scope_key.clone()),
+            // The CLI IS the operator's hand; the daemon's default says so.
+            actor: None,
+            targets: channel.recipients.clone(),
+            origin_message_id: None,
+            text,
+            request_id,
+        },
+    )
+    .await;
+    if format == OutputFormat::Json {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        println!(
+            "message {} -> {}",
+            escape_control(&result.message_id),
+            escape_control(&channel.scope_key)
+        );
+        for delivery in &result.deliveries {
+            println!("  {}", crate::cli::fleet::msg::render_delivery(delivery));
         }
     }
     Ok(())
