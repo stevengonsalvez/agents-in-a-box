@@ -985,17 +985,35 @@ async fn two_parked_permissions_are_both_answerable_over_the_wire() {
     // OLDEST first: the fingerprint the session row is NOT carrying, and the
     // exact answer the old gate refused as stale.
     for (index, (attention_id, fingerprint)) in asks.iter().enumerate() {
-        let approved = client
-            .call(
-                methods::FLEET_ACTION,
-                serde_json::json!({
-                    "session_key": session_key,
-                    "expected_version": harness.version(&session_key).await,
-                    "request_id": format!("req-acp-two-answer-{index}"),
-                    "action": { "action": "approve", "request_fingerprint": fingerprint },
-                }),
-            )
-            .await;
+        // The second fixture request can finish projecting after both attention
+        // rows are visible. A real Fleet client refreshes optimistic version
+        // conflicts, so do the same before judging the parked-request route.
+        let retry_deadline = Instant::now() + Duration::from_secs(5);
+        let approved = loop {
+            let approved = client
+                .call(
+                    methods::FLEET_ACTION,
+                    serde_json::json!({
+                        "session_key": session_key,
+                        "expected_version": harness.version(&session_key).await,
+                        "request_id": format!("req-acp-two-answer-{index}"),
+                        "action": { "action": "approve", "request_fingerprint": fingerprint },
+                    }),
+                )
+                .await;
+            let stale_version = approved["error"]["code"] == -32602
+                && approved["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(" version is "));
+            if !stale_version {
+                break approved;
+            }
+            assert!(
+                Instant::now() < retry_deadline,
+                "ask {index} never reached a stable Fleet version: {approved}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         assert!(approved["error"].is_null(), "ask {index}: {approved}");
         assert_eq!(
             approved["result"]["receipt"]["status"], "DELIVERED",
