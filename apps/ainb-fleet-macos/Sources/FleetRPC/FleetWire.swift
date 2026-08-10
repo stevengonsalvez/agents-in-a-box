@@ -492,7 +492,7 @@ struct FleetActionParams: Codable, Equatable {
     private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", expectedVersion = "expected_version", requestID = "request_id", action }
 }
 
-enum ActionReceiptStatus: String, Codable, Equatable { case pending = "PENDING", delivered = "DELIVERED", failed = "FAILED", unknown = "UNKNOWN", rejected = "REJECTED" }
+enum ActionReceiptStatus: String, Codable, Equatable, CaseIterable { case pending = "PENDING", delivered = "DELIVERED", failed = "FAILED", unknown = "UNKNOWN", rejected = "REJECTED" }
 
 struct FleetActionReceipt: Codable, Equatable {
     let requestID: String
@@ -1000,10 +1000,19 @@ struct FleetMessageSendParams: Encodable, Equatable {
     }
 }
 
+/// One recipient's leg of a send, with the daemon's REASON when it has one.
+///
+/// `detail` is not decoration: `REJECTED` alone does not tell an operator
+/// whether to retry or to go and look at the session, while `REJECTED
+/// claude:gone · target_not_running` does. The TUI's `receipt_line` and the
+/// CLI's `render_delivery` both print it, so a client that dropped the key
+/// would be the one surface unable to say why. The daemon omits the key when
+/// it has no reason, which a plain optional decodes.
 struct FleetMessageDelivery: Codable, Equatable {
     let sessionKey: String
     let state: ActionReceiptStatus
-    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", state }
+    let detail: String?
+    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", state, detail }
 }
 
 struct FleetMessageSendResult: Codable, Equatable {

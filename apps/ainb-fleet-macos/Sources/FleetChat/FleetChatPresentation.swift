@@ -274,6 +274,55 @@ enum FleetChatLabels {
         case .unknown: "Unrecognised provider"
         }
     }
+
+    /// The state word for one delivery leg.
+    ///
+    /// The daemon's own token, verbatim, because the TUI pane
+    /// (`fleet_chat::delivery_state_label`) and the CLI (`msg::render_delivery`)
+    /// print exactly these words: an operator watching two surfaces must read
+    /// ONE vocabulary. Wildcard-free, so a new status is a compile error here.
+    static func deliveryState(_ state: ActionReceiptStatus) -> String {
+        switch state {
+        case .pending: "PENDING"
+        case .delivered: "DELIVERED"
+        case .failed: "FAILED"
+        case .unknown: "UNKNOWN"
+        case .rejected: "REJECTED"
+        }
+    }
+
+    /// One leg as one line: state, recipient, and the daemon's REASON when it
+    /// has one. Mirrors the TUI's `receipt_line`.
+    static func receiptLine(_ delivery: FleetMessageDelivery) -> String {
+        let state = deliveryState(delivery.state)
+        let detail = delivery.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return detail.isEmpty
+            ? "\(state) \(delivery.sessionKey)"
+            : "\(state) \(delivery.sessionKey) · \(detail)"
+    }
+
+    /// What a send actually did, as one operator-facing line.
+    ///
+    /// A send whose only leg came back REJECTED still answers 200 on the RPC:
+    /// the daemon reports per-leg honesty in the RESULT, not in the transport.
+    /// A client that discarded the result would clear the composer and show the
+    /// operator's own message in the timeline with no notice at all, i.e. a
+    /// 1-of-1 fan-out where 0 delivered reading as complete success. The
+    /// counts and the words are the TUI's (`ChatState::apply_receipts` plus
+    /// `receipt_line`), so the two surfaces cannot disagree about what happened.
+    static func deliverySummary(_ deliveries: [FleetMessageDelivery]) -> String {
+        let total = deliveries.count
+        let undelivered = deliveries.filter { $0.state != .delivered }
+        let delivered = total - undelivered.count
+        var line = "delivered to \(delivered)/\(total)"
+        if !undelivered.isEmpty {
+            line += " · \(undelivered.count) not delivered"
+            // The reason, per refused leg: "REJECTED" alone does not say
+            // whether to retry or to go and look at the session.
+            line += " · " + undelivered.map(receiptLine).joined(separator: " · ")
+        }
+        return line
+    }
 }
 
 /// Everything one page of the copilot conversation put on screen.

@@ -236,6 +236,93 @@ final class FleetChatPresentationTests: XCTestCase {
         XCTAssertEqual(object["request_id"] as? String, "req-1")
     }
 
+    // MARK: - Send receipts
+
+    /// The daemon's REASON survives the wire onto this client.
+    ///
+    /// Decoded from the `message_send` result shape rather than built in
+    /// Swift: a `detail` the type declares but the CodingKeys never read would
+    /// pass an initialiser-based test and still print REJECTED with no reason,
+    /// which is the one thing the operator needs to decide whether to retry.
+    func testDeliveryDetailSurvivesTheWire() throws {
+        let result = try FleetWire.decoder().decode(FleetMessageSendResult.self, from: Data("""
+        {"message_id":"01J0MSG","deliveries":[
+          {"session_key":"claude:gone","state":"REJECTED","detail":"target_not_running"}]}
+        """.utf8))
+
+        let leg = try XCTUnwrap(result.deliveries.first)
+        XCTAssertEqual(leg.detail, "target_not_running", "the reason must cross the socket")
+        XCTAssertTrue(
+            FleetChatLabels.receiptLine(leg).contains("target_not_running"),
+            "a receipt that cannot say WHY is one an operator can only stare at"
+        )
+    }
+
+    /// A leg with no reason decodes too: the daemon omits the key rather than
+    /// sending null, and an older daemon never sends it at all.
+    func testADeliveryWithNoReasonStillDecodes() throws {
+        let result = try FleetWire.decoder().decode(FleetMessageSendResult.self, from: Data("""
+        {"message_id":"01J0MSG","deliveries":[{"session_key":"claude:one","state":"DELIVERED"}]}
+        """.utf8))
+
+        XCTAssertNil(try XCTUnwrap(result.deliveries.first).detail)
+    }
+
+    /// The hunt-2 failure in its worst form: a 1-of-1 fan-out where 0
+    /// delivered must NOT read as success. Asserted on the decoded result, not
+    /// on a view, so it fails whatever the pane happens to look like.
+    func testALoneRejectedLegNeverReadsAsSent() throws {
+        let result = try FleetWire.decoder().decode(FleetMessageSendResult.self, from: Data("""
+        {"message_id":"01J0MSG","deliveries":[
+          {"session_key":"claude:gone","state":"REJECTED","detail":"target_not_running"}]}
+        """.utf8))
+
+        let summary = FleetChatLabels.deliverySummary(result.deliveries)
+        XCTAssertTrue(summary.contains("delivered to 0/1"), summary)
+        XCTAssertTrue(summary.contains("1 not delivered"), summary)
+        XCTAssertTrue(summary.contains("claude:gone"), summary)
+        XCTAssertTrue(summary.contains("target_not_running"), summary)
+    }
+
+    /// The vocabulary is the TUI's, word for word
+    /// (`ChatState::apply_receipts`), so an operator watching both surfaces
+    /// reads one sentence rather than two dialects of it.
+    func testAFullyDeliveredSendReadsLikeTheTUI() {
+        XCTAssertEqual(
+            FleetChatLabels.deliverySummary([
+                FleetMessageDelivery(sessionKey: "claude:one", state: .delivered, detail: nil),
+                FleetMessageDelivery(sessionKey: "codex:two", state: .delivered, detail: nil),
+            ]),
+            "delivered to 2/2"
+        )
+    }
+
+    /// Every receipt state renders a distinct word, and only `DELIVERED` reads
+    /// as success. `UNKNOWN` counts as NOT delivered on purpose: at-most-once
+    /// delivery means an unknown leg may never have arrived, and counting it as
+    /// sent is the single lie this summary exists to prevent. Adding a status
+    /// fails to COMPILE in `deliveryState` and in the classifier below.
+    func testEveryReceiptStateRendersALabelAndOnlyDeliveredIsSuccess() {
+        let states = ActionReceiptStatus.allCases
+        XCTAssertEqual(Set(states.map(FleetChatLabels.deliveryState)).count, states.count)
+        for state in states {
+            let word = FleetChatLabels.deliveryState(state)
+            XCTAssertEqual(word, state.rawValue, "the label must be the daemon's own token")
+            let readsAsSuccess: Bool = switch state {
+            case .delivered: true
+            case .pending, .failed, .unknown, .rejected: false
+            }
+            let summary = FleetChatLabels.deliverySummary([
+                FleetMessageDelivery(sessionKey: "claude:one", state: state, detail: nil)
+            ])
+            XCTAssertEqual(
+                summary == "delivered to 1/1",
+                readsAsSuccess,
+                "\(word) is counted wrongly: \(summary)"
+            )
+        }
+    }
+
     /// The page size is the daemon's own maximum. A client that pages
     /// differently from the TUI shows a different conversation for the same
     /// scope, which reads as message loss.

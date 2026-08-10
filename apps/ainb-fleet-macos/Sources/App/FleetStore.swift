@@ -650,7 +650,12 @@ final class FleetStore: ObservableObject {
             return
         }
         do {
-            chat = try await Self.pageChat(using: connection, canWrite: canWrite)
+            // Same guard as the unavailable branch above, for the same reason:
+            // this runs once a second and an unconditional @Published write
+            // re-evaluates the whole window subtree even when nothing moved.
+            // `FleetChatSurface` is Equatable, so the comparison is free.
+            let paged = try await Self.pageChat(using: connection, canWrite: canWrite)
+            if chat != paged { chat = paged }
         } catch {
             controlNotice = "Chat refresh refused: \(String(describing: error))"
         }
@@ -678,13 +683,20 @@ final class FleetStore: ObservableObject {
             guard let self else { return }
             defer { self.pendingIntentID = nil }
             do {
-                _ = try await connection.messageSend(FleetMessageSendParams(
+                // The RESULT is the honest half. A 200 says the daemon accepted
+                // the send, not that anybody received it: a lone leg coming back
+                // REJECTED (`target_not_running`) or UNKNOWN
+                // (`tmux_identity_unknown`) answers 200 too, and discarding it
+                // would clear the composer, re-page, and leave the operator
+                // reading their own message in the timeline as proof it landed.
+                let result = try await connection.messageSend(FleetMessageSendParams(
                     scopeKey: scopeKey,
                     targets: [target],
                     originMessageID: nil,
                     text: trimmed,
                     requestID: requestID
                 ))
+                self.controlNotice = FleetChatLabels.deliverySummary(result.deliveries)
             } catch {
                 self.controlNotice = "Chat send refused: \(String(describing: error))"
                 return
