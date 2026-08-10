@@ -45,6 +45,9 @@
 		A100000000000000000000107 /* claude.png in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010A /* claude.png */; };
 		A100000000000000000000108 /* codex.png in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010B /* codex.png */; };
 		A100000000000000000000109 /* copilot.png in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010C /* copilot.png */; };
+		A100000000000000000000111 /* FleetChatPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000110 /* FleetChatPresentation.swift */; };
+		A100000000000000000000113 /* FleetChatPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000112 /* FleetChatPaneView.swift */; };
+		A100000000000000000000115 /* FleetChatPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000114 /* FleetChatPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -96,6 +99,9 @@
 		A10000000000000000000010A /* claude.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ProviderIcons/claude.png; sourceTree = "<group>"; };
 		A10000000000000000000010B /* codex.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ProviderIcons/codex.png; sourceTree = "<group>"; };
 		A10000000000000000000010C /* copilot.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ProviderIcons/copilot.png; sourceTree = "<group>"; };
+		A100000000000000000000110 /* FleetChatPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetChat/FleetChatPresentation.swift; sourceTree = SOURCE_ROOT; };
+		A100000000000000000000112 /* FleetChatPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetChat/FleetChatPaneView.swift; sourceTree = SOURCE_ROOT; };
+		A100000000000000000000114 /* FleetChatPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetChatPresentationTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000004D /* FleetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000031 /* AINBFleet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AINBFleet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000032 /* FleetRPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetRPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -132,6 +138,7 @@
 				A10000000000000000000052 /* App */,
 				A10000000000000000000056 /* FleetRPC */,
 				A100000000000000000000102 /* Notifications */,
+				A100000000000000000000116 /* FleetChat */,
 				A10000000000000000000053 /* Resources */,
 				A10000000000000000000054 /* FleetRPCTests */,
 				A10000000000000000000057 /* FleetUITests */,
@@ -178,6 +185,15 @@
 			path = Sources/Notifications;
 			sourceTree = SOURCE_ROOT;
 		};
+		A100000000000000000000116 /* FleetChat */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000110 /* FleetChatPresentation.swift */,
+				A100000000000000000000112 /* FleetChatPaneView.swift */,
+			);
+			path = Sources/FleetChat;
+			sourceTree = SOURCE_ROOT;
+		};
 		A10000000000000000000056 /* FleetRPC */ = {
 			isa = PBXGroup;
 			children = (
@@ -203,6 +219,7 @@
 				A1000000000000000000002E /* FleetDaemonContractTests.swift */,
 				A10000000000000000000043 /* FleetRosterPresentationTests.swift */,
 				A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */,
+				A100000000000000000000114 /* FleetChatPresentationTests.swift */,
 			);
 			path = Tests/FleetRPCTests;
 			sourceTree = "<group>";
@@ -381,6 +398,8 @@
 				A1000000000000000000005E /* FleetNotificationCenter.swift in Sources */,
 				A100000000000000000000103 /* FleetDesktopController.swift in Sources */,
 				A100000000000000000000105 /* FleetProviderIcon.swift in Sources */,
+				A100000000000000000000111 /* FleetChatPresentation.swift in Sources */,
+				A100000000000000000000113 /* FleetChatPaneView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -399,6 +418,7 @@
 				A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */,
 				A1000000000000000000005C /* FleetFixtureDaemon.swift in Sources */,
 				A1000000000000000000005A /* FleetFixtureDaemonFallbackTests.swift in Sources */,
+				A100000000000000000000115 /* FleetChatPresentationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

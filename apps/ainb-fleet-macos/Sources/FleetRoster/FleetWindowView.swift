@@ -11,6 +11,7 @@ struct FleetWindowView: View {
     @State private var atcPresented = false
     @State private var timelinePresented = false
     @State private var answerQueuePresented = false
+    @State private var chatPresented = false
 
     private var visibleSessions: [FleetSession] {
         FleetRosterPresentation.visibleSessions(
@@ -42,6 +43,7 @@ struct FleetWindowView: View {
         .sheet(isPresented: $timelinePresented) { FleetTimelineList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
         .sheet(isPresented: $answerQueuePresented) { FleetAnswerQueue(store: store) }
+        .sheet(isPresented: $chatPresented) { FleetChatPaneView(store: store) }
         .onAppear(perform: selectFirstVisibleSession)
         .onReceive(store.$sessions) { selectFirstVisibleSession(in: $0) }
         .onChange(of: presentation.filters) { _, _ in selectFirstVisibleSession() }
@@ -136,6 +138,9 @@ struct FleetWindowView: View {
             Button("Answer queue \(interviewCount)") { answerQueuePresented = true }
                 .disabled(interviewCount == 0)
                 .accessibilityIdentifier("fleet.answer-queue.open")
+            Button("Chat") { chatPresented = true }
+                .disabled(!store.canReadChat)
+                .accessibilityIdentifier("fleet.chat.open")
             Menu {
                 Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts)
                 Button("ATC") { atcPresented = true }.disabled(!store.canReadATC)

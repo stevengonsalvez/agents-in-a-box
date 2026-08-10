@@ -912,28 +912,168 @@ struct AtcListResult: Codable, Equatable {
 // a confirm card means "not answerable" and for an activity class means "warn
 // louder", never the reverse.
 
-enum FleetChannelKind: String, Encodable, Equatable { case copilot, broadcast, unknown }
+enum FleetChannelKind: String, Encodable, Equatable, CaseIterable { case copilot, broadcast, unknown }
 // A channel whose kind this build cannot name is still a channel with a
 // timeline, so it stays listed rather than vanishing from the sidebar.
 extension FleetChannelKind: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
-enum FleetCopilotProvider: String, Encodable, Equatable { case claude, codex, unknown }
+enum FleetCopilotProvider: String, Encodable, Equatable, CaseIterable { case claude, codex, unknown }
 extension FleetCopilotProvider: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
-enum FleetConfirmState: String, Encodable, Equatable { case open, approved, denied, expired, unknown }
+enum FleetConfirmState: String, Encodable, Equatable, CaseIterable { case open, approved, denied, expired, unknown }
 // NOT `.open`: a card in a state this build cannot name must never render as
 // answerable, or the UI offers an approve button for a lifecycle it does not
 // understand. Unknown is terminal-looking on purpose.
 extension FleetConfirmState: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
-enum FleetActivityClass: String, Encodable, Equatable { case read, write, destructive, unknown }
+enum FleetActivityClass: String, Encodable, Equatable, CaseIterable { case read, write, destructive, unknown }
 // An unknown guardrail class over-warns rather than under-warns: rendering a
 // future class as `unknown` next to the destructive styling is recoverable,
 // silently rendering it as a harmless read is not.
 extension FleetActivityClass: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
-enum FleetActivityOutcome: String, Encodable, Equatable { case ok, denied, expired, error, unknown }
+enum FleetActivityOutcome: String, Encodable, Equatable, CaseIterable { case ok, denied, expired, error, unknown }
 extension FleetActivityOutcome: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+/// Chat message kind on the wire.
+///
+/// The Rust enum has no `unknown` arm: it does not need one, because a Rust
+/// client decodes a message row into a `Result` it can drop. Swift decodes the
+/// page as an ARRAY, so one future kind would fail every row on it. Same
+/// reasoning as `FleetProvider`, same fallback shape.
+enum FleetMessageKind: String, Encodable, Equatable, CaseIterable { case user, agent, marker, unknown }
+extension FleetMessageKind: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+
+/// One persisted chat message.
+///
+/// `sender` is the daemon's record of WHO WROTE IT, taken from the send's
+/// `actor` and never from the body. It is the whole reason a copilot write
+/// cannot masquerade as a human's, so nothing in this client may synthesise or
+/// default it: see `FleetChatActor`, which maps it for display and refuses to
+/// read a blank one as the operator.
+struct FleetMessage: Codable, Equatable {
+    let id: String
+    let scopeKey: String
+    let originMessageID: String?
+    let sender: String
+    let kind: FleetMessageKind
+    let body: String
+    let createdAt: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case id, sender, kind, body
+        case scopeKey = "scope_key"
+        case originMessageID = "origin_message_id"
+        case createdAt = "created_at"
+    }
+}
+
+/// Params for `fleet/message_send`.
+///
+/// There is deliberately NO `actor` field. The wire key exists so a copilot
+/// write is distinguishable from a human one, and this client is a human
+/// surface: omitting the key is exactly what the daemon defaults to
+/// (`operator`). Modelling it as a settable property would hand every caller
+/// here the ability to file a message under somebody else's name, which is the
+/// single guarantee `sender` exists to provide.
+struct FleetMessageSendParams: Encodable, Equatable {
+    let scopeKey: String?
+    let targets: [String]
+    let originMessageID: String?
+    let text: String
+    let requestID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case targets, text
+        case scopeKey = "scope_key"
+        case originMessageID = "origin_message_id"
+        case requestID = "request_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(scopeKey, forKey: .scopeKey)
+        try container.encode(targets, forKey: .targets)
+        try container.encodeIfPresent(originMessageID, forKey: .originMessageID)
+        try container.encode(text, forKey: .text)
+        try container.encode(requestID, forKey: .requestID)
+    }
+}
+
+struct FleetMessageDelivery: Codable, Equatable {
+    let sessionKey: String
+    let state: ActionReceiptStatus
+    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", state }
+}
+
+struct FleetMessageSendResult: Codable, Equatable {
+    let messageID: String
+    let deliveries: [FleetMessageDelivery]
+    private enum CodingKeys: String, CodingKey { case messageID = "message_id", deliveries }
+}
+
+struct FleetMessageListParams: Encodable, Equatable {
+    let scopeKey: String?
+    let originID: String?
+    let afterID: String?
+    let limit: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case limit
+        case scopeKey = "scope_key"
+        case originID = "origin_id"
+        case afterID = "after_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(scopeKey, forKey: .scopeKey)
+        try container.encodeIfPresent(originID, forKey: .originID)
+        try container.encodeIfPresent(afterID, forKey: .afterID)
+        try container.encode(limit, forKey: .limit)
+    }
+}
+
+/// Maximum rows one `fleet/message_list` page may return
+/// (`FLEET_MESSAGE_LIST_MAX`). The daemon clamps, so asking for more is not an
+/// error, but asking for the wrong number silently pages differently from the
+/// TUI reading the same conversation.
+let fleetMessageListMax: UInt32 = 100
+/// Maximum rows one `fleet/activity_list` page may return
+/// (`FLEET_ACTIVITY_LIST_MAX`).
+let fleetActivityListMax: UInt32 = 200
+
+struct FleetMessageListResult: Codable, Equatable {
+    let messages: [FleetMessage]
+    let nextAfterID: String?
+    private enum CodingKeys: String, CodingKey { case messages, nextAfterID = "next_after_id" }
+}
+
+/// Payload of the `fleet/message_event` notification.
+struct FleetMessageEventParams: Codable, Equatable {
+    let message: FleetMessage
+}
+
+/// Adapter token the copilot channel's ACP session is opened with.
+///
+/// The same string the TUI uses (`COPILOT_DEFAULT_PROVIDER`). The daemon binds
+/// a scope to the adapter the FIRST `fleet/acp_session_create` names, so two
+/// clients naming different providers for `#copilot` means whichever opened the
+/// chat first decides and the other is refused.
+let copilotDefaultProvider = "claude-agent-acp"
+
+struct FleetAcpSessionCreateParams: Encodable, Equatable {
+    let provider: String
+    let cwd: String
+    let scopeKey: String?
+    private enum CodingKeys: String, CodingKey { case provider, cwd, scopeKey = "scope_key" }
+}
+
+struct FleetAcpSessionCreateResult: Codable, Equatable {
+    let sessionKey: String
+    let scopeKey: String
+    private enum CodingKeys: String, CodingKey { case sessionKey = "session_key", scopeKey = "scope_key" }
+}
 
 struct FleetChannel: Codable, Equatable {
     let id: String
@@ -959,6 +1099,8 @@ struct FleetChannelCreateParams: Codable, Equatable {
 struct FleetChannelCreateResult: Codable, Equatable {
     let channel: FleetChannel
 }
+
+struct FleetChannelListParams: Codable, Equatable { init() {} }
 
 struct FleetChannelListResult: Codable, Equatable {
     let channels: [FleetChannel]
@@ -1023,8 +1165,30 @@ struct FleetConfirm: Codable, Equatable {
     var isAnswerable: Bool { state == .open }
 }
 
+struct FleetConfirmListParams: Encodable, Equatable {
+    let scopeKey: String?
+    private enum CodingKeys: String, CodingKey { case scopeKey = "scope_key" }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(scopeKey, forKey: .scopeKey)
+    }
+}
+
 struct FleetConfirmListResult: Codable, Equatable {
     let confirms: [FleetConfirm]
+}
+
+/// The same frame decoded ROW BY ROW.
+///
+/// `FleetConfirmListResult` decodes `confirms` as a typed array, so a single
+/// row this build cannot decode (a renamed key, a retyped field: the failures a
+/// tolerant ENUM does not cover) fails the whole page, and the operator loses
+/// every card this build does understand along with the one it does not. The
+/// UI reads this shape instead and classifies each row itself; the typed result
+/// stays for the contract tests, which SHOULD fail on drift.
+struct FleetConfirmListRawResult: Decodable, Equatable {
+    let confirms: [JSONValue]
 }
 
 /// The answer to a confirm card, internally tagged on the wire (`answer`),
