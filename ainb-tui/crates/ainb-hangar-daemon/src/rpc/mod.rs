@@ -12778,6 +12778,41 @@ mod tests {
 
     static APPROVE_SOCKET_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// A channel kind this build cannot name never ships as addressable.
+    ///
+    /// The fallback this replaces rendered ANY unknown token as a broadcast
+    /// channel, i.e. as one an operator may send into, on every client at
+    /// once. A wire mapping that silently widens who can be messaged is worse
+    /// than a loud refusal, so the third kind is an error somebody reads.
+    #[test]
+    fn a_channel_kind_this_build_cannot_name_is_refused_rather_than_broadcast() {
+        use ainb_hangar_proto::fleet::FleetChannelKind;
+        use ainb_hangar_store::repo::fleet_chat::FleetChannelRow;
+
+        let row = |kind: &str| FleetChannelRow {
+            id: "01J0CHAN".into(),
+            kind: kind.to_string(),
+            name: "ops".into(),
+            scope_key: "channel:01J0CHAN".into(),
+            recipients: vec!["claude:one".into()],
+            created_at: 1,
+        };
+
+        assert_eq!(
+            wire_channel(&row("broadcast")).expect("broadcast is known").kind,
+            FleetChannelKind::Broadcast
+        );
+        assert_eq!(
+            wire_channel(&row("copilot")).expect("copilot is known").kind,
+            FleetChannelKind::Copilot
+        );
+        let refused = wire_channel(&row("skunkworks")).expect_err("an unknown kind was accepted");
+        assert!(
+            refused.message.contains("skunkworks") && refused.message.contains("01J0CHAN"),
+            "the refusal does not name the row or the kind: {refused:?}"
+        );
+    }
+
     fn health() -> DaemonHealth {
         DaemonHealth {
             socket_path: "/tmp/hangar.sock".into(),

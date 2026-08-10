@@ -641,8 +641,15 @@ impl Default for BroadcastState {
 /// Where the channel-create form is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ChannelCreateStage {
-    /// Typing the channel name.
+    /// Choosing between the channels that already exist and minting a new one.
+    ///
+    /// FIRST, not last: a channel an operator cannot reopen is a write-once
+    /// conversation, and a create form that opens straight onto a name field
+    /// invites a second channel with the same name whenever somebody wants the
+    /// one they made yesterday.
     #[default]
+    Pick,
+    /// Typing the channel name.
     Name,
     /// Ticking the members off the roster.
     Recipients,
@@ -664,6 +671,12 @@ struct ChannelCreateState {
     expanded_roster: bool,
     cursor: usize,
     selected: BTreeSet<String>,
+    /// The broadcast channels the daemon already has, as `fleet/channel_list`
+    /// answered. Empty until it does, which is why the picker says so rather
+    /// than rendering "no channels" over a list that has not arrived.
+    existing: Vec<ainb_hangar_proto::fleet::FleetChannel>,
+    /// Whether that answer has landed.
+    listed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1036,12 @@ pub enum FleetEvent {
     ChannelCreateFailed {
         detail: String,
     },
+    /// Every channel the daemon has, as `fleet/channel_list` answered
+    /// ([`ChatIntent::ListChannels`]). The reducer keeps only the broadcast
+    /// ones: the copilot channel has its own key (`m`) and no recipient list,
+    /// and offering it here would open a second door onto the same
+    /// conversation with the wrong send targets.
+    ChannelsListed(Vec<ainb_hangar_proto::fleet::FleetChannel>),
     Feedback(String),
     Tick(i64),
 }
@@ -1165,6 +1184,10 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         }
         FleetEvent::ChannelCreateFailed { detail } => {
             apply_channel_create_failed(&mut next, detail);
+            None
+        }
+        FleetEvent::ChannelsListed(channels) => {
+            apply_channels_listed(&mut next, channels);
             None
         }
         FleetEvent::Feedback(message) => {
@@ -1318,12 +1341,16 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // reason `b` is: the reserved-key invariant test refuses a browse
         // binding on a char the router or host swallows first (#450).
         FleetKey::Char('m') => state.mode = FleetMode::Chat(Box::new(ChatState::opening())),
-        // `N` opens the broadcast-channel form: name it, tick its members, and
-        // the daemon mints the `channel:<ulid>` the chat surface then talks in.
-        // Uppercase because lowercase `n` is already the host panel's deny /
-        // new-ATC key, and `C` (the obvious mnemonic) is a reserved router char.
+        // `N` opens the broadcast-channel form. It opens on the PICKER: the
+        // channels that already exist first, minting a new one second, because
+        // a form that only creates makes every channel a write-once
+        // conversation and mints a duplicate whenever an operator wants
+        // yesterday's. Uppercase because lowercase `n` is already the host
+        // panel's deny / new-ATC key, and `C` (the obvious mnemonic) is a
+        // reserved router char.
         FleetKey::Char('N') => {
             state.mode = FleetMode::ChannelCreate(ChannelCreateState::default());
+            return Some(FleetIntent::Chat(ChatIntent::ListChannels));
         }
         // `M` is the SAME surface over the selected session's own thread. Not
         // a second screen: one chat state machine, one renderer, two topics
@@ -2332,6 +2359,34 @@ fn reduce_channel_create_key(
         return None;
     }
     match form.stage {
+        // The list, plus one trailing row that falls through to the create
+        // form. Enter on a listed row opens the DAEMON's scope, name and
+        // membership, never a `channel:` string composed here: the scope is
+        // minted and only the daemon knows it.
+        ChannelCreateStage::Pick => {
+            let rows = form.existing.len() + 1;
+            match key {
+                FleetKey::Down | FleetKey::Char('j') => {
+                    form.cursor = (form.cursor + 1).min(rows - 1);
+                }
+                FleetKey::Up | FleetKey::Char('k') => form.cursor = form.cursor.saturating_sub(1),
+                FleetKey::Enter => match form.existing.get(form.cursor) {
+                    Some(channel) => {
+                        state.mode = FleetMode::Chat(Box::new(ChatState::channel(
+                            channel.scope_key.clone(),
+                            channel.name.clone(),
+                            channel.recipients.clone(),
+                        )));
+                        return None;
+                    }
+                    None => {
+                        form.stage = ChannelCreateStage::Name;
+                        form.cursor = 0;
+                    }
+                },
+                _ => {}
+            }
+        }
         ChannelCreateStage::Name => match key {
             FleetKey::Char(character) => form.name.push(character),
             FleetKey::Space => form.name.push(' '),
@@ -2340,6 +2395,10 @@ fn reduce_channel_create_key(
             }
             FleetKey::Enter if !form.name.trim().is_empty() => {
                 form.stage = ChannelCreateStage::Recipients;
+                // The cursor last walked the PICKER's rows; carrying that index
+                // into the roster would pre-select whichever session happened
+                // to sit at the same offset.
+                form.cursor = 0;
             }
             FleetKey::Enter => state.feedback = Some("channel name required".into()),
             _ => {}
@@ -2393,6 +2452,31 @@ fn apply_channel_created(
     recipients: Vec<String>,
 ) {
     state.mode = FleetMode::Chat(Box::new(ChatState::channel(scope_key, name, recipients)));
+}
+
+/// Fill the picker with the broadcast channels the daemon already has.
+///
+/// Copilot channels are dropped, not rendered greyed out: the copilot has its
+/// own key and no recipient list, so a row here could only open it with an
+/// empty target set, i.e. a composer that sends nowhere.
+fn apply_channels_listed(
+    state: &mut FleetPaneState,
+    channels: Vec<ainb_hangar_proto::fleet::FleetChannel>,
+) {
+    use ainb_hangar_proto::fleet::FleetChannelKind;
+
+    let FleetMode::ChannelCreate(form) = &mut state.mode else {
+        return;
+    };
+    form.existing = channels
+        .into_iter()
+        .filter(|channel| match channel.kind {
+            FleetChannelKind::Broadcast => true,
+            FleetChannelKind::Copilot => false,
+        })
+        .collect();
+    form.listed = true;
+    form.cursor = form.cursor.min(form.existing.len());
 }
 
 /// Put the form back in front of the operator with the daemon's own refusal.
@@ -3792,6 +3876,32 @@ fn render_channel_create_modal(
 ) {
     let mut lines = Vec::new();
     match form.stage {
+        ChannelCreateStage::Pick => {
+            lines.push(if form.listed {
+                format!("Channels ({})", form.existing.len())
+            } else {
+                "Channels (loading)".to_string()
+            });
+            // Windowed on the cursor, not truncated at the top: a selection
+            // that walks off the painted region is an Enter against a channel
+            // the operator cannot see.
+            let first = form.cursor.saturating_sub(7);
+            for (index, channel) in form.existing.iter().enumerate().skip(first).take(8) {
+                let cursor = if index == form.cursor { '>' } else { ' ' };
+                lines.push(format!(
+                    "{cursor} {} · {} member(s)",
+                    channel.name,
+                    channel.recipients.len()
+                ));
+            }
+            let cursor = if form.cursor >= form.existing.len() {
+                '>'
+            } else {
+                ' '
+            };
+            lines.push(format!("{cursor} + new channel"));
+            lines.push("Enter opens, Esc cancels".into());
+        }
         ChannelCreateStage::Name => {
             lines.push("Name the channel".into());
             lines.push(format!("> {}", form.name));
@@ -5957,8 +6067,15 @@ mod tests {
     /// the reason a literal `channel:...` never appears in this file.
     #[test]
     fn the_channel_form_names_members_and_asks_the_daemon_to_mint_the_scope() {
-        let state = apply(&state_with_roster(), FleetEvent::Key(FleetKey::Char('N'))).state;
-        assert!(state.is_modal_open(), "`N` opened nothing");
+        let opened = apply(&state_with_roster(), FleetEvent::Key(FleetKey::Char('N')));
+        assert!(opened.state.is_modal_open(), "`N` opened nothing");
+        assert_eq!(
+            opened.intent,
+            Some(FleetIntent::Chat(ChatIntent::ListChannels)),
+            "the picker opened without asking the daemon what already exists"
+        );
+        // The picker's trailing row falls through to the create form.
+        let state = apply(&opened.state, FleetEvent::Key(FleetKey::Enter)).state;
         assert!(
             state.is_capturing_text(),
             "the name field does not swallow printable characters"
@@ -6018,11 +6135,112 @@ mod tests {
         );
     }
 
+    /// A channel is REACHABLE after the keystroke that minted it.
+    ///
+    /// Without the picker a broadcast channel is write-once: one Esc and the
+    /// conversation is unreachable forever, and pressing `N` again with the
+    /// same name mints a SECOND channel and splits the thread. The row the
+    /// picker opens carries the DAEMON's scope, name and membership, never a
+    /// `channel:` string composed here.
+    #[test]
+    fn the_picker_reopens_a_channel_the_daemon_already_has() {
+        use ainb_hangar_proto::fleet::{FleetChannel, FleetChannelKind};
+
+        let opened = apply(&state_with_roster(), FleetEvent::Key(FleetKey::Char('N')));
+        let listed = apply(
+            &opened.state,
+            FleetEvent::ChannelsListed(vec![
+                FleetChannel {
+                    id: "01J0OPS".into(),
+                    kind: FleetChannelKind::Broadcast,
+                    name: "ops".into(),
+                    scope_key: "channel:01J0OPS".into(),
+                    recipients: vec!["claude:ask".into(), "codex:run".into()],
+                    created_at: 1,
+                },
+                // The copilot channel has its own key and no recipient list; a
+                // row here could only open it with an empty target set, i.e. a
+                // composer that sends nowhere.
+                FleetChannel {
+                    id: "01J0COPILOT".into(),
+                    kind: FleetChannelKind::Copilot,
+                    name: "copilot".into(),
+                    scope_key: "channel:01J0COPILOT".into(),
+                    recipients: Vec::new(),
+                    created_at: 2,
+                },
+            ]),
+        )
+        .state;
+
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 28, &listed);
+        let painted: Vec<String> = (0..30).map(|row| row_text(&buffer, row, 120)).collect();
+        assert!(
+            painted.iter().any(|row| row.contains("ops · 2 member(s)")),
+            "the channel that exists is not offered:\n{}",
+            painted.join("\n")
+        );
+        assert!(
+            !painted.iter().any(|row| row.contains("copilot")),
+            "the copilot channel is addressable from the broadcast picker:\n{}",
+            painted.join("\n")
+        );
+
+        let reopened = apply(&listed, FleetEvent::Key(FleetKey::Enter)).state;
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 28, &reopened);
+        let painted: Vec<String> = (0..30).map(|row| row_text(&buffer, row, 120)).collect();
+        assert!(
+            painted
+                .iter()
+                .any(|row| row.contains("Fleet channel · ops") && row.contains("channel:01J0OPS")),
+            "Enter on a listed channel did not open the daemon's own scope:\n{}",
+            painted.join("\n")
+        );
+    }
+
+    /// The trailing row is still the create form, below whatever exists.
+    #[test]
+    fn the_picker_falls_through_to_the_create_form() {
+        use ainb_hangar_proto::fleet::{FleetChannel, FleetChannelKind};
+
+        let opened = apply(&state_with_roster(), FleetEvent::Key(FleetKey::Char('N')));
+        let listed = apply(
+            &opened.state,
+            FleetEvent::ChannelsListed(vec![FleetChannel {
+                id: "01J0OPS".into(),
+                kind: FleetChannelKind::Broadcast,
+                name: "ops".into(),
+                scope_key: "channel:01J0OPS".into(),
+                recipients: vec!["claude:ask".into()],
+                created_at: 1,
+            }]),
+        )
+        .state;
+
+        // Past the one listed row is `+ new channel`.
+        let state = apply(&listed, FleetEvent::Key(FleetKey::Down)).state;
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(
+            state.is_capturing_text(),
+            "the trailing row did not reach the name field"
+        );
+        // And the cursor did not carry the picker's offset into the roster.
+        let state = type_text(state, "ops2");
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let FleetMode::ChannelCreate(form) = &state.mode else {
+            panic!("the form left the create mode: {:?}", state.mode);
+        };
+        assert_eq!(form.cursor, 0, "the picker's cursor leaked into the roster");
+    }
+
     /// A refusal puts the operator back in the form with the daemon's own
     /// words, rather than dropping them on the roster with nothing to fix.
     #[test]
     fn a_refused_channel_create_returns_to_the_form_with_the_reason() {
         let state = apply(&state_with_roster(), FleetEvent::Key(FleetKey::Char('N'))).state;
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
         let state = type_text(state, "ops");
         let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
         let state = apply(&state, FleetEvent::Key(FleetKey::Char('e'))).state;

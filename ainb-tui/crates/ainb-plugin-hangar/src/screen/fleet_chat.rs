@@ -942,6 +942,14 @@ pub enum ChatIntent {
         /// The membership, which becomes the send target list.
         recipients: Vec<String>,
     },
+    /// Page the channels that already exist: `fleet/channel_list`.
+    ///
+    /// Without this a broadcast channel is reachable exactly once, in the
+    /// keystroke that mints it: press Esc and the conversation is unreachable
+    /// forever, and pressing the create key again with the same name mints a
+    /// SECOND channel and splits the thread. The picker is what makes the
+    /// channel surface readable as well as writable.
+    ListChannels,
 }
 
 /// What one key press did to the surface.

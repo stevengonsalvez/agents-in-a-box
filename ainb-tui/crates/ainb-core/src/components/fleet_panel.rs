@@ -339,8 +339,38 @@ impl FleetPanelState {
             ChatIntent::ConfirmAnswer(_) => ChatTopic::Copilot,
             // A create has no conversation to page yet: the channel it mints IS
             // the topic, and the surface opens on it when the daemon answers.
-            ChatIntent::CreateChannel { .. } => ChatTopic::Copilot,
+            // A list has none either; both are handled on their own workers
+            // below and never reach the page.
+            ChatIntent::CreateChannel { .. } | ChatIntent::ListChannels => ChatTopic::Copilot,
         };
+        // The picker's read. Its own worker for the same reason a create is:
+        // falling into the "write then page" path below would page the COPILOT
+        // channel behind a picker the operator opened to find a broadcast one.
+        if matches!(intent, ChatIntent::ListChannels) {
+            let spawned =
+                std::thread::Builder::new().name("ainb-fleet-channels".into()).spawn(move || {
+                    let event = match crate::fleet::control::channel_list_blocking() {
+                        Ok(channels) => FleetEvent::ChannelsListed(channels),
+                        // The picker's failure is the create form's failure:
+                        // one feedback line, and the form stays open so the
+                        // operator can still mint one.
+                        Err(detail) => FleetEvent::ChannelCreateFailed {
+                            detail: format!("channel list failed: {detail}"),
+                        },
+                    };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.push(event);
+                    }
+                });
+            if let Err(error) = spawned {
+                if let Ok(mut updates) = self.canonical_updates.lock() {
+                    updates.push(FleetEvent::ChannelCreateFailed {
+                        detail: format!("channel list worker did not start: {error}"),
+                    });
+                }
+            }
+            return;
+        }
         // A create is its own worker with its own event: it must NOT fall into
         // the "write then page" path below, which would page the COPILOT
         // channel behind a broadcast channel the operator just made.
@@ -422,8 +452,8 @@ impl FleetPanelState {
                         .map(|detail| format!("answering {confirm_id}: {detail}"));
                     (failure, None)
                 }
-                // Handled above, on its own worker.
-                ChatIntent::CreateChannel { .. } => (None, None),
+                // Handled above, each on its own worker.
+                ChatIntent::CreateChannel { .. } | ChatIntent::ListChannels => (None, None),
             };
             let mut events = Vec::new();
             if let Some(detail) = write_failure {

@@ -633,6 +633,23 @@ pub fn channel_create_blocking(
     })
 }
 
+/// Page every channel the daemon has, on a worker thread.
+///
+/// The picker's source of truth. Returns the rows verbatim, kind included, so
+/// the caller decides which are addressable rather than this helper guessing.
+pub fn channel_list_blocking() -> Result<Vec<ainb_hangar_proto::fleet::FleetChannel>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        let result = client.channel_list().await.map_err(|error| error.to_string())?;
+        Ok(result.channels)
+    })
+}
+
 /// Answer one guardrail confirm card on a worker thread.
 pub fn chat_confirm_answer_blocking(
     params: ainb_hangar_proto::fleet::FleetConfirmAnswerParams,
