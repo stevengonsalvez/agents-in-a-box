@@ -383,6 +383,57 @@ pub fn execute_fleet_broadcast_blocking(
     })
 }
 
+/// Page ONE session's own chat thread on a worker thread.
+///
+/// Three of the copilot page's four calls are absent on purpose: a session
+/// thread has no channel to resolve (part 1 mints `session:<key>` for it), no
+/// ACP session to create (it IS the session), and no guardrail cards or copilot
+/// activity (that machinery belongs to the copilot channel). What is left is
+/// the timeline, in commit order.
+///
+/// The scope comes from [`ChatTopic::scope_key`], the ONE place a topic is
+/// turned into a scope on this side of the socket, rather than being re-derived
+/// here. The daemon derives the same string when a single-target
+/// `fleet/message_send` omits `scope_key`, and the tripwire is what proves the
+/// two agree: the thread reads what the composer wrote.
+///
+/// [`ChatTopic::scope_key`]: ainb_plugin_hangar::screen::fleet_chat::ChatTopic::scope_key
+pub fn chat_thread_page_blocking(
+    topic: &ainb_plugin_hangar::screen::fleet_chat::ChatTopic,
+) -> Result<ainb_plugin_hangar::screen::fleet_chat::ChatSnapshot, String> {
+    use ainb_hangar_proto::fleet::{FLEET_MESSAGE_LIST_MAX, FleetMessageListParams};
+
+    let scope = topic.scope_key().ok_or_else(|| "this topic has no session scope".to_string())?;
+    let target_session_key = topic.target_session_key();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        let messages = client
+            .message_list(FleetMessageListParams {
+                scope_key: Some(scope.clone()),
+                origin_id: None,
+                after_id: None,
+                limit: FLEET_MESSAGE_LIST_MAX,
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .messages;
+        Ok(ainb_plugin_hangar::screen::fleet_chat::ChatSnapshot {
+            scope_key: Some(scope),
+            target_session_key,
+            messages,
+            confirms: Vec::new(),
+            confirms_detail: None,
+            session_detail: None,
+            activity: Vec::new(),
+        })
+    })
+}
+
 /// Page the copilot chat surface on a worker thread.
 ///
 /// One worker, four calls, because the surface needs all four to say anything
@@ -543,6 +594,42 @@ pub fn chat_send_blocking(
         let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
             .map_err(|error| error.to_string())?;
         client.message_send(params).await.map_err(|error| error.to_string())
+    })
+}
+
+/// Mint one broadcast channel on a worker thread.
+///
+/// Returns the PERSISTED channel, not the request: the `channel:<ulid>` scope
+/// is the daemon's to mint and the recipient list is the daemon's to
+/// deduplicate, so a caller that echoed its own request back would be right
+/// only until the daemon disagreed.
+pub fn channel_create_blocking(
+    name: String,
+    recipients: Vec<String>,
+) -> Result<ainb_hangar_proto::fleet::FleetChannel, String> {
+    use ainb_hangar_proto::fleet::{
+        FleetChannelCreateParams, FleetChannelCreateResult, FleetChannelKind,
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        let result: FleetChannelCreateResult = client
+            .call_typed(
+                ainb_hangar_proto::methods::FLEET_CHANNEL_CREATE,
+                &FleetChannelCreateParams {
+                    kind: FleetChannelKind::Broadcast,
+                    name,
+                    recipients: Some(recipients),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(result.channel)
     })
 }
 
