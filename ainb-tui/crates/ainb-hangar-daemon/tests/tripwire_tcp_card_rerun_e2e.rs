@@ -62,34 +62,45 @@ fn launch_headless(sess: &TuiSession, scale: u64, which: &str, home: &std::path:
         // that no keypress dropped. When either assumption failed, focus
         // stopped on an empty column and this loop pressed Enter at nothing
         // until it timed out.
-        if sess.capture().contains("— empty —") {
+        //
+        // Gated on actually being ON the board: `— empty —` is a generic
+        // placeholder that other screens paint too (the issue list's detail
+        // pane uses it), and sending `Right` at one of those walks a cursor
+        // that has nothing to do with board columns.
+        let capture = sess.capture();
+        if capture.contains("Board:") && capture.contains("— empty —") {
             sess.send_key("Right");
         }
     }
     // Name the FIRST thing that did not happen, not the last. `Enter` opens
-    // this menu over a FOCUSED CARD, so when the board holds no card there is
-    // nothing for it to open and "Run ▾ never opened" is a true statement about
-    // the wrong step. That message sent three separate investigations after a
-    // menu bug when every observed failure was actually an empty board.
-    //
-    // The store state is reported too, because "the board is empty" alone does
-    // not say WHICH half is broken. The caller already proved the card RENDERED
-    // before the first launch, so an empty board here means the card was lost
-    // between then and now, not that it never arrived, and the store tells us
-    // whether it is the data or only the view that lost it.
+    // this menu over a FOCUSED CARD, so "Run ▾ never opened" can be a true
+    // statement about entirely the wrong step. Three investigations chased a
+    // menu bug because of it, and a fourth chased an empty BOARD because the
+    // first version of this message asserted one without checking the screen
+    // was the board at all. So establish, in order: which screen is up, then
+    // whether the board holds the card, then whether the store does.
     if !opened {
         let capture = sess.capture();
+        let on_board = capture.contains("Board:");
+        let card_visible = capture.contains(CARD_TITLE);
         let in_store = board_card_by_title(home, CARD_TITLE).is_some();
-        let diagnosis = match (capture.contains("— empty —"), in_store) {
-            (true, true) => {
-                "the board is EMPTY but the card IS in the store, so the VIEW lost a card \
-                 the data still has"
+        let diagnosis = match (on_board, card_visible, in_store) {
+            (false, _, _) => {
+                "the TUI is NOT ON THE BOARDS SCREEN at all (no `Board:` header), so nothing \
+                 here is about cards: something navigated away from the board"
             }
-            (true, false) => {
-                "the board is EMPTY and the card is GONE from the store, so this is a data \
+            (true, false, true) => {
+                "the board is up and the card IS in the store but NOT rendered, so the view \
+                 lost a card the data still has"
+            }
+            (true, false, false) => {
+                "the board is up and the card is GONE from the store too, so this is data \
                  loss, not a render bug"
             }
-            (false, _) => "a card is on the board but the `Run ▾` menu never opened",
+            (true, true, _) => {
+                "the card IS rendered on the board but the `Run ▾` menu never opened, so this \
+                 really is the menu or the focus cursor"
+            }
         };
         panic!("{which}: {diagnosis}:\n{capture}");
     }
