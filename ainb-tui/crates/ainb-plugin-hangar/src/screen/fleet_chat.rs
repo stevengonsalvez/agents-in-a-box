@@ -29,8 +29,9 @@
 //!    this file rather than an `UNKNOWN` on the one screen an operator reads.
 
 use ainb_hangar_proto::fleet::{
-    FleetActivityClass, FleetActivityOutcome, FleetActivityRow, FleetConfirm, FleetConfirmAnswer,
-    FleetConfirmAnswerParams, FleetConfirmState, FleetMessage, FleetMessageKind,
+    ActionReceiptStatus, FleetActivityClass, FleetActivityOutcome, FleetActivityRow, FleetConfirm,
+    FleetConfirmAnswer, FleetConfirmAnswerParams, FleetConfirmState, FleetMessage,
+    FleetMessageDelivery, FleetMessageKind,
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
@@ -50,6 +51,187 @@ use super::fleet::{
 /// places, agreeing in every unit test and disagreeing against a real daemon,
 /// where the timeline silently reads an empty scope forever.
 pub const COPILOT_CHANNEL_KIND: &str = "copilot";
+
+/// Which conversation this surface is showing.
+///
+/// The copilot channel and a session thread are the SAME widget over two
+/// scopes, which is the whole reason this is an enum rather than a second
+/// screen: one state machine, one renderer, one set of key bindings.
+///
+/// It is also the single place a scope is derived from a topic. Part 1's scope
+/// grammar says a session's own scope is `session:<session_key>`, and the
+/// daemon derives exactly that when a single-target send omits `scope_key`
+/// (`message_send_inner`). Deriving it in a second place inside this crate is
+/// the double-mapping bug this file's header is about, so every caller (the
+/// state constructor and the host that pages the thread) asks HERE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatTopic {
+    /// The fleet copilot channel, whose `channel:<ulid>` scope only the daemon
+    /// knows.
+    Copilot,
+    /// One session's own thread.
+    Session {
+        /// The session that answers in this thread.
+        session_key: String,
+    },
+    /// A named broadcast channel: ONE scope, N members, one send with N legs.
+    ///
+    /// The scope is carried rather than derived: `fleet/channel_create` MINTS
+    /// `channel:<ulid>`, so this surface only ever learns it from the daemon.
+    Channel {
+        /// The minted `channel:<id>` scope.
+        scope_key: String,
+        /// The channel's operator-facing name.
+        name: String,
+        /// The channel's membership, which is exactly the send's target list.
+        recipients: Vec<String>,
+    },
+}
+
+impl ChatTopic {
+    /// The scope this topic reads and writes, when it is knowable without
+    /// asking the daemon.
+    ///
+    /// `None` for the copilot channel deliberately: its scope is MINTED, and a
+    /// literal `channel:copilot` is how the first version of this screen read
+    /// an empty timeline forever.
+    #[must_use]
+    pub fn scope_key(&self) -> Option<String> {
+        match self {
+            Self::Copilot => None,
+            Self::Session { session_key } => Some(format!("session:{session_key}")),
+            Self::Channel { scope_key, .. } => Some(scope_key.clone()),
+        }
+    }
+
+    /// The session this topic addresses, when it is known up front.
+    ///
+    /// `None` for a channel: a channel addresses its MEMBERSHIP, which is a
+    /// list, and collapsing it to one session here is how a fan-out quietly
+    /// becomes a direct message to whoever happened to be first.
+    #[must_use]
+    pub fn target_session_key(&self) -> Option<String> {
+        match self {
+            Self::Copilot | Self::Channel { .. } => None,
+            Self::Session { session_key } => Some(session_key.clone()),
+        }
+    }
+
+    /// Every recipient one send from this surface addresses, or why there is
+    /// nobody to address.
+    ///
+    /// The ONE place a topic becomes a target list. `resolved` is the session
+    /// the host discovered for the copilot channel (its scope is minted, so its
+    /// answering session is only known after a page); the other two topics know
+    /// their recipients without asking anyone.
+    ///
+    /// Wildcard-free: a fourth topic must decide here what a send from it
+    /// addresses, rather than inheriting whichever arm happens to be last.
+    pub fn send_targets(&self, resolved: Option<&str>) -> Result<Vec<String>, String> {
+        match self {
+            Self::Copilot => resolved
+                .map(|key| vec![key.to_string()])
+                .ok_or_else(|| "no copilot session yet, nothing to send to".to_string()),
+            Self::Session { session_key } => Ok(vec![session_key.clone()]),
+            // A channel with no members is refused HERE rather than at the
+            // daemon: `fleet/message_send` requires at least one target, and
+            // "targets must name at least one session" is not what an operator
+            // staring at an empty channel needs to read.
+            Self::Channel { recipients, .. } if recipients.is_empty() => {
+                Err("this channel has no members, nothing to send to".to_string())
+            }
+            Self::Channel { recipients, .. } => Ok(recipients.clone()),
+        }
+    }
+
+    /// The header an operator reads, so the two topics are never confusable.
+    ///
+    /// Wildcard-free: a third topic is a compile error here rather than a
+    /// header that claims to be the copilot channel.
+    #[must_use]
+    pub fn title(&self) -> String {
+        match self {
+            Self::Copilot => "Fleet chat · #copilot".to_string(),
+            Self::Session { session_key } => format!("Fleet thread · {session_key}"),
+            Self::Channel {
+                name, recipients, ..
+            } => {
+                format!("Fleet channel · {name} · {} member(s)", recipients.len())
+            }
+        }
+    }
+
+    /// Whether guardrail confirm cards and the copilot activity feed belong on
+    /// this surface.
+    ///
+    /// They are copilot machinery: a session thread has none, and rendering an
+    /// empty "CONFIRM CARDS" block there invites an operator to look for cards
+    /// that can never appear.
+    #[must_use]
+    pub const fn shows_copilot_feeds(&self) -> bool {
+        match self {
+            Self::Copilot => true,
+            Self::Session { .. } | Self::Channel { .. } => false,
+        }
+    }
+
+    /// What an empty timeline tells the operator to do next.
+    ///
+    /// Wildcard-free like the rest: a channel that told the operator to "prompt
+    /// the session" is a small lie, and small lies on this surface are how the
+    /// two conversations drift apart.
+    #[must_use]
+    pub const fn empty_hint(&self) -> &'static str {
+        match self {
+            Self::Copilot => "no messages yet, type below to ask the copilot",
+            Self::Session { .. } => {
+                "no messages in this thread yet, type below to prompt the session"
+            }
+            Self::Channel { .. } => {
+                "no messages in this channel yet, type below to reach every member"
+            }
+        }
+    }
+
+    /// Whether a send from this surface produces receipts worth a block of the
+    /// screen.
+    ///
+    /// A single-recipient send has one leg, and the timeline row IS the receipt.
+    /// A fan-out has N, and "sent" is a lie about the ones that were refused:
+    /// the case an operator has to be able to read off the screen is three
+    /// delivered and one rejected.
+    #[must_use]
+    pub const fn shows_receipts(&self) -> bool {
+        match self {
+            Self::Copilot | Self::Session { .. } => false,
+            Self::Channel { .. } => true,
+        }
+    }
+}
+
+/// Where one row sits in its thread.
+///
+/// Derived from [`FleetMessage::origin_message_id`], the ONE threading join
+/// part 1 defines. A wildcard-free label mapping, for the same reason every
+/// other display token in this file has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatThreadRole {
+    /// A message nothing was replied to.
+    Root,
+    /// A reply carrying an `origin_message_id`.
+    Reply,
+}
+
+impl ChatThreadRole {
+    /// The marker printed before the body.
+    #[must_use]
+    pub const fn marker(self) -> &'static str {
+        match self {
+            Self::Root => "",
+            Self::Reply => "↳ ",
+        }
+    }
+}
 
 /// How many timeline rows the surface keeps in memory.
 ///
@@ -315,6 +497,8 @@ pub struct ChatMessageRow {
     pub actor: ChatActor,
     /// Message kind.
     pub kind: FleetMessageKind,
+    /// Whether this row answers another one.
+    pub role: ChatThreadRole,
     /// Message body.
     pub body: String,
 }
@@ -325,8 +509,64 @@ impl From<FleetMessage> for ChatMessageRow {
             id: message.id,
             actor: ChatActor::from_wire(&message.sender),
             kind: message.kind,
+            role: if message.origin_message_id.is_some() {
+                ChatThreadRole::Reply
+            } else {
+                ChatThreadRole::Root
+            },
             body: message.body,
         }
+    }
+}
+
+/// The on-screen label for one delivery leg.
+///
+/// The word itself is the PROTOCOL's
+/// ([`ainb_hangar_proto::fleet::receipt_status_token`]), not this pane's: the
+/// daemon and the `ainb fleet msg` CLI print the same vocabulary, and three
+/// private copies of the mapping could drift into one surface saying REFUSED
+/// while another says REJECTED. Wildcard-free there, so a new
+/// [`ActionReceiptStatus`] variant is still a compile error rather than a leg
+/// rendering as whichever arm was written last.
+#[must_use]
+pub const fn delivery_state_label(state: ActionReceiptStatus) -> &'static str {
+    ainb_hangar_proto::fleet::receipt_status_token(state)
+}
+
+/// The colour one delivery leg is painted in.
+///
+/// Delivered is the only green. Everything else is a state an operator has to
+/// look at, and `UNKNOWN` is deliberately NOT green: at-most-once delivery
+/// means an unknown leg may or may not have arrived, and painting it as success
+/// is the one lie this surface exists to avoid.
+#[must_use]
+pub const fn delivery_state_color(state: ActionReceiptStatus) -> Color {
+    match state {
+        ActionReceiptStatus::Delivered => GREEN,
+        ActionReceiptStatus::Pending => MUTED,
+        ActionReceiptStatus::Unknown => GOLD,
+        ActionReceiptStatus::Failed | ActionReceiptStatus::Rejected => ALERT,
+    }
+}
+
+/// One rendered receipt row: who, what happened, and why.
+///
+/// The reason comes from [`FleetMessageDelivery::detail`], the daemon's own
+/// token (`target_not_running`, `queue_full`, …). A leg with no reason renders
+/// without one rather than inventing a plausible-sounding cause.
+#[must_use]
+pub fn receipt_line(delivery: &FleetMessageDelivery) -> String {
+    match delivery.detail.as_deref().map(str::trim).filter(|detail| !detail.is_empty()) {
+        Some(detail) => format!(
+            "{:<10} {} · {detail}",
+            delivery_state_label(delivery.state),
+            delivery.session_key
+        ),
+        None => format!(
+            "{:<10} {}",
+            delivery_state_label(delivery.state),
+            delivery.session_key
+        ),
     }
 }
 
@@ -401,6 +641,7 @@ pub struct ChatSnapshot {
 /// The Fleet chat surface's whole state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatState {
+    topic: ChatTopic,
     scope_key: Option<String>,
     target_session_key: Option<String>,
     messages: Vec<ChatMessageRow>,
@@ -408,6 +649,12 @@ pub struct ChatState {
     confirms_detail: Option<String>,
     session_detail: Option<String>,
     activity: Vec<FleetActivityRow>,
+    /// The legs of the LAST send, one per recipient.
+    ///
+    /// Replaced wholesale by the next send rather than accumulated: these are
+    /// the receipts for the message the operator just posted, and a growing
+    /// list of legs from older messages reads as one send that half-failed.
+    receipts: Vec<FleetMessageDelivery>,
     composer: String,
     edit: Option<CardEdit>,
     focus: ChatFocus,
@@ -430,14 +677,44 @@ impl ChatState {
     /// A fresh surface bound to the copilot channel, nothing loaded yet.
     #[must_use]
     pub fn opening() -> Self {
+        Self::for_topic(ChatTopic::Copilot)
+    }
+
+    /// A fresh surface bound to ONE session's thread.
+    ///
+    /// Unlike the copilot channel there is nothing to resolve: the scope and
+    /// the recipient are both known from the session the operator selected, so
+    /// the composer is live on the first frame rather than after a round trip.
+    #[must_use]
+    pub fn thread(session_key: String) -> Self {
+        Self::for_topic(ChatTopic::Session { session_key })
+    }
+
+    /// A fresh surface bound to one broadcast channel the daemon just minted.
+    ///
+    /// The scope is passed in, never built here: `channel:<ulid>` is the
+    /// daemon's to mint, and a client that composes its own reads an empty
+    /// timeline forever (the mistake [`COPILOT_CHANNEL_KIND`] documents).
+    #[must_use]
+    pub fn channel(scope_key: String, name: String, recipients: Vec<String>) -> Self {
+        Self::for_topic(ChatTopic::Channel {
+            scope_key,
+            name,
+            recipients,
+        })
+    }
+
+    fn for_topic(topic: ChatTopic) -> Self {
         Self {
-            scope_key: None,
-            target_session_key: None,
+            scope_key: topic.scope_key(),
+            target_session_key: topic.target_session_key(),
+            topic,
             messages: Vec::new(),
             confirms: Vec::new(),
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            receipts: Vec::new(),
             composer: String::new(),
             edit: None,
             focus: ChatFocus::Composer,
@@ -447,6 +724,12 @@ impl ChatState {
             in_flight: true,
             last_poll_ms: 0,
         }
+    }
+
+    /// Which conversation this surface is showing.
+    #[must_use]
+    pub const fn topic(&self) -> &ChatTopic {
+        &self.topic
     }
 
     /// The scope this surface reads and writes, once the daemon has named it.
@@ -477,6 +760,12 @@ impl ChatState {
     #[must_use]
     pub fn activity(&self) -> &[FleetActivityRow] {
         &self.activity
+    }
+
+    /// The last send's per-recipient legs, in the order they were requested.
+    #[must_use]
+    pub fn receipts(&self) -> &[FleetMessageDelivery] {
+        &self.receipts
     }
 
     /// The composer's current text.
@@ -546,15 +835,15 @@ impl ChatState {
         self.confirms_detail = snapshot.confirms_detail;
         self.session_detail = snapshot.session_detail;
         self.activity = snapshot.activity;
-        // Selection survives a refresh ONLY by identity. A selected card that
-        // this page no longer lists (answered from the CLI, from the macOS
-        // client, or expired by the daemon) leaves the anchor dangling on
-        // purpose: nothing is selected, nothing is answerable, and the operator
-        // picks again. Adopting the row that slid into its index is precisely
-        // the blind approve this surface must not have.
-        if self.selected_id.is_none() {
-            self.selected_id = self.confirms.first().map(|card| card.confirm_id().to_string());
-        }
+        // Selection survives a refresh ONLY by identity, and a poll NEVER makes
+        // one. A selected card that this page no longer lists (answered from the
+        // CLI, from the macOS client, or expired by the daemon) leaves the
+        // anchor dangling on purpose: nothing is selected, nothing is
+        // answerable, and the operator picks again. Adopting the row that slid
+        // into its index — or adopting the first row of the first page that
+        // happens to arrive — is precisely the blind approve this surface must
+        // not have. `↑↓`/`jk` select index 0 from an empty selection, so the
+        // first approve always follows a deliberate keypress.
     }
 
     /// Record that the host's fetch failed.
@@ -567,6 +856,32 @@ impl ChatState {
     pub fn apply_send_failure(&mut self, detail: String) {
         self.in_flight = false;
         self.feedback = Some(format!("send failed: {detail}"));
+        // The legs of the send that failed are not the legs of the send before
+        // it. Leaving the previous receipts up would show four DELIVERED rows
+        // under a message that never left the client.
+        self.receipts.clear();
+    }
+
+    /// Fold one send's per-recipient legs in.
+    ///
+    /// The summary says how many legs did NOT deliver, because that is the
+    /// number an operator scans for. A partial failure is the normal case for a
+    /// fan-out and it must never read as success.
+    pub fn apply_receipts(&mut self, deliveries: Vec<FleetMessageDelivery>) {
+        let total = deliveries.len();
+        let delivered = deliveries
+            .iter()
+            .filter(|leg| leg.state == ActionReceiptStatus::Delivered)
+            .count();
+        self.receipts = deliveries;
+        self.feedback = Some(if delivered == total {
+            format!("delivered to {delivered}/{total}")
+        } else {
+            format!(
+                "delivered to {delivered}/{total} · {} not delivered",
+                total.saturating_sub(delivered)
+            )
+        });
     }
 }
 
@@ -576,10 +891,18 @@ impl ChatState {
 /// own tests can assert on it without building a whole pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatIntent {
-    /// Resolve the copilot session and page the channel: `fleet/acp_session_create`
-    /// (idempotent per live scope), then `fleet/message_list`, then the confirm
-    /// and activity feeds once their dispatch arms exist.
+    /// Page the conversation this surface is showing.
+    ///
+    /// For [`ChatTopic::Copilot`] that means resolving the copilot session and
+    /// channel first (`fleet/acp_session_create`, idempotent per live scope),
+    /// then `fleet/message_list` plus the confirm and activity feeds. For
+    /// [`ChatTopic::Session`] it is `fleet/message_list` on the session's own
+    /// scope and nothing else: a session thread has no copilot machinery.
     Refresh {
+        /// Which conversation to page. The host branches on THIS rather than
+        /// sniffing the scope string, so the two never disagree about what a
+        /// `session:` prefix means.
+        topic: ChatTopic,
         /// The scope to page, when this surface already knows it. `None` asks
         /// the host to resolve the copilot channel first: only the daemon knows
         /// the minted `channel:<ulid>`.
@@ -591,10 +914,17 @@ pub enum ChatIntent {
     /// what the daemon defaults to. A copilot write is the daemon's own MCP
     /// path and never originates here.
     Send {
+        /// Which conversation this was composed in, so the page that follows
+        /// the write reads the same surface the operator is looking at.
+        topic: ChatTopic,
         /// The channel scope the row is filed under.
         scope_key: String,
-        /// The copilot session the message is delivered to.
-        target_session_key: String,
+        /// Every session the message is delivered to.
+        ///
+        /// A LIST, not a session: a channel fan-out is ONE `message_send` with
+        /// N delivery legs (part 2's Phase C rule), and the receipts this
+        /// surface renders are those legs.
+        targets: Vec<String>,
         /// The body.
         text: String,
         /// Replay identity for the send.
@@ -602,6 +932,16 @@ pub enum ChatIntent {
     },
     /// Answer a guardrail confirm card: `fleet/confirm_answer`.
     ConfirmAnswer(FleetConfirmAnswerParams),
+    /// Mint a broadcast channel: `fleet/channel_create {kind: broadcast}`.
+    ///
+    /// The host answers with the MINTED scope, which is the only thing that can
+    /// open the channel view; this surface never composes a `channel:` string.
+    CreateChannel {
+        /// Operator-supplied channel name.
+        name: String,
+        /// The membership, which becomes the send target list.
+        recipients: Vec<String>,
+    },
 }
 
 /// What one key press did to the surface.
@@ -680,12 +1020,15 @@ fn submit_composer(state: &mut ChatState) -> ChatKeyOutcome {
     if text.is_empty() {
         return ChatKeyOutcome::Handled;
     }
-    let Some(target) = state.target_session_key.clone() else {
-        // Refusing beats sending into a scope with no recipient: the daemon
-        // requires at least one target and would reject the frame anyway, and
-        // the operator deserves to know the copilot session is not up yet.
-        state.feedback = Some("no copilot session yet, nothing to send to".into());
-        return ChatKeyOutcome::Handled;
+    // Refusing beats sending into a scope with no recipient: the daemon
+    // requires at least one target and would reject the frame anyway, and the
+    // operator deserves the reason this topic has nobody to address.
+    let targets = match state.topic.send_targets(state.target_session_key.as_deref()) {
+        Ok(targets) => targets,
+        Err(refusal) => {
+            state.feedback = Some(refusal);
+            return ChatKeyOutcome::Handled;
+        }
     };
     let Some(scope_key) = state.scope_key.clone() else {
         state.feedback = Some("no copilot channel yet, nothing to send to".into());
@@ -701,8 +1044,9 @@ fn submit_composer(state: &mut ChatState) -> ChatKeyOutcome {
     state.composer.clear();
     state.in_flight = true;
     ChatKeyOutcome::Intent(ChatIntent::Send {
+        topic: state.topic.clone(),
         scope_key,
-        target_session_key: target,
+        targets,
         text,
         request_id,
     })
@@ -871,6 +1215,7 @@ pub fn chat_tick(state: &mut ChatState, now_ms: i64) -> Option<ChatIntent> {
     state.last_poll_ms = now_ms;
     state.in_flight = true;
     Some(ChatIntent::Refresh {
+        topic: state.topic.clone(),
         scope_key: state.scope_key.clone(),
     })
 }
@@ -894,7 +1239,8 @@ pub fn render_chat(
         1,
         row,
         &format!(
-            "Fleet chat · #copilot · {}",
+            "{} · {}",
+            state.topic.title(),
             state.scope_key.as_deref().unwrap_or("resolving channel")
         ),
         GOLD,
@@ -907,21 +1253,36 @@ pub fn render_chat(
         ChatStatus::Loading => ("LOADING".to_string(), MUTED),
         ChatStatus::Live => (
             format!(
-                "LIVE · {} messages · copilot {}",
+                "LIVE · {} messages · {}",
                 state.messages.len(),
-                // The daemon's own refusal, not a generic "not started": its
-                // wording ("scope_key ... is already held by a session whose
-                // cwd is X") is the only thing that tells the operator the TUI
-                // was launched from the wrong directory.
-                state.target_session_key.as_deref().map_or_else(
-                    || {
-                        state.session_detail.as_ref().map_or_else(
-                            || "not started".to_string(),
-                            |detail| format!("not started: {detail}"),
+                // Wildcard-free: a channel that reported "session not started"
+                // would be describing machinery it does not have.
+                match &state.topic {
+                    ChatTopic::Copilot | ChatTopic::Session { .. } => format!(
+                        "{} {}",
+                        if state.topic.shows_copilot_feeds() {
+                            "copilot"
+                        } else {
+                            "session"
+                        },
+                        // The daemon's own refusal, not a generic "not
+                        // started": its wording ("scope_key ... is already held
+                        // by a session whose cwd is X") is the only thing that
+                        // tells the operator the TUI was launched from the
+                        // wrong directory.
+                        state.target_session_key.as_deref().map_or_else(
+                            || {
+                                state.session_detail.as_ref().map_or_else(
+                                    || "not started".to_string(),
+                                    |detail| format!("not started: {detail}"),
+                                )
+                            },
+                            ToString::to_string,
                         )
-                    },
-                    ToString::to_string,
-                )
+                    ),
+                    ChatTopic::Channel { recipients, .. } =>
+                        format!("{} member(s)", recipients.len()),
+                }
             ),
             GREEN,
         ),
@@ -934,12 +1295,23 @@ pub fn render_chat(
     let composer_row = bottom.saturating_sub(3);
     let help_row = bottom.saturating_sub(2);
     let feedback_row = bottom.saturating_sub(1);
-    let cards_height = cards_block_height(state);
-    let timeline_bottom = composer_row.saturating_sub(cards_height).saturating_sub(1);
+    // Cards and receipts are mutually exclusive by topic (the copilot channel
+    // has guardrail cards, a broadcast channel has delivery legs), so they
+    // share one reserved band under the timeline and each renders nothing on
+    // the other's topic.
+    let block_height = cards_block_height(state).saturating_add(receipts_block_height(state));
+    let timeline_bottom = composer_row.saturating_sub(block_height).saturating_sub(1);
 
     row = render_timeline(buffer, row, timeline_bottom, right, state);
     let _ = row;
     render_cards(
+        buffer,
+        timeline_bottom.saturating_add(1),
+        composer_row,
+        right,
+        state,
+    );
+    render_receipts(
         buffer,
         timeline_bottom.saturating_add(1),
         composer_row,
@@ -968,6 +1340,12 @@ pub fn render_chat(
         "Enter answers with the edited arguments · Esc cancels the edit"
     } else {
         match state.focus {
+            // A thread advertises no card key: there are no cards on it, and a
+            // footer that promises one is the same lie as an action hint the
+            // reducer declines.
+            ChatFocus::Composer if !state.topic.shows_copilot_feeds() => {
+                "Enter sends · Esc back to the Fleet panel"
+            }
             ChatFocus::Composer => "Enter sends · Tab confirm cards · Esc back to the Fleet panel",
             ChatFocus::Cards => "↑↓ card · y approve · n deny · e answer · Tab composer",
         }
@@ -978,7 +1356,84 @@ pub fn render_chat(
     }
 }
 
+/// How many receipt rows the block paints before it starts summarising.
+pub const RECEIPTS_VISIBLE: usize = 6;
+
+fn receipts_block_height(state: &ChatState) -> u16 {
+    if !state.topic.shows_receipts() || state.receipts.is_empty() {
+        return 0;
+    }
+    let rows = state.receipts.len().min(RECEIPTS_VISIBLE) as u16;
+    // header + rows + the "N more" row when any leg is off the window.
+    1 + rows + u16::from(state.receipts.len() > RECEIPTS_VISIBLE)
+}
+
+/// Paint one row per recipient of the last send.
+///
+/// One row per LEG, never one aggregate tick: the partial failure (three
+/// delivered, one rejected because its pane is gone) is the case this block
+/// exists for, and a single "sent" line is exactly the rendering that hides it.
+/// Rejected legs are painted FIRST, so the ones an operator has to act on are
+/// the ones that survive the window.
+fn render_receipts(buffer: &mut WireBuffer, top: u16, bottom: u16, right: u16, state: &ChatState) {
+    if bottom <= top || !state.topic.shows_receipts() || state.receipts.is_empty() {
+        return;
+    }
+    let mut row = top;
+    let delivered = state
+        .receipts
+        .iter()
+        .filter(|leg| leg.state == ActionReceiptStatus::Delivered)
+        .count();
+    let total = state.receipts.len();
+    put_str_styled(
+        buffer,
+        1,
+        row,
+        &format!("DELIVERY RECEIPTS · {delivered}/{total} delivered"),
+        if delivered == total { GREEN } else { ALERT },
+        Some(SURFACE),
+        1,
+        right,
+    );
+    row = row.saturating_add(1);
+    let mut ordered: Vec<&FleetMessageDelivery> = state.receipts.iter().collect();
+    ordered.sort_by_key(|leg| u8::from(leg.state == ActionReceiptStatus::Delivered));
+    let shown = ordered.len().min(RECEIPTS_VISIBLE);
+    for leg in ordered.iter().take(RECEIPTS_VISIBLE) {
+        if row >= bottom {
+            return;
+        }
+        put_str(
+            buffer,
+            1,
+            row,
+            &truncate_ellipsis(&receipt_line(leg), usize::from(right.saturating_sub(2))),
+            delivery_state_color(leg.state),
+            right,
+        );
+        row = row.saturating_add(1);
+    }
+    let hidden = total.saturating_sub(shown);
+    if hidden > 0 && row < bottom {
+        put_str(
+            buffer,
+            1,
+            row,
+            &format!("  … {hidden} more recipient(s) not shown"),
+            MUTED,
+            right,
+        );
+    }
+}
+
 fn cards_block_height(state: &ChatState) -> u16 {
+    // A session thread has no guardrail cards and no copilot activity: the
+    // whole block is copilot machinery, and an empty "CONFIRM CARDS · none
+    // open" there tells an operator to wait for something that cannot arrive.
+    if !state.topic.shows_copilot_feeds() {
+        return 0;
+    }
     let rows = state.confirms.len().min(CARDS_VISIBLE) as u16;
     let activity = state.activity.len().min(3) as u16;
     // header + cards + the "N more" row when any card is off the window +
@@ -1003,14 +1458,7 @@ fn render_timeline(
     let skip = state.messages.len().saturating_sub(capacity);
     let mut row = top;
     if state.messages.is_empty() {
-        put_str(
-            buffer,
-            1,
-            row,
-            "no messages yet, type below to ask the copilot",
-            MUTED,
-            right,
-        );
+        put_str(buffer, 1, row, state.topic.empty_hint(), MUTED, right);
         return row.saturating_add(1);
     }
     for message in state.messages.iter().skip(skip) {
@@ -1032,7 +1480,15 @@ fn render_timeline(
             right,
         );
         put_str(buffer, 13, row, "│ ", MUTED, right);
-        let body = format!("{}{}", message_kind_label(message.kind), message.body);
+        // The thread marker is BEFORE the kind label: a reply is a reply
+        // whatever kind it is, and `origin_message_id` is the only thing on the
+        // wire that says so.
+        let body = format!(
+            "{}{}{}",
+            message.role.marker(),
+            message_kind_label(message.kind),
+            message.body
+        );
         put_str(
             buffer,
             15,
@@ -1055,7 +1511,7 @@ fn cards_window_start(state: &ChatState) -> usize {
 }
 
 fn render_cards(buffer: &mut WireBuffer, top: u16, bottom: u16, right: u16, state: &ChatState) {
-    if bottom <= top {
+    if bottom <= top || !state.topic.shows_copilot_feeds() {
         return;
     }
     let mut row = top;
@@ -1189,6 +1645,45 @@ mod tests {
         }
     }
 
+    /// The session a thread test threads.
+    const THREAD_SESSION: &str = "claude:one";
+    /// The scope part 1 mints for that session, written out ONCE here so the
+    /// test would notice the derivation changing under it.
+    const THREAD_SCOPE: &str = "session:claude:one";
+
+    /// One row in a session thread, `id` given so ordering is assertable.
+    fn thread_row(id: &str, sender: &str, body: &str, origin: Option<&str>) -> FleetMessage {
+        FleetMessage {
+            id: id.to_string(),
+            scope_key: THREAD_SCOPE.to_string(),
+            origin_message_id: origin.map(str::to_string),
+            sender: sender.to_string(),
+            kind: if origin.is_some() {
+                FleetMessageKind::Agent
+            } else {
+                FleetMessageKind::User
+            },
+            body: body.to_string(),
+            created_at: 1_700_000_000_000,
+        }
+    }
+
+    /// A thread surface with `messages` already paged in, in the order the
+    /// daemon returned them (commit order).
+    fn threaded(messages: Vec<FleetMessage>) -> ChatState {
+        let mut state = ChatState::thread(THREAD_SESSION.to_string());
+        state.apply_snapshot(ChatSnapshot {
+            scope_key: Some(THREAD_SCOPE.into()),
+            target_session_key: Some(THREAD_SESSION.into()),
+            messages,
+            confirms: Vec::new(),
+            confirms_detail: None,
+            session_detail: None,
+            activity: Vec::new(),
+        });
+        state
+    }
+
     fn confirm(state: FleetConfirmState) -> serde_json::Value {
         card("01J0CONFIRM", "kill", state)
     }
@@ -1222,7 +1717,59 @@ mod tests {
             session_detail: None,
             activity: Vec::new(),
         });
+        // The OPERATOR's first cursor move, which a poll deliberately does not
+        // make for them (see `a_fresh_page_of_cards_selects_nothing`). Every
+        // test below is about what happens once a card is selected.
+        state.select(0);
         state
+    }
+
+    /// A poll that returns cards selects NOTHING.
+    ///
+    /// The one place this surface could make a choice on the operator's behalf,
+    /// on the screen whose whole job is a human reading a destructive call
+    /// before approving it. `Tab` then `y` must not approve whatever happened to
+    /// be first at that instant.
+    #[test]
+    fn a_fresh_page_of_cards_selects_nothing() {
+        let mut state = ChatState::opening();
+        state.apply_snapshot(ChatSnapshot {
+            scope_key: Some(MINTED_SCOPE.into()),
+            target_session_key: Some("acp:01J0COPILOT".into()),
+            messages: Vec::new(),
+            confirms: vec![
+                card("CARD-KILL", "kill", FleetConfirmState::Open),
+                card("CARD-SPAWN", "spawn_session", FleetConfirmState::Open),
+            ],
+            confirms_detail: None,
+            session_detail: None,
+            activity: Vec::new(),
+        });
+        assert_eq!(state.confirms().len(), 2);
+        assert!(
+            state.selected_card().is_none(),
+            "the first poll pre-armed an approve"
+        );
+
+        // Tab into the cards and press approve: nothing is answered.
+        state.focus = ChatFocus::Cards;
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Char('y')),
+            ChatKeyOutcome::Handled,
+            "`y` answered a card the operator never selected"
+        );
+        assert_eq!(state.feedback(), Some("no confirm card selected"));
+
+        // One deliberate keypress later, the same key answers.
+        reduce_chat_key(&mut state, ChatKey::Down);
+        assert_eq!(
+            state.selected_card().map(ChatConfirmCard::confirm_id),
+            Some("CARD-KILL")
+        );
+        assert!(matches!(
+            reduce_chat_key(&mut state, ChatKey::Char('y')),
+            ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(_))
+        ));
     }
 
     /// The panel maps `sender` TWICE: the wire token becomes a [`ChatActor`],
@@ -1435,16 +1982,20 @@ mod tests {
         }
         assert_eq!(state.composer(), "hi ");
         let ChatKeyOutcome::Intent(ChatIntent::Send {
+            topic,
             scope_key,
-            target_session_key,
+            targets,
             text,
             request_id,
         }) = reduce_chat_key(&mut state, ChatKey::Enter)
         else {
             panic!("Enter did not send");
         };
+        assert_eq!(topic, ChatTopic::Copilot);
         assert_eq!(scope_key, MINTED_SCOPE);
-        assert_eq!(target_session_key, "acp:01J0COPILOT");
+        // ONE target, and it is the session the daemon resolved: the copilot
+        // channel is a fan-out of exactly one.
+        assert_eq!(targets, vec!["acp:01J0COPILOT".to_string()]);
         assert_eq!(text, "hi");
         assert!(
             request_id.starts_with(&format!("fleet-chat-{MINTED_SCOPE}-")),
@@ -1565,7 +2116,10 @@ mod tests {
         // one, so the surface asks rather than guessing a literal.
         assert_eq!(
             chat_tick(&mut state, 1_000),
-            Some(ChatIntent::Refresh { scope_key: None })
+            Some(ChatIntent::Refresh {
+                topic: ChatTopic::Copilot,
+                scope_key: None
+            })
         );
         // In flight: every subsequent frame is silent until the fetch answers.
         assert_eq!(chat_tick(&mut state, 1_500), None);
@@ -1589,6 +2143,7 @@ mod tests {
         assert_eq!(
             chat_tick(&mut state, 9_000),
             Some(ChatIntent::Refresh {
+                topic: ChatTopic::Copilot,
                 scope_key: Some(MINTED_SCOPE.into())
             })
         );
@@ -1854,6 +2409,467 @@ mod tests {
         assert!(
             text.lines().any(|row| row.contains("more card(s) not shown")),
             "hidden cards are invisible as an absence:\n{text}"
+        );
+    }
+
+    /// Every topic maps to a scope, a recipient, a header and a feed rule, and
+    /// a new topic is a compile error in all four rather than a thread that
+    /// silently reads the copilot channel.
+    ///
+    /// This is the [`every_wire_actor_renders_a_label_operators_can_tell_apart`]
+    /// shape applied to the other fact this surface maps twice: which
+    /// conversation it is showing.
+    #[test]
+    fn every_topic_names_its_scope_its_recipient_and_its_header() {
+        fn is_the_copilot(topic: &ChatTopic) -> bool {
+            match topic {
+                ChatTopic::Copilot => true,
+                ChatTopic::Session { .. } | ChatTopic::Channel { .. } => false,
+            }
+        }
+
+        /// A topic whose recipient is ONE session, known without asking the
+        /// daemon. A channel's is a list, and the copilot's is resolved.
+        fn addresses_one_known_session(topic: &ChatTopic) -> bool {
+            match topic {
+                ChatTopic::Session { .. } => true,
+                ChatTopic::Copilot | ChatTopic::Channel { .. } => false,
+            }
+        }
+
+        for topic in [
+            ChatTopic::Copilot,
+            ChatTopic::Session {
+                session_key: THREAD_SESSION.to_string(),
+            },
+            ChatTopic::Channel {
+                scope_key: "channel:01J0BROADCAST".to_string(),
+                name: "#ops".to_string(),
+                recipients: vec![THREAD_SESSION.to_string()],
+            },
+        ] {
+            assert!(!topic.title().is_empty(), "{topic:?} renders no header");
+            assert!(
+                !topic.empty_hint().is_empty(),
+                "{topic:?} tells an operator nothing on an empty timeline"
+            );
+            assert_eq!(
+                topic.scope_key().is_none(),
+                is_the_copilot(&topic),
+                "{topic:?} disagrees with itself about whether its scope is minted"
+            );
+            assert_eq!(
+                topic.shows_copilot_feeds(),
+                is_the_copilot(&topic),
+                "{topic:?} shows the wrong feeds"
+            );
+            assert_eq!(
+                topic.target_session_key().is_some(),
+                addresses_one_known_session(&topic)
+            );
+            // Every topic can say who a send from it addresses, or why nobody.
+            assert!(
+                topic
+                    .send_targets(Some("acp:01J0COPILOT"))
+                    .is_ok_and(|targets| !targets.is_empty()),
+                "{topic:?} cannot name a single recipient"
+            );
+        }
+        assert_ne!(
+            ChatTopic::Copilot.title(),
+            ChatTopic::Session {
+                session_key: THREAD_SESSION.to_string()
+            }
+            .title(),
+            "a thread and the copilot channel render the same header"
+        );
+        // The scope grammar part 1 froze, and the string the daemon derives for
+        // a single-target send that omits `scope_key`.
+        assert_eq!(
+            ChatTopic::Session {
+                session_key: THREAD_SESSION.to_string()
+            }
+            .scope_key()
+            .as_deref(),
+            Some(THREAD_SCOPE)
+        );
+    }
+
+    /// Both thread roles render, and only a reply claims one. A new role is a
+    /// compile error in the marker mapping.
+    #[test]
+    fn only_a_reply_is_marked_as_one() {
+        for role in [ChatThreadRole::Root, ChatThreadRole::Reply] {
+            assert_eq!(
+                role.marker().is_empty(),
+                role == ChatThreadRole::Root,
+                "{role:?} marker is wrong"
+            );
+        }
+        let reply = ChatMessageRow::from(thread_row("02", "claude:one", "on it", Some("01")));
+        assert_eq!(reply.role, ChatThreadRole::Reply);
+        let root = ChatMessageRow::from(thread_row("01", "operator", "run the tests", None));
+        assert_eq!(root.role, ChatThreadRole::Root);
+    }
+
+    /// A thread opens KNOWING its scope and its recipient, without a round
+    /// trip, and its first poll carries both.
+    #[test]
+    fn a_thread_addresses_its_session_from_the_first_frame() {
+        let mut state = ChatState::thread(THREAD_SESSION.to_string());
+        assert_eq!(state.scope_key(), Some(THREAD_SCOPE));
+        assert_eq!(state.target_session_key(), Some(THREAD_SESSION));
+        assert_eq!(
+            chat_tick(&mut state, 1_000),
+            Some(ChatIntent::Refresh {
+                topic: ChatTopic::Session {
+                    session_key: THREAD_SESSION.to_string()
+                },
+                scope_key: Some(THREAD_SCOPE.to_string()),
+            })
+        );
+    }
+
+    /// Composing in a thread sends to THAT session, in THAT scope, and the
+    /// intent carries the topic so the page that follows the write reads the
+    /// thread rather than resolving the copilot channel.
+    #[test]
+    fn composing_in_a_thread_prompts_the_session_it_is_open_on() {
+        let mut state = threaded(Vec::new());
+        for character in "run the tests".chars() {
+            reduce_chat_key(&mut state, ChatKey::Char(character));
+        }
+        let ChatKeyOutcome::Intent(ChatIntent::Send {
+            topic,
+            scope_key,
+            targets,
+            text,
+            ..
+        }) = reduce_chat_key(&mut state, ChatKey::Enter)
+        else {
+            panic!("Enter did not send");
+        };
+        assert_eq!(
+            topic,
+            ChatTopic::Session {
+                session_key: THREAD_SESSION.to_string()
+            }
+        );
+        assert_eq!(scope_key, THREAD_SCOPE);
+        assert_eq!(targets, vec![THREAD_SESSION.to_string()]);
+        assert_eq!(text, "run the tests");
+    }
+
+    /// The thread renders in the order the daemon returned (commit order),
+    /// with the reply marked as a reply and attributed to the session.
+    ///
+    /// Ordering is asserted on the ROW POSITIONS in the painted pane, not on
+    /// the state vector: the pane is what an operator reads, and the window
+    /// that keeps the newest rows is between the two.
+    #[test]
+    fn a_thread_renders_its_reply_under_the_message_it_answers() {
+        let state = threaded(vec![
+            thread_row("01J0A", "operator", "run the tests", None),
+            thread_row("01J0B", THREAD_SESSION, "tests are green", Some("01J0A")),
+        ]);
+        let text = render_to_text(&state, 100, 30);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Fleet thread · claude:one") && row.contains(THREAD_SCOPE)),
+            "the thread header does not name its session and scope:\n{text}"
+        );
+        let prompt = rows
+            .iter()
+            .position(|row| row.contains("YOU") && row.contains("│ run the tests"))
+            .unwrap_or_else(|| panic!("no operator row:\n{text}"));
+        let reply = rows
+            .iter()
+            .position(|row| row.contains("claude:one") && row.contains("tests are green"))
+            .unwrap_or_else(|| panic!("no reply row:\n{text}"));
+        assert!(
+            prompt < reply,
+            "the reply rendered above the message it answers:\n{text}"
+        );
+        assert!(
+            rows[reply].contains("↳"),
+            "the reply is not marked as threaded: {}",
+            rows[reply]
+        );
+        assert!(
+            !rows[prompt].contains("↳"),
+            "the prompt claims to answer something: {}",
+            rows[prompt]
+        );
+    }
+
+    /// A session thread advertises no confirm-card machinery: there is none on
+    /// it, and a footer that promises a key the surface cannot honour is the
+    /// same lie as an action hint the reducer declines.
+    #[test]
+    fn a_thread_shows_no_copilot_feeds() {
+        let mut state = threaded(vec![thread_row("01J0A", "operator", "run the tests", None)]);
+        // Even handed cards and activity, a thread paints neither: the topic
+        // decides, not the payload.
+        state.confirms = vec![ChatConfirmCard::decode(&confirm(FleetConfirmState::Open))];
+        state.activity = vec![FleetActivityRow {
+            seq: 1,
+            id: "01J0ACT".into(),
+            scope_key: THREAD_SCOPE.into(),
+            tool: "send_prompt".into(),
+            class: FleetActivityClass::Write,
+            target_session_key: Some(THREAD_SESSION.into()),
+            outcome: FleetActivityOutcome::Ok,
+            detail: None,
+            created_at: 1_700_000_000_000,
+        }];
+        let text = render_to_text(&state, 100, 30);
+        assert!(
+            !text.contains("CONFIRM CARDS"),
+            "a session thread painted the copilot's card block:\n{text}"
+        );
+        assert!(
+            !text.contains("COPILOT ACTIVITY"),
+            "a session thread painted the copilot activity feed:\n{text}"
+        );
+        assert!(
+            text.lines().any(|row| row.contains("Enter sends · Esc back")),
+            "the thread footer still advertises a card key:\n{text}"
+        );
+    }
+
+    /// The channel this file's Phase C tests talk in, with the scope shaped
+    /// like one a real daemon MINTS.
+    const CHANNEL_SCOPE: &str = "channel:01J0BROADCAST";
+
+    fn channel_members() -> Vec<String> {
+        vec![
+            "claude:one".to_string(),
+            "claude:two".to_string(),
+            "codex:three".to_string(),
+            "claude:gone".to_string(),
+        ]
+    }
+
+    fn leg(
+        session_key: &str,
+        state: ActionReceiptStatus,
+        detail: Option<&str>,
+    ) -> FleetMessageDelivery {
+        FleetMessageDelivery {
+            session_key: session_key.to_string(),
+            state,
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    /// A fan-out is only legible if every recipient gets its own line.
+    ///
+    /// THE case this block exists for: three delivered, one rejected. An
+    /// aggregate tick ("sent to 4") is true of the message and false of the
+    /// recipients, and the one recipient an operator has to go and look at is
+    /// exactly the one it hides. The REASON is asserted too, because "REJECTED"
+    /// alone does not say whether to retry or to go and restart a session.
+    #[test]
+    fn a_partial_fan_out_renders_one_receipt_per_recipient_with_its_reason() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        state.apply_receipts(vec![
+            leg("claude:one", ActionReceiptStatus::Delivered, None),
+            leg("claude:two", ActionReceiptStatus::Delivered, None),
+            leg("codex:three", ActionReceiptStatus::Delivered, None),
+            leg(
+                "claude:gone",
+                ActionReceiptStatus::Rejected,
+                Some("target_not_running"),
+            ),
+        ]);
+
+        let text = render_to_text(&state, 100, 30);
+        // ROW-ANCHORED: the rejected recipient and its reason are on ONE line,
+        // so this cannot pass on a pane that happens to mention both somewhere.
+        let rejected = text
+            .lines()
+            .find(|row| row.contains("claude:gone"))
+            .unwrap_or_else(|| panic!("the rejected recipient has no row:\n{text}"));
+        assert!(
+            rejected.contains("REJECTED"),
+            "the rejected leg does not say so: {rejected}"
+        );
+        assert!(
+            rejected.contains("target_not_running"),
+            "the rejected leg does not say WHY: {rejected}"
+        );
+        for delivered in ["claude:one", "claude:two", "codex:three"] {
+            let row = text
+                .lines()
+                .find(|row| row.contains(delivered))
+                .unwrap_or_else(|| panic!("{delivered} has no receipt row:\n{text}"));
+            assert!(
+                row.contains("DELIVERED"),
+                "{delivered} is not shown as delivered: {row}"
+            );
+        }
+        // The header COUNTS, so a partial failure is readable without adding up
+        // four rows, and it never claims the whole send landed.
+        assert!(
+            text.lines().any(|row| row.contains("DELIVERY RECEIPTS · 3/4 delivered")),
+            "the receipts header does not count the legs:\n{text}"
+        );
+        assert!(
+            state.feedback().is_some_and(|line| line.contains("1 not delivered")),
+            "the feedback line hides the leg that failed: {:?}",
+            state.feedback()
+        );
+        // Delivered and rejected must not paint the same, or the block is a
+        // list of four identical-looking lines.
+        assert_ne!(
+            delivery_state_color(ActionReceiptStatus::Delivered),
+            delivery_state_color(ActionReceiptStatus::Rejected),
+            "a rejected leg is painted like a delivered one"
+        );
+    }
+
+    /// Every delivery state the wire can carry renders a label an operator can
+    /// read, and only ONE of them reads as success.
+    ///
+    /// Exhaustive on purpose, in the shape of
+    /// `every_wire_provider_renders_a_label_operators_can_read`: a new
+    /// [`ActionReceiptStatus`] variant must fail to COMPILE here rather than
+    /// inherit whichever arm was written last and quietly read as delivered.
+    #[test]
+    fn every_wire_delivery_state_renders_a_label_operators_can_read() {
+        fn operators_should_read_as_success(state: ActionReceiptStatus) -> bool {
+            match state {
+                ActionReceiptStatus::Delivered => true,
+                ActionReceiptStatus::Pending
+                | ActionReceiptStatus::Failed
+                | ActionReceiptStatus::Unknown
+                | ActionReceiptStatus::Rejected => false,
+            }
+        }
+
+        let mut labels = std::collections::BTreeSet::new();
+        for state in [
+            ActionReceiptStatus::Pending,
+            ActionReceiptStatus::Delivered,
+            ActionReceiptStatus::Failed,
+            ActionReceiptStatus::Unknown,
+            ActionReceiptStatus::Rejected,
+        ] {
+            let label = delivery_state_label(state);
+            assert!(!label.trim().is_empty(), "{state:?} renders as nothing");
+            assert!(
+                labels.insert(label),
+                "{state:?} shares the label {label:?} with another state"
+            );
+            // The success COLOUR is the operator's real signal on a block of
+            // eight rows, so it has to agree with the taxonomy.
+            assert_eq!(
+                delivery_state_color(state) == GREEN,
+                operators_should_read_as_success(state),
+                "{state:?} is painted as the wrong kind of outcome"
+            );
+            // A leg with a reason always shows it; one without never invents it.
+            let with = receipt_line(&leg("claude:one", state, Some("queue_full")));
+            assert!(
+                with.contains("queue_full"),
+                "{state:?} dropped its reason: {with}"
+            );
+            let without = receipt_line(&leg("claude:one", state, None));
+            assert!(
+                without.contains(label) && without.contains("claude:one"),
+                "{state:?} renders an unusable receipt: {without}"
+            );
+        }
+    }
+
+    /// A channel send addresses the channel's MEMBERSHIP, in one send.
+    ///
+    /// The bug this pins: collapsing a channel to `target_session_key` (which
+    /// is `None` for a channel) either sends to nobody or, worse, to whichever
+    /// session the surface last resolved. The scope has to be the MINTED one
+    /// and the targets have to be every member, because `fleet/message_send`
+    /// refuses a target that is not on the channel.
+    #[test]
+    fn a_channel_send_addresses_every_member_in_one_send() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        for character in "ship it".chars() {
+            reduce_chat_key(&mut state, ChatKey::Char(character));
+        }
+        let outcome = reduce_chat_key(&mut state, ChatKey::Enter);
+        let ChatKeyOutcome::Intent(ChatIntent::Send {
+            scope_key,
+            targets,
+            text,
+            ..
+        }) = outcome
+        else {
+            panic!("a channel composer did not emit one send: {outcome:?}");
+        };
+        assert_eq!(
+            scope_key, CHANNEL_SCOPE,
+            "the send left the channel's scope"
+        );
+        assert_eq!(
+            targets,
+            channel_members(),
+            "the fan-out did not address every member"
+        );
+        assert_eq!(text, "ship it");
+    }
+
+    /// A channel with no members refuses out loud instead of posting a message
+    /// the daemon would reject with "targets must name at least one session".
+    #[test]
+    fn a_memberless_channel_refuses_the_send_and_says_why() {
+        let mut state =
+            ChatState::channel(CHANNEL_SCOPE.to_string(), "#empty".to_string(), Vec::new());
+        for character in "anyone?".chars() {
+            reduce_chat_key(&mut state, ChatKey::Char(character));
+        }
+        let outcome = reduce_chat_key(&mut state, ChatKey::Enter);
+        assert_eq!(
+            outcome,
+            ChatKeyOutcome::Handled,
+            "a memberless channel sent a message anyway"
+        );
+        assert!(
+            state.feedback().is_some_and(|line| line.contains("no members")),
+            "the refusal does not say the channel is empty: {:?}",
+            state.feedback()
+        );
+    }
+
+    /// A channel is the chat widget over a third topic, not a third widget: it
+    /// paints no copilot machinery, and its own header names the channel.
+    #[test]
+    fn a_channel_view_paints_its_own_header_and_no_copilot_machinery() {
+        let state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        let text = render_to_text(&state, 100, 30);
+        assert!(
+            text.lines()
+                .any(|row| row.contains("Fleet channel · #ops") && row.contains(CHANNEL_SCOPE)),
+            "the channel header does not name the channel and its minted scope:\n{text}"
+        );
+        assert!(
+            !text.contains("CONFIRM CARDS"),
+            "a broadcast channel painted the copilot's card block:\n{text}"
+        );
+        assert!(
+            !text.contains("DELIVERY RECEIPTS"),
+            "receipts were painted before anything was sent:\n{text}"
         );
     }
 
