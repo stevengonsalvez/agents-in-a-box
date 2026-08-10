@@ -626,6 +626,21 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         let _acp_sweeper = acp_pool.spawn_sweeper();
         crate::acp_pool::install(acp_pool).await;
 
+        // Name the rows written before the daemon authored `display_name` at all.
+        // Every existing row is NULL there, and a session nothing observes again
+        // would never be named by the writers alone, so the roster's name search
+        // would stay dead for exactly the sessions an operator has to search for.
+        match ainb_hangar_store::repo::fleet::FleetRepo::backfill_display_names(
+            store.pool(),
+            crate::fleet::display_name_for_cwd,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(named) => tracing::info!(named, "named fleet sessions left unnamed by older builds"),
+            Err(error) => tracing::error!(%error, "could not backfill fleet display names at boot"),
+        }
+
         // Tmux reconciliation keeps unhooked and standalone provider sessions in
         // the canonical Fleet roster as degraded rows with exact pane identity.
         let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());

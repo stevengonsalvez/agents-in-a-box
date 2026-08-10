@@ -5608,6 +5608,7 @@ async fn handle_fleet_acp_session_create(
             // `FleetProvider::Acp`; anything else would render as Unknown.
             provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
             cwd: Some(params.cwd.clone()),
+            display_name: crate::fleet::display_name_for_cwd(&params.cwd),
             management_state: Some("MANAGED".to_string()),
             capabilities: Some(acp_capabilities()),
             confidence: Some("HIGH".to_string()),
