@@ -37,38 +37,47 @@ const CARD_TITLE: &str = "Rerunlifecycletripwire";
 /// Open the `Run ▾` menu over the focused card and launch headless (`Enter`
 /// re-sent — a lone key can drop after a screen change).
 fn launch_headless(sess: &TuiSession, scale: u64, which: &str, home: &std::path::Path) {
+    // Sweep focus ACROSS THE COLUMNS, trying `Enter` at each one.
+    //
+    // `Enter` opens this menu over a FOCUSED CARD, and the card is in exactly
+    // one column. A finished card auto-moves to Done while the focus cursor
+    // stays behind on the now-empty Todo column, so the rerun leg has to move
+    // focus. The original code pressed `Right` a fixed five times on 100 ms
+    // sleeps, which assumes the card has already landed and that no keypress
+    // dropped; when either failed, focus stopped on an empty column and this
+    // loop pressed `Enter` at nothing until it timed out.
+    //
+    // A "nudge right when the pane shows the empty placeholder" is NOT the fix
+    // either, and I shipped that mistake once: `— empty —` is painted for EVERY
+    // empty column, so on a seven-column board it is essentially always on
+    // screen, and the nudge walks focus straight past the card to the last
+    // column (the board clamps there) on every iteration.
+    //
+    // So sweep deterministically instead: walk left to the first column, then
+    // step right one column at a time trying `Enter` at each. That visits the
+    // card's column exactly once per sweep wherever it sits, and repeats until
+    // the deadline.
+    const COLUMNS: usize = 8; // seven seeded columns, plus one to clamp on
     let deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut opened = false;
-    while Instant::now() < deadline {
-        sess.send_enter();
-        if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
-                c.contains("Run ▾")
-            })
-            .is_some()
-        {
-            opened = true;
-            break;
+    'sweep: while Instant::now() < deadline {
+        for _ in 0..COLUMNS {
+            sess.send_key("Left");
         }
-        // Focus sitting on an EMPTY column can never open this menu, because
-        // `Enter` opens it over a focused CARD. Nudge focus right and retry,
-        // rather than spending the whole deadline pressing Enter at a column
-        // that has nothing in it.
-        //
-        // This is what makes the rerun leg self-correcting. A finished card
-        // auto-moves to the Done column while the focus cursor stays behind on
-        // the now-empty Todo column, and walking focus with a fixed number of
-        // blind keypresses assumes both that the card has already moved and
-        // that no keypress dropped. When either assumption failed, focus
-        // stopped on an empty column and this loop pressed Enter at nothing
-        // until it timed out.
-        //
-        // Gated on actually being ON the board: `— empty —` is a generic
-        // placeholder that other screens paint too (the issue list's detail
-        // pane uses it), and sending `Right` at one of those walks a cursor
-        // that has nothing to do with board columns.
-        let capture = sess.capture();
-        if capture.contains("Board:") && capture.contains("— empty —") {
+        for _ in 0..COLUMNS {
+            sess.send_enter();
+            if sess
+                .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                    c.contains("Run ▾")
+                })
+                .is_some()
+            {
+                opened = true;
+                break 'sweep;
+            }
+            if Instant::now() >= deadline {
+                break 'sweep;
+            }
             sess.send_key("Right");
         }
     }
