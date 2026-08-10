@@ -3448,8 +3448,15 @@ async fn execute_fleet_action(
                     answers,
                     ..
                 } if session.provider == "claude" => {
-                    execute_claude_structured(pool, events, &session, request_fingerprint, answers)
-                        .await
+                    execute_claude_structured(
+                        pool,
+                        events,
+                        &session,
+                        params.expected_version,
+                        request_fingerprint,
+                        answers,
+                    )
+                    .await
                 }
                 ControlAction::DismissStructured {
                     request_fingerprint,
@@ -3839,7 +3846,10 @@ async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod fleet_launch_tests {
-    use super::{managed_codex_tmux_args, managed_codex_tmux_name, verify_picker_pane};
+    use super::{
+        MirroredClaudePickerStep, managed_codex_tmux_args, managed_codex_tmux_name,
+        mirrored_claude_picker_steps, verify_picker_pane,
+    };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
@@ -3961,6 +3971,88 @@ mod fleet_launch_tests {
                     2. No";
         let error = verify_picker_pane("claude", &request, pane).unwrap_err();
         assert!(error.contains("newer picker"));
+    }
+
+    #[test]
+    fn mirrored_claude_picker_routes_multi_question_answers_and_submit() {
+        let questions = vec![
+            serde_json::json!({
+                "id": "region",
+                "question": "Deploy to which region?",
+                "options": [{"label": "Europe"}, {"label": "United States"}]
+            }),
+            serde_json::json!({
+                "id": "checks",
+                "question": "Which checks should run?",
+                "multiSelect": true,
+                "options": [{"label": "Lint"}, {"label": "Test"}, {"label": "Tripwire"}]
+            }),
+        ];
+        let answers = vec![
+            ainb_hangar_proto::fleet::FleetQuestionAnswer {
+                question_id: "region".to_string(),
+                selected_options: vec!["United States".to_string()],
+                text: None,
+            },
+            ainb_hangar_proto::fleet::FleetQuestionAnswer {
+                question_id: "checks".to_string(),
+                selected_options: vec!["Test".to_string(), "Tripwire".to_string()],
+                text: None,
+            },
+        ];
+        assert_eq!(
+            mirrored_claude_picker_steps(&questions, &answers),
+            Ok(vec![
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[0].clone(),
+                    key: "Down".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[0].clone(),
+                    key: "Enter".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[1].clone(),
+                    key: "Down".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[1].clone(),
+                    key: "Space".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[1].clone(),
+                    key: "Down".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[1].clone(),
+                    key: "Space".to_string()
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: questions[1].clone(),
+                    key: "Tab".to_string()
+                },
+                MirroredClaudePickerStep::Submit { answers },
+            ])
+        );
+    }
+
+    #[test]
+    fn mirrored_claude_picker_rejects_unverified_text_route() {
+        let questions = vec![serde_json::json!({
+            "id": "region",
+            "question": "Deploy to which region?",
+            "options": [{"label": "Europe"}]
+        })];
+        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+            question_id: "region".to_string(),
+            selected_options: vec![],
+            text: Some("Custom region".to_string()),
+        }];
+        assert!(
+            mirrored_claude_picker_steps(&questions, &answers)
+                .unwrap_err()
+                .contains("free-text")
+        );
     }
 }
 
@@ -4443,6 +4535,7 @@ async fn execute_claude_structured(
     pool: &SqlitePool,
     events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    expected_version: i64,
     request_fingerprint: &str,
     answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
 ) -> (
@@ -4468,6 +4561,17 @@ async fn execute_claude_structured(
             Some("stored Claude question payload is invalid".to_string()),
         );
     };
+    if request.get("fleet_delivery").and_then(serde_json::Value::as_str) == Some("mirrored") {
+        return execute_claude_mirrored_picker(
+            pool,
+            session,
+            expected_version,
+            request_fingerprint,
+            questions,
+            answers,
+        )
+        .await;
+    }
     let mut mapped = Vec::with_capacity(answers.len());
     for answer in answers {
         let question = questions.iter().enumerate().find_map(|(index, question)| {
@@ -4538,6 +4642,255 @@ async fn execute_claude_structured(
         Ok(Err(error)) => (ActionReceiptStatus::Failed, Some(error.to_string())),
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
     }
+}
+
+/// Submit one mirrored Claude interview through its visible native picker.
+///
+/// Every key is checked against the exact request and live native screen before
+/// delivery. Free-text controls stay unavailable until their input state has
+/// equivalent verification coverage.
+async fn execute_claude_mirrored_picker(
+    pool: &SqlitePool,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    expected_version: i64,
+    request_fingerprint: &str,
+    questions: &[serde_json::Value],
+    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+
+    let steps = match mirrored_claude_picker_steps(questions, answers) {
+        Ok(steps) => steps,
+        Err(detail) => return (ActionReceiptStatus::Rejected, Some(detail)),
+    };
+    for step in steps {
+        let (status, detail) = verified_tmux_picker_for_mirrored_step(
+            pool,
+            session,
+            expected_version,
+            request_fingerprint,
+            &step,
+        )
+        .await;
+        if status != ActionReceiptStatus::Delivered {
+            return (status, detail);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    (
+        ActionReceiptStatus::Delivered,
+        Some("mirrored Claude native picker".to_string()),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MirroredClaudePickerStep {
+    QuestionKey {
+        question: serde_json::Value,
+        key: String,
+    },
+    Submit {
+        answers: Vec<ainb_hangar_proto::fleet::FleetQuestionAnswer>,
+    },
+}
+
+fn mirrored_claude_picker_steps(
+    questions: &[serde_json::Value],
+    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
+) -> Result<Vec<MirroredClaudePickerStep>, String> {
+    if questions.len() != answers.len() || questions.is_empty() {
+        return Err("mirrored Claude answers do not cover every question".to_string());
+    }
+    let mut steps = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let question_id = question
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| index.to_string());
+        let answer = answers
+            .iter()
+            .find(|answer| answer.question_id == question_id)
+            .ok_or_else(|| "mirrored Claude question is stale".to_string())?;
+        if answer.text.as_deref().is_some_and(|text| !text.trim().is_empty()) {
+            return Err("mirrored Claude free-text answer is not available yet".to_string());
+        }
+        let options = question
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "mirrored Claude options are absent".to_string())?;
+        let mut selected = answer
+            .selected_options
+            .iter()
+            .map(|label| {
+                options
+                    .iter()
+                    .position(|option| {
+                        option.get("label").and_then(serde_json::Value::as_str) == Some(label)
+                    })
+                    .ok_or_else(|| "mirrored Claude option is stale".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        selected.sort_unstable();
+        selected.dedup();
+        if selected.len() != answer.selected_options.len() || selected.is_empty() {
+            return Err("mirrored Claude requires listed options".to_string());
+        }
+        let multi_select = question
+            .get("multiSelect")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !multi_select && selected.len() != 1 {
+            return Err("mirrored Claude single-select requires one option".to_string());
+        }
+        let mut cursor = 0;
+        for selected_index in selected {
+            for _ in cursor..selected_index {
+                steps.push(MirroredClaudePickerStep::QuestionKey {
+                    question: question.clone(),
+                    key: "Down".to_string(),
+                });
+            }
+            steps.push(MirroredClaudePickerStep::QuestionKey {
+                question: question.clone(),
+                key: if multi_select { "Space" } else { "Enter" }.to_string(),
+            });
+            cursor = selected_index;
+        }
+        if multi_select {
+            steps.push(MirroredClaudePickerStep::QuestionKey {
+                question: question.clone(),
+                key: "Tab".to_string(),
+            });
+        }
+    }
+    steps.push(MirroredClaudePickerStep::Submit {
+        answers: answers.to_vec(),
+    });
+    Ok(steps)
+}
+
+async fn verified_tmux_picker_for_mirrored_step(
+    pool: &SqlitePool,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    expected_version: i64,
+    request_fingerprint: &str,
+    step: &MirroredClaudePickerStep,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    let (Some(target), Some(fingerprint)) = (
+        session.tmux_target.as_deref(),
+        session.process_start_fingerprint.as_deref(),
+    ) else {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some(DETAIL_TMUX_IDENTITY_UNKNOWN.to_string()),
+        );
+    };
+    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
+        Ok(discovered) => discovered,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    if !discovered.iter().any(|candidate| {
+        candidate.exact_tmux_target.as_deref() == Some(target)
+            && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
+            && candidate.provider.as_str() == session.provider
+    }) {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("tmux provider or process identity changed".to_string()),
+        );
+    }
+    let pane = match ainb_fleet_core::read::capture_pane(target, 0).await {
+        Ok(pane) => pane,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let verified = match step {
+        MirroredClaudePickerStep::QuestionKey { question, .. } => {
+            verify_claude_picker_question(question, &pane)
+        }
+        MirroredClaudePickerStep::Submit { answers } => verify_claude_picker_submit(answers, &pane),
+    };
+    if let Err(detail) = verified {
+        return (ActionReceiptStatus::Failed, Some(detail));
+    }
+    if let Err(error) = ainb_hangar_store::repo::fleet::FleetRepo::validate_action_target(
+        pool,
+        &session.session_key,
+        expected_version,
+        Some(request_fingerprint),
+    )
+    .await
+    {
+        return (ActionReceiptStatus::Failed, Some(error.to_string()));
+    }
+    let key = match step {
+        MirroredClaudePickerStep::QuestionKey { key, .. } => key,
+        MirroredClaudePickerStep::Submit { .. } => "Enter",
+    };
+    match ainb_fleet_core::send::tmux_send_picker_key(target, key).await {
+        Ok(()) => (
+            ActionReceiptStatus::Delivered,
+            Some(format!("mirrored tmux picker ({target})")),
+        ),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
+fn verify_claude_picker_question(question: &serde_json::Value, pane: &str) -> Result<(), String> {
+    if !claude_native_picker_is_visible(pane) {
+        return Err("Claude native picker is no longer active".to_string());
+    }
+    let prompt = question
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "mirrored Claude question text is absent".to_string())?;
+    let visible = normalize_picker_text(pane);
+    let start = visible
+        .rfind(&normalize_picker_text(prompt))
+        .ok_or_else(|| "visible picker prompt does not match current question".to_string())?;
+    let mut cursor = start + normalize_picker_text(prompt).len();
+    for option in question
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "mirrored Claude options are absent".to_string())?
+    {
+        let label = option
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mirrored Claude option label is absent".to_string())?;
+        let label = normalize_picker_text(label);
+        let offset = visible[cursor..].find(&label).ok_or_else(|| {
+            "visible picker option order does not match current question".to_string()
+        })?;
+        cursor += offset + label.len();
+    }
+    Ok(())
+}
+
+fn verify_claude_picker_submit(
+    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
+    pane: &str,
+) -> Result<(), String> {
+    if !pane.contains("Review your answers") || !pane.contains("Submit answers") {
+        return Err("Claude native picker is not ready to submit".to_string());
+    }
+    for answer in answers {
+        for selected in &answer.selected_options {
+            if !pane.contains(selected) {
+                return Err(
+                    "Claude native picker review does not match selected answer".to_string()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One-line render of a delivered interview answer for the attention row's audit

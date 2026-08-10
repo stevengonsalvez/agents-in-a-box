@@ -114,6 +114,7 @@ final class FleetStore: ObservableObject {
     private var connection: FleetConnection?
     private var connectionTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var authoritativeRepairTask: Task<Void, Never>?
     private var connectionGeneration: UInt = 0
     private var projection = FleetProjection.empty
     private var negotiation: FleetNegotiateResult?
@@ -142,6 +143,7 @@ final class FleetStore: ObservableObject {
     deinit {
         connectionTask?.cancel()
         reconnectTask?.cancel()
+        authoritativeRepairTask?.cancel()
     }
 
     var activeCount: Int {
@@ -202,6 +204,7 @@ final class FleetStore: ObservableObject {
     func start() {
         guard connectionTask == nil, reconnectTask == nil else { return }
         connectionState = .connecting
+        startAuthoritativeRepair()
         beginConnection()
     }
 
@@ -231,10 +234,23 @@ final class FleetStore: ObservableObject {
         connectionTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
+        authoritativeRepairTask?.cancel()
+        authoritativeRepairTask = nil
         let currentConnection = connection
         connection = nil
         negotiation = nil
         Task { await currentConnection?.close() }
+    }
+
+    private func startAuthoritativeRepair() {
+        guard authoritativeRepairTask == nil else { return }
+        authoritativeRepairTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self, let connection = self.connection else { continue }
+                await self.refreshAuthoritativeState(using: connection)
+            }
+        }
     }
 
     func canPerform(_ action: FleetOperatorAction, on session: FleetSession) -> Bool {

@@ -1588,7 +1588,7 @@ fn hook_core_for_agent(
     let append_event = || {
         let event_id = uuid::Uuid::new_v4().to_string();
         let raw_payload_stored = persist_raw_hook_payload(home, &event_id, payload).is_ok();
-        let line = build_event_line_for_agent(
+        let mut line = build_event_line_for_agent(
             now_ms,
             &event_id,
             agent,
@@ -1600,9 +1600,12 @@ fn hook_core_for_agent(
             our_parent.as_deref(),
             raw_payload_stored,
         );
+        if is_structured_ask {
+            line["fleet_delivery"] = serde_json::Value::String("mirrored".to_string());
+        }
         let _ = append_event_line(home, &line);
     };
-    if !session_id.is_empty() && !is_structured_ask {
+    if !session_id.is_empty() {
         append_event();
     }
 
@@ -1658,47 +1661,12 @@ fn hook_core_for_agent(
         }
     }
 
-    // 4. PreToolUse(AskUserQuestion): block on exact structured answers and
-    //    return the full original questions plus Claude's answer map. Labels
-    //    never pass through generic text delivery.
+    // 4. PreToolUse(AskUserQuestion): keep Claude's native picker visible while
+    //    the durable hook event exposes the same request to Fleet. Fleet routes
+    //    a selected answer back through the verified picker transport, so neither
+    //    surface owns a separate answer lifecycle.
     if is_structured_ask {
-        let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
-        let (tool_input, questions, fingerprint) = match extract_structured_tool_input(payload) {
-            Ok(request) => request,
-            Err(_) => return Ok(None),
-        };
-        let registered = ainb_plugin_notifyd::broker::client_register_structured(
-            &socket,
-            session_id,
-            &fingerprint,
-            &questions,
-        )
-        .unwrap_or(false);
-        if !registered {
-            // Fleet is an optional control surface. A broker outage must not
-            // reject Claude's native AskUserQuestion tool invocation.
-            return Ok(None);
-        }
-        append_event();
-        let resolution = ainb_plugin_notifyd::broker::client_await_structured(
-            &socket,
-            session_id,
-            &fingerprint,
-            &questions,
-            ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
-        );
-        if matches!(
-            resolution,
-            ainb_plugin_notifyd::broker::StructuredResolution::ReleasedToNative
-        ) {
-            // Fleet explicitly yielded ownership. Returning no hook output lets
-            // Claude render its own AskUserQuestion picker unchanged.
-            return Ok(None);
-        }
-        return Ok(Some(HookEmit::Structured(structured_emit_json(
-            tool_input,
-            &resolution,
-        ))));
+        return Ok(None);
     }
 
     // 5. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
@@ -2872,154 +2840,48 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ask_hook_returns_complete_structured_answer_without_text_routing() {
-        use ainb_plugin_notifyd::broker::{
-            BrokerState, StructuredQuestionAnswer, client_answer_structured, client_list,
-        };
-        use tokio::net::UnixListener;
-
+    #[test]
+    fn ask_hook_mirrors_native_picker_and_persists_fleet_request() {
         let home = TempDir::new().unwrap();
         let cwd = home.path().join("plain-claude-worktree");
         std::fs::create_dir_all(&cwd).unwrap();
-        let paths = ainb_plugin_notifyd::paths::Paths::under(home.path());
-        std::fs::create_dir_all(paths.approve_socket.parent().unwrap()).unwrap();
-        let listener = UnixListener::bind(&paths.approve_socket).unwrap();
-        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
-            listener,
-            BrokerState::with_timeout(std::time::Duration::from_secs(30)),
-        ));
-
         let payload = serde_json::json!({
             "tool_name": "AskUserQuestion",
-            "tool_use_id": "toolu_ask_1",
+            "tool_use_id": "toolu_mirrored",
             "tool_input": {
-                "questions": [
-                    {
-                        "question": "Region?",
-                        "header": "Region",
-                        "options": [
-                            {"label": "EU", "description": "Europe"},
-                            {"label": "US", "description": "United States"}
-                        ],
-                        "multiSelect": false
-                    },
-                    {
-                        "question": "Checks?",
-                        "header": "Checks",
-                        "options": [
-                            {"label": "Lint", "description": "Run linter"},
-                            {"label": "Test", "description": "Run tests"}
-                        ],
-                        "multiSelect": true
-                    }
-                ]
+                "questions": [{
+                    "question": "Continue?",
+                    "header": "Continue",
+                    "options": [{"label": "Yes"}, {"label": "No"}]
+                }]
             }
-        });
-        let original_questions = payload["tool_input"]["questions"].clone();
-        let hook_home = home.path().to_path_buf();
-        let hook_cwd = cwd.clone();
-        let hook_payload = payload.to_string();
-        let waiter = tokio::task::spawn_blocking(move || {
-            hook_core(
-                &hook_home,
-                "PreToolUse",
-                "ask-session",
-                hook_cwd.to_str().expect("temporary cwd is valid UTF-8"),
-                None,
-                None,
-                50,
-                &hook_payload,
-                Some("AskUserQuestion"),
-            )
-        });
+        })
+        .to_string();
 
-        let pending = loop {
-            let socket = paths.approve_socket.clone();
-            let listed = tokio::task::spawn_blocking(move || client_list(&socket))
-                .await
-                .unwrap()
-                .unwrap_or_default();
-            if let Some(pending) = listed.into_iter().find(|item| item.session_id == "ask-session")
-            {
-                break pending;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        };
-        assert_eq!(
-            pending.questions,
-            original_questions.as_array().unwrap().clone()
-        );
-        let fingerprint = pending.request_fingerprint.unwrap();
+        let emitted = hook_core(
+            home.path(),
+            "PreToolUse",
+            "mirrored-session",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            50,
+            &payload,
+            Some("AskUserQuestion"),
+        )
+        .unwrap();
+        assert!(emitted.is_none(), "Claude must render its native picker");
         let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
-        assert!(
-            events.contains("ask-session"),
-            "Fleet event must appear only after broker registration"
+        let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+        assert_eq!(event["fleet_delivery"], "mirrored");
+        assert_eq!(
+            event["payload"]["tool_input"]["questions"][0]["question"],
+            "Continue?"
         );
-
-        let stale_socket = paths.approve_socket.clone();
-        let stale = tokio::task::spawn_blocking(move || {
-            client_answer_structured(
-                &stale_socket,
-                "ask-session",
-                "fnv1a64:stale",
-                &[StructuredQuestionAnswer {
-                    question: "Region?".to_string(),
-                    selected_options: vec!["EU".to_string()],
-                }],
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(stale.stale);
-        assert!(!stale.matched);
-
-        let answer_socket = paths.approve_socket.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            client_answer_structured(
-                &answer_socket,
-                "ask-session",
-                &fingerprint,
-                &[
-                    StructuredQuestionAnswer {
-                        question: "Region?".to_string(),
-                        selected_options: vec!["EU".to_string()],
-                    },
-                    StructuredQuestionAnswer {
-                        question: "Checks?".to_string(),
-                        selected_options: vec!["Lint".to_string(), "Test".to_string()],
-                    },
-                ],
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(accepted.matched);
-
-        let emitted = waiter.await.unwrap().unwrap().expect("structured hook output");
-        let HookEmit::Structured(line) = emitted else {
-            panic!("AskUserQuestion must emit structured hook output");
-        };
-        let output: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let specific = &output["hookSpecificOutput"];
-        assert_eq!(specific["hookEventName"], "PreToolUse");
-        assert_eq!(specific["permissionDecision"], "allow");
-        assert_eq!(specific["updatedInput"]["questions"], original_questions);
-        assert_eq!(specific["updatedInput"]["answers"]["Region?"], "EU");
-        assert_eq!(specific["updatedInput"]["answers"]["Checks?"], "Lint, Test");
-        assert!(
-            output.get("text").is_none(),
-            "must not route labels as generic text"
-        );
-
-        server.abort();
-        let _ = std::fs::remove_file(&paths.approve_socket);
     }
 
     #[test]
-    fn ask_hook_without_broker_fails_open_without_persisting_a_fleet_card() {
+    fn ask_hook_without_broker_fails_open_and_persists_a_mirrored_fleet_card() {
         let home = TempDir::new().unwrap();
         let cwd = home.path().join("plain-claude-worktree");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -3052,10 +2914,8 @@ mod tests {
             emitted.is_none(),
             "unavailable Fleet broker must leave Claude's native interview unblocked"
         );
-        assert!(
-            !home.path().join("events.jsonl").exists(),
-            "unregistered AskUserQuestion must never create an actionable Fleet card"
-        );
+        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"fleet_delivery\":\"mirrored\""));
     }
 
     #[test]

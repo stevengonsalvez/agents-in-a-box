@@ -311,6 +311,11 @@ struct FleetAnswerQueue: View {
 
             Text(question.header).font(.title3.weight(.semibold))
             Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
+            if deck.mirroredPicker {
+                Text("Claude picker is also open. Submit here to select the same answer there.")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(FleetPalette.mint)
+            }
             if deck.nativePicker {
                 Text("Claude picker active. Answer in the attached Claude session, then Fleet refreshes the same interview state.")
                     .font(.callout.weight(.medium))
@@ -449,6 +454,7 @@ struct FleetInterviewDeck {
     let session: FleetSession
     let questions: [FleetInterviewQuestion]
     let nativePicker: Bool
+    let mirroredPicker: Bool
 
     init?(session: FleetSession) {
         guard session.attention == .ask,
@@ -472,6 +478,7 @@ struct FleetInterviewDeck {
         self.session = session
         self.questions = questions
         self.nativePicker = request.value("fleet_delivery")?.stringValue == "native_claude"
+        self.mirroredPicker = request.value("fleet_delivery")?.stringValue == "mirrored"
     }
 
     static func priority(_ session: FleetSession) -> (Int, Int64) {

@@ -526,6 +526,11 @@ private struct FleetNotchDetail: View {
                     }
                 }
             } else if let deck, let question = deck.questions[safe: clampedIndex(deck)] {
+                if deck.mirroredPicker {
+                    Text("Claude picker also open. Submit here selects same answer there.")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(FleetNotchPalette.mint)
+                }
                 inlineInterview(deck: deck, question: question)
             } else if session.attention == .ask {
                 Text("Interview ready")
