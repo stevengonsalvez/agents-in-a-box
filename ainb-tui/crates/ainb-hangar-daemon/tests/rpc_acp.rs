@@ -314,6 +314,36 @@ impl Harness {
     }
 }
 
+/// Issue a `fleet/action` that carries `expected_version`, refreshing that
+/// version and retrying if the daemon reports a mismatch.
+///
+/// Reading the version and then acting on it is a read-then-act race: the
+/// session's version advances on writes these tests do not make (turn
+/// recording, turn-end commit, lifecycle convergence), so the value can be
+/// stale by the time the call lands. The optimistic-concurrency guard is not
+/// what these tests are about; they are about whether the answer reaches its
+/// adapter. Retrying with the fresh version keeps that the subject, and a
+/// mismatch surviving every attempt still fails the test.
+async fn fleet_action_versioned(
+    client: &mut Client,
+    harness: &Harness,
+    session_key: &str,
+    mut params: serde_json::Value,
+) -> serde_json::Value {
+    let mut reply = serde_json::Value::Null;
+    for _ in 0..3 {
+        params["expected_version"] = harness.version(session_key).await.into();
+        reply = client.call(methods::FLEET_ACTION, params.clone()).await;
+        let stale = reply["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("version is") && m.contains("expected"));
+        if !stale {
+            return reply;
+        }
+    }
+    reply
+}
+
 struct Client {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
@@ -817,20 +847,26 @@ async fn a_permission_round_trips_through_fleet_action() {
     // an ACP session can be blocked on SEVERAL asks at once and the row can name
     // only one of them, which is why the row-equality gate is off for ACP (see
     // `two_parked_permissions_are_both_answerable_over_the_wire`).
-    let stale = client
-        .call(
-            methods::FLEET_ACTION,
-            serde_json::json!({
+    let stale = fleet_action_versioned(
+
+        &mut client,
+
+        &harness,
+
+        &session_key,
+
+        serde_json::json!({
                 "session_key": session_key,
-                "expected_version": harness.version(&session_key).await,
                 "request_id": "req-acp-stale-answer",
                 "action": {
                     "action": "approve",
                     "request_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
                 },
             }),
-        )
-        .await;
+
+    )
+
+    .await;
     assert!(stale["error"].is_null(), "{stale}");
     assert_eq!(
         stale["result"]["receipt"]["status"], "FAILED",
@@ -850,17 +886,17 @@ async fn a_permission_round_trips_through_fleet_action() {
         .expect("attention row");
     assert_eq!(still_open, "open", "the refusal left the ask untouched");
 
-    let approved = client
-        .call(
-            methods::FLEET_ACTION,
-            serde_json::json!({
-                "session_key": session_key,
-                "expected_version": harness.version(&session_key).await,
-                "request_id": "req-acp-answer",
-                "action": { "action": "approve", "request_fingerprint": fingerprint },
-            }),
-        )
-        .await;
+    let approved = fleet_action_versioned(
+        &mut client,
+        &harness,
+        &session_key,
+        serde_json::json!({
+            "session_key": session_key,
+            "request_id": "req-acp-answer",
+            "action": { "action": "approve", "request_fingerprint": fingerprint },
+        }),
+    )
+    .await;
     assert!(approved["error"].is_null(), "{approved}");
     assert_eq!(
         approved["result"]["receipt"]["status"], "DELIVERED",
@@ -985,35 +1021,17 @@ async fn two_parked_permissions_are_both_answerable_over_the_wire() {
     // OLDEST first: the fingerprint the session row is NOT carrying, and the
     // exact answer the old gate refused as stale.
     for (index, (attention_id, fingerprint)) in asks.iter().enumerate() {
-        // The second fixture request can finish projecting after both attention
-        // rows are visible. A real Fleet client refreshes optimistic version
-        // conflicts, so do the same before judging the parked-request route.
-        let retry_deadline = Instant::now() + Duration::from_secs(5);
-        let approved = loop {
-            let approved = client
-                .call(
-                    methods::FLEET_ACTION,
-                    serde_json::json!({
-                        "session_key": session_key,
-                        "expected_version": harness.version(&session_key).await,
-                        "request_id": format!("req-acp-two-answer-{index}"),
-                        "action": { "action": "approve", "request_fingerprint": fingerprint },
-                    }),
-                )
-                .await;
-            let stale_version = approved["error"]["code"] == -32602
-                && approved["error"]["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains(" version is "));
-            if !stale_version {
-                break approved;
-            }
-            assert!(
-                Instant::now() < retry_deadline,
-                "ask {index} never reached a stable Fleet version: {approved}"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
+        let approved = fleet_action_versioned(
+            &mut client,
+            &harness,
+            &session_key,
+            serde_json::json!({
+                "session_key": session_key,
+                "request_id": format!("req-acp-two-answer-{index}"),
+                "action": { "action": "approve", "request_fingerprint": fingerprint },
+            }),
+        )
+        .await;
         assert!(approved["error"].is_null(), "ask {index}: {approved}");
         assert_eq!(
             approved["result"]["receipt"]["status"], "DELIVERED",

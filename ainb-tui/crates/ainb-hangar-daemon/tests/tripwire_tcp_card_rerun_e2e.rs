@@ -36,22 +36,93 @@ const CARD_TITLE: &str = "Rerunlifecycletripwire";
 
 /// Open the `Run ▾` menu over the focused card and launch headless (`Enter`
 /// re-sent — a lone key can drop after a screen change).
-fn launch_headless(sess: &TuiSession, scale: u64) {
+fn launch_headless(sess: &TuiSession, scale: u64, which: &str, home: &std::path::Path) {
+    // Sweep focus ACROSS THE COLUMNS, trying `Enter` at each one.
+    //
+    // `Enter` opens this menu over a FOCUSED CARD, and the card is in exactly
+    // one column. A finished card auto-moves to Done while the focus cursor
+    // stays behind on the now-empty Todo column, so the rerun leg has to move
+    // focus. The original code pressed `Right` a fixed five times on 100 ms
+    // sleeps, which assumes the card has already landed and that no keypress
+    // dropped; when either failed, focus stopped on an empty column and this
+    // loop pressed `Enter` at nothing until it timed out.
+    //
+    // A "nudge right when the pane shows the empty placeholder" is NOT the fix
+    // either, and I shipped that mistake once: `— empty —` is painted for EVERY
+    // empty column, so on a seven-column board it is essentially always on
+    // screen, and the nudge walks focus straight past the card to the last
+    // column (the board clamps there) on every iteration.
+    //
+    // So sweep deterministically instead: walk left to the first column, then
+    // step right one column at a time trying `Enter` at each. That visits the
+    // card's column exactly once per sweep wherever it sits, and repeats until
+    // the deadline.
+    const COLUMNS: usize = 8; // seven seeded columns, plus one to clamp on
     let deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut opened = false;
-    while Instant::now() < deadline {
-        sess.send_enter();
-        if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
-                c.contains("Run ▾")
-            })
-            .is_some()
-        {
-            opened = true;
-            break;
+    'sweep: while Instant::now() < deadline {
+        for _ in 0..COLUMNS {
+            sess.send_key("Left");
+        }
+        for _ in 0..COLUMNS {
+            sess.send_enter();
+            if sess
+                .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                    c.contains("Run ▾")
+                })
+                .is_some()
+            {
+                opened = true;
+                break 'sweep;
+            }
+            if Instant::now() >= deadline {
+                break 'sweep;
+            }
+            sess.send_key("Right");
         }
     }
-    assert!(opened, "Run ▾ menu never opened:\n{}", sess.capture());
+    // Name the FIRST thing that did not happen, not the last. `Enter` opens
+    // this menu over a FOCUSED CARD, so "Run ▾ never opened" can be a true
+    // statement about entirely the wrong step. Three investigations chased a
+    // menu bug because of it, and a fourth chased an empty BOARD because the
+    // first version of this message asserted one without checking the screen
+    // was the board at all. So establish, in order: which screen is up, then
+    // whether the board holds the card, then whether the store does.
+    if !opened {
+        let capture = sess.capture();
+        let on_board = capture.contains("Board:");
+        let card_visible = capture.contains(CARD_TITLE);
+        let in_store = board_card_by_title(home, CARD_TITLE).is_some();
+        let diagnosis = match (on_board, card_visible, in_store) {
+            // No `Board:` header AND the card-board placeholder on screen means
+            // the board surface rendered with NO BOARDS in its snapshot: the
+            // placeholder is painted only by `widgets/card_board.rs`, so the
+            // screen is right and the boards list came back empty. The header
+            // is missing because there is no board to name, not because the TUI
+            // navigated somewhere else.
+            (false, _, _) if capture.contains("— empty —") => {
+                "the boards list came back EMPTY (no `Board:` header, card-board placeholder \
+                 on screen), so the snapshot carried zero boards for this workspace"
+            }
+            (false, _, _) => {
+                "the TUI is not on a board surface at all (no `Board:` header, no card-board \
+                 placeholder), so something navigated away"
+            }
+            (true, false, true) => {
+                "the board is up and the card IS in the store but NOT rendered, so the view \
+                 lost a card the data still has"
+            }
+            (true, false, false) => {
+                "the board is up and the card is GONE from the store too, so this is data \
+                 loss, not a render bug"
+            }
+            (true, true, _) => {
+                "the card IS rendered on the board but the `Run ▾` menu never opened, so this \
+                 really is the menu or the focus cursor"
+            }
+        };
+        panic!("{which}: {diagnosis}:\n{capture}");
+    }
     sess.send_enter(); // headless launch → hangar/board_card_run
 }
 
@@ -102,7 +173,7 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
 
     // RUN #1: launch, wait for done, capture the first run's slug + assert its
     // durable branch exists (the committing run left commits).
-    launch_headless(&sess, scale);
+    launch_headless(&sess, scale, "run #1 launch", pipe.home());
     let slug1 = wait_for_done(pipe.home(), CARD_TITLE, scale)
         .unwrap_or_else(|| panic!("run #1 never reached done:\n{}", sess.capture()));
     let branch1 = worktree_branch(&slug1);
@@ -111,19 +182,17 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
         "run #1 must leave a durable branch {branch1}"
     );
 
-    // The finished card auto-moved into the Done column (the last column), but the
-    // focus cursor stayed on the now-empty Todo column. Walk focus right — the
-    // board clamps at the last column — so the Done card is focused before the
-    // rerun (else Run ▾ has no card to open over).
-    for _ in 0..5 {
-        sess.send_key("Right");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // The finished card auto-moves into the Done column while the focus cursor
+    // stays on the now-empty Todo column, so focus has to walk right before the
+    // rerun. That used to be five blind `Right` presses on 100 ms sleeps, which
+    // assumed the card had already landed in Done and that no keypress dropped;
+    // `launch_headless` now walks focus itself, deadline-bounded, and only when
+    // the focused column is demonstrably empty.
 
     // RERUN: Enter on the now-FINISHED card opens the same Run ▾ picker and
     // launches a fresh headless run. The claim guard permits it precisely because
     // run #1 is terminal (no pending task holds the per-(issue, agent) slot).
-    launch_headless(&sess, scale);
+    launch_headless(&sess, scale, "run #2 launch (the RERUN)", pipe.home());
 
     // POSITIVE (fresh run): a DISTINCT task short-id appears — the rerun enqueued
     // a new row, not a replay of run #1.

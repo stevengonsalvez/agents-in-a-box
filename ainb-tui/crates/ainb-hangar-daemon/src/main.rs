@@ -8,7 +8,7 @@
 use ainb_hangar_daemon::beads_sync::reconcile;
 use ainb_hangar_daemon::beads_sync::reconcile::cli::{BeadsCli, BeadsCommand};
 use ainb_hangar_daemon::observability::{self, ObservabilityOpts};
-use ainb_hangar_daemon::{boot, hangar_dir, log_dir};
+use ainb_hangar_daemon::{boot, log_dir};
 use clap::{Parser, Subcommand};
 
 /// Hangar control-plane daemon.
@@ -95,14 +95,9 @@ async fn main() -> anyhow::Result<()> {
 /// unmigratable database, a bind error) is recorded as an explained exit rather
 /// than reading as a hard kill.
 async fn run_daemon(once: bool) -> anyhow::Result<()> {
-    match hangar_dir() {
-        Ok(dir) => {
-            observability::note_phase("boot");
-            observability::start_breadcrumbs(&dir);
-        }
-        Err(e) => tracing::warn!(error = %e, "no hangar home; crash breadcrumbs disabled"),
-    }
-
+    // Breadcrumbs are installed inside `boot`, after it has taken the home's
+    // ownership lock. Installing them here would let a duplicate that declines
+    // erase the incumbent's exit record and overwrite its heartbeat first.
     let result = boot(once).await;
 
     observability::note_phase("shutdown");

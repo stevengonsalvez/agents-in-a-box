@@ -789,6 +789,52 @@ impl FleetRepo {
         Ok(Some(revision))
     }
 
+    /// Name the rows that were written before anything authored a
+    /// `display_name`, using the caller's rule.
+    ///
+    /// A repair, not an observation: it fills a column that was NULL for the
+    /// field's whole life without touching `version`, `updated_revision`, or any
+    /// group's authority, so no client sees a state change and no event is
+    /// logged for a name nobody changed. Rows the rule declines stay NULL and
+    /// are retried on the next call.
+    ///
+    /// The rule is the CALLER's, so the label the operator sees has exactly one
+    /// author and this layer stays free of presentation.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` read or write failure.
+    pub async fn backfill_display_names<F>(
+        pool: &SqlitePool,
+        derive: F,
+    ) -> Result<usize, sqlx::Error>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let nameless: Vec<(String, String)> = sqlx::query_as(
+            "SELECT session_key, cwd FROM fleet_session \
+             WHERE display_name IS NULL OR display_name = ''",
+        )
+        .fetch_all(pool)
+        .await?;
+        let named: Vec<(String, String)> = nameless
+            .into_iter()
+            .filter_map(|(session_key, cwd)| Some((session_key, derive(&cwd)?)))
+            .collect();
+        if named.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = pool.begin().await?;
+        for (session_key, display_name) in &named {
+            sqlx::query("UPDATE fleet_session SET display_name = ? WHERE session_key = ?")
+                .bind(display_name)
+                .bind(session_key)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(named.len())
+    }
+
     /// Read the archived roster, most recently observed first.
     ///
     /// Archiving hides a row from [`Self::snapshot`], it does not delete it, so
@@ -1659,6 +1705,90 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
         (dir, store)
+    }
+
+    /// The boot repair names rows written before `display_name` existed, and
+    /// does it WITHOUT touching `version` or `updated_revision`.
+    ///
+    /// That invariant is the whole reason this is a repair rather than an
+    /// observation: bumping either would mint a revision on every existing row
+    /// at boot, and every connected client would re-snapshot a fleet-wide change
+    /// for a name nobody actually changed. On the live host this pass covers
+    /// 1724 rows, so the churn would not be small.
+    #[tokio::test]
+    async fn backfill_names_nameless_rows_without_minting_a_revision() {
+        let (_dir, store) = store().await;
+        for (key, cwd) in [
+            ("claude:s-named", "/Users/dev/d/git/ai-coder-rules"),
+            ("claude:s-declined", "/Users/dev"),
+        ] {
+            FleetRepo::apply_event(
+                store.pool(),
+                &event(
+                    &format!("e-{key}"),
+                    key,
+                    100,
+                    ObservationAuthority::Authoritative,
+                    FleetSessionPatch {
+                        provider: Some("claude".to_string()),
+                        cwd: Some(cwd.to_string()),
+                        ..FleetSessionPatch::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let before = FleetRepo::get_session(store.pool(), "claude:s-named")
+            .await
+            .unwrap()
+            .expect("seeded session");
+        assert_eq!(before.display_name, None, "precondition: unnamed");
+
+        // The caller owns the rule, exactly as the daemon passes its own.
+        let derive = |cwd: &str| -> Option<String> {
+            let trimmed = cwd.trim_end_matches('/');
+            let path = std::path::Path::new(trimmed);
+            if matches!(
+                path.parent().and_then(std::path::Path::to_str),
+                Some("/Users" | "/home")
+            ) {
+                return None;
+            }
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        };
+
+        let named = FleetRepo::backfill_display_names(store.pool(), derive).await.unwrap();
+        assert_eq!(named, 1, "only the row the rule accepts is named");
+
+        let after = FleetRepo::get_session(store.pool(), "claude:s-named")
+            .await
+            .unwrap()
+            .expect("session survives");
+        assert_eq!(after.display_name.as_deref(), Some("ai-coder-rules"));
+        assert_eq!(
+            (after.version, after.updated_revision),
+            (before.version, before.updated_revision),
+            "a repair must not mint a revision, or every client re-snapshots at boot"
+        );
+
+        let declined = FleetRepo::get_session(store.pool(), "claude:s-declined")
+            .await
+            .unwrap()
+            .expect("declined session survives");
+        assert_eq!(
+            declined.display_name, None,
+            "a cwd that would name the operator's home stays NULL rather than leaking identity"
+        );
+
+        // Idempotent: the named row is not rewritten, so a long-lived daemon
+        // does no work per boot beyond the rows it still cannot name.
+        let second = FleetRepo::backfill_display_names(store.pool(), derive).await.unwrap();
+        assert_eq!(second, 0, "second boot names nothing new");
     }
 
     #[tokio::test]

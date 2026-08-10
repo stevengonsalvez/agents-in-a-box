@@ -286,6 +286,34 @@ fn observed_model_pair(observation: &HookObservation<'_>) -> (Option<String>, Op
     )
 }
 
+/// The operator-facing label for a session: the final component of its `cwd`,
+/// which for an ainb worktree is `<repo>--<branch>--<hash>`.
+///
+/// This is the label the Fleet screens ALREADY derive from `cwd` when a session
+/// has no stored name (`repository_label` in the hangar plugin, `short_session`
+/// in the host panel), so nothing here is a second naming scheme: it moves the
+/// existing one to the writer, where a remote client that cannot see this
+/// filesystem can search and paint the same text.
+///
+/// `None` for anything that would put identity rather than work on the wire: a
+/// bare home directory's leaf IS the account name, and a root or empty path has
+/// no label to give. `None` leaves any stored name untouched, because the
+/// metadata group merges per field (`assign_option_if_some`), so a nameless
+/// observation never blanks a named row.
+pub(crate) fn display_name_for_cwd(cwd: &str) -> Option<String> {
+    let path = std::path::Path::new(cwd.trim());
+    if matches!(
+        path.parent().and_then(std::path::Path::to_str),
+        Some("/Users" | "/home")
+    ) {
+        return None;
+    }
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// Apply one exact provider hook and wake revision subscribers after commit.
 pub async fn apply_hook(
     pool: &SqlitePool,
@@ -370,6 +398,7 @@ pub async fn apply_hook(
             tmux_target: tmux_target.clone(),
             process_start_fingerprint: process_start_fingerprint.clone(),
             cwd: Some(observation.cwd.to_string()),
+            display_name: display_name_for_cwd(observation.cwd),
             management_state: (provider == Provider::Claude).then(|| "MANAGED".to_string()),
             capabilities: (provider == Provider::Claude)
                 .then(|| claude_managed_capabilities(exact_tmux_identity)),
@@ -946,6 +975,7 @@ pub async fn register_managed_codex_tmux(
             tmux_target: Some(target),
             process_start_fingerprint: Some(fingerprint),
             cwd: Some(cwd.to_string()),
+            display_name: display_name_for_cwd(cwd),
             management_state: Some("MANAGED".to_string()),
             capabilities: Some(with_tmux_capabilities(
                 &with_managed_lifecycle_capabilities(
@@ -2163,6 +2193,7 @@ fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
             tmux_target: session.exact_tmux_target.clone(),
             process_start_fingerprint: session.process_start_fingerprint.clone(),
             cwd: Some(session.cwd.clone()),
+            display_name: display_name_for_cwd(&session.cwd),
             management_state: Some(management_token(session.management).to_string()),
             capabilities: Some(degraded_capabilities()),
             confidence: Some(confidence_token(session.confidence).to_string()),
@@ -2802,6 +2833,243 @@ mod tests {
         assert_eq!(unobserved.model, None);
         assert_eq!(unobserved.reasoning_effort, None);
         assert_eq!(unobserved.model_updated_at, 0);
+    }
+
+    /// A session reached the roster the ordinary way (a provider hook) must
+    /// carry a human label. `display_name` was `NULL` on every row for the
+    /// field's whole life, so the macOS roster's name-search leg matched
+    /// nothing while still LOOKING like it worked, because the cwd and
+    /// session-key legs kept matching.
+    #[tokio::test]
+    async fn hook_discovered_session_gets_a_worktree_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "hook-named".to_string(),
+                provider: "claude",
+                provider_session_id: "sess-named",
+                event_type: "PreToolUse",
+                cwd: "/Users/dev/.agents-in-a-box/worktrees/by-name/ainb--f-search--9c1e",
+                payload: &serde_json::json!({}),
+                observed_at: 1,
+                transcript_model: None,
+            },
+        )
+        .await
+        .expect("hook applies");
+
+        let session = FleetRepo::get_session(store.pool(), "claude:sess-named")
+            .await
+            .expect("session query")
+            .expect("session exists");
+        assert_eq!(
+            session.display_name.as_deref(),
+            Some("ainb--f-search--9c1e"),
+            "an operator searches the worktree name, so the daemon must store it"
+        );
+    }
+
+    /// The tmux discovery path is the only writer for a session no hook ever
+    /// reaches, so it must name its rows too.
+    #[tokio::test]
+    async fn tmux_discovered_session_gets_a_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        let discovered = FleetSession {
+            cwd: "/Users/dev/d/git/ai-coder-rules".to_string(),
+            ..tmux_discovery_fixture()
+        };
+        let event = tmux_event(&discovered, 1);
+        FleetRepo::apply_event(store.pool(), &event).await.expect("discovery applies");
+
+        let session = FleetRepo::get_session(store.pool(), &event.session_key)
+            .await
+            .expect("session query")
+            .expect("session exists");
+        assert_eq!(
+            session.display_name.as_deref(),
+            Some("ai-coder-rules"),
+            "tmux discovery must name the row it creates"
+        );
+    }
+
+    /// The metadata state group merges field by field. A later observation that
+    /// cannot derive a name (an empty cwd) must leave the stored one alone
+    /// rather than blank it, which is `assign_option_if_some`'s contract and the
+    /// second hypothesis this bug could have had.
+    #[tokio::test]
+    async fn a_later_nameless_observation_does_not_blank_the_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        for (event_id, cwd, observed_at) in [
+            ("hook-named", "/Users/dev/work/ainb--f-search--9c1e", 1),
+            ("hook-nameless", "", 2),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.to_string(),
+                    provider: "claude",
+                    provider_session_id: "sess-keeps-name",
+                    event_type: "PreToolUse",
+                    cwd,
+                    payload: &serde_json::json!({}),
+                    observed_at,
+                    transcript_model: None,
+                },
+            )
+            .await
+            .expect("hook applies");
+        }
+
+        let session = FleetRepo::get_session(store.pool(), "claude:sess-keeps-name")
+            .await
+            .expect("session query")
+            .expect("session exists");
+        assert_eq!(
+            session.display_name.as_deref(),
+            Some("ainb--f-search--9c1e"),
+            "an observation with no name of its own must not clear the stored one"
+        );
+    }
+
+    /// The label is derived from the cwd and from nothing else, so the exact
+    /// component it picks is the contract. The refusals matter most: this value
+    /// crosses the wire to the macOS client, and a bare home directory would put
+    /// the account name on it.
+    #[test]
+    fn display_name_for_cwd_names_the_worktree_and_refuses_identity() {
+        for (cwd, expected) in [
+            (
+                "/Users/dev/.agents-in-a-box/worktrees/by-name/ainb--f-search--9c1e",
+                Some("ainb--f-search--9c1e"),
+            ),
+            ("/Users/dev/d/git/ai-coder-rules", Some("ai-coder-rules")),
+            ("/Users/dev/d/git/ai-coder-rules/", Some("ai-coder-rules")),
+            ("/tmp/scratch", Some("scratch")),
+            // An account's home, on either platform layout: the leaf IS the
+            // username.
+            ("/Users/dev", None),
+            ("/home/dev", None),
+            ("/", None),
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(
+                display_name_for_cwd(cwd).as_deref(),
+                expected,
+                "cwd {cwd:?} must derive {expected:?}"
+            );
+        }
+    }
+
+    /// Every row already on disk was written by a build that never authored a
+    /// name, and a session nothing observes again would stay nameless forever.
+    /// The boot repair names them with the same rule the writers use, and leaves
+    /// a name it did not author alone.
+    #[tokio::test]
+    async fn boot_backfill_names_rows_written_before_the_writers_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        for (event_id, session_id, cwd) in [
+            (
+                "hook-old",
+                "sess-old",
+                "/Users/dev/work/ainb--f-search--9c1e",
+            ),
+            ("hook-homeless", "sess-homeless", "/Users/dev"),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.to_string(),
+                    provider: "claude",
+                    provider_session_id: session_id,
+                    event_type: "PreToolUse",
+                    cwd,
+                    payload: &serde_json::json!({}),
+                    observed_at: 1,
+                    transcript_model: None,
+                },
+            )
+            .await
+            .expect("hook applies");
+        }
+        // Exactly the on-disk shape an older build left: a real row, no name.
+        sqlx::query("UPDATE fleet_session SET display_name = NULL")
+            .execute(store.pool())
+            .await
+            .expect("strip names");
+
+        let named = FleetRepo::backfill_display_names(store.pool(), display_name_for_cwd)
+            .await
+            .expect("backfill runs");
+        assert_eq!(named, 1, "only the row the rule can name is repaired");
+
+        let repaired = FleetRepo::get_session(store.pool(), "claude:sess-old")
+            .await
+            .expect("session query")
+            .expect("session exists");
+        assert_eq!(
+            repaired.display_name.as_deref(),
+            Some("ainb--f-search--9c1e")
+        );
+
+        let homeless = FleetRepo::get_session(store.pool(), "claude:sess-homeless")
+            .await
+            .expect("session query")
+            .expect("session exists");
+        assert_eq!(
+            homeless.display_name, None,
+            "a home directory's leaf is the account name and must stay unnamed"
+        );
+
+        // Idempotent: a second boot finds nothing left to repair.
+        assert_eq!(
+            FleetRepo::backfill_display_names(store.pool(), display_name_for_cwd)
+                .await
+                .expect("second backfill runs"),
+            0
+        );
+    }
+
+    /// A tmux-discovered session with just enough shape to reach `tmux_event`.
+    fn tmux_discovery_fixture() -> FleetSession {
+        let target = "tmux_ai-coder-rules:1.1";
+        let fingerprint = "pane=%9;pid=909;session_started=1700000000";
+        FleetSession {
+            session_key: SessionKey::legacy(Provider::Claude, target, fingerprint),
+            provider: Provider::Claude,
+            provider_session_id: None,
+            cwd: String::new(),
+            exact_tmux_target: Some(target.to_string()),
+            pane_pid: Some(909),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            lifecycle: LifecycleState::Idle,
+            attention: AttentionState::None,
+            management: ManagementState::Degraded,
+            capabilities: ainb_fleet_core::types::Capabilities::degraded_tmux(),
+            provenance: std::collections::BTreeSet::from([
+                ainb_fleet_core::types::Provenance::Tmux,
+            ]),
+            confidence: Confidence::Inferred,
+            transport_health: TransportHealth::Healthy,
+            first_seen_ms: Some(1_700_000_000_000),
+            last_seen_ms: None,
+            version: 0,
+        }
     }
 
     /// The reaper retires what nothing can observe, and then goes quiet.

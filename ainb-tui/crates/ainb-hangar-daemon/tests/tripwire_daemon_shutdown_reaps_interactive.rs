@@ -43,11 +43,40 @@ use tripwire_support::{
 
 /// The interactive task id — its tmux session is `tmux_hangar-<id>`.
 const TASK_ID: &str = "task-shutdown-int";
+/// The SIGTERM case's task id. Distinct so the two cases never share a tmux
+/// session name when cargo runs them in parallel.
+const TASK_TERM: &str = "task-shutdown-term";
 /// A sentinel that is NEVER written here — the session must die via the reap.
 const SENTINEL: &str = "never-released";
 
+/// SIGINT is the foreground "tear it all down": the attached pane goes with it.
 #[tokio::test]
-async fn graceful_shutdown_reaps_in_flight_interactive_session() {
+async fn sigint_reaps_in_flight_interactive_session() {
+    drive_shutdown("-INT", TASK_ID, "shutdown-sid", Expect::Reaped).await;
+}
+
+/// SIGTERM is `hangar daemon stop` / `restart`, which runs after every upgrade.
+/// It must stop the daemon WITHOUT killing the operator's attached agent panes —
+/// the next boot's tmux reconciler re-adopts them with exact pane identity.
+///
+/// Before the SIGTERM handler existed this test could not have been written: the
+/// process died on the OS default disposition, so nothing about the shutdown was
+/// under the daemon's control at all.
+#[tokio::test]
+async fn sigterm_stops_the_daemon_but_leaves_the_attached_session_running() {
+    drive_shutdown("-TERM", TASK_TERM, "shutdown-term-sid", Expect::Survives).await;
+}
+
+/// What the interactive session should look like after the signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// The shutdown path killed it by exact name.
+    Reaped,
+    /// It outlived the daemon, still attachable.
+    Survives,
+}
+
+async fn drive_shutdown(signal: &str, task_id: &str, sid: &str, expect: Expect) {
     if !tmux_available() {
         eprintln!("SKIP: a54 shutdown-reap tripwire (need tmux + built ainb-hangar-daemon)");
         return;
@@ -62,8 +91,8 @@ async fn graceful_shutdown_reaps_in_flight_interactive_session() {
     ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
     let ids = seed_world(&pool).await;
 
-    let fake = fake_claude_tty_branch(home.path(), "shutdown-sid", SENTINEL);
-    let daemon = DaemonProcess::spawn(
+    let fake = fake_claude_tty_branch(home.path(), sid, SENTINEL);
+    let mut daemon = DaemonProcess::spawn(
         home.path(),
         &[
             ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
@@ -77,7 +106,7 @@ async fn graceful_shutdown_reaps_in_flight_interactive_session() {
         "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, mode, created_at) \
          VALUES (?, ?, ?, ?, 'interactive', ?)",
     )
-    .bind(TASK_ID)
+    .bind(task_id)
     .bind(&ids.workspace_id)
     .bind(&ids.runtime_id)
     .bind(&ids.agent_id)
@@ -87,7 +116,7 @@ async fn graceful_shutdown_reaps_in_flight_interactive_session() {
     .expect("enqueue interactive task");
 
     // Wait for the interactive session to be LIVE (the in-flight run to reap).
-    let session_name = format!("tmux_hangar-{TASK_ID}");
+    let session_name = format!("tmux_hangar-{task_id}");
     let live_deadline = Instant::now() + Duration::from_secs(30);
     let mut saw_live = false;
     while Instant::now() < live_deadline {
@@ -107,37 +136,51 @@ async fn graceful_shutdown_reaps_in_flight_interactive_session() {
     // closes the theoretical spawn→register gap deterministically).
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    // Graceful shutdown: SIGINT (NOT the SIGKILL that Drop uses), so the daemon's
-    // Ctrl-C reap path runs.
+    // Graceful shutdown by EXACT pid (never the SIGKILL that Drop uses), so the
+    // daemon's own shutdown path runs.
     let pid = daemon.pid();
     let sent = Command::new("kill")
-        .args(["-INT", &pid.to_string()])
+        .args([signal, &pid.to_string()])
         .status()
-        .expect("send SIGINT to daemon");
-    assert!(sent.success(), "kill -INT {pid} failed");
+        .expect("signal daemon");
+    assert!(sent.success(), "kill {signal} {pid} failed");
 
-    // POSITIVE: the session is reaped by the shutdown path (the sentinel is never
-    // written, so a still-live session past this deadline is an ORPHAN — the a54
-    // bug this guards).
-    let reap_deadline = Instant::now() + Duration::from_secs(15);
+    // The sentinel is never written, so the stub only self-exits after ~60s —
+    // far past this deadline. Anything that changes within it is the daemon's
+    // shutdown path, not the run finishing.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut reaped = false;
-    while Instant::now() < reap_deadline {
+    while Instant::now() < deadline {
         if !tmux_session_live(&session_name) {
             reaped = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
+    // The daemon itself must be gone either way — a handler that hangs is as
+    // broken as one that kills the wrong thing. `wait_for_exit` reaps, because
+    // this test is the daemon's parent and a zombie answers `kill(pid, 0)`
+    // exactly like a live process.
+    let daemon_stopped = daemon.wait_for_exit(Duration::from_secs(15));
+    let still_live = tmux_session_live(&session_name);
 
-    // Teardown (exact-name) before the assertion so a failure never leaks a pane.
+    // Teardown (exact-name) before the assertions so a failure never leaks a pane.
     drop(daemon);
     tmux_kill_session(&session_name);
 
-    assert!(
-        reaped,
-        "graceful shutdown must reap the in-flight interactive session `{session_name}`, \
-         not orphan it"
-    );
+    assert!(daemon_stopped, "the daemon must exit on {signal}");
+    match expect {
+        Expect::Reaped => assert!(
+            reaped,
+            "SIGINT must reap the in-flight interactive session `{session_name}`, \
+             not orphan it"
+        ),
+        Expect::Survives => assert!(
+            still_live,
+            "SIGTERM must leave the operator's attached session `{session_name}` \
+             running — `daemon restart` happens on every upgrade"
+        ),
+    }
 }
 
 /// Open a WAL sqlite pool at `db_path` (matches the daemon's connection mode).
