@@ -58,20 +58,27 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                 json!({ "jsonrpc": "2.0", "id": id, "result": {} })
             }
             "fleet/message_send" => match behaviour {
-                // The message id ECHOES the thread join, because that is the
-                // only part of the request a CLI test can observe: the fixture
-                // is the only witness to what actually crossed the socket, and
-                // an `--origin` the CLI drops would be invisible otherwise.
+                // The message id ECHOES the thread join AND THE BODY, because
+                // the id is the only part of the response the CLI re-serialises
+                // verbatim: the fixture is the only witness to what actually
+                // crossed the socket, and an `--origin` the CLI drops, or a
+                // body it strips, splits or truncates, would be invisible
+                // otherwise. Asserting exit 0 alone proves clap accepted the
+                // argument, not that the operator's bytes reached the daemon.
                 SendBehaviour::Ok => json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "message_id": request["params"]["origin_message_id"]
-                            .as_str()
-                            .map_or_else(
-                                || "msg-01".to_string(),
-                                |origin| format!("msg-01-reply-to-{origin}"),
-                            ),
+                        "message_id": format!(
+                            "{}|text={}",
+                            request["params"]["origin_message_id"]
+                                .as_str()
+                                .map_or_else(
+                                    || "msg-01".to_string(),
+                                    |origin| format!("msg-01-reply-to-{origin}"),
+                                ),
+                            request["params"]["text"].as_str().unwrap_or("<missing>"),
+                        ),
                         // ONE LEG PER TARGET, as the daemon answers: a fan-out
                         // into a channel is one send with N legs, and a fixture
                         // that always answered one leg could not tell a CLI
@@ -394,7 +401,7 @@ async fn send_prints_json_on_stdout_and_exits_zero() {
             );
             let parsed: Value =
                 serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
-            assert_eq!(parsed["message_id"], "msg-01");
+            assert_eq!(parsed["message_id"], "msg-01|text=hello");
             assert_eq!(parsed["deliveries"][0]["state"], "DELIVERED");
         },
     )
@@ -458,7 +465,9 @@ async fn send_reads_the_body_from_stdin() {
         |output| {
             assert_eq!(output.status.code(), Some(0));
             let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
-            assert_eq!(parsed["message_id"], "msg-01");
+            // The body the fixture SAW, not just exit 0: stdin has to reach
+            // the wire intact.
+            assert_eq!(parsed["message_id"], "msg-01|text=piped body");
         },
     )
     .await;
@@ -584,7 +593,7 @@ async fn send_carries_the_thread_origin_to_the_daemon() {
                 let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
                 assert_eq!(
                     parsed["message_id"],
-                    format!("msg-01-reply-to-{origin}"),
+                    format!("msg-01-reply-to-{origin}|text=on it"),
                     "the origin never reached the wire"
                 );
             },
@@ -1191,7 +1200,7 @@ async fn channel_create_list_and_send_round_trip_as_json() {
             // ONE MESSAGE, THREE LEGS: the fan-out is a single send addressed to
             // the channel's whole membership, resolved by the CLI rather than
             // typed by the operator.
-            assert_eq!(parsed["message_id"], "msg-01");
+            assert_eq!(parsed["message_id"], "msg-01|text=run the tests");
             assert_eq!(
                 parsed["deliveries"].as_array().map(Vec::len),
                 Some(3),
@@ -1288,7 +1297,9 @@ async fn channel_send_accepts_a_dash_prefixed_body() {
                 String::from_utf8_lossy(&output.stderr)
             );
             let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
-            assert_eq!(parsed["message_id"], "msg-01");
+            // The BODY, not just the exit code: a CLI that stripped, split or
+            // dropped the leading `-y` would still exit 0.
+            assert_eq!(parsed["message_id"], "msg-01|text=-y run the tests");
         },
     )
     .await;

@@ -251,11 +251,19 @@ fn a_broadcast_channel_is_created_addressed_and_receipted_per_recipient() {
         capture_pane(session)
     );
 
-    // THE FORM. `N` names the channel, Enter moves to the checklist.
+    // THE PICKER FIRST. `N` opens the channels that already exist, with a
+    // trailing row that falls through to the create form. There are none yet,
+    // so the `+ new channel` row is where the cursor lands.
     send_key(session, "N");
     assert!(
+        wait_for(session, "+ new channel", 20),
+        "`N` did not open the channel picker:\n{}",
+        capture_pane(session)
+    );
+    send_key(session, "Enter");
+    assert!(
         wait_for(session, "Name the channel", 20),
-        "`N` did not open the channel form:\n{}",
+        "the picker's `+ new channel` row did not reach the create form:\n{}",
         capture_pane(session)
     );
     type_text(session, "ops");
@@ -415,6 +423,34 @@ fn a_broadcast_channel_is_created_addressed_and_receipted_per_recipient() {
     assert!(
         wait_for(session, "ACTION QUEUE", 20),
         "Esc did not return the channel to the Fleet panel:\n{}",
+        capture_pane(session)
+    );
+
+    // THE WAY BACK IN. Without this the channel is write-once: minted in one
+    // keystroke, unreachable the moment the operator presses Esc, and pressing
+    // `N` again would mint a SECOND `ops` with the conversation split between
+    // them. The picker lists the one the daemon has, and Enter reopens THAT
+    // conversation, with the message already in it.
+    send_key(session, "N");
+    assert!(
+        wait_for(session, "ops · 2 member(s)", 20),
+        "the channel that exists is not offered by the picker:\n{}",
+        capture_pane(session)
+    );
+    send_key(session, "Enter");
+    let reopened = wait_for_row(
+        session,
+        |row| row.contains("Fleet channel · ops") && row.contains(&channel.scope_key),
+        30,
+    );
+    assert!(
+        reopened.is_some(),
+        "the picker did not reopen the daemon's own channel scope:\n{}",
+        capture_pane(session)
+    );
+    assert!(
+        wait_for(session, "run the tests", 30),
+        "the reopened channel is empty, so the picker opened a different scope:\n{}",
         capture_pane(session)
     );
 }
