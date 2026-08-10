@@ -4,10 +4,14 @@
 //! Every daemon here is the real `rpc::serve` against a real `Store`; no
 //! fixture daemon, no mocked repo. What is NOT real is the ACP adapter: no
 //! adapter process is spawned in this binary, so the confirm cards are minted
-//! by driving `copilot::gate` directly, exactly as the copilot's tool bridge
-//! will. That seam is the honest one to test at, because the guardrail decision
-//! and the park are the behaviour under test, not the transport that carries a
-//! tool call to them.
+//! by driving `copilot::gate` directly. That seam is the honest one for the
+//! GATE's own behaviour, because the guardrail decision and the park are what
+//! is under test, not the transport that carries a tool call to them.
+//!
+//! It is deliberately NOT the seam that proves anything calls the gate: these
+//! tests would stay green against a gate with no production caller, which is
+//! exactly the state this file shipped in. `copilot_gate_live.rs` covers that,
+//! starting at the copilot's real MCP `tools/call` instead.
 //!
 //! Proves:
 //!
@@ -310,6 +314,115 @@ async fn a_channel_scope_accepts_a_member_and_refuses_a_stranger() {
     assert!(
         ghost["error"]["message"].as_str().unwrap().contains("names no channel"),
         "{ghost}"
+    );
+}
+
+/// A channel fan-out answers ONE LEG PER MEMBER, and every leg that did not
+/// deliver says WHY.
+///
+/// The reason was computed and persisted from the first day of the chat bus and
+/// then dropped on the floor: `FleetMessageDelivery` carried only a state, so
+/// every surface could say REJECTED and none of them could say whether to retry
+/// or to go and look at the session. This asserts the detail against the REAL
+/// socket, because that is the one place a per-leg field either survives the
+/// wire or quietly does not.
+#[tokio::test]
+async fn a_channel_fan_out_answers_one_leg_per_member_with_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "member-live").await;
+    seed_session(&store, "member-gone").await;
+    // One member dies AFTER the channel is created, which is the ordinary way a
+    // fan-out ends up partial: membership is decided once, delivery per send.
+    sqlx::query("UPDATE fleet_session SET lifecycle_state = 'EXITED' WHERE session_key = ?")
+        .bind("member-gone")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({
+                "kind": "broadcast",
+                "name": "#ops",
+                "recipients": ["member-live", "member-gone"],
+            }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    assert!(
+        scope.starts_with("channel:"),
+        "the daemon did not mint a channel scope: {created}"
+    );
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            json!({
+                "scope_key": scope,
+                "targets": ["member-live", "member-gone"],
+                "text": "run the tests",
+                "request_id": "req-fanout",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "the fan-out was refused: {sent}");
+    let legs = sent["result"]["deliveries"].as_array().expect("deliveries");
+    assert_eq!(
+        legs.len(),
+        2,
+        "one send did not answer one leg per member: {sent}"
+    );
+
+    // The dead member is REJECTED, with the daemon's own token. Not a transport
+    // symptom, and not a bare state an operator cannot act on.
+    let gone = legs
+        .iter()
+        .find(|leg| leg["session_key"] == "member-gone")
+        .expect("the dead member has a leg");
+    assert_eq!(gone["state"], "REJECTED", "{sent}");
+    assert_eq!(gone["detail"], "target_not_running", "{sent}");
+    // The live member has no pane in this test, so its leg is honestly
+    // non-delivered too — but for a DIFFERENT reason, which is the whole point
+    // of a per-leg detail.
+    let live = legs
+        .iter()
+        .find(|leg| leg["session_key"] == "member-live")
+        .expect("the live member has a leg");
+    assert_ne!(
+        live["detail"], gone["detail"],
+        "both legs carry the same reason, so the detail is not per-leg: {sent}"
+    );
+
+    // AND THE REPLAY. A retried request_id answers from the durable legs, so it
+    // must carry the same reasons rather than degrading to a bare state.
+    let replayed = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            json!({
+                "scope_key": scope,
+                "targets": ["member-live", "member-gone"],
+                "text": "run the tests",
+                "request_id": "req-fanout",
+            }),
+        )
+        .await;
+    assert_eq!(
+        replayed["result"]["message_id"], sent["result"]["message_id"],
+        "the retry wrote a second message: {replayed}"
+    );
+    let replayed_gone = replayed["result"]["deliveries"]
+        .as_array()
+        .expect("deliveries")
+        .iter()
+        .find(|leg| leg["session_key"] == "member-gone")
+        .expect("the dead member has a replayed leg");
+    assert_eq!(replayed_gone["state"], "REJECTED", "{replayed}");
+    assert_eq!(
+        replayed_gone["detail"], "target_not_running",
+        "a replay answered a worse receipt than the first send: {replayed}"
     );
 }
 

@@ -952,6 +952,213 @@ async fn list_filters_by_scope_and_by_thread_origin() {
     assert_eq!(ids, vec!["reply-a"]);
 }
 
+/// A threaded send round trips: the origin is persisted, comes back on the
+/// wire, and the thread read returns exactly that reply.
+///
+/// This is the per-session thread (part 2 Phase B): the origin and the reply
+/// share one `session:<key>` scope, so `message_list {origin_id}` is the thread
+/// view and `message_list {scope_key}` is the whole conversation.
+#[tokio::test]
+async fn a_threaded_send_round_trips_through_the_origin_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:one").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let root = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "text": "run the tests",
+                "request_id": "req-thread-root",
+            }),
+        )
+        .await;
+    assert!(root["error"].is_null(), "{root}");
+    let origin_id = root["result"]["message_id"].as_str().expect("a message id").to_string();
+
+    let reply = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:one"],
+                "origin_message_id": origin_id,
+                "text": "and then deploy",
+                "request_id": "req-thread-reply",
+            }),
+        )
+        .await;
+    assert!(reply["error"].is_null(), "{reply}");
+    let reply_id = reply["result"]["message_id"].as_str().expect("a message id").to_string();
+
+    // The wire carries the linkage back, or no client can render a thread.
+    let thread = client
+        .call(
+            methods::FLEET_MESSAGE_LIST,
+            serde_json::json!({ "origin_id": origin_id, "limit": 10 }),
+        )
+        .await;
+    let rows = thread["result"]["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the thread join is exact: {thread}");
+    assert_eq!(rows[0]["id"], reply_id.as_str());
+    assert_eq!(
+        rows[0]["origin_message_id"],
+        origin_id.as_str(),
+        "the reply does not carry its origin on the wire: {thread}"
+    );
+
+    // And the durable row agrees with the wire.
+    let stored = FleetMessageRepo::get_message(store.pool(), &reply_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.origin_message_id.as_deref(),
+        Some(origin_id.as_str())
+    );
+    assert_eq!(
+        stored.scope_key, "session:claude:one",
+        "a single-target send files the row in the recipient's own scope, which \
+         is the scope a session thread reads"
+    );
+}
+
+/// An origin the daemon cannot vouch for is refused, both ways it can be wrong.
+///
+/// Fails CLOSED like the channel-membership rule: an origin in another scope
+/// would thread this row into a conversation nobody addressed, and an origin
+/// naming nothing at all builds a thread no read can ever return. Neither may
+/// persist a message.
+#[tokio::test]
+async fn an_origin_that_is_unknown_or_in_another_scope_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    seed_session(&store, "claude:a").await;
+    seed_session(&store, "claude:b").await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    // A real message, in A's scope.
+    let root = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:a"],
+                "text": "a's conversation",
+                "request_id": "req-origin-root",
+            }),
+        )
+        .await;
+    let origin_id = root["result"]["message_id"].as_str().unwrap().to_string();
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_message")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+
+    // Same id, but this send is addressed to B, so it resolves to B's scope.
+    let cross_scope = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": ["claude:b"],
+                "origin_message_id": origin_id,
+                "text": "reply to a thread in someone else's conversation",
+                "request_id": "req-origin-cross",
+            }),
+        )
+        .await;
+    assert_eq!(
+        cross_scope["error"]["code"], -32602,
+        "an origin in another scope must be refused: {cross_scope}"
+    );
+
+    for (request_id, origin) in [
+        ("req-origin-missing", "01J0NOSUCHMESSAGE"),
+        ("req-origin-blank", "   "),
+    ] {
+        let refused = client
+            .call(
+                methods::FLEET_MESSAGE_SEND,
+                serde_json::json!({
+                    "targets": ["claude:a"],
+                    "origin_message_id": origin,
+                    "text": "answering nothing",
+                    "request_id": request_id,
+                }),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["code"], -32602,
+            "origin {origin:?} must be refused: {refused}"
+        );
+    }
+
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_message")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "a refused threaded send must persist nothing"
+    );
+}
+
+/// The thread read is ordered by the COMMIT-ordered `seq`, never by the ULID.
+///
+/// Ids are identities and are minted by whoever writes the row; part 1 shipped
+/// an ordering bug of exactly this shape. The replies here are inserted with
+/// ids that sort BACKWARDS against their commit order, so a reader that sorts
+/// or pages by id returns them reversed (or skips one after a cursor).
+#[tokio::test]
+async fn a_thread_is_ordered_by_commit_seq_not_by_ulid() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut root = message("origin-row");
+    root.scope_key = "session:s-1".to_string();
+    FleetMessageRepo::insert_message(store.pool(), &root).await.unwrap();
+    // Committed first..last, named last..first.
+    for id in ["zzz-first", "mmm-second", "aaa-third"] {
+        let mut reply = message(id);
+        reply.scope_key = "session:s-1".to_string();
+        reply.kind = "agent".to_string();
+        reply.origin_message_id = Some("origin-row".to_string());
+        FleetMessageRepo::insert_message(store.pool(), &reply).await.unwrap();
+    }
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let page = client
+        .call(
+            methods::FLEET_MESSAGE_LIST,
+            serde_json::json!({ "origin_id": "origin-row", "limit": 10 }),
+        )
+        .await;
+    let ids: Vec<&str> = page["result"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["zzz-first", "mmm-second", "aaa-third"],
+        "the thread is in commit order, not id order: {page}"
+    );
+
+    // And the cursor is the same thing: paging after the first reply returns
+    // the two committed AFTER it, which id order would get wrong in both
+    // directions.
+    let next = client
+        .call(
+            methods::FLEET_MESSAGE_LIST,
+            serde_json::json!({ "origin_id": "origin-row", "after_id": "zzz-first", "limit": 10 }),
+        )
+        .await;
+    let ids: Vec<&str> = next["result"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["mmm-second", "aaa-third"], "{next}");
+}
+
 /// A session whose `capabilities` JSON withholds `send_prompt` is refused by
 /// `action_capability` before any transport runs, and the leg must say so with
 /// ITS token. This is the second half of the taxonomy contract: the tokens are
