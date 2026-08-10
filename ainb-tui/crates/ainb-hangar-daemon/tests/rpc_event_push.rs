@@ -36,6 +36,19 @@ struct Client {
     writer: OwnedWriteHalf,
 }
 
+/// How long an assertion that an event MUST ARRIVE is willing to wait.
+///
+/// These are arrival assertions, not latency assertions: the property is that
+/// the subscriber receives the frame, not that it receives it quickly. Five
+/// seconds was enough on a dev box and not on a loaded hosted macOS runner,
+/// where it failed as "subscribed connection must receive a hangar/event
+/// frame" and read like a lost event rather than a slow one.
+///
+/// The ABSENCE assertions in this file deliberately keep their short waits: a
+/// longer wait there only makes the suite slower, since nothing arriving is
+/// what they are proving.
+const EVENT_ARRIVAL_BUDGET: Duration = Duration::from_secs(30);
+
 impl Client {
     /// Poll-connect until the accept loop is up, then split the stream.
     async fn connect(socket_path: &std::path::Path) -> Self {
@@ -224,7 +237,7 @@ async fn subscribed_connection_receives_task_finished_event() {
 
     // The subscribed connection receives the typed event frame.
     let event = sub
-        .next_event(Duration::from_secs(5))
+        .next_event(EVENT_ARRIVAL_BUDGET)
         .await
         .expect("subscribed connection must receive a hangar/event frame");
     assert_eq!(event["event"], "task_finished", "wrong event: {event}");
@@ -274,7 +287,7 @@ async fn event_never_crosses_workspace_boundary() {
     // Positive marker first: A's subscriber sees the event (so the negative
     // below proves isolation, not a broken pipeline).
     let event = sub_a
-        .next_event(Duration::from_secs(5))
+        .next_event(EVENT_ARRIVAL_BUDGET)
         .await
         .expect("workspace A's subscriber must receive the event");
     assert_eq!(event["event"], "task_finished");
