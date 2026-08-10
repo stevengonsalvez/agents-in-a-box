@@ -186,6 +186,8 @@ async fn launched_command(
         resume_transcript,
         resume_requested,
         false, // headroom_enabled (keep the env prefix off the critical path)
+        None,  // codex_session (this test resumes through the transcript, not a
+               // pre-ensured codex session)
     )
     .await
     .expect("start_cli_in_tmux");
