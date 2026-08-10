@@ -35,7 +35,7 @@ const CODEX_OFF: (&str, &str) = ("AINB_CODEX_MANAGED", "0");
 /// cold CI runner still has to exec the binary.
 const LOCK_BUDGET: Duration = Duration::from_secs(30);
 /// The socket appears only after migrations + token mint, so it needs more room.
-const SOCKET_BUDGET: Duration = Duration::from_secs(60);
+const SOCKET_BUDGET: Duration = Duration::from_mins(1);
 
 fn hangar_home(home: &Path) -> PathBuf {
     home.join(".agents-in-a-box")
@@ -225,7 +225,7 @@ fn sigterm_stops_the_daemon_and_releases_the_home() {
     );
 }
 
-/// A SIGKILLed daemon runs no destructor, so it leaves the lock file behind
+/// A `SIGKILL`ed daemon runs no destructor, so it leaves the lock file behind
 /// naming a dead pid. That must not lock the home out forever — the next boot
 /// steals it (atomically, `rename`, winner-take-all) and takes over.
 #[test]

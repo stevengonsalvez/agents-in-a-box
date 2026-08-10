@@ -163,7 +163,7 @@ const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 ///
 /// Exported so the CLI can apply the same identity rule to the same lock file —
 /// the two halves disagreeing about who owns a home is how a recycled pid ends
-/// up being reported as a running daemon, and SIGTERMed by `stop`.
+/// up being reported as a running daemon, and `SIGTERM`ed by `stop`.
 #[must_use]
 pub fn process_argv(pid: i32) -> Option<String> {
     let mut child = std::process::Command::new("ps")
@@ -384,7 +384,7 @@ mod tests {
         drop(held);
     }
 
-    /// A lock left by a SIGKILLed daemon whose pid has since been recycled onto
+    /// A lock left by a `SIGKILL`ed daemon whose pid has since been recycled onto
     /// an unrelated live process must be reclaimable, or the daemon can never
     /// boot again after a reboot.
     #[test]
