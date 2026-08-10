@@ -1772,7 +1772,7 @@ async fn message_send_inner(
 
     use ainb_hangar_proto::fleet::{
         ActionReceiptStatus, FLEET_MESSAGE_BODY_MAX, FLEET_MESSAGE_TARGETS_MAX,
-        FleetMessageDelivery, FleetMessageSendResult, FleetScope,
+        FleetMessageDelivery, FleetMessageSendResult,
     };
     use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
     use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
