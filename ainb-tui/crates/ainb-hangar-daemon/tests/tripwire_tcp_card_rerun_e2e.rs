@@ -85,9 +85,19 @@ fn launch_headless(sess: &TuiSession, scale: u64, which: &str, home: &std::path:
         let card_visible = capture.contains(CARD_TITLE);
         let in_store = board_card_by_title(home, CARD_TITLE).is_some();
         let diagnosis = match (on_board, card_visible, in_store) {
+            // No `Board:` header AND the card-board placeholder on screen means
+            // the board surface rendered with NO BOARDS in its snapshot: the
+            // placeholder is painted only by `widgets/card_board.rs`, so the
+            // screen is right and the boards list came back empty. The header
+            // is missing because there is no board to name, not because the TUI
+            // navigated somewhere else.
+            (false, _, _) if capture.contains("— empty —") => {
+                "the boards list came back EMPTY (no `Board:` header, card-board placeholder \
+                 on screen), so the snapshot carried zero boards for this workspace"
+            }
             (false, _, _) => {
-                "the TUI is NOT ON THE BOARDS SCREEN at all (no `Board:` header), so nothing \
-                 here is about cards: something navigated away from the board"
+                "the TUI is not on a board surface at all (no `Board:` header, no card-board \
+                 placeholder), so something navigated away"
             }
             (true, false, true) => {
                 "the board is up and the card IS in the store but NOT rendered, so the view \
