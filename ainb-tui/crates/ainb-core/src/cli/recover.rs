@@ -398,6 +398,7 @@ fn execute_resume(session: &str) -> Result<()> {
         model: None,
         model_source: Default::default(),
         codex_model: None,
+        codex_thread_id: None,
     };
 
     // Locked RMW (pu4): serialise recovery's re-register against live writers.
@@ -630,6 +631,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         }
     }
 

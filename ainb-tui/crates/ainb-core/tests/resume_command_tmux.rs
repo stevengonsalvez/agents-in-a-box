@@ -51,6 +51,8 @@ struct TmuxIsolation {
     /// Whatever `TMUX_TMPDIR` was before we overrode it, so a probe can still
     /// reach the AMBIENT server on purpose.
     ambient: Option<String>,
+    /// Current-client socket. tmux prefers this over `TMUX_TMPDIR` unless removed.
+    ambient_client: Option<String>,
 }
 
 /// Redirect every tmux call this process makes onto a private socket dir.
@@ -63,6 +65,7 @@ fn isolation() -> &'static TmuxIsolation {
     static ISO: OnceLock<TmuxIsolation> = OnceLock::new();
     ISO.get_or_init(|| {
         let ambient = std::env::var("TMUX_TMPDIR").ok();
+        let ambient_client = std::env::var("TMUX").ok();
         // pid + nanos: containers recycle low pids, and a leftover dir owned by
         // another uid would make tmux refuse the socket.
         let nonce = std::time::SystemTime::now()
@@ -73,7 +76,12 @@ fn isolation() -> &'static TmuxIsolation {
             PathBuf::from("/tmp").join(format!("ainb-verify-tmux-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create private tmux socket dir");
         std::env::set_var("TMUX_TMPDIR", &dir);
-        TmuxIsolation { dir, ambient }
+        std::env::remove_var("TMUX");
+        TmuxIsolation {
+            dir,
+            ambient,
+            ambient_client,
+        }
     })
 }
 
@@ -91,6 +99,10 @@ fn ambient_tmux() -> Command {
     match &iso.ambient {
         Some(v) => cmd.env("TMUX_TMPDIR", v),
         None => cmd.env_remove("TMUX_TMPDIR"),
+    };
+    match &iso.ambient_client {
+        Some(v) => cmd.env("TMUX", v),
+        None => cmd.env_remove("TMUX"),
     };
     cmd
 }
@@ -173,6 +185,7 @@ async fn launched_command(
         resume_transcript,
         resume_requested,
         false, // headroom_enabled (keep the env prefix off the critical path)
+        None,
     )
     .await
     .expect("start_cli_in_tmux");
