@@ -122,11 +122,12 @@ where
 /// lock, and `rpc::bind` then unlinked its socket — the exact double-daemon
 /// incident this module exists to prevent, reintroduced by the guard meant to
 /// stop it.
-fn holder_is_live_daemon(pid: i32) -> bool {
+#[must_use]
+pub fn holder_is_live_daemon(pid: i32) -> bool {
     if !pid_alive(pid) {
         return false;
     }
-    let Some(args) = ps_args(pid) else {
+    let Some(args) = process_argv(pid) else {
         return true;
     };
     is_hangar_daemon_args(&args) || runs_our_executable(&args)
@@ -159,7 +160,12 @@ const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The full argv of `pid` as one line, or `None` when `ps` cannot answer in
 /// time.
-fn ps_args(pid: i32) -> Option<String> {
+///
+/// Exported so the CLI can apply the same identity rule to the same lock file —
+/// the two halves disagreeing about who owns a home is how a recycled pid ends
+/// up being reported as a running daemon, and SIGTERMed by `stop`.
+#[must_use]
+pub fn process_argv(pid: i32) -> Option<String> {
     let mut child = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .stdin(std::process::Stdio::null())

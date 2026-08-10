@@ -7898,9 +7898,38 @@ fn running_daemon_pid() -> Result<Option<u32>> {
 /// [`running_daemon_pid`] against an explicit hangar home, so the
 /// lock-beats-pid-file precedence is testable without touching the environment.
 fn running_daemon_pid_in(home: &std::path::Path) -> Option<u32> {
-    let live = |path: std::path::PathBuf| read_daemon_pid(&path).filter(|pid| pid_is_running(*pid));
-    live(ainb_hangar_daemon::single_instance::lock_path_in(home))
-        .or_else(|| live(ainb_hangar_daemon::pid_path_in(home)))
+    let owner =
+        |path: std::path::PathBuf| read_daemon_pid(&path).filter(|pid| pid_owns_a_home(*pid));
+    owner(ainb_hangar_daemon::single_instance::lock_path_in(home))
+        .or_else(|| owner(ainb_hangar_daemon::pid_path_in(home)))
+}
+
+/// Is `pid` a live hangar daemon, by the SAME rule the daemon itself applies?
+///
+/// Liveness alone is not enough for a record that outlives a reboot: after a
+/// power cut the pid in `daemon.lock` usually belongs to some unrelated process,
+/// and reading that as "a daemon is running" wedges the home with ZERO daemons
+/// (the autostart declines forever) while `stop` SIGTERMs a stranger. The daemon
+/// half has guarded against exactly this since the lock shipped; this is the
+/// other half agreeing with it.
+///
+/// Fails safe in the same direction — an unidentifiable live process is treated
+/// as the owner rather than spawned over.
+fn pid_owns_a_home(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if ainb_hangar_daemon::single_instance::holder_is_live_daemon(pid) {
+        return true;
+    }
+    // One shape the daemon-side rule cannot see: a daemon launched through an
+    // `AINB_HANGAR_DAEMON_BIN` wrapper has an argv neither the two known shapes
+    // nor the DAEMON's `current_exe` comparison recognises from over here. This
+    // CLI knows what it would launch, so it can recognise its own wrapper.
+    let launcher = resolve_daemon_launch().0.display().to_string();
+    !launcher.is_empty()
+        && ainb_hangar_daemon::single_instance::process_argv(pid)
+            .is_some_and(|args| args == launcher || args.starts_with(&format!("{launcher} ")))
 }
 
 /// Is `pid` a live process? `kill(pid, 0)` succeeds iff it exists (and we may
@@ -8631,10 +8660,15 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
 
     // Record the version of the binary now serving, beside the pid. The launcher
     // and the daemon it spawns share the workspace version, so this is the
-    // running daemon's version. Best-effort: a write failure must not fail the
-    // start (the skew check just degrades to "unknown").
-    if let Ok(vpath) = daemon_version_path() {
-        std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
+    // running daemon's version — but ONLY when our child is the one serving.
+    // On the lost-race path the incumbent is some other build, and stamping our
+    // version over it would silence the very skew warning `status` exists to
+    // print. Best-effort: a write failure must not fail the start (the skew
+    // check just degrades to "unknown").
+    if exited.is_none() {
+        if let Ok(vpath) = daemon_version_path() {
+            std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
+        }
     }
 
     if announce {
@@ -8862,8 +8896,17 @@ fn run_daemon_stop() -> Result<()> {
 }
 
 /// `hangar daemon restart`: `stop` (if running) then `start`.
+///
+/// A failed stop does NOT abort the start. `stop` now waits for the daemon to
+/// exit and errors if it outlasts its budget — propagating that would return
+/// with the old daemon mid-shutdown and nothing scheduled to replace it, so a
+/// daemon that finished dying a moment later left the home empty until something
+/// else autostarted it. Report the stop problem and start anyway: if the old
+/// daemon is somehow still up, `start` is a no-op that says so.
 pub(crate) fn run_daemon_restart() -> Result<()> {
-    run_daemon_stop()?;
+    if let Err(e) = run_daemon_stop() {
+        println!("hangar daemon: stop reported a problem, starting anyway: {e}");
+    }
     run_daemon_start()
 }
 
