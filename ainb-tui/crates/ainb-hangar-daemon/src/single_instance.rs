@@ -19,13 +19,22 @@
 //! power-cut) daemon leaves the file naming its pid, and after the next boot that
 //! pid very likely belongs to some unrelated process. A liveness-only check would
 //! read that as "a daemon owns this home" forever and the daemon would never start
-//! again. So the predicate also asks the process table whether the pid still looks
-//! like a hangar daemon.
+//! again. So the predicate also asks the process table what that pid is running.
 //!
-//! That check FAILS SAFE: when `ps` cannot answer, the holder is respected. The
-//! asymmetry is deliberate — declining to boot is loud and recoverable (the log
-//! names the file to remove), whereas stealing a live daemon's lock silently
-//! recreates the double-hold this module exists to prevent.
+//! That check FAILS SAFE in every direction: a `ps` that cannot answer, an argv
+//! shape it does not recognise, and a holder running our own executable all
+//! RESPECT the holder. Only positive evidence of a different program justifies a
+//! steal. The asymmetry is deliberate — declining to boot is loud and
+//! recoverable (the log names the file to remove), whereas stealing a live
+//! daemon's lock silently recreates the double-hold this module exists to
+//! prevent.
+//!
+//! The kernel offers a primitive with none of this bookkeeping: an `flock` /
+//! `F_SETLK` held for the process lifetime is released by the kernel on exit,
+//! crash and reboot alike, which removes the recycled-pid problem at the root.
+//! This module reuses [`BdLock`] instead because that carries the crate's
+//! existing double-hold race tests; the lock-file primitive is the better
+//! long-term shape and the identity layer is what it costs to keep the pidfile.
 
 use std::path::{Path, PathBuf};
 
@@ -90,28 +99,96 @@ where
     }
 }
 
-/// Is `pid` a live process that still looks like a hangar daemon?
+/// Is `pid` a live process this daemon must respect as the home's owner?
 ///
-/// Fails safe: a process table we cannot read yields `true` (respect the
-/// holder). See the module doc for why that direction is the safe one.
+/// Three ways to answer yes, and only ONE way to answer no. That asymmetry is
+/// the contract [`BdLock::try_acquire_with`] demands: a false negative steals a
+/// LIVE holder's lock and puts two daemons on one home, so "not a daemon" is
+/// only ever concluded from positive evidence that the holder is a different
+/// program.
+///
+/// 1. `ps` cannot answer → respect (the original fail-safe).
+/// 2. The argv is a recognised daemon shape → respect.
+/// 3. The argv is unrecognised but the holder is running the SAME executable we
+///    are → respect. This covers every daemon whose argv
+///    [`is_hangar_daemon_args`] cannot know about: an `AINB_HANGAR_DAEMON_BIN`
+///    override pointing at a wrapper or a dev binary, an install path
+///    containing a space (`ps` renders argv whitespace-separated, so
+///    `/Volumes/My Passport/bin/ainb-hangar-daemon` has a first token of
+///    `/Volumes/My`), and an in-process `boot()` inside a cargo test binary,
+///    whose argv is `target/debug/deps/<hash>`.
+///
+/// Without (3) a second daemon judged such an incumbent a stranger, stole its
+/// lock, and `rpc::bind` then unlinked its socket — the exact double-daemon
+/// incident this module exists to prevent, reintroduced by the guard meant to
+/// stop it.
 fn holder_is_live_daemon(pid: i32) -> bool {
     if !pid_alive(pid) {
         return false;
     }
-    ps_args(pid).is_none_or(|args| is_hangar_daemon_args(&args))
+    let Some(args) = ps_args(pid) else {
+        return true;
+    };
+    is_hangar_daemon_args(&args) || runs_our_executable(&args)
 }
 
-/// The full argv of `pid` as one line, or `None` when `ps` cannot answer.
+/// Is this argv running the same binary as us?
+///
+/// Prefix-matched against [`std::env::current_exe`] rather than compared
+/// token-wise, because `ps` renders argv whitespace-separated and an executable
+/// path may itself contain spaces. An unresolvable `current_exe` answers `true`
+/// (respect the holder), keeping every unknown on the fail-safe side.
+fn runs_our_executable(args: &str) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return true;
+    };
+    let exe = exe.to_string_lossy().into_owned();
+    if exe.is_empty() {
+        return true;
+    }
+    args == exe || args.starts_with(&format!("{exe} "))
+}
+
+/// How long to wait for `ps` before treating the process table as unreadable.
+///
+/// `holder_is_live_daemon` runs as part of the FIRST statement of `boot`, so an
+/// unbounded wait here would hang startup on a wedged `ps` (a stalled disk, a
+/// frozen cgroup) — defeating the fail-fast the whole guard is built around. A
+/// timeout degrades to the `None` branch, which respects the holder.
+const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The full argv of `pid` as one line, or `None` when `ps` cannot answer in
+/// time.
 fn ps_args(pid: i32) -> Option<String> {
-    let output = std::process::Command::new("ps")
+    let mut child = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+
+    let deadline = std::time::Instant::now() + PS_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                // Reap our own child by its exact handle so a wedged `ps` is not
+                // left behind, then answer "unreadable".
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    };
+    if !status.success() {
         return None;
     }
-    let args = String::from_utf8(output.stdout).ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut args = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut args).ok()?;
     let args = args.trim();
     (!args.is_empty()).then(|| args.to_string())
 }
@@ -121,14 +198,17 @@ fn ps_args(pid: i32) -> Option<String> {
 /// Overridable with `AINB_HANGAR_OWNERSHIP_WATCH_MS` so a tripwire can drive
 /// several ticks inside a test budget, mirroring `HANGAR_DAEMON_POLL_MS`.
 fn watchdog_interval() -> std::time::Duration {
+    /// The tick is the WIDTH of the window in which two daemons can be live on
+    /// one home: the newcomer unlinks the incumbent's socket the moment it
+    /// binds, while the incumbent keeps claiming and sweeping until its next
+    /// sample. 5s bounds that, at the cost of one file read per tick.
+    const DEFAULT: std::time::Duration = std::time::Duration::from_secs(5);
+
     std::env::var("AINB_HANGAR_OWNERSHIP_WATCH_MS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
-        .map_or(
-            std::time::Duration::from_secs(30),
-            std::time::Duration::from_millis,
-        )
+        .map_or(DEFAULT, std::time::Duration::from_millis)
 }
 
 /// What one watchdog sample saw.
@@ -306,13 +386,61 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = lock_path_in(dir.path());
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        // A live pid that is emphatically not a daemon: our own test process.
-        std::fs::write(&path, std::process::id().to_string()).expect("seed lock");
 
-        match acquire(dir.path()).expect("acquire") {
+        // A genuinely foreign live process — the shape a recycled pid takes
+        // after a reboot. Our OWN pid would not do: this test binary is the
+        // executable a daemon would be running, so it is respected by design
+        // (see `a_holder_running_our_own_binary_is_respected_whatever_its_argv`).
+        // Killed by its exact pid on drop.
+        let mut stranger = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        std::fs::write(&path, stranger.id().to_string()).expect("seed lock");
+
+        let outcome = acquire(dir.path()).expect("acquire");
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+
+        match outcome {
             Ownership::Acquired(_) => {}
             other => panic!("expected a recycled-pid lock to be reclaimed, got {other:?}"),
         }
+    }
+
+    /// The fail-safe that stops the guard from recreating the incident.
+    ///
+    /// A daemon whose argv `is_hangar_daemon_args` cannot recognise — a wrapper
+    /// via `AINB_HANGAR_DAEMON_BIN`, an install path with a space, an
+    /// in-process `boot()` in a test binary — must still be respected, or a
+    /// second daemon steals its lock and both end up serving one home.
+    #[test]
+    fn a_holder_running_our_own_binary_is_respected_whatever_its_argv() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let exe = exe.to_string_lossy().into_owned();
+
+        assert!(runs_our_executable(&exe), "bare invocation");
+        assert!(runs_our_executable(&format!("{exe} --once")), "with args");
+        assert!(
+            !is_hangar_daemon_args(&exe),
+            "this test binary's argv is exactly the unrecognised shape under test"
+        );
+        assert!(
+            holder_is_live_daemon(i32::try_from(std::process::id()).unwrap()),
+            "our own live process must never be judged a stranger"
+        );
+    }
+
+    /// The other half: a genuinely different program is not protected, or a
+    /// recycled pid would wedge the home forever.
+    #[test]
+    fn a_different_executable_is_not_ours() {
+        assert!(!runs_our_executable("/bin/sleep 30"));
+        assert!(!runs_our_executable("/usr/bin/vim"));
+        // A prefix of our path is not our path.
+        let exe = std::env::current_exe().expect("current_exe");
+        let truncated = &exe.to_string_lossy()[..exe.to_string_lossy().len() - 1];
+        assert!(!runs_our_executable(truncated));
     }
 
     /// The watchdog's whole decision table. The dangerous cell is `Unknown`:
