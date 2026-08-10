@@ -90,6 +90,7 @@
     <a href="#tldr">TL;DR</a>
     <a href="#what">What shipped</a>
     <a href="#arch">How it works</a>
+    <a href="#guardrail">Part 2: the guardrail is live</a>
     <a href="#proof">The proof</a>
     <a href="#recordings">All recordings</a>
     <a href="#proof" class="l2">j1 bus on tmux</a>
@@ -97,13 +98,20 @@
     <a href="#proof" class="l2">j3 resume</a>
     <a href="#proof" class="l2">j4 convergence</a>
     <a href="#faults">Fault matrix</a>
+    <a href="#surface">The operating surface</a>
+    <a href="#surface" class="l2">j6 Fleet panel, real TUI</a>
+    <a href="#surface" class="l2">j7 copilot chat, operated</a>
     <a href="#caught">What review caught</a>
     <a href="#invariants">Invariants</a>
     <a href="#next">What is next</a>
     <div class="files">
       <div class="label">Where it lives</div>
       <code>hangar-daemon/acp_pool.rs</code>
+      <code>hangar-daemon/copilot.rs</code>
       <code>ainb-acp/{client,reducer}.rs</code>
+      <code>ainb-fleet-tools/{server,fleet}.rs</code>
+      <code>ainb-plugin-hangar/screen/fleet_chat.rs</code>
+      <code>ainb-fleet-macos/Sources/FleetChat/</code>
       <code>migrations/0079_chat_bus.sql</code>
       <code>scripts/chat-bus-smoke.sh</code>
     </div>
@@ -111,15 +119,20 @@
 
   <main>
     <header>
-      <div class="eyebrow">agents-in-a-box · buzz port part 1 · shipped 2026-08-07</div>
+      <div class="eyebrow">agents-in-a-box · buzz port part 1 shipped 2026-08-07 · part 2 in PR #662, open</div>
       <h1>The ainb chat bus: built, proven, recorded</h1>
       <div class="tldr" id="tldr">
         <b>TL;DR</b> ainb can now hold a conversation. Messages go to running tmux sessions AND to
         headless ACP agents through one bus, with receipts per recipient, live
-        execution transcripts, actionable permission prompts, and resume across a daemon crash. Six
-        phases, five merged PRs, sixteen named invariants, and nine live journeys recorded end to
-        end against real processes. Every recording below is an uncut run, and every frame was read
-        to confirm it shows the assertion it claims.
+        execution transcripts, actionable permission prompts, and resume across a daemon crash. Part
+        2 gives the fleet a voice: a <code>#copilot</code> channel whose agent holds fleet-control
+        tools behind a confirm-card guardrail that now actually blocks on the operator, per-session
+        chat threads, broadcast channels with a reason on every leg, and both the TUI and the macOS
+        app operating the same wire. Part 1 is six phases, five merged PRs, sixteen named
+        invariants. Part 2 is not yet merged (PR #662, base <code>main</code>). Eleven live journeys
+        are recorded end to end; two of them, unlike the first nine, drive the real TUI binary
+        rather than only the daemon and the CLI. Every recording below is an uncut run, and every
+        frame was read to confirm it shows the assertion it claims.
       </div>
     </header>
 
@@ -139,6 +152,11 @@
         <tr><td>5</td><td>Multiplexed agent pool, ACP delivery, permission round trip, convergence</td><td>#596</td></tr>
         <tr><td>6</td><td>Resume by <code>session/load</code> with a re-prime fallback, transcript prune</td><td>#598</td></tr>
         <tr><td>E2E</td><td>Nine live journeys, opt-in CI lane, the recordings on this page</td><td>#614</td></tr>
+        <tr><td>P2·A</td><td>The confirm-card guardrail wired onto the live tool-call path; one classifier, not two</td><td>#662</td></tr>
+        <tr><td>P2·B</td><td>Per-session chat threads: <code>origin_message_id</code>, ordered by commit <code>seq</code></td><td>#662</td></tr>
+        <tr><td>P2·C</td><td>Broadcast channels, one send with N legs, each with its own state AND its own reason</td><td>#662</td></tr>
+        <tr><td>P2·A3</td><td>Both operator surfaces: the TUI chat screen, the macOS Fleet chat pane</td><td>#662</td></tr>
+        <tr><td>P2·E2E</td><td>Two more live journeys against the real TUI binary, not just the daemon and CLI</td><td>#662</td></tr>
       </tbody>
     </table>
 
@@ -177,6 +195,46 @@
         chat view stays readable and never has to render half-finished markdown.</div>
     </div>
 
+    <h2 id="guardrail">Part 2: the guardrail is live</h2>
+    <p>Part 2 puts an agent behind a <code>#copilot</code> channel, holding an MCP tool table that can
+      read the whole fleet, send messages as itself, and reach the destructive tools (kill, spawn,
+      interrupt, archive) behind a confirm card. Every tool call goes through one gate before it can
+      run anything.</p>
+
+    <pre><span class="cm">tool call -&gt; classify -&gt; Auto/Refused/Confirm, and Confirm BLOCKS on a human</span>
+
+  model    tools/call     +------------------------+
+  (tool +  ----------&gt;    | fleet/copilot_gate     |   one classifier, daemon-side
+  args,                   | Auto ------------------|-> run
+  never                   | Refused ----------------|-> never runs
+  prose)                  | Confirm -&gt; card (open) -|-> fleet/confirm_event
+                          +------------------------+          |
+                                                          operator answers
+                                                       approve / edit / deny
+                                                                |
+                                                        Run (gate's own args)
+                                                          / Denied / Expired</pre>
+
+    <div class="callout">
+      <span class="ico">*</span>
+      <div><b>The review found it was not enforced.</b> <code>copilot::gate</code> minted confirm
+        cards and was fully tested, but nothing on the production path called it: the tool server
+        answered a <code>Confirm</code> verdict with a structured error straight back to the model,
+        so the entire approve surface, TUI cards, <code>confirm_list</code>, <code>confirm_answer</code>,
+        the CLI verbs, was reachable only by cards nothing minted. <code>fleet/copilot_gate</code> now
+        parks a real card and the tool call blocks on the operator's answer, bounded by a TTL
+        strictly shorter than part 1's 30-minute turn deadline (a card that outlived the deadline
+        would get its turn converged out from under a dialog the operator is still looking at).</div>
+    </div>
+
+    <p>The tool arguments are projected onto the tool's own declared schema keys <b>before</b> the
+      card is persisted, so a model-authored <code>justification</code> or <code>operator_approved</code>
+      key never reaches the human's approve dialog. There is one classifier, not two: the tool
+      server's own live <code>Guardrail</code> copy was deleted, because a second copy of the rule,
+      running downstream of every transcript the copilot has read, is the easier one to soften. The
+      server now asks the daemon and executes only on <code>Run</code>, using the gate's own
+      arguments, so an operator who edits a card edits what actually runs.</p>
+
     <h2 id="proof">The proof</h2>
     <p>Every recording is one uncut run of <code>ainb-tui/scripts/chat-bus-smoke.sh</code>. Each run
       builds a scratch world: its own hangar home, a real daemon, the real <code>ainb</code> binary,
@@ -195,7 +253,7 @@
       <figcaption><b>j1 . the bus on tmux.</b> One <code>msg send</code> to three targets, three
         DELIVERED receipts, the payload verbatim in every pane, and a follower that was already
         streaming when it happened.<br>
-        <span class="assert">RECEIVED:[j1 ...] hello fleet, deliver me verbatim &middot; 3/3 DELIVERED &middot; 3/3 panes verbatim &middot; follower saw it</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j1.mp4">download the full j1 run (mp4)</a></figcaption>
+        <span class="assert">RECEIVED:-y [j1 ...] hello fleet, deliver me verbatim &middot; 3/3 DELIVERED &middot; 3/3 panes verbatim &middot; follower saw it</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j1.mp4">download the full j1 run (mp4)</a></figcaption>
     </figure>
 
     <figure>
@@ -266,14 +324,56 @@
         <span class="assert">DELIVERED + REJECTED/target_unknown in one request, message persisted</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">download the full j5e run (mp4)</a></figcaption>
     </figure>
 
+    <h2 id="surface">The operating surface</h2>
+    <p><code>j1</code> through <code>j5e</code> drive the daemon and the CLI. Part 1 shipped a chat
+      bus the TUI consumes without anything ever opening the TUI, and that is exactly how a real bug
+      got past every recording above: the Fleet panel rendered an ACP session's provider as
+      <code>UNKNOWN</code> while every daemon-level and CLI-level test stayed green. <code>j6</code>
+      and <code>j7</code> close that gap: each additionally cold-launches the real <code>ainb tui</code>
+      on a private tmux server and operates it with the keys an operator would press. That
+      distinction is the whole point of both.</p>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j6.gif" alt="Journey 6: an ACP session labelled correctly in the real Fleet panel">
+      <figcaption><b>j6 . the operating surface, an ACP session in the real Fleet panel.</b> Pressing
+        <code>f</code> once, the way a user opens Fleet, then reading the provider cell off the
+        ACP session's own card, anchored on its row rather than a substring search of the whole
+        pane (<code>UNKNOWN</code> would otherwise pass on an incidental <code>acp</code> in the
+        session key or the scratch path). This journey only passes against a build containing
+        <code>193c3e3c</code>, the fix for a provider mapped twice: once from
+        <code>FleetProvider::Acp</code> to the wire token <code>acp</code>, then from that token to
+        a label <code>provider_label</code> only knew <code>claude</code> and <code>codex</code> for.
+        <code>acp</code> and <code>copilot</code> both fell through to <code>UNKNOWN</code> while
+        every daemon-level and CLI-level test stayed green.<br>
+        <span class="assert">card provider row, as the operator sees it: &#124; branch unknown &middot; ACP &middot; REMOTE &middot; Fleet opened on the first `f` &middot; card [j6-project] labelled [ACP]</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j6.mp4">download the full j6 run (mp4)</a></figcaption>
+    </figure>
+
+    <figure>
+      <img src="https://robust-rocket-8zjr.here.now/media/j7.gif" alt="Journey 7: the copilot chat operated from the real TUI, a confirm card approved from the pane">
+      <figcaption><b>j7 . the operating surface, the copilot chat, operated.</b> One <code>f</code>,
+        one <code>m</code>, the daemon's own minted channel scope on screen (a hardcoded
+        <code>channel:copilot</code> would have read an empty timeline forever while every unit test
+        stayed green), the operator's own message typed in the composer and sent with one
+        <code>Enter</code>, both authors on distinct rows checked both ways, and an open confirm
+        card answered with <code>Tab</code> then <code>y</code>. Every key is pressed once, after
+        waiting for the screen that receives it, because a retry loop is how a modal swallowing the
+        first press goes unnoticed. The confirm card itself is staged, the copilot tool bridge that
+        would mint one is not built yet, but everything after that row (<code>fleet/confirm_list</code>
+        decoding it, <code>fleet/confirm_answer</code> resolving it) is real product behaviour on the
+        real wire.<br>
+        <span class="assert">chat header: Fleet chat &middot; #copilot &middot; channel:01KZH51MFJKSX7CN5HNDANHBQA &middot; YOU &#124; what is blocked right now &middot; COPILOT &#124; session one is waiting on an approval &middot; confirm card: [OPEN] kill {"session":"legacy:claude:ainb-smoke-18&hellip; y approve n deny e answer &middot; card [j7-card-1831130-1786208373] answered [approved]</span><br><a class="dl" href="https://robust-rocket-8zjr.here.now/media/j7.mp4">download the full j7 run (mp4)</a></figcaption>
+    </figure>
+
     <h2 id="recordings">All recordings</h2>
-    <p>Nine tapes, one per journey, each an uncut run. They live in the repo at
+    <p>Eleven tapes, one per journey, each an uncut run. They live in the repo at
       <code>explainers/recordings/chat-bus/</code> next to
       <code>EXPECTED-OUTCOMES.md</code>, which names the exact frame text each one must
       show. There is deliberately no whole-suite tape: three attempts to capture the
       fifteen minute run died mid-recording, and a tape that stops after four journeys
       looks like evidence without being any. Run the suite yourself instead, it is one
-      command.</p>
+      command. The <code>j6</code> and <code>j7</code> tapes were recorded 2026-08-08; they are
+      short (about 7 seconds for a multi-minute journey) because vhs captures on screen change and
+      both spend most of their run polling silently, not because either is truncated.</p>
 
     <table>
       <thead><tr><th>Journey</th><th>What it proves</th><th>Files</th></tr></thead>
@@ -287,6 +387,8 @@
         <tr><td><code>j5c</code></td><td>idempotency replay</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5c.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5c.mp4">mp4</a></td></tr>
         <tr><td><code>j5d</code></td><td>permission round trip</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5d.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5d.mp4">mp4</a></td></tr>
         <tr><td><code>j5e</code></td><td>unknown target</td><td><a href="https://robust-rocket-8zjr.here.now/media/j5e.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j5e.mp4">mp4</a></td></tr>
+        <tr><td><code>j6</code></td><td>an ACP session in the real Fleet panel, provider labelled correctly</td><td><a href="https://robust-rocket-8zjr.here.now/media/j6.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j6.mp4">mp4</a></td></tr>
+        <tr><td><code>j7</code></td><td>the copilot chat, operated from the real TUI</td><td><a href="https://robust-rocket-8zjr.here.now/media/j7.gif">gif</a> · <a href="https://robust-rocket-8zjr.here.now/media/j7.mp4">mp4</a></td></tr>
       </tbody>
     </table>
 
@@ -337,6 +439,71 @@
         at all. The j3 recording above is the proof it takes the fast path.</p></div>
     </details>
 
+    <p>Part 2's highest-value findings were all caught by adversarial review, not by a failing test:
+      the code did exactly what it was asked to do, and what it was asked to do was wrong.</p>
+
+    <details>
+      <summary>A copilot write that could wear the operator's name <span class="where">part 2, wave 1</span></summary>
+      <div class="body"><p>Every message persisted <code>sender: "operator"</code>, so a copilot's
+        message was indistinguishable from a human's at every surface that renders one, including
+        the receiving agent's re-prime corpus. That routes around the entire guardrail table: a
+        copilot never needs the kill tool if it can ask another agent to do it while wearing the
+        operator's name. <code>message_send</code> now takes an optional actor and refuses a blank
+        one; absent still means the operator, so every existing caller is unchanged.</p></div>
+    </details>
+
+    <details>
+      <summary>A guardrail that was fully tested and unreachable <span class="where">part 2, gate</span></summary>
+      <div class="body"><p><code>copilot::gate</code> classified tool calls and minted confirm cards
+        correctly, but nothing on the production path called it: the tool server answered a
+        <code>Confirm</code> verdict with a structured error straight back to the model, so the
+        entire approve surface, TUI cards, <code>confirm_list</code>, <code>confirm_answer</code>,
+        the CLI verbs, had no producer that could ever reach it. <code>fleet/copilot_gate</code> now
+        parks a real card on the live path and the tool call blocks on it.</p></div>
+    </details>
+
+    <details>
+      <summary>The copilot held the daemon's own global credential <span class="where">part 2, gate</span></summary>
+      <div class="body"><p>The whole boundary rested on "the copilot only acts through its MCP tool
+        table", and nothing enforced it: anything holding the daemon's token could call the same
+        methods directly, including answering its own confirm cards. Authorization is now per
+        connection: a <code>Caller</code> is either the operator (the daemon's own token) or the
+        copilot (a token minted per channel scope, restricted to the read methods, the gate, and the
+        two writes the tool table can reach after the gate says run). Same shape as the
+        <code>sender: "operator"</code> finding: a guarantee asserted in the design and absent from
+        the code.</p></div>
+    </details>
+
+    <details>
+      <summary>An injection test that proved less than it claimed <span class="where">part 2, gate</span></summary>
+      <div class="body"><p>The adversarial test now makes the model <em>obey</em> the injected
+        instruction verbatim, exactly as a compromised model would, both demanded tool calls issued
+        with the injection's own prose as justification, then asserts nothing reached an execution
+        path: no message row, no write on the socket, one denied activity row per attempt. Proving
+        the copilot declines is not the same claim as proving obedience is harmless, and only the
+        second one holds up against a model that does not decline.</p></div>
+    </details>
+
+    <details>
+      <summary>Two races in the confirm-card path <span class="where">part 2, gate</span></summary>
+      <div class="body"><p>An edited confirm answer was projected but not re-classified, so an edit
+        that dropped a required key, like <code>answer</code> from an <code>answer_need</code>,
+        could run with a default that silently resolved another agent's open need. It is now
+        re-classified after projection, and a shape-invalid edit is refused rather than run.
+        Separately, the card row could be persisted before its waiter was registered, so an answer
+        landing in that window would resolve the durable row to <code>approved</code>, find no
+        waiter, and leave the tool call to time out: a card reading APPROVED everywhere while the
+        tool itself resolved EXPIRED. The waiter now registers first.</p></div>
+    </details>
+
+    <details>
+      <summary>A chat pane that pre-armed an approval <span class="where">part 2, macOS</span></summary>
+      <div class="body"><p>The confirm section adopted the first open card on the first poll, so an
+        operator who pressed Approve without reading the row could approve whichever card happened
+        to arrive first, not the one they meant to answer. Every open card now renders its own row
+        with its own Approve, Deny and Edit controls; nothing is pre-selected.</p></div>
+    </details>
+
     <h2 id="invariants">The sixteen invariants</h2>
     <p>Each one is a property the plan named up front, mapped to the test that would go red if it
       broke. This is the contract the port was built against.</p>
@@ -364,12 +531,36 @@
     </table>
 
     <h2 id="next">What is next</h2>
-    <p>Part 1 gave the fleet a nervous system. Part 2 gives it a voice: a
-      <code>#copilot</code> channel where an agent holds fleet-control tools and orchestrates the
-      whole fleet, with per-session chat threads and broadcast channels, on the macOS app and the TUI
-      in parallel. That plan is already written, reviewed, and reconciled against everything above,
-      including the decision that the copilot may act on its own for reads and prompts but must ask
-      before anything destructive.</p>
+    <p>Part 1 gave the fleet a nervous system. Part 2 gives it a voice, and what shipped above is
+      real: the guardrail blocks on the operator on the live path, threads and broadcast channels
+      work, and both operator surfaces render a copilot message and an operator message as visibly
+      distinguishable. What is left, stated as plainly as the rest of this page:</p>
+
+    <p><b>The macOS pane has not been built by its own author.</b> There is no Swift toolchain on
+      the machine PR #662 was written on, so no Swift test in that change has been executed by the
+      person who wrote it. <code>fleet-macos-contract.yml</code> is what proves it, and the PR should
+      not merge until that job is green.</p>
+
+    <p><b>PR #662 is not merged.</b> Everything in this section (the live guardrail, threads,
+      channels, both surfaces, j6 and j7) is on <code>fix/tui-tripwire-hangar-home</code> against
+      <code>main</code>, reviewed, not yet in <code>main</code> itself.</p>
+
+    <p><b>A DELIVERED leg is not proven end to end.</b> It needs a live agent pane, and no agent runs
+      in a tripwire. The mixed delivered/rejected <em>rendering</em> is pinned in unit and CLI tests
+      where it can be driven deterministically, which is not the same claim as a message actually
+      reaching a live process.</p>
+
+    <p><b>No real ACP adapter has ever run in CI or in any recording on this page.</b> Every ACP run,
+      part 1's j2 through j4 and part 2's j6 and j7, uses the <code>fake_acp_adapter</code> fixture.
+      The real-adapter tests exist and skip until an adapter is installed; the adapters were measured
+      by hand against the real thing when their protocol behaviour was pinned, but that measurement
+      is not itself in this page's proof.</p>
+
+    <p><b>The guardrail's operator-named-sessions state is not wired to a live turn yet.</b>
+      <code>fleet/copilot_gate</code> currently builds an empty <code>Guardrail</code> for every
+      call, which is the fail-closed value, not a finished feature: every <code>answer_need</code>
+      takes a confirm card regardless of which sessions the operator's own message named, because
+      nothing yet computes that pinned set from the turn that triggered the call.</p>
 
     <div class="callout">
       <span class="ico">-&gt;</span>
