@@ -82,6 +82,7 @@ The two-tier learning capture and retrieval system.
 
 - [Building from source](contributing/building.md)
 - [CI / CD](contributing/ci-cd.md)
+- [Verifying on a loaded box](contributing/verifying-on-a-loaded-box.md)
 - [Release process](contributing/release-process.md)
 
 ## Reference
