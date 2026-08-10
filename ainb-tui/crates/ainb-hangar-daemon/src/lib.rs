@@ -486,6 +486,13 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     let shutdown = crate::shutdown::install(Some(lost_rx));
     let mut during_boot = shutdown.clone();
 
+    // Raised the instant boot hands over to the run loop, so the boot-phase race
+    // below stops competing. Without it that race stays armed for the daemon's
+    // WHOLE life, and a Ctrl-C could cancel the run loop mid-teardown — dropping
+    // it before it reaped its interactive tmux sessions, which is precisely the
+    // orphaning the shutdown path exists to prevent.
+    let (running_tx, running_rx) = tokio::sync::oneshot::channel::<()>();
+
     // The rest of boot, raced against that seam. Dropping this future on a
     // shutdown unwinds the partially built daemon; `_ownership` lives OUTSIDE it,
     // so the lock is released either way.
@@ -825,12 +832,25 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
         cfg.runtime_id =
             Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
+        // Boot is done; from here the run loop owns shutdown.
+        let _ = running_tx.send(());
         run(store.pool().clone(), cfg, stats, broker.sink(), shutdown).await
     };
 
     tokio::select! {
         result = booted => result,
-        cause = during_boot.recv() => {
+        cause = async move {
+            let raced = tokio::select! {
+                cause = during_boot.recv() => Some(cause),
+                _ = running_rx => None,
+            };
+            match raced {
+                Some(cause) => cause,
+                // The run loop took over. Park forever so this arm can never
+                // resolve and cancel it.
+                None => std::future::pending().await,
+            }
+        } => {
             tracing::info!(
                 signal = cause.as_str(),
                 "ainb-hangar-daemon shutting down during boot"
