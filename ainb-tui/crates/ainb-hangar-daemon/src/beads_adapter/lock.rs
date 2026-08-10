@@ -299,6 +299,16 @@ impl Drop for BdLockGuard {
     /// here would then delete THAT live holder's pidfile — the same double-hold
     /// the steal path is careful to avoid, reintroduced on the way out. Removing
     /// only while the file still names us keeps the invariant symmetric.
+    ///
+    /// This is a read-then-unlink, so a residual window remains: a successor
+    /// could steal and republish between the read and the unlink, and we would
+    /// delete its file. POSIX offers no compare-and-unlink to close it — the
+    /// steal path's `rename` trick does not transfer, because renaming a file we
+    /// intend to delete would displace whatever is at the path if it is no
+    /// longer ours. Reaching it requires the predicate to first misjudge a LIVE
+    /// holder as dead, which `single_instance::holder_is_live_daemon` now
+    /// answers only on positive evidence; a lock the kernel releases (`flock` /
+    /// `F_SETLK`) is the primitive that removes the window entirely.
     fn drop(&mut self) {
         if read_pid(&self.path)
             == i32::try_from(std::process::id()).map_err(|_| PidfileRead::Unreadable)
