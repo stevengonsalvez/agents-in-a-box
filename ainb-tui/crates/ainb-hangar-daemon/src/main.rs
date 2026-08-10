@@ -8,7 +8,7 @@
 use ainb_hangar_daemon::beads_sync::reconcile;
 use ainb_hangar_daemon::beads_sync::reconcile::cli::{BeadsCli, BeadsCommand};
 use ainb_hangar_daemon::observability::{self, ObservabilityOpts};
-use ainb_hangar_daemon::{boot, hangar_dir, log_dir};
+use ainb_hangar_daemon::{boot, log_dir};
 use clap::{Parser, Subcommand};
 
 /// Hangar control-plane daemon.

@@ -75,33 +75,21 @@ pub enum Ownership {
 pub fn acquire(dir: &Path) -> std::io::Result<Ownership> {
     match acquire_with(dir, holder_is_live_daemon)? {
         // `Contended` means the path churned for a whole window without ever
-        // naming a live holder. That is NOT evidence anyone won it, so declining
-        // on it is the one way this guard could leave a home with NO daemon:
-        // symmetric contenders all sampling churn, all standing down.
+        // naming a live holder. That is NOT evidence anyone won it, so a single
+        // sample must not be enough to decline: symmetric contenders could all
+        // stand down and leave the home with no daemon.
         //
-        // Escalate instead of declining. A blocking attempt either takes the
-        // lock (nobody had it — exactly the case a fail-fast sample cannot tell
-        // apart from a busy one) or resolves into an honest `HeldBy` once a
-        // winner publishes. Only if THAT still cannot name anyone do we decline,
-        // by which point a real owner has had seconds to appear.
-        Ownership::Contended => Ok(escalate(dir)),
+        // Sample twice. A second fail-fast pass costs one window and turns the
+        // usual case (someone did win in the meantime) into an honest `HeldBy`.
+        //
+        // It is deliberately NOT a longer blocking acquire. That was tried and
+        // reverted: escalating turned a rare "nobody boots" into an
+        // intermittent DOUBLE-hold under the stale-lock stress, which is the
+        // failure this whole module exists to prevent and strictly the worse of
+        // the two. Two daemons corrupt a home; a home that briefly starts none
+        // is fixed by the next invocation.
+        Ownership::Contended => acquire_with(dir, holder_is_live_daemon),
         won_or_held => Ok(won_or_held),
-    }
-}
-
-/// How long the `Contended` escalation blocks before giving up.
-const CONTENDED_ESCALATION: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// One blocking attempt after fail-fast could not name a holder.
-fn escalate(dir: &Path) -> Ownership {
-    match BdLock::new(lock_path_in(dir))
-        .acquire_within_with(CONTENDED_ESCALATION, holder_is_live_daemon)
-    {
-        Ok(guard) => Ownership::Acquired(guard),
-        Err(LockHeld::By(pid)) => Ownership::HeldBy(pid),
-        // Still nobody nameable. Decline: something is churning the path that we
-        // cannot identify, and booting alongside it is the worse failure.
-        Err(LockHeld::Contended | LockHeld::Io(_)) => Ownership::Contended,
     }
 }
 
