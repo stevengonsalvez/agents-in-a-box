@@ -973,6 +973,19 @@ pub struct FleetRuntimeHookStatus {
     pub last_event: Option<String>,
 }
 
+/// One local Codex app-server discovered by the Hangar daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexAppServerRuntimeStatus {
+    /// Process identifier on this machine.
+    pub pid: u32,
+    /// `owned`, `adopted`, or `external`.
+    pub ownership: String,
+    /// Whether process argv requested Codex remote control enrollment.
+    pub remote_control: bool,
+    /// `healthy`, `degraded`, or `unknown` for external processes.
+    pub health: String,
+}
+
 /// Bounded runtime health returned only by the public Fleet RPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetRuntimeStatusResult {
@@ -982,6 +995,9 @@ pub struct FleetRuntimeStatusResult {
     pub protocol_version: u32,
     /// Supported provider hook states. No filesystem paths are exposed.
     pub hooks: Vec<FleetRuntimeHookStatus>,
+    /// Bounded local Codex app-server inventory. No filesystem paths are exposed.
+    #[serde(default)]
+    pub codex_app_servers: Vec<CodexAppServerRuntimeStatus>,
 }
 
 /// Initial result for a replay-safe Fleet subscription.
@@ -1300,6 +1316,36 @@ pub struct FleetStartResult {
     pub prospective_session_key: String,
     /// Durable start receipt.
     pub receipt: FleetActionReceipt,
+}
+
+/// Parameters for `codex/session_ensure`.
+///
+/// Interactive mode owns its tmux and session metadata. The daemon owns the
+/// shared app-server and returns the exact thread that tmux must resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSessionEnsureParams {
+    /// Stable Ainb Interactive session identity, used for validation and logs.
+    pub session_id: String,
+    /// Session working directory.
+    pub cwd: String,
+    /// Exact raw Codex model identifier, when selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Existing remote thread to resume after an Interactive restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Preserve Interactive's explicit yolo launch semantics at thread creation.
+    #[serde(default)]
+    pub skip_permissions: bool,
+}
+
+/// Result for `codex/session_ensure`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSessionEnsureResult {
+    /// Exact Codex thread identity.
+    pub thread_id: String,
+    /// Canonical Unix endpoint consumed by the Interactive tmux client.
+    pub endpoint: String,
 }
 
 /// Parameters for `fleet/broadcast`.

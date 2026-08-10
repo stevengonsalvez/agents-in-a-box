@@ -408,6 +408,9 @@ pub const FLEET_RECEIPT_LIST: &str = "fleet/receipt_list";
 pub const FLEET_RECEIPT_GET: &str = "fleet/receipt_get";
 /// Start a provider session without borrowing selected-session state.
 pub const FLEET_START: &str = "fleet/start";
+/// Ensure one Interactive Codex session has an exact thread on Ainb's shared
+/// Codex app-server.
+pub const CODEX_SESSION_ENSURE: &str = "codex/session_ensure";
 /// Read bounded, payload-free Fleet revision timeline entries.
 pub const FLEET_TIMELINE: &str = "fleet/timeline";
 /// Read a bounded daemon-owned Fleet usage summary.
@@ -1797,6 +1800,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_RECEIPT_LIST,
     FLEET_RECEIPT_GET,
     FLEET_START,
+    CODEX_SESSION_ENSURE,
     FLEET_TIMELINE,
     FLEET_USAGE_SUMMARY,
     FLEET_USAGE_DASHBOARD,
@@ -2120,6 +2124,7 @@ mod tests {
             FLEET_RECEIPT_LIST,
             FLEET_RECEIPT_GET,
             FLEET_START,
+            CODEX_SESSION_ENSURE,
             FLEET_TIMELINE,
             FLEET_USAGE_SUMMARY,
             FLEET_USAGE_DASHBOARD,

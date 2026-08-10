@@ -591,9 +591,11 @@ impl BrokerState {
             }
             match &pending.kind {
                 PendingKind::Structured { tx, .. } => {
-                    tx.send_replace(Some(StructuredResolution::Answered {
-                        answers: answers.clone(),
-                    }));
+                    tx.send_modify(|resolution| {
+                        *resolution = Some(StructuredResolution::Answered {
+                            answers: answers.clone(),
+                        });
+                    });
                     true
                 }
                 _ => false,
@@ -631,7 +633,9 @@ impl BrokerState {
             }
             match &pending.kind {
                 PendingKind::Structured { tx, .. } => {
-                    tx.send_replace(Some(StructuredResolution::Rejected { reason }));
+                    tx.send_modify(|resolution| {
+                        *resolution = Some(StructuredResolution::Rejected { reason });
+                    });
                     true
                 }
                 _ => false,
@@ -667,7 +671,9 @@ impl BrokerState {
             }
             match &pending.kind {
                 PendingKind::Structured { tx, .. } => {
-                    tx.send_replace(Some(StructuredResolution::ReleasedToNative));
+                    tx.send_modify(|resolution| {
+                        *resolution = Some(StructuredResolution::ReleasedToNative);
+                    });
                     true
                 }
                 _ => false,

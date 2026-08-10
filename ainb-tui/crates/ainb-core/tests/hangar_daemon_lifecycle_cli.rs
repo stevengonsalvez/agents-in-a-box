@@ -15,8 +15,10 @@
 //! the test SKIPs rather than fails — the weak macOS CI runner must never be
 //! blocked on a binary it did not build.
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 /// Path to the `ainb` binary under test.
@@ -32,6 +34,39 @@ fn daemon_bin() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
+/// Reap only orphaned `ainb hangar daemon run` children from an interrupted
+/// prior invocation of this exact test binary. Selection requires both the
+/// exact command and ppid=1; every signal addresses one PID only.
+fn reap_orphaned_test_daemons() {
+    static REAPED: Once = Once::new();
+    REAPED.call_once(|| {
+        let Ok(output) = Command::new("ps")
+            .args(["-Ao", "pid=,ppid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let expected = format!("{} hangar daemon run", ainb_bin().display());
+        let Ok(table) = String::from_utf8(output.stdout) else {
+            return;
+        };
+        for pid in table.lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (ppid == 1 && command == expected).then_some(pid)
+        }) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    });
+}
+
 /// Run `ainb hangar daemon <args>` against an isolated home, pointing the CLI at
 /// the sibling daemon binary. Returns (success, combined stdout+stderr).
 fn run(home: &Path, daemon: &Path, args: &[&str]) -> (bool, String) {
@@ -44,6 +79,8 @@ fn run(home: &Path, daemon: &Path, args: &[&str]) -> (bool, String) {
         // the claim loop so the child stays a quiet idle process for the test.
         .env("HANGAR_DAEMON_RUNTIME_ID", "rt-lifecycle")
         .env("HANGAR_DAEMON_DISABLE_CLAIM", "1")
+        .env("AINB_CODEX_MANAGED", "0")
+        .env("HANGAR_TEST_PARENT_PID", std::process::id().to_string())
         .output()
         .expect("spawn ainb");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -77,8 +114,27 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     cond()
 }
 
+/// Kill this exact PID if an assertion aborts the watchdog proof early.
+struct ExactPidCleanup(u32);
+
+impl Drop for ExactPidCleanup {
+    fn drop(&mut self) {
+        if pid_alive(self.0) {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(self.0 as i32), Signal::SIGKILL);
+        }
+    }
+}
+
+fn kill_and_wait(child: &mut Child) {
+    child.kill().expect("SIGKILL exact test parent");
+    child.wait().expect("reap exact test parent");
+}
+
 #[test]
 fn daemon_start_status_stop_round_trip() {
+    reap_orphaned_test_daemons();
     let Some(daemon) = daemon_bin() else {
         eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
         return;
@@ -146,5 +202,151 @@ fn daemon_start_status_stop_round_trip() {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+}
+
+#[test]
+fn daemon_exits_when_its_test_parent_is_sigkilled() {
+    reap_orphaned_test_daemons();
+    let home = tempfile::tempdir().expect("isolated hangar home");
+    let mut parent = Command::new("sh")
+        .args([
+            "-c",
+            "HANGAR_TEST_PARENT_PID=$$ AINB_CODEX_MANAGED=0 HANGAR_DAEMON_DISABLE_CLAIM=1 \\
+             AINB_HANGAR_HOME=\"$2\" HOME=\"$2\" \"$1\" hangar daemon run >/dev/null 2>&1 &\n             printf '%s\\n' \"$!\"\n             wait \"$!\"",
+            "sh",
+        ])
+        .arg(ainb_bin())
+        .arg(home.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn test parent");
+    let stdout = parent.stdout.take().expect("test parent stdout");
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).expect("read daemon pid");
+    let daemon_pid = line.trim().parse::<u32>().expect("daemon pid");
+    let _cleanup = ExactPidCleanup(daemon_pid);
+
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .path()
+            .join("hangar.sock")
+            .exists()),
+        "daemon must reach its run loop before the parent dies"
+    );
+    kill_and_wait(&mut parent);
+    assert!(
+        wait_until(Duration::from_secs(5), || !pid_alive(daemon_pid)),
+        "daemon {daemon_pid} survived its SIGKILLed test parent"
+    );
+}
+/// Read the ownership lock — the record that decides who owns the home.
+fn read_lock_pid(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(home.join("hangar").join("daemon.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A second `start` is a no-op that reports the incumbent, and above all leaves
+/// no second daemon behind — the failure mode that reached 69 on one machine.
+#[test]
+fn a_second_start_reports_the_incumbent_and_spawns_nothing() {
+    let Some(daemon) = daemon_bin() else {
+        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "daemon start should exit 0; out={out}");
+    let pid = read_pid(home).expect("daemon start wrote a pid file");
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .join("hangar.sock")
+            .exists()),
+        "the daemon must bind its control socket"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "a second start should exit 0; out={out}");
+    assert!(
+        out.contains("already running"),
+        "a second start must report the incumbent:\n{out}"
+    );
+    assert_eq!(
+        read_pid(home),
+        Some(pid),
+        "a second start must not re-point the pid file"
+    );
+    assert_eq!(
+        read_lock_pid(home),
+        Some(pid),
+        "the incumbent must still own the home"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "cleanup stop should exit 0; out={out}");
+    if pid_alive(pid) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+}
+
+/// `restart` must leave exactly one daemon: a new one, and the old one gone.
+///
+/// The regression this guards is self-inflicted and subtle. Shutdown is now
+/// graceful, so it takes time; a restart that hands off while the outgoing
+/// daemon still holds the home gets "already running" from `start`, returns —
+/// and when that daemon finishes dying the home is left with NOTHING.
+#[test]
+fn restart_leaves_exactly_one_daemon_running() {
+    let Some(daemon) = daemon_bin() else {
+        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "daemon start should exit 0; out={out}");
+    let first = read_pid(home).expect("daemon start wrote a pid file");
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .join("hangar.sock")
+            .exists()),
+        "the daemon must bind its control socket"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "restart"]);
+    assert!(ok, "daemon restart should exit 0; out={out}");
+
+    let second = read_pid(home).expect("restart recorded a pid");
+    assert_ne!(second, first, "restart should replace the daemon");
+    assert!(
+        !pid_alive(first),
+        "the old daemon must be gone after restart"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || pid_alive(second)),
+        "restart must leave a live daemon, not an empty home"
+    );
+    assert_eq!(
+        read_lock_pid(home),
+        Some(second),
+        "the lock must name the surviving daemon"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "cleanup stop should exit 0; out={out}");
+    if pid_alive(second) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(second as i32), Signal::SIGKILL);
     }
 }

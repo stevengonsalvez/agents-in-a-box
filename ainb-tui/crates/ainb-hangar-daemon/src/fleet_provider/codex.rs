@@ -152,11 +152,16 @@ impl CommandSpec {
 }
 
 /// Build shared app-server Unix listener command.
+///
+/// `--remote-control` makes this process discoverable by the signed-in Codex
+/// desktop and mobile clients. Hangar creates every managed Codex thread through
+/// this server, so the remote clients and the tmux TUI share one thread.
 pub fn app_server_command(codex_binary: &OsStr, socket: &Path) -> CommandSpec {
     CommandSpec {
         program: codex_binary.to_os_string(),
         args: vec![
             "app-server".into(),
+            "--remote-control".into(),
             "--listen".into(),
             unix_endpoint(socket).into(),
         ],
@@ -855,12 +860,13 @@ mod tests {
     }
 
     #[test]
-    fn command_specs_use_shared_unix_endpoint_and_proxy() {
+    fn command_specs_enable_remote_control_on_shared_app_server() {
         let socket = Path::new("/tmp/fleet codex.sock");
         assert_eq!(
             app_server_command(OsStr::new("codex"), socket).args,
             vec![
                 OsString::from("app-server"),
+                OsString::from("--remote-control"),
                 OsString::from("--listen"),
                 OsString::from("unix:///tmp/fleet codex.sock"),
             ]

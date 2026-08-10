@@ -219,8 +219,15 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt as _;
 
     // A leftover socket file from a previous (crashed) daemon would make `bind`
-    // fail with AddrInUse even though nothing is listening. Remove it first —
-    // this is safe because only one daemon owns a given hangar home at a time.
+    // fail with AddrInUse even though nothing is listening. Remove it first.
+    //
+    // This is safe because exactly one daemon owns a given hangar home at a
+    // time, and that is now ENFORCED rather than assumed: `boot` holds
+    // `single_instance`'s lock on `<home>/hangar/daemon.lock` before reaching
+    // this call, so the only socket we can unlink here belongs to a daemon whose
+    // lock we already reclaimed as stale. Unlinking does not close a live
+    // listener's fd — it would leave the incumbent accepting on an unreachable
+    // inode — so this line is only correct while that guard holds.
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
     }
@@ -1252,6 +1259,7 @@ async fn handle(
         methods::FLEET_RECEIPT_LIST => handle_fleet_receipt_list(pool, req).await,
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
+        methods::CODEX_SESSION_ENSURE => handle_codex_session_ensure(pool, req).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
         methods::FLEET_ACP_SESSION_CREATE => {
             handle_fleet_acp_session_create(pool, req, events).await
@@ -1531,8 +1539,8 @@ async fn handle_fleet_runtime_status(
     health: &DaemonHealth,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_proto::fleet::{
-        FLEET_CAPABILITY_RUNTIME_READ, FLEET_PROTOCOL_VERSION, FleetRuntimeHookStatus,
-        FleetRuntimeStatusParams, FleetRuntimeStatusResult,
+        CodexAppServerRuntimeStatus, FLEET_CAPABILITY_RUNTIME_READ, FLEET_PROTOCOL_VERSION,
+        FleetRuntimeHookStatus, FleetRuntimeStatusParams, FleetRuntimeStatusResult,
     };
 
     require_fleet_capability(FLEET_CAPABILITY_RUNTIME_READ)?;
@@ -1557,10 +1565,21 @@ async fn handle_fleet_runtime_status(
             last_event: (!row.last_event.is_empty()).then_some(row.last_event),
         })
         .collect();
+    let codex_app_servers = crate::fleet_provider::codex_manager::app_server_inventory()
+        .await
+        .into_iter()
+        .map(|row| CodexAppServerRuntimeStatus {
+            pid: row.pid,
+            ownership: row.ownership,
+            remote_control: row.remote_control,
+            health: row.health,
+        })
+        .collect();
     to_value(&FleetRuntimeStatusResult {
         daemon_version: health.version.clone(),
         protocol_version: FLEET_PROTOCOL_VERSION,
         hooks,
+        codex_app_servers,
     })
 }
 
@@ -3283,6 +3302,117 @@ async fn handle_fleet_start(
     to_value(&result)
 }
 
+/// Allocate or resume an Interactive Codex thread through the one daemon-owned
+/// app-server. Interactive owns tmux and durable session metadata, so this is
+/// deliberately narrower than `fleet/start`.
+async fn handle_codex_session_ensure(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{CodexSessionEnsureParams, CodexSessionEnsureResult};
+
+    let params: CodexSessionEnsureParams = parse_params(
+        req,
+        "{ session_id, cwd, model?, thread_id?, skip_permissions? }",
+    )?;
+    if params.session_id.trim().is_empty() || params.cwd.trim().is_empty() {
+        return Err(invalid_params("session_id and cwd must not be empty"));
+    }
+    let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .ok_or_else(|| internal("Ainb Codex runtime is unavailable"))?;
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
+            .bind(&params.session_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
+    let thread_id = match existing {
+        Some(Some(thread_id)) => {
+            if let Some(requested) = params.thread_id.as_deref().filter(|id| !id.trim().is_empty())
+            {
+                if requested != thread_id {
+                    return Err(invalid_params(
+                        "session_id belongs to a different Codex thread",
+                    ));
+                }
+            }
+            manager
+                .thread_resume(&thread_id)
+                .await
+                .map_err(|error| internal(&format!("resume Codex thread: {error}")))?;
+            thread_id
+        }
+        Some(None) => {
+            return Err(internal(
+                "previous Interactive Codex allocation is incomplete; refusing duplicate thread",
+            ));
+        }
+        None => match params.thread_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            Some(thread_id) => {
+                manager
+                    .thread_resume(thread_id)
+                    .await
+                    .map_err(|error| internal(&format!("resume Codex thread: {error}")))?;
+                sqlx::query(
+                    "INSERT INTO interactive_codex_thread \
+                     (session_id, thread_id, cwd, model, skip_permissions) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&params.session_id)
+                .bind(thread_id)
+                .bind(&params.cwd)
+                .bind(&params.model)
+                .bind(params.skip_permissions)
+                .execute(pool)
+                .await
+                .map_err(|error| internal(&format!("persist Interactive Codex thread: {error}")))?;
+                thread_id.to_string()
+            }
+            None => {
+                let inserted = sqlx::query(
+                    "INSERT OR IGNORE INTO interactive_codex_thread \
+                     (session_id, thread_id, cwd, model, skip_permissions) VALUES (?, NULL, ?, ?, ?)",
+                )
+                .bind(&params.session_id)
+                .bind(&params.cwd)
+                .bind(&params.model)
+                .bind(params.skip_permissions)
+                .execute(pool)
+                .await
+                .map_err(|error| internal(&format!("reserve Interactive Codex thread: {error}")))?;
+                if inserted.rows_affected() == 0 {
+                    return Err(internal(
+                        "concurrent Interactive Codex allocation is in progress; retry shortly",
+                    ));
+                }
+                let thread_id = manager
+                    .thread_start_interactive(
+                        std::path::Path::new(&params.cwd),
+                        params.model.as_deref(),
+                        params.skip_permissions,
+                    )
+                    .await
+                    .map_err(|error| internal(&format!("start Codex thread: {error}")))?;
+                sqlx::query(
+                    "UPDATE interactive_codex_thread SET thread_id = ? WHERE session_id = ?",
+                )
+                .bind(&thread_id)
+                .bind(&params.session_id)
+                .execute(pool)
+                .await
+                .map_err(|error| internal(&format!("persist Interactive Codex thread: {error}")))?;
+                thread_id
+            }
+        },
+    };
+    to_value(&CodexSessionEnsureResult {
+        thread_id,
+        endpoint: format!("unix://{}", manager.socket_path().display()),
+    })
+}
+
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
 async fn handle_fleet_broadcast(
     pool: &SqlitePool,
@@ -4243,6 +4373,37 @@ mod fleet_launch_tests {
     }
 
     #[test]
+    fn mirrored_claude_picker_single_select_stops_after_option_enter() {
+        let question = serde_json::json!({
+            "id": "choice",
+            "question": "Choose silver or indigo",
+            "options": [{"label": "silver"}, {"label": "indigo"}],
+        });
+        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+            question_id: "choice".to_string(),
+            selected_options: vec!["indigo".to_string()],
+            text: None,
+        }];
+        assert_eq!(
+            mirrored_claude_picker_steps(&[question.clone()], &answers),
+            Ok(vec![
+                MirroredClaudePickerStep::QuestionKey {
+                    question,
+                    key: "Down".to_string(),
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: serde_json::json!({
+                        "id": "choice",
+                        "question": "Choose silver or indigo",
+                        "options": [{"label": "silver"}, {"label": "indigo"}],
+                    }),
+                    key: "Enter".to_string(),
+                },
+            ])
+        );
+    }
+
+    #[test]
     fn mirrored_claude_picker_rejects_unverified_text_route() {
         let questions = vec![serde_json::json!({
             "id": "region",
@@ -4980,6 +5141,14 @@ fn mirrored_claude_picker_steps(
                 key: "Enter".to_string(),
             });
         }
+    }
+    if questions.len() == 1
+        && !questions[0]
+            .get("multiSelect")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Ok(steps);
     }
     steps.push(MirroredClaudePickerStep::Submit {
         answers: answers.to_vec(),
@@ -5807,6 +5976,7 @@ async fn handle_fleet_acp_session_create(
             // `FleetProvider::Acp`; anything else would render as Unknown.
             provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
             cwd: Some(params.cwd.clone()),
+            display_name: crate::fleet::display_name_for_cwd(&params.cwd),
             management_state: Some("MANAGED".to_string()),
             capabilities: Some(acp_capabilities()),
             confidence: Some("HIGH".to_string()),

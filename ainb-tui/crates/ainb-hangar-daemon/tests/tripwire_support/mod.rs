@@ -16,6 +16,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use sqlx::sqlite::SqliteRow;
@@ -476,6 +477,39 @@ pub fn daemon_bin() -> PathBuf {
     assert_cmd::cargo::cargo_bin("ainb-hangar-daemon")
 }
 
+/// Reap only `ainb-hangar-daemon` children from an interrupted prior tripwire
+/// run. The selection requires both this exact binary and ppid=1; each signal
+/// addresses one PID from the just-captured process table.
+fn reap_orphaned_tripwire_daemons(bin: &Path) {
+    static REAPED: Once = Once::new();
+    REAPED.call_once(|| {
+        let Ok(output) = Command::new("ps")
+            .args(["-Ao", "pid=,ppid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let expected = bin.display().to_string();
+        let Ok(table) = String::from_utf8(output.stdout) else {
+            return;
+        };
+        for pid in table.lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (ppid == 1 && command == expected).then_some(pid)
+        }) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    });
+}
+
 /// Whether the `tmux` binary is on `PATH`.
 pub fn tmux_available() -> bool {
     Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
@@ -494,6 +528,7 @@ impl DaemonSession {
     /// session. The session name embeds the pid + a nanosecond timestamp so
     /// parallel test binaries never collide.
     pub fn spawn(bin: &Path, _home: &Path, env: &[(&str, &str)]) -> Self {
+        reap_orphaned_tripwire_daemons(bin);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -505,6 +540,11 @@ impl DaemonSession {
         for (k, v) in env {
             let _ = write!(cmd, "export {k}='{v}'; ");
         }
+        let _ = write!(
+            cmd,
+            "export HANGAR_TEST_PARENT_PID='{}'; ",
+            std::process::id()
+        );
         let _ = write!(cmd, "exec '{}'", bin.display());
 
         let status = Command::new("tmux")
@@ -558,10 +598,13 @@ impl DaemonProcess {
     /// nulled. `HOME` is pinned and the two home-override vars are removed so
     /// the child cannot escape the isolated tree.
     pub fn spawn(home: &Path, extra_env: &[(&str, &str)]) -> Self {
-        let mut cmd = Command::new(daemon_bin());
+        let bin = daemon_bin();
+        reap_orphaned_tripwire_daemons(&bin);
+        let mut cmd = Command::new(bin);
         cmd.env("HOME", home)
             .env_remove("AINB_HOME")
             .env_remove("AINB_HANGAR_HOME")
+            .env("HANGAR_TEST_PARENT_PID", std::process::id().to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -578,6 +621,27 @@ impl DaemonProcess {
     #[must_use]
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Poll until the daemon has exited, bounded by `budget`.
+    ///
+    /// Must be used instead of `kill(pid, 0)` to prove a signalled daemon died:
+    /// this test process is its PARENT, so an exited-but-unreaped daemon is a
+    /// ZOMBIE, and a zombie answers `kill(pid, 0)` exactly like a live process.
+    /// `try_wait` reaps it, which is the only reading that distinguishes the two.
+    pub fn wait_for_exit(&mut self, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 

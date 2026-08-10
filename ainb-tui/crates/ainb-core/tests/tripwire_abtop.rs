@@ -156,13 +156,11 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
-    // Launch ainb inheriting the real PATH so ~/.cargo/bin/abtop resolves.
-    // Single send-keys + Enter to avoid the launch-command truncation race.
-    // The embed is pure host code (AttachAbtop) + the real abtop binary —
-    // plugins aren't needed, so disable discovery to keep the launch fast and
-    // free of unrelated plugin-spawn noise.
+    // Launch ainb with its normal plugin runtime: disabling plugins also
+    // disables the abtop shortcut path this test validates.
+    // Single send-keys + Enter avoids the launch-command truncation race.
     let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
+        "HOME={} exec {} tui",
         home_tmp.path().display(),
         ainb_bin().display()
     );
@@ -181,6 +179,10 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
         kill_session(&session);
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     }
+
+    // The first frame can paint before terminal input handling is live on a
+    // warm process. Let the TUI complete that handoff before sending `t`.
+    thread::sleep(Duration::from_millis(500));
 
     // J6: press `t` → first launch should offer to run `abtop --setup`
     // (the rate-limit consent dialog) BEFORE attaching, and must NOT have

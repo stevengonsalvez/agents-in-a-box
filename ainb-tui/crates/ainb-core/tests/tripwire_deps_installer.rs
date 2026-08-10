@@ -84,17 +84,25 @@ fn deps_installer_cursor_docs_and_install_affordance() {
         panic!("wizard welcome never rendered:\n{last}");
     }
 
-    // Advance Welcome -> Source -> Role -> UseCase -> DependencyCheck: the
-    // wizard has three questionnaire steps between Welcome and the dependency
-    // step, each accepting its default selection on Enter.
-    for _ in 0..4 {
+    // Advance through the wizard until DependencyCheck. Rendering transitions
+    // are asynchronous, so fixed key counts can drop an Enter on a slow host.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut loaded = None;
+    let mut current = capture(&session);
+    while Instant::now() < deadline {
+        if current.contains("Plugin binaries") && !current.contains("Checking dependencies") {
+            loaded = Some(current);
+            break;
+        }
         send(&session, "Enter");
-        sleep(Duration::from_millis(400));
+        let transition_deadline = std::cmp::min(deadline, Instant::now() + Duration::from_secs(5));
+        let Some(next) = poll_capture(&session, transition_deadline, |screen| screen != current)
+        else {
+            break;
+        };
+        current = next;
     }
-    let loaded = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("Plugin binaries") && !c.contains("Checking dependencies")
-    })
-    .unwrap_or_else(|| capture(&session));
+    let loaded = loaded.unwrap_or_else(|| capture(&session));
 
     // The new keymap footer must advertise the install + cursor affordances.
     assert!(

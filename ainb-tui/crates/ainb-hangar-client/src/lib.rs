@@ -42,6 +42,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 /// Upper bound on a single dial + round-trip. Local unix socket, so generous;
 /// only guards against a wedged daemon.
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Shared Codex initialization can take longer than ordinary daemon reads.
+const CODEX_SESSION_ENSURE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A failure talking to the hangar daemon. Non-fatal to the bridge: outbound
 /// degrades to "no items to push", inbound reply-routing falls back to the
@@ -248,6 +250,17 @@ impl DaemonClient {
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
+    /// Read bounded Hangar runtime diagnostics, including Codex app-servers.
+    pub async fn fleet_runtime_status(
+        &self,
+    ) -> Result<ainb_hangar_proto::fleet::FleetRuntimeStatusResult, DaemonError> {
+        self.call_typed(
+            ainb_hangar_proto::methods::FLEET_RUNTIME_STATUS,
+            &ainb_hangar_proto::fleet::FleetRuntimeStatusParams {},
+        )
+        .await
+    }
+
     /// Subscribe from one revision and receive race-free snapshot plus replay.
     pub async fn fleet_subscribe(
         &self,
@@ -291,6 +304,27 @@ impl DaemonClient {
         let result: ainb_hangar_proto::fleet::FleetActionResult =
             serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))?;
         Ok(result.receipt)
+    }
+
+    /// Ensure an Interactive Codex session is backed by the daemon-owned
+    /// shared app-server and return its exact remote thread.
+    pub async fn codex_session_ensure(
+        &self,
+        params: ainb_hangar_proto::fleet::CodexSessionEnsureParams,
+    ) -> Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult, DaemonError> {
+        let value = serde_json::to_value(params).map_err(|source| {
+            DaemonError::Decode(format!("encoding Codex session params: {source}"))
+        })?;
+        let result = self
+            .call_with_timeout(
+                ainb_hangar_proto::methods::CODEX_SESSION_ENSURE,
+                value,
+                CODEX_SESSION_ENSURE_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|source| {
+            DaemonError::Decode(format!("decoding Codex session result: {source}"))
+        })
     }
 
     /// Rebuild one stale Claude interview through the live daemon.
@@ -580,9 +614,18 @@ impl DaemonClient {
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
-        tokio::time::timeout(RPC_TIMEOUT, self.call_inner(method, params))
+        self.call_with_timeout(method, params, RPC_TIMEOUT).await
+    }
+
+    async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, DaemonError> {
+        tokio::time::timeout(timeout, self.call_inner(method, params))
             .await
-            .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
+            .map_err(|_| DaemonError::Timeout(timeout))?
     }
 
     async fn call_inner(&self, method: &str, params: Value) -> Result<Value, DaemonError> {

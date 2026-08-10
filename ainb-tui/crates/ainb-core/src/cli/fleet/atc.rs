@@ -2733,6 +2733,30 @@ mod tests {
     /// `drain_with_budget` and the error propagates out of `hook_core`. The
     /// `hook()` swallow wrapper ([`swallow_hook_result`]) then maps that Err to
     /// `Ok(())` → exit 0, which we assert directly on the real error value.
+    /// Read `events.jsonl` once the daemon has actually written it.
+    ///
+    /// The hook returning is NOT proof the event reached disk: the daemon
+    /// writes that log on its own schedule. Reading it straight away is a race
+    /// that loses on a slow runner, and it panics with `NotFound`, which reads
+    /// like a missing feature rather than the timing bug it is.
+    fn events_jsonl(home: &std::path::Path) -> String {
+        let path = home.join("events.jsonl");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::fs::read_to_string(&path) {
+                Ok(text) if !text.trim().is_empty() => return text,
+                other => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the daemon never wrote {}: {other:?}",
+                        path.display()
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
     #[test]
     fn forced_drain_error_is_swallowed_to_ok() {
         let home = TempDir::new().unwrap();
@@ -2871,7 +2895,7 @@ mod tests {
         )
         .unwrap();
         assert!(emitted.is_none(), "Claude must render its native picker");
-        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        let events = events_jsonl(home.path());
         let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
         assert_eq!(event["fleet_delivery"], "mirrored");
         assert_eq!(
@@ -2914,7 +2938,7 @@ mod tests {
             emitted.is_none(),
             "unavailable Fleet broker must leave Claude's native interview unblocked"
         );
-        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        let events = events_jsonl(home.path());
         assert!(events.contains("\"fleet_delivery\":\"mirrored\""));
     }
 

@@ -128,6 +128,42 @@ fn on_skills_screen(c: &str) -> bool {
     c.contains("Provider:") && c.contains("Associations")
 }
 
+fn on_session_list(c: &str) -> bool {
+    c.contains("Session Details")
+        || c.contains("Select a session to view details")
+        || (c.contains("attach") && c.contains("restart") && c.contains("cleanup"))
+}
+
+fn go_to_session_list(session: &str) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        send_key(session, "s");
+        if let Some(capture) = poll_capture(
+            session,
+            Instant::now() + Duration::from_millis(750),
+            on_session_list,
+        ) {
+            return Some(capture);
+        }
+    }
+    None
+}
+
+fn open_skills_screen(session: &str, key: &str) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        send_key(session, key);
+        if let Some(capture) = poll_capture(
+            session,
+            Instant::now() + Duration::from_millis(750),
+            on_skills_screen,
+        ) {
+            return Some(capture);
+        }
+    }
+    None
+}
+
 #[test]
 fn skills_from_home_returns_home() {
     if !tmux_available() {
@@ -149,14 +185,7 @@ fn skills_from_home_returns_home() {
     // Open skills from the home menu. The home-screen catalogue key is
     // `c` (`z` opens the Skills manager); the session list mirrors it on
     // `k`, exercised by the sibling test below.
-    send_key(&session, "c");
-    if poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(40),
-        on_skills_screen,
-    )
-    .is_none()
-    {
+    if open_skills_screen(&session, "c").is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!("skills screen never rendered after `k`; last:\n---\n{last}\n---");
@@ -187,14 +216,8 @@ fn skills_from_session_list_returns_to_session_list() {
     let session = format!("tripwire-skills-sessions-{}", std::process::id());
     launch_to_home(&session, home_tmp.path());
 
-    // Hop to the session list first. `del-sel` is on the session-list
-    // legend (line 2) and appears on no other screen.
-    send_key(&session, "s");
-    if poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
-        c.contains("del-sel")
-    })
-    .is_none()
-    {
+    // Hop to the session list first.
+    if go_to_session_list(&session).is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
@@ -202,14 +225,7 @@ fn skills_from_session_list_returns_to_session_list() {
 
     // Open skills from the session list. The catalogue is mirrored here
     // on `k` (the home menu uses `c`).
-    send_key(&session, "k");
-    if poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(40),
-        on_skills_screen,
-    )
-    .is_none()
-    {
+    if open_skills_screen(&session, "k").is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!("skills screen never rendered after `k` from session list; last:\n---\n{last}\n---");
@@ -219,7 +235,7 @@ fn skills_from_session_list_returns_to_session_list() {
     // pops the saved `previous_screen`.
     send_key(&session, "Escape");
     let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
-        c.contains("del-sel") && !on_skills_screen(c)
+        on_session_list(c) && !on_skills_screen(c)
     });
     let final_cap = capture_pane(&session);
     kill_session(&session);

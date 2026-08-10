@@ -38,6 +38,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 /// The expected on-screen marker proving the seeded hangar TUI actually rendered
@@ -149,6 +150,40 @@ pub fn can_run_tripwire() -> bool {
 pub struct Pipeline {
     home: tempfile::TempDir,
     daemon: Child,
+}
+
+/// Reap only orphaned daemons started by this exact tripwire binary. A test
+/// process killed by SIGKILL cannot run [`Pipeline`]'s drop implementation, so
+/// every suite start clears the prior run's known process shape before spawning.
+fn reap_orphaned_tripwire_daemons(bin: &Path) {
+    static REAPED: Once = Once::new();
+    REAPED.call_once(|| {
+        let Ok(output) = Command::new("ps")
+            .args(["-Ao", "pid=,ppid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let expected = bin.display().to_string();
+        let Ok(table) = String::from_utf8(output.stdout) else {
+            return;
+        };
+        for pid in table.lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (ppid == 1 && command == expected).then_some(pid)
+        }) {
+            // Exact PID from the immediately preceding process-table snapshot.
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    });
 }
 
 impl Pipeline {
@@ -412,6 +447,8 @@ impl Drop for DeliveryTarget {
 ///
 /// Panics only after [`can_run_tripwire`] has gated the caller.
 pub fn prepare_pipeline_answer_flip(target_tmux: &str) -> Pipeline {
+    let bin = daemon_bin().expect("gated by can_run_tripwire");
+    reap_orphaned_tripwire_daemons(&bin);
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -425,10 +462,11 @@ pub fn prepare_pipeline_answer_flip(target_tmux: &str) -> Pipeline {
     // The fake `ainb list` stub the daemon shells out to for session discovery.
     let fake = write_fake_ainb(home.path(), target_tmux);
 
-    let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
     cmd.env("HOME", home.path())
         .env_remove("AINB_HANGAR_HOME")
+        .env("AINB_CODEX_MANAGED", "0")
+        .env("HANGAR_TEST_PARENT_PID", std::process::id().to_string())
         .env("HANGAR_DAEMON_DISABLE_CLAIM", "1")
         // Point discovery at the stub + force tmux-only delivery so the seeded
         // ASK's target (`s-deploy`) resolves to the real tmux pane the tripwire
@@ -513,6 +551,8 @@ fn prepare_pipeline_board_run_seeded(
     pre_spawn: impl FnOnce(&Path),
     extra_env: impl FnOnce(&Path) -> Vec<(String, String)>,
 ) -> Pipeline {
+    let bin = daemon_bin().expect("gated by can_run_tripwire");
+    reap_orphaned_tripwire_daemons(&bin);
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -537,10 +577,11 @@ fn prepare_pipeline_board_run_seeded(
     let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
     let extra_env = extra_env(home.path());
 
-    let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
     cmd.env("HOME", home.path())
         .env_remove("AINB_HANGAR_HOME")
+        .env("AINB_CODEX_MANAGED", "0")
+        .env("HANGAR_TEST_PARENT_PID", std::process::id().to_string())
         // Claim-enabled on the fixture's runtime, with a fast poll so the enqueued
         // card task claims + runs promptly.
         .env("HANGAR_DAEMON_RUNTIME_ID", "runtime-1")
@@ -1762,6 +1803,8 @@ fn prepare_pipeline_seeded(
     extra_env: &[(&str, &str)],
     pre_spawn_seed: impl FnOnce(&Path),
 ) -> Pipeline {
+    let bin = daemon_bin().expect("gated by can_run_tripwire");
+    reap_orphaned_tripwire_daemons(&bin);
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -1796,10 +1839,11 @@ fn prepare_pipeline_seeded(
     pre_spawn_seed(home.path());
 
     // Spawn the daemon under the same $HOME (binds $HOME/.agents-in-a-box/hangar.sock).
-    let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
     cmd.env("HOME", home.path())
         .env_remove("AINB_HANGAR_HOME")
+        .env("AINB_CODEX_MANAGED", "0")
+        .env("HANGAR_TEST_PARENT_PID", std::process::id().to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
