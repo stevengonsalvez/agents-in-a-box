@@ -60,6 +60,16 @@ if [[ ! -x "$BIN" ]]; then
     echo "FAIL: build failed"; exit 1; }
 fi
 
+# Run a PRIVATE COPY, never the shared target/ path. A `cargo build` or `cargo
+# test` running concurrently replaces that file, and daemons launched from it
+# then die mid-run with no shutdown line — which reads exactly like the
+# double-daemon defect this script exists to detect. Copying removes the
+# confound, so a FAIL here always means the lock, never the toolchain.
+RUN_BIN="$SOAK_HOME/ainb-hangar-daemon"
+cp "$BIN" "$RUN_BIN" || { echo "FAIL: could not stage the daemon binary"; exit 1; }
+chmod +x "$RUN_BIN"
+BIN="$RUN_BIN"
+
 echo "== soak-hangar-single-instance: $ROUNDS rounds x $FLEET daemons =="
 echo "AINB_HANGAR_HOME=$AINB_HANGAR_HOME"
 
