@@ -266,16 +266,6 @@ impl Harness {
             .expect("delivery row")
     }
 
-    /// The session row's current optimistic-concurrency version, which every
-    /// `fleet/action` must carry.
-    async fn version(&self, session_key: &str) -> i64 {
-        sqlx::query_scalar("SELECT version FROM fleet_session WHERE session_key = ?")
-            .bind(session_key)
-            .fetch_one(self.store.pool())
-            .await
-            .expect("session version")
-    }
-
     /// Poll until the session has an OPEN attention row, and return it.
     async fn await_open_attention(&self, session_key: &str) -> (String, serde_json::Value) {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -314,34 +304,45 @@ impl Harness {
     }
 }
 
-/// Issue a `fleet/action` that carries `expected_version`, refreshing that
-/// version and retrying if the daemon reports a mismatch.
+/// The session's optimistic-concurrency version, taken from the SAME snapshot
+/// row that already shows `fingerprint` as the session's current ask.
 ///
-/// Reading the version and then acting on it is a read-then-act race: the
-/// session's version advances on writes these tests do not make (turn
-/// recording, turn-end commit, lifecycle convergence), so the value can be
-/// stale by the time the call lands. The optimistic-concurrency guard is not
-/// what these tests are about; they are about whether the answer reaches its
-/// adapter. Retrying with the fresh version keeps that the subject, and a
-/// mismatch surviving every attempt still fails the test.
-async fn fleet_action_versioned(
-    client: &mut Client,
-    harness: &Harness,
-    session_key: &str,
-    mut params: serde_json::Value,
-) -> serde_json::Value {
-    let mut reply = serde_json::Value::Null;
-    for _ in 0..3 {
-        params["expected_version"] = harness.version(session_key).await.into();
-        reply = client.call(methods::FLEET_ACTION, params.clone()).await;
-        let stale = reply["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("version is") && m.contains("expected"));
-        if !stale {
-            return reply;
+/// `SessionActor::raise_permission` INSERTS the attention row before it applies
+/// the fleet event that records the ask, and that event is what bumps
+/// `fleet_session.version`. So a test that polls for the attention row and then
+/// reads the version reads a value from before its OWN ask, sends it as
+/// `expected_version`, and is refused by a guard doing its job: exactly the
+/// `version is 2, expected 1` flake, which is a race against a write the test
+/// provoked rather than against CI load.
+///
+/// One `fleet/snapshot` answers both questions from one read transaction, which
+/// is how every sibling test (and every real client) obtains a version: paired
+/// with the ask state it belongs to, never sampled out of band. Waiting for the
+/// fingerprint to appear waits for precisely the write that moved the version,
+/// and from then until the answer this test is about to send, nothing else
+/// writes the row.
+async fn version_showing_ask(client: &mut Client, session_key: &str, fingerprint: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let snapshot = client.call(methods::FLEET_SNAPSHOT, serde_json::json!({})).await;
+        assert!(snapshot["error"].is_null(), "{snapshot}");
+        let row = snapshot["result"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .find(|row| row["session_key"] == serde_json::json!(session_key))
+            .cloned();
+        if let Some(row) = row {
+            if row["current_request_fingerprint"] == serde_json::json!(fingerprint) {
+                return row["version"].as_i64().expect("version");
+            }
         }
+        assert!(
+            Instant::now() < deadline,
+            "the session row never caught up with the ask {fingerprint}: {snapshot}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    reply
 }
 
 struct Client {
@@ -847,26 +848,21 @@ async fn a_permission_round_trips_through_fleet_action() {
     // an ACP session can be blocked on SEVERAL asks at once and the row can name
     // only one of them, which is why the row-equality gate is off for ACP (see
     // `two_parked_permissions_are_both_answerable_over_the_wire`).
-    let stale = fleet_action_versioned(
-
-        &mut client,
-
-        &harness,
-
-        &session_key,
-
-        serde_json::json!({
+    let version = version_showing_ask(&mut client, &session_key, &fingerprint).await;
+    let stale = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
                 "session_key": session_key,
+                "expected_version": version,
                 "request_id": "req-acp-stale-answer",
                 "action": {
                     "action": "approve",
                     "request_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
                 },
             }),
-
-    )
-
-    .await;
+        )
+        .await;
     assert!(stale["error"].is_null(), "{stale}");
     assert_eq!(
         stale["result"]["receipt"]["status"], "FAILED",
@@ -886,17 +882,20 @@ async fn a_permission_round_trips_through_fleet_action() {
         .expect("attention row");
     assert_eq!(still_open, "open", "the refusal left the ask untouched");
 
-    let approved = fleet_action_versioned(
-        &mut client,
-        &harness,
-        &session_key,
-        serde_json::json!({
-            "session_key": session_key,
-            "request_id": "req-acp-answer",
-            "action": { "action": "approve", "request_fingerprint": fingerprint },
-        }),
-    )
-    .await;
+    // The SAME version the refusal was sent with: a refused action writes no
+    // fleet event, so nothing has moved the row in between. If that ever stops
+    // being true this fails loudly rather than silently retrying past it.
+    let approved = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": session_key,
+                "expected_version": version,
+                "request_id": "req-acp-answer",
+                "action": { "action": "approve", "request_fingerprint": fingerprint },
+            }),
+        )
+        .await;
     assert!(approved["error"].is_null(), "{approved}");
     assert_eq!(
         approved["result"]["receipt"]["status"], "DELIVERED",
@@ -1018,20 +1017,33 @@ async fn two_parked_permissions_are_both_answerable_over_the_wire() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
+    // Both raises have reached the session row once it carries the NEWER ask:
+    // the actor raises them in order, and each raise applies its fleet event
+    // before the next begins, so this is the settled version rather than a
+    // sample taken mid-raise.
+    let settled = version_showing_ask(&mut client, &session_key, &asks[1].1).await;
+
     // OLDEST first: the fingerprint the session row is NOT carrying, and the
     // exact answer the old gate refused as stale.
     for (index, (attention_id, fingerprint)) in asks.iter().enumerate() {
-        let approved = fleet_action_versioned(
-            &mut client,
-            &harness,
-            &session_key,
-            serde_json::json!({
-                "session_key": session_key,
-                "request_id": format!("req-acp-two-answer-{index}"),
-                "action": { "action": "approve", "request_fingerprint": fingerprint },
-            }),
-        )
-        .await;
+        // Each answer applies its own `acp_permission_answered` event BEFORE
+        // `fleet/action` returns (`SessionActor::answer` awaits
+        // `retire_attention`), so the next expected version is exactly one
+        // higher. Counting is deliberate: re-reading here would reintroduce the
+        // read-then-send race, and if that ordering ever changes this fails
+        // deterministically instead of flaking.
+        let expected_version = settled + i64::try_from(index).expect("two asks");
+        let approved = client
+            .call(
+                methods::FLEET_ACTION,
+                serde_json::json!({
+                    "session_key": session_key,
+                    "expected_version": expected_version,
+                    "request_id": format!("req-acp-two-answer-{index}"),
+                    "action": { "action": "approve", "request_fingerprint": fingerprint },
+                }),
+            )
+            .await;
         assert!(approved["error"].is_null(), "ask {index}: {approved}");
         assert_eq!(
             approved["result"]["receipt"]["status"], "DELIVERED",
