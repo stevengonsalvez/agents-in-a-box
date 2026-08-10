@@ -185,7 +185,7 @@ Recording gotchas, all of them learned by losing a tape to each:
   produced a 7 second blur. vhs captures on screen change; leave it alone.
 - Terminate on `Wait+Screen@<n>s /SMOKE-RESULT .../`, never a fixed `Sleep`.
   A `Sleep` that ends before the journey does yields a banner with no verdict,
-  which looks like evidence and is not. `j1`–`j5e` still use fixed `Sleep`s.
+  which looks like evidence and is not. Every tape here now does this.
 - Keep the pattern out of the TYPED command. `Wait+Screen` matches the whole
   screen, and the shell echoes the command as it is typed, so a tape that types
   its own sentinel matches instantly and records three seconds of nothing.

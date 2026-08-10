@@ -7,6 +7,369 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-08-10
+### Added
+- Merge pull request #649 from stevengonsalvez/f/interview-in-both
+- **fleet**: mirror Claude interviews
+
+### Fixed
+- **fleet**: harden mirrored picker replies
+
+### Other
+- Merge pull request #648 from stevengonsalvez/chore/release-v1.19.0
+
+
+## [1.19.0] - 2026-08-10
+### Added
+- Merge pull request #571 from stevengonsalvez/f/atc-4
+- Merge pull request #573 from stevengonsalvez/f/atc-4
+- Merge pull request #576 from stevengonsalvez/feat/pipeline-health-and-stage-prompts
+- Merge pull request #577 from stevengonsalvez/f/atc-4
+- Merge pull request #581 from stevengonsalvez/f/atc-4
+- Merge pull request #584 from stevengonsalvez/f/minor-bugs
+- Merge pull request #585 from stevengonsalvez/f/atc-4
+- Merge pull request #587 from stevengonsalvez/f/chat-bus-01
+- Merge pull request #592 from stevengonsalvez/f/chat-bus-02
+- Merge pull request #595 from stevengonsalvez/fix/fleet-expanded-identity
+- Merge pull request #596 from stevengonsalvez/f/chat-bus-03
+- Merge pull request #597 from stevengonsalvez/fix/fleet-expanded-identity
+- Merge pull request #598 from stevengonsalvez/f/chat-bus-04
+- Merge pull request #603 from stevengonsalvez/feat/fleet-native-interview-route
+- Merge pull request #604 from stevengonsalvez/feat/fleet-just-launcher
+- Merge pull request #625 from stevengonsalvez/feat/fleet-notch-usage-dashboard
+- Merge pull request #626 from stevengonsalvez/feat/atc-repair-verb
+- Merge pull request #629 from stevengonsalvez/f/part2-chat
+- Merge pull request #645 from stevengonsalvez/fix/usage-dashboard-validation
+- **acp**: ainb-acp crate on the upstream protocol
+- **acp**: read the turn deadline from the environment
+- **acp**: resume by session/load with a re-prime fallback
+- **atc**: add `ainb fleet atc repair` to rebuild a stale heartbeat unit
+- **atc**: add a repair verb for a broken heartbeat scheduler
+- **broker**: release exact interview waiter
+- feat(burndown)!: replace Daily and Weekly tabs with Activity
+- **burndown**: add contribution heatmap data layer
+- **burndown**: add heatmap cursor and metric state
+- **burndown**: wire heatmap navigation keys
+- **claude**: yield released interviews natively
+- **cli**: acp create and transcript verbs
+- **cli**: add `ainb fleet archived` so archived sessions stay browsable
+- **cli**: fleet chat verbs
+- **cli**: register Fleet runtime
+- **cli**: transcript prune with mandatory export
+- **client**: typed chat calls, and a typed escape hatch
+- **daemon**: chat bus live on tmux sessions
+- **daemon**: multiplexed acp pool, delivery leg and permissions
+- **daemon**: reconcile native interview route
+- **daemon**: the fleet copilot service
+- **fleet**: add native release action
+- **fleet**: add notch quit control
+- **fleet**: add quota client wire
+- **fleet**: add runtime installer
+- **fleet**: cache live quota windows
+- **fleet**: cache usage summaries
+- **fleet**: confirm structured interview delivery
+- **fleet**: consolidate controls in notch
+- **fleet**: decode runtime projections
+- **fleet**: define quota wire types
+- **fleet**: expand notch controls
+- **fleet**: expose Claude picker action
+- **fleet**: expose runtime installer
+- **fleet**: improve interview controls
+- **fleet**: label native picker event
+- **fleet**: load usage and runtime
+- **fleet**: polish interview card queue
+- **fleet**: queue structured interviews
+- **fleet**: refresh usage on hooks
+- **fleet**: register quota rpc method
+- **fleet**: render live quota cards
+- **fleet**: request quota summaries
+- **fleet**: request runtime projections
+- **fleet**: serve cached usage rpc
+- **fleet**: ship responsive operator board
+- **fleet**: show tool and wait time for pending approve requests
+- **fleet**: start cached usage services
+- **fleet**: store quota projections
+- **fleet-core**: tail a session's model from its transcript
+- **fleet-macos**: add the usage dashboard RPC client
+- **fleet-macos**: rebuild the usage panel as tabbed widgets
+- **fleet-macos**: show a session's model and effort on its row
+- **fleet-macos**: show the dashboard and answer interviews in the notch
+- **fleet-tools**: an MCP tool server for the fleet copilot
+- **hangar**: derive pipeline health at query time and ship it on the board
+- **hangar**: expose usage projection
+- **hangar**: layer a per-stage prompt addendum into the dispatch brief
+- **hangar**: render the pipeline health strip and add pipeline stage-prompt
+- **hangar**: run the archive and retention janitors in the daemon
+- **hangar**: serve Fleet runtime RPCs
+- **hangar**: summarize provider usage
+- **hangar-daemon**: capture model and effort for claude and codex
+- **hangar-daemon**: project 53 weeks of usage into a dashboard
+- **hangar-daemon**: serve fleet/usage_dashboard
+- **hangar-proto**: add fleet/usage_dashboard wire contract
+- **hangar-proto**: carry model and effort on the session wire
+- **hangar-store**: collapse repeat firings of one open ask
+- **hangar-store**: record a session's model and reasoning effort
+- **macos**: decode the part 2 chat frames, tolerantly
+- **macos**: dispatch Claude picker action
+- **macos**: encode Claude picker action
+- **macos**: show Claude picker state
+- **proto**: add the part 2 chat contract, append only
+- **proto**: advertise the chat capabilities
+- **proto**: fleet protocol v2 with message family and acp provider
+- **protocol**: define Fleet usage RPC
+- **protocol**: register Fleet runtime methods
+- **session-reader**: add an aggregates-only windowed scan
+- **store**: archive dead fleet sessions instead of scanning them
+- **store**: batch append, head readers, pre-migration backup
+- **store**: channels, members and confirm cards
+- **store**: chat bus tables and repos (migration 0079)
+- **store**: per-session copilot configuration
+- **store**: retention policy for the fleet event ledger
+- **tui**: make the chat screen reachable, and keep it live
+- **tui**: the fleet chat screen
+- **usage**: add efficiency tiles and mark estimated quota
+- **usage**: add shared ainb-model-rates crate
+- **usage**: scan requested history window
+- add Claude Fleet icon
+- add Codex Fleet icon
+- add Copilot Fleet icon
+- add Fleet interview answer queue
+- add provider icon view
+- brand Fleet detail header
+- brand Fleet roster rows
+- brand notch provider rows
+- control hangar daemon from popup
+- redesign Fleet priority roster
+
+### Fixed
+- Merge pull request #568 from stevengonsalvez/fix/codex-hook-trust
+- Merge pull request #572 from stevengonsalvez/f/burndown-ops
+- Merge pull request #575 from stevengonsalvez/f/minor-bugs
+- Merge pull request #578 from stevengonsalvez/f/minor-bugs
+- Merge pull request #582 from stevengonsalvez/fix/pipeline-health-review-findings
+- Merge pull request #583 from stevengonsalvez/fix/pull-pipeline-review-findings
+- Merge pull request #589 from stevengonsalvez/fix/atc-hook-bin
+- Merge pull request #590 from stevengonsalvez/fix/fleet-structured-hook-timeout
+- Merge pull request #593 from stevengonsalvez/fix/fleet-notch-roster
+- Merge pull request #594 from stevengonsalvez/fix/fleet-interview-reconcile
+- Merge pull request #599 from stevengonsalvez/fix/fleet-interview-delivery
+- Merge pull request #600 from stevengonsalvez/fix/fleet-ask-fail-open
+- Merge pull request #606 from stevengonsalvez/ops/debug-claude-usage
+- Merge pull request #607 from stevengonsalvez/fix/fleet-atc-hangar-tests
+- Merge pull request #609 from stevengonsalvez/fix/atc-timer-binary-pin
+- Merge pull request #610 from stevengonsalvez/feat/fleet-just-launcher
+- Merge pull request #611 from stevengonsalvez/fix/bridge-service-binary-pin
+- Merge pull request #617 from stevengonsalvez/f/chat-bus-explainer
+- Merge pull request #618 from stevengonsalvez/fix/atc-papercuts-615-616
+- Merge pull request #619 from stevengonsalvez/fix/fleet-send-integrity
+- Merge pull request #623 from stevengonsalvez/f/tui-acp-tripwire
+- Merge pull request #624 from stevengonsalvez/f/codex-findings
+- Merge pull request #632 from stevengonsalvez/fix/atc-repair-duplicate-e0428
+- Merge pull request #633 from stevengonsalvez/f/cpu-fix-hangar-daemon
+- Merge pull request #636 from stevengonsalvez/feat/fleet-dashboard-followups
+- Merge pull request #646 from stevengonsalvez/fix/hangar-daemon-stability
+- Merge pull request #647 from stevengonsalvez/fix/fleet-model-fields-merge-conflict
+- docs: harden buzz port plans after design review
+- **acp**: answer every parked permission and never drop a turn
+- **acp**: bind prune to the exported watermark and bound the resume corpus
+- **ainb-hooks**: correct the documented Codex payload delivery
+- **atc**: address review on the repair verb and the ATC label
+- **atc**: make repair honest about what it knows and enforce one scheduler
+- **atc**: make the repair help text true, and guard the duplicate
+- **atc**: reach the heartbeat binary through the shell, not a frozen path
+- **atc**: remove the duplicate repair verb that broke the build
+- **atc**: resolve a bare heartbeat argv[0] the way the scheduler will
+- **atc**: stop pinning heartbeat units to an absolute binary path
+- **bridge**: do not start a unit known to be broken, and harden unit values
+- **bridge**: report a dead inbound half instead of hiding it behind outbound
+- **bridge**: resolve the systemd unit through a shell, and stop status lying
+- **bridge**: run the launchd unit through a shell so PATH is honoured
+- **bridge**: stop pinning an absolute ainb path in the service unit
+- **bridge**: stop reporting the phone bridge healthy when outbound is dead
+- **burndown**: show tokens for unpriced rows, not "cost n/a"
+- **chat-bus**: a scope must name a recipient of its own send
+- **chat-bus**: close the pool gaps the peer review found
+- **chat-bus**: harden backup, writer and bounds per review
+- **chat-bus**: record who actually sent a message
+- **ci**: keep Fleet UI tests explicit
+- **cli**: accept a message body that leads with a dash
+- **cli**: escape fields in the archived-session CSV and Markdown output
+- **core**: route run prompt through verified tmux send
+- **e2e**: replace the empty gifs with real ones
+- **fleet**: anchor notch at screen center
+- **fleet**: await Claude interviews universally
+- **fleet**: emit tmux_missing on transition, not every tick
+- **fleet**: fail open without structured broker
+- **fleet**: fence structured interview cards
+- **fleet**: focus notch text input
+- **fleet**: gate the send on a change, not on what is already on screen
+- **fleet**: guard interview reconcile race
+- **fleet**: harden interview delivery proof
+- **fleet**: harden interview queue rendering
+- **fleet**: keep structured hooks alive
+- **fleet**: label every provider the wire contract defines
+- **fleet**: let only one row per pane claim the live tmux binding
+- **fleet**: make both halves of the tmux reconcile agree on "missing"
+- **fleet**: never let a bounded tail read return zero rows
+- **fleet**: preserve Continue fallback
+- **fleet**: preserve interview cards at compact height
+- **fleet**: rank pane claims by standing, not by the timestamp sweeps write
+- **fleet**: reconcile stale Claude interviews
+- **fleet**: refresh and submit direct actions
+- **fleet**: refuse high-risk actions while the daemon is offline
+- **fleet**: restart daemon on runtime install
+- **fleet**: retain unproven Claude interviews
+- **fleet**: route c through pane reducer
+- **fleet**: search session identity
+- **fleet**: set the model fields #645 added to test constructors
+- **fleet**: show ACP notch sessions
+- **fleet**: stop r falling through to Restart, show Connecting
+- **fleet**: verify every send instead of only multi-line ones
+- **fleet**: wake subscribers once per archive pass, not once per row
+- **fleet-macos**: degrade an unknown usage state instead of throwing
+- **fleet-macos**: make the usage panel reachable and readable
+- **fleet-macos**: say why the roster is empty and offer the way out
+- **fleet-macos**: show active filters before they empty the roster
+- **hangar**: add Fleet snapshot refresh
+- **hangar**: align interview pointer geometry with the renderer
+- **hangar**: answer a squad dispatch with its own card's task
+- **hangar**: detach runtime daemon
+- **hangar**: enqueue snapshot refreshes promptly
+- **hangar**: gate --redundant by the card's stage, and say so in the docs
+- **hangar**: ignore stale snapshot replies
+- **hangar**: make the closed-issue guard real, and stop rendering Done early
+- **hangar**: never derive attention from a transcript that hides a live ask
+- **hangar**: paint role dots on the stage they describe when the board scrolls
+- **hangar**: raise interview cards from the hook payload, not the transcript
+- **hangar**: refuse to stop a daemon pid that cannot prove it is ours
+- **hangar**: resolve the run generation on the squad-assign CLI path
+- **hangar**: ship column health only on role-gated columns
+- **hangar**: source the stage addendum from the pipeline board only
+- **hangar**: stop a pipeline stage executing twice in the finalize window
+- **hangar**: strip the lsof type suffix in every ownership proof
+- **hangar-daemon**: anchor the codex argv match and prove ownership before reaping
+- **hangar-daemon**: attribute MCP servers instead of leaking their tool names
+- **hangar-daemon**: capture stderr and leave crash breadcrumbs
+- **hangar-daemon**: close the attention row when an interview ends
+- **hangar-daemon**: correlate tmux panes when the pid drifts
+- **hangar-daemon**: dedupe open asks and sweep the stale backlog
+- **hangar-daemon**: dial the approve broker under $AINB_HANGAR_HOME
+- **hangar-daemon**: drop a stale dashboard and match burndown on MCP names
+- **hangar-daemon**: emit tmux transitions only on real change
+- **hangar-daemon**: require both segments of an MCP tool name
+- **hangar-daemon**: stop leaking shell commands and report honest cost
+- **hangar-daemon**: verify codex orphan adoption before sparing
+- **hangar-store**: renumber attention migration to 0082
+- **hangar-store**: renumber attention migration to 0084
+- **hangar-store**: take the write lock at BEGIN for fleet events
+- **hooks**: honor AINB_BIN for ATC events
+- **hooks**: pin runtime hook binary
+- **hooks**: reuse hook binary for lazy spawn
+- **hooks**: share runtime home
+- **notifyd**: honor Hangar home
+- **notifyd**: prove a pid is ours before reaping it
+- **notifyd**: strip the type suffix Linux lsof appends to a socket name
+- **plugin-hangar**: seed the health fixture with no acp pool
+- **plugin-notifyd**: warn that Codex will not run untrusted hooks
+- **release**: defer version bump to workflow
+- **sbx**: drop the custom hook block, the plugin already honours the home
+- **sbx**: prove ownership before signalling, and bound what rm -rf can reach
+- **sbx**: wait for readiness instead of guessing, and fail fast when it never comes
+- **session-reader**: drop price-stale cache rows on upgrade
+- **store**: keep archived sessions honest about when they were last seen
+- **store**: renumber the part 2 migrations past main's
+- **tui**: advertise the chat key, and pin its binding
+- **tui**: keep the Claude quota visible for 24h
+- **tui**: render ATC control dirs as atc:<name>, not (broken)
+- **tui**: treat a windowless statusline cache as a Tier 1 miss
+- **usage**: price a zero-token call at zero so cost stops reading unknown
+- **usage**: rank unpriced rows below priced ones
+- **usage**: skip stale provider files
+- add Claude interview reprojection
+- align filtered session selection
+- avoid pane attach legend clipping
+- default Fleet view to active
+- expose Fleet session identity to VoiceOver
+- highlight selected notch filter
+- improve Fleet notch roster
+- label expanded Fleet sessions
+- navigate only visible sessions
+- preserve Claude interview state
+- preserve nested worktree identity
+- preserve workspace jump order
+- report Claude recovery outcome
+- report hangar start failures
+- retain session status filter
+- route Claude recovery live
+
+### Documentation
+- Merge pull request #574 from stevengonsalvez/f/buzz
+- Merge pull request #579 from stevengonsalvez/f/buzz
+- Merge pull request #586 from stevengonsalvez/f/buzz
+- Merge pull request #622 from stevengonsalvez/f/explainer-recordings
+- **ainb-hooks**: document the Codex hook trust gate
+- **cli**: add Fleet runtime reference
+- **cli**: regenerate the reference and man page for `ainb fleet archived`
+- **e2e**: drop the whole-suite tape rather than fake it
+- **e2e**: record every smoke journey end to end
+- **fleet**: document standalone runtime
+- **fleet-tools**: name the phase boundary on the confirm path
+- **hangar-daemon**: correct why the context-window suffix is stripped
+- **man**: add Fleet runtime command
+- **recordings**: record the copilot chat journey
+- **recordings**: record the operating-surface journey
+- **research**: record the hangar daemon CPU and growth investigation
+- **research**: record the measured outcome and two corrected numbers
+- add CLI parity rule to buzz port plans
+- add acp resume and steering spike report
+- add buzz acp port explainer page
+- add buzz to ainb port research
+- add coupling enforcement to part 1 plan
+- add frontmatter titles to plan pages
+- add live e2e smoke journeys to part 1 exit gate
+- carry part 1's pool invariants into part 2
+- drop committed research copies in favour of discussion
+- explainer for the shipped chat bus
+- harden buzz port plans after design review
+- index every recording on the explainer
+- mode re-apply after load covers both adapters
+- move buzz port plans under docs/plans
+- pin after_id semantics and pre-migration backup in phase 3
+- plan daemon chat bus and acp adapter (part 1)
+- plan fleet chat and copilot surfaces (part 2)
+- record chat bus migration as 0079
+- record what the chat bus does not guarantee
+- refresh CLI reference
+- regenerate the CLI reference after the approve listing change
+- require operating-surface proof in part 2
+- fix(chat-bus): harden backup, writer and bounds per review
+
+### Other
+- Merge pull request #566 from stevengonsalvez/chore/release-v1.18.0
+- Merge pull request #601 from stevengonsalvez/release/ainb-hooks-0.4.3
+- **hangar**: renumber the stage-stamp migration to 0078
+- **hooks**: release version 0.4.3
+- ignore impeccable hook cache
+- **fleet**: bound usage history scans
+- **fleet**: build usage summaries without holding the corpus
+- **fleet**: decode each transcript row once per probe
+- **fleet**: pace usage rescans to the projection's own cadence
+- **fleet**: read only the tail of a transcript
+- **fleet**: stop the tmux reconciler bursting on overrun
+- **hangar**: stop paying for the health fold on every board refresh
+- **hangar**: stop the retention janitor scanning the whole ledger
+- **atc**: point the heartbeat timer at the shared unit-program module
+- **fleet**: add shared unit program resolver and validator
+- **fleet**: boot notch-only app
+- **fleet**: reuse inline interviews
+- **hangar**: expose daemon restart
+- **reader**: export scanner library
+- **reader**: publish scanner API
+- **reader**: use shared library
+- **usage**: source rates from the shared crate
+- share the daemon client and the reprime envelope
+
+
 ## [1.18.0] - 2026-08-01
 ### Added
 - Merge pull request #522 from stevengonsalvez/codex/ainb-fleet-macos-contract-v2

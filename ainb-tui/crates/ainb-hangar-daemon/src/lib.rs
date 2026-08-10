@@ -242,6 +242,24 @@ pub mod scheduler;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// The daemon's shutdown seam: which signal stopped it, and how far to tear
+/// down.
+///
+/// [`shutdown::install`] registers the SIGINT and SIGTERM handlers as part of
+/// taking the home — before migrations, the socket bind and the tmux reconcile —
+/// and hands out [`shutdown::Handle`]s so the boot phase and the run loop wait on
+/// the same first cause. The hangar daemon was this workspace's only daemon that
+/// ignored SIGTERM, so the supported `daemon stop` killed it on the OS default
+/// disposition and none of its teardown ran.
+pub mod shutdown;
+/// One daemon per hangar home.
+///
+/// [`single_instance::acquire`] is the first thing [`boot`] does: it takes a
+/// cross-process lock on `<hangar_home>/hangar/daemon.lock` (fail-fast) so a
+/// second daemon declines instead of racing the incumbent's database and
+/// unlinking its socket. Holders are judged by pid liveness AND process
+/// identity, so a recycled pid cannot wedge every future boot.
+pub mod single_instance;
 /// Toolkit-directory skill importer behind `ainb hangar skills sync` (P6.2).
 ///
 /// Walks a `ainb-toolkit/skills/`-shaped tree (`<name>/SKILL.md` + nested
@@ -372,8 +390,24 @@ impl PidFile {
 }
 
 impl Drop for PidFile {
+    /// Compare-and-delete: remove the file only while it still names US.
+    ///
+    /// A blind unlink here deletes whoever's registration is CURRENT, which is
+    /// not necessarily ours — `register` is a last-write-wins `fs::write`, so any
+    /// other daemon that started later owns the file's contents. An exiting
+    /// daemon then wiped the LIVE daemon's registration, the next
+    /// `ensure_hangar_daemon` read "nothing running", and spawned another. That
+    /// ratchet is what turned a one-shot race into a pile of 69.
+    ///
+    /// [`crate::single_instance`] now stops the duplicates at the source; this
+    /// keeps the pid file honest for the readers that still consult it, and
+    /// covers the upgrade window where a pre-lock daemon is still running.
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        let ours = std::process::id().to_string();
+        if std::fs::read_to_string(&path).is_ok_and(|recorded| recorded.trim() == ours) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -434,328 +468,518 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     spawn_test_parent_watchdog();
     let dir = hangar_dir()?;
 
-    // Observability tripwire seam (P8.1): when `$AINB_HANGAR_BOOT_TASK_ID` is set
-    // the daemon emits exactly one structured boot event carrying that id. The
-    // `it_subscriber_writes_jsonl` integration test sets it to prove the JSONL
-    // sink installed in `main` lays down a single matching JSON line. Production
-    // boots never set it, so this is a no-op in normal operation.
-    if let Some(task_id) = std::env::var_os("AINB_HANGAR_BOOT_TASK_ID")
-        .and_then(|v| v.into_string().ok())
-        .filter(|v| !v.is_empty())
-    {
-        tracing::info!(task_id = %task_id, "boot");
-    }
-
-    let store: Store = Store::open_in(&dir).await?;
-
-    // Fresh-home boot seed: lay down the default workspace + runtime + one
-    // starter agent so an empty home "just works" (a runtime shows in the Daemon
-    // pane, the agent picker is non-empty, and the Squad create gate is already
-    // cleared). Idempotent + non-clobbering, and it self-registers the runtime
-    // under the SAME default id the claim loop keys off (subsuming the old
-    // e38.20 self-register). A failure is non-fatal — the daemon must still
-    // sweep + serve — so it is logged and swallowed here.
-    if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
-        tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
-    }
-
-    // P8.5: the in-memory health stats collector — shared between the RPC server
-    // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
-    // pane) and the run loop's FSM finalize path (which records each task's
-    // terminal outcome into the ring).
-    let stats = std::sync::Arc::new(crate::health_stats::HealthStats::default());
-
-    // e38.2 + T1: the daemon-global event broker, built WITH a durable outbox.
-    // Mutation paths (the claim loop's FSM steps, the RPC mutations, the
-    // autopilot scheduler) publish typed `HangarEvent`s through cloned sinks;
-    // the RPC server forwards them to authenticated, workspace-subscribed
-    // connections (live, lossy) AND every event is queued on the lossless outbox
-    // channel returned here for the outbox drain to persist. With no subscriber
-    // the live broadcast is dropped silently, so the broker costs nothing when no
-    // TUI is attached — but the durable log still records every event for replay.
-    let (broker, outbox_rx) = crate::events::EventBroker::with_outbox();
-
-    // T1: spawn the event-outbox drain — the writer of the durable, replayable
-    // event log. It pulls every emitted event off the lossless outbox channel
-    // and appends it to `event_log` (migration 0024) with a monotonic `seq`, so a
-    // reconnecting or late-joining plugin resumes the bus from its last cursor.
-    // Wired BEFORE the RPC server and the claim loop so the first mutation's
-    // event is already persisted. The handle is dropped (process exit tears the
-    // task down, mirroring the sweepers); a failed append is logged inside the
-    // task, never fatal.
-    let _outbox = crate::event_outbox::spawn(store.pool().clone(), outbox_rx);
-
-    // e38.14: spawn the inbox aggregator — the writer half of the durable
-    // notification inbox. It subscribes to the broker (exactly like an RPC
-    // connection) and folds every issue/comment/task event into the
-    // `inbox_entry` table, so live events that were once broadcast-only now land
-    // durably with an unread count. Subscribed BEFORE the RPC server and the
-    // claim loop come up, so the first mutation's event is already aggregated.
-    // The handle is dropped (process exit tears the task down, mirroring the
-    // sweepers); a failed write is logged inside the task, never fatal.
-    let _inbox = crate::inbox_aggregator::spawn(store.pool().clone(), broker.subscribe());
-
-    // Spec P2 (D10): spawn the attention ingest producer — the daemon's own tail
-    // of the shared hook `events.jsonl` (`~/.agents-in-a-box/events.jsonl`, the
-    // SAME file notifyd reads) into the `attention` table. It classifies every
-    // qualifying session event (ASK > ERR > IDLE > WAIT) and raises an answerable
-    // row + a fleet-wide `AttentionRaised` nudge. Its byte cursor lives under the
-    // hangar home so the T2 store boundary holds (no cross-read of notifyd's
-    // rusqlite). The handle is dropped (process exit tears the task down,
-    // mirroring the inbox aggregator); a failed ingest is logged, never fatal.
-    // Hook and daemon use the same resolved runtime root, including isolated
-    // `$AINB_HANGAR_HOME` test and paid-runtime installs.
-    {
-        let events_jsonl = dir.join("events.jsonl");
-        let cursor = dir.join("hangar").join("attention_ingest.offset");
-        let _attention_ingest = crate::attention_ingest::AttentionIngest::new(
-            store.pool().clone(),
-            broker.sink(),
-            events_jsonl,
-            cursor,
-        )
-        .spawn();
-    }
-
-    // The ACP boot scan (I16), BEFORE the pool is installed: a daemon that was
-    // SIGKILLed mid-turn left `open_turn_id` set, its legs PENDING and its
-    // parked permissions' attention rows open, and no runtime path revisits a
-    // session this process never hosted. Same shared routine the process-exit
-    // and deadline paths run, so the outcomes cannot drift.
-    crate::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink()).await;
-
-    // The confirm-card TTL, swept once at boot. The park's own bound is a
-    // `tokio` timer inside a copilot turn, and a timer dies with the process:
-    // without this, a card left open by a SIGKILLed or upgraded daemon keeps
-    // rendering as answerable on every client for as long as the row exists,
-    // and approving it returns a success receipt for a destructive tool call
-    // with no waiter left to run it.
-    match ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo::sweep_expired(
-        store.pool(),
-        ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock),
-    )
-    .await
-    {
-        Ok(0) => {}
-        Ok(swept) => tracing::warn!(swept, "expired confirm cards left open by a prior daemon"),
-        Err(error) => tracing::error!(%error, "could not sweep expired confirm cards at boot"),
-    }
-
-    // The ACP agent pool. Installed BEFORE the socket accepts a connection so
-    // `fleet/acp_session_create` can never answer "no pool" on a daemon that
-    // has one; nothing is spawned until the first prompt reaches it.
-    let acp_pool = crate::acp_pool::AcpPool::new(
-        store.clone(),
-        broker.sink(),
-        crate::acp_pool::PoolConfig::from_env(),
-    );
-    let _acp_sweeper = acp_pool.spawn_sweeper();
-    crate::acp_pool::install(acp_pool).await;
-
-    // Tmux reconciliation keeps unhooked and standalone provider sessions in
-    // the canonical Fleet roster as degraded rows with exact pane identity.
-    let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
-
-    // Two slow janitors, each on its OWN clock rather than folded into the 3s
-    // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
-    // sessions were dead EXITED rows that every snapshot scanned, and
-    // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
-    // Both are pure cleanup with no deadline, so neither belongs on a hot path.
-    let _fleet_archiver = crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
-    let _fleet_retention = crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
-
-    // Managed Codex transport starts independently from daemon readiness. A
-    // missing or incompatible Codex binary leaves hook and tmux observation
-    // running, while the service records an honest transport downgrade.
-    let _codex_manager = if !once
-        && std::env::var_os("AINB_CODEX_MANAGED")
-            .as_deref()
-            .is_none_or(|value| value != "0")
-    {
-        let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
-        let socket = dir.join("codex-app-server.sock");
-        // Reap any app-server orphaned by a SIGKILLed/OOM-reaped prior daemon (or a
-        // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
-        // SIGKILL, so this boot-time sweep is the only backstop that survives it.
-        let reaped =
-            crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
-        if reaped > 0 {
-            tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
+    // FIRST, before the store, the broker, the sweepers and `rpc::bind`. Every
+    // one of those mutates state this daemon must own alone, and `rpc::bind`
+    // unlinks the socket unconditionally — so a duplicate that gets even this
+    // far leaves the incumbent listening on an inode no client can reach.
+    //
+    // A loser exits 0, not non-zero: it did the right thing, and a supervisor
+    // (launchd `KeepAlive`, systemd `Restart=on-failure`) must not restart-loop
+    // a daemon that correctly declined. `--once` takes the lock too — a one-shot
+    // boot against a live home would otherwise steal that daemon's socket.
+    let _ownership = match single_instance::acquire(&dir)? {
+        single_instance::Ownership::Acquired(guard) => guard,
+        single_instance::Ownership::HeldBy(pid) => {
+            tracing::info!(
+                holder = pid,
+                lock = %single_instance::lock_path_in(&dir).display(),
+                "another hangar daemon owns this home; exiting"
+            );
+            return Ok(());
         }
-        Some(crate::fleet_provider::codex_manager::spawn_service(
-            crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
-            store.pool().clone(),
-            broker.sink(),
-        ))
-    } else {
-        None
+        // Two fail-fast windows elapsed with the lock churning and no live
+        // holder to name. Almost always another daemon booting; logged as a
+        // warning rather than an info because, unlike `HeldBy`, we cannot point
+        // at the daemon that won.
+        single_instance::Ownership::Contended => {
+            tracing::warn!(
+                lock = %single_instance::lock_path_in(&dir).display(),
+                "hangar home is contended and no holder could be named; exiting"
+            );
+            return Ok(());
+        }
     };
 
-    // P5 (T6): reconcile the agent-profile index against the on-disk masters and
-    // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`
-    // is picked up into the `profile` index without an RPC. Best-effort — a
-    // watcher-setup fault is logged inside the helper and swallowed (the
-    // `profile/upsert` RPC still refreshes the index directly). The returned
-    // watcher is HELD for the process lifetime; dropping it would stop the watch,
-    // so it lives in `boot`'s scope alongside the other background handles.
-    let _profile_watch = crate::profile::profiles_dir()
-        .and_then(|dir| crate::profile::spawn_index_watch(store.pool().clone(), dir));
+    // Crash breadcrumbs start HERE, once this process owns the home — never
+    // before. They live in the SHARED home: `start_breadcrumbs` deletes the
+    // previous run's exit reason and begins overwriting `daemon.heartbeat` with
+    // our pid. A duplicate that goes on to decline would therefore erase the
+    // INCUMBENT's death record and impersonate its heartbeat, and the decline's
+    // own `record_exit` would then file a clean exit for a daemon that is still
+    // running. Behind the lock, a decliner installs nothing and `record_exit`
+    // is a no-op for it.
+    crate::observability::note_phase("boot");
+    crate::observability::start_breadcrumbs(&dir);
 
-    // Fleet Usage survives TUI restarts: load the daemon-owned bounded snapshot
-    // now, then refresh it on a background worker before Fleet opens its socket.
-    crate::fleet_usage::install(&dir).await;
-    crate::fleet_quota::install(&dir).await;
+    // The ownership watchdog: the one layer that survives every exit path not
+    // running. If this daemon ever stops owning its home — an operator deleting
+    // the lock, a home restored from a backup — it stands down instead of racing
+    // the daemon that owns it now. Home-scoped by construction: it reads one file
+    // and signals nobody, so unlike an argv-matching reaper it can never touch a
+    // daemon serving a different home.
+    let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
+    let watchdog_dir = dir.clone();
+    tokio::spawn(async move {
+        let owner = crate::single_instance::watch_ownership(&watchdog_dir).await;
+        let _ = lost_tx.send(owner);
+    });
 
-    // P4.10: bind the JSON-RPC socket beside the database and serve plugin
-    // connections on a background task. A bind failure is non-fatal — the
-    // daemon's claim loop must still run even if no plugin can reach it (and a
-    // stale socket from a crashed daemon is removed in `rpc::bind`).
-    //
-    // e38.1: the socket-auth credential is ensured BEFORE the bind so the
-    // token file exists by the time a client can dial (clients read it and
-    // present it on their first frame). A mint failure disables the listener
-    // (an unauthenticated control plane must never come up) but stays
-    // non-fatal to the claim loop, mirroring the bind-failure path.
-    let socket_path = rpc::socket_path_in(&dir);
-    match rpc::auth::ensure_socket_token(store.pool(), &dir).await {
-        Ok(token_path) => match rpc::bind(&socket_path) {
-            Ok(listener) => {
-                let health = rpc::DaemonHealth {
-                    socket_path: socket_path.to_string_lossy().into_owned(),
-                    pid: std::process::id(),
-                    started_at: std::time::Instant::now(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    stats: stats.clone(),
-                };
-                tracing::info!(
-                    socket = %socket_path.display(),
-                    token_file = %token_path.display(),
-                    "hangar rpc listening"
-                );
-                tokio::spawn(rpc::serve(
-                    listener,
-                    store.pool().clone(),
-                    health,
-                    broker.clone(),
-                ));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed");
-            }
-        },
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                socket = %socket_path.display(),
-                "hangar rpc socket-token mint failed; rpc listener disabled"
-            );
+    // Signal handlers are installed HERE, not at the end of boot. Everything
+    // below — migrations, the socket bind, the tmux reconcile — takes seconds on
+    // a cold home, and a SIGTERM arriving in that window used to kill the process
+    // on the OS default disposition: no teardown, and the ownership lock left on
+    // disk naming a dead pid. `daemon restart` and system shutdown both land
+    // exactly there.
+    let shutdown = crate::shutdown::install(Some(lost_rx));
+    let mut during_boot = shutdown.clone();
+
+    // Raised the instant boot hands over to the run loop, so the boot-phase race
+    // below stops competing. Without it that race stays armed for the daemon's
+    // WHOLE life, and a Ctrl-C could cancel the run loop mid-teardown — dropping
+    // it before it reaped its interactive tmux sessions, which is precisely the
+    // orphaning the shutdown path exists to prevent.
+    let (running_tx, running_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // The rest of boot, raced against that seam. Dropping this future on a
+    // shutdown unwinds the partially built daemon; `_ownership` lives OUTSIDE it,
+    // so the lock is released either way.
+    let booted = async move {
+        // Observability tripwire seam (P8.1): when `$AINB_HANGAR_BOOT_TASK_ID` is set
+        // the daemon emits exactly one structured boot event carrying that id. The
+        // `it_subscriber_writes_jsonl` integration test sets it to prove the JSONL
+        // sink installed in `main` lays down a single matching JSON line. Production
+        // boots never set it, so this is a no-op in normal operation.
+        if let Some(task_id) = std::env::var_os("AINB_HANGAR_BOOT_TASK_ID")
+            .and_then(|v| v.into_string().ok())
+            .filter(|v| !v.is_empty())
+        {
+            tracing::info!(task_id = %task_id, "boot");
         }
-    }
 
-    // P7.3: spawn the autopilot scheduler. It is a daemon-global cron tick loop
-    // over every enabled autopilot; guarded so a scheduler fault is non-fatal to
-    // the claim loop (one bad autopilot must never down the daemon). The token is
-    // never cancelled here (process exit tears the task down); a future
-    // supervisor can cancel it for graceful shutdown.
-    {
-        use std::sync::Arc;
+        let store: Store = Store::open_in(&dir).await?;
 
-        use ainb_hangar_core::clock::SystemClock;
-        use tokio_util::sync::CancellationToken;
+        // Fresh-home boot seed: lay down the default workspace + runtime + one
+        // starter agent so an empty home "just works" (a runtime shows in the Daemon
+        // pane, the agent picker is non-empty, and the Squad create gate is already
+        // cleared). Idempotent + non-clobbering, and it self-registers the runtime
+        // under the SAME default id the claim loop keys off (subsuming the old
+        // e38.20 self-register). A failure is non-fatal — the daemon must still
+        // sweep + serve — so it is logged and swallowed here.
+        if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
+            tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
+        }
 
-        let scheduler = crate::scheduler::AutopilotScheduler::new(
-            store.pool().clone(),
-            Arc::new(SystemClock),
-            CancellationToken::new(),
+        // P8.5: the in-memory health stats collector — shared between the RPC server
+        // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
+        // pane) and the run loop's FSM finalize path (which records each task's
+        // terminal outcome into the ring).
+        let stats = std::sync::Arc::new(crate::health_stats::HealthStats::default());
+
+        // e38.2 + T1: the daemon-global event broker, built WITH a durable outbox.
+        // Mutation paths (the claim loop's FSM steps, the RPC mutations, the
+        // autopilot scheduler) publish typed `HangarEvent`s through cloned sinks;
+        // the RPC server forwards them to authenticated, workspace-subscribed
+        // connections (live, lossy) AND every event is queued on the lossless outbox
+        // channel returned here for the outbox drain to persist. With no subscriber
+        // the live broadcast is dropped silently, so the broker costs nothing when no
+        // TUI is attached — but the durable log still records every event for replay.
+        let (broker, outbox_rx) = crate::events::EventBroker::with_outbox();
+
+        // T1: spawn the event-outbox drain — the writer of the durable, replayable
+        // event log. It pulls every emitted event off the lossless outbox channel
+        // and appends it to `event_log` (migration 0024) with a monotonic `seq`, so a
+        // reconnecting or late-joining plugin resumes the bus from its last cursor.
+        // Wired BEFORE the RPC server and the claim loop so the first mutation's
+        // event is already persisted. The handle is dropped (process exit tears the
+        // task down, mirroring the sweepers); a failed append is logged inside the
+        // task, never fatal.
+        let _outbox = crate::event_outbox::spawn(store.pool().clone(), outbox_rx);
+
+        // e38.14: spawn the inbox aggregator — the writer half of the durable
+        // notification inbox. It subscribes to the broker (exactly like an RPC
+        // connection) and folds every issue/comment/task event into the
+        // `inbox_entry` table, so live events that were once broadcast-only now land
+        // durably with an unread count. Subscribed BEFORE the RPC server and the
+        // claim loop come up, so the first mutation's event is already aggregated.
+        // The handle is dropped (process exit tears the task down, mirroring the
+        // sweepers); a failed write is logged inside the task, never fatal.
+        let _inbox = crate::inbox_aggregator::spawn(store.pool().clone(), broker.subscribe());
+
+        // Spec P2 (D10): spawn the attention ingest producer — the daemon's own tail
+        // of the shared hook `events.jsonl` (`~/.agents-in-a-box/events.jsonl`, the
+        // SAME file notifyd reads) into the `attention` table. It classifies every
+        // qualifying session event (ASK > ERR > IDLE > WAIT) and raises an answerable
+        // row + a fleet-wide `AttentionRaised` nudge. Its byte cursor lives under the
+        // hangar home so the T2 store boundary holds (no cross-read of notifyd's
+        // rusqlite). The handle is dropped (process exit tears the task down,
+        // mirroring the inbox aggregator); a failed ingest is logged, never fatal.
+        // Hook and daemon use the same resolved runtime root, including isolated
+        // `$AINB_HANGAR_HOME` test and paid-runtime installs.
+        {
+            let events_jsonl = dir.join("events.jsonl");
+            let cursor = dir.join("hangar").join("attention_ingest.offset");
+            let _attention_ingest = crate::attention_ingest::AttentionIngest::new(
+                store.pool().clone(),
+                broker.sink(),
+                events_jsonl,
+                cursor,
+            )
+            .spawn();
+        }
+
+        // The ACP boot scan (I16), BEFORE the pool is installed: a daemon that was
+        // SIGKILLed mid-turn left `open_turn_id` set, its legs PENDING and its
+        // parked permissions' attention rows open, and no runtime path revisits a
+        // session this process never hosted. Same shared routine the process-exit
+        // and deadline paths run, so the outcomes cannot drift.
+        crate::acp_pool::converge_dirty_sessions_at_boot(store.pool(), &broker.sink()).await;
+
+        // The confirm-card TTL, swept once at boot. The park's own bound is a
+        // `tokio` timer inside a copilot turn, and a timer dies with the process:
+        // without this, a card left open by a SIGKILLed or upgraded daemon keeps
+        // rendering as answerable on every client for as long as the row exists,
+        // and approving it returns a success receipt for a destructive tool call
+        // with no waiter left to run it.
+        match ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo::sweep_expired(
+            store.pool(),
+            ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock),
         )
-        .with_hangar_events(broker.sink());
-        tokio::spawn(scheduler.run());
-        tracing::info!("autopilot scheduler spawned");
-    }
+        .await
+        {
+            Ok(0) => {}
+            Ok(swept) => tracing::warn!(swept, "expired confirm cards left open by a prior daemon"),
+            Err(error) => tracing::error!(%error, "could not sweep expired confirm cards at boot"),
+        }
 
-    // Spec P9 (D13): spawn the auto-standup watcher — a daemon-global periodic
-    // scan that WRITES `/standup` into a stagnant, idle-at-prompt session behind
-    // every guardrail (global toggle default OFF/opt-in, per-session opt-out, 60-min
-    // cooldown, max-one concurrent). It writes via the one verified send path
-    // (INV-2) and raises a `waiting` "standup ready" attention row when a fired
-    // standup's turn completes. Non-fatal like the scheduler: a discovery / send /
-    // store fault is warned and degraded, never a daemon-down. The handle is
-    // dropped (process exit tears the task down).
-    let _standup = crate::standup::StandupWatcher::spawn(store.pool().clone(), broker.sink());
-    tracing::info!("auto-standup watcher spawned");
+        // The ACP agent pool. Installed BEFORE the socket accepts a connection so
+        // `fleet/acp_session_create` can never answer "no pool" on a daemon that
+        // has one; nothing is spawned until the first prompt reaches it.
+        let acp_pool = crate::acp_pool::AcpPool::new(
+            store.clone(),
+            broker.sink(),
+            crate::acp_pool::PoolConfig::from_env(),
+        );
+        let _acp_sweeper = acp_pool.spawn_sweeper();
+        crate::acp_pool::install(acp_pool).await;
 
-    // Spec P9 (D12): spawn the ATC heartbeat cron — the launchd/systemd timer's
-    // daemon-native replacement. It reuses the autopilot scheduler's DB-durable
-    // tick loop over `atc_instance.next_tick_at`, fires each instance's heartbeat
-    // on its cron (enforcing the store-backed retry cap and escalating exhausted
-    // sessions through the attention pipeline), and reschedules from the fired
-    // slot. Non-fatal like the scheduler; the handle is dropped (process exit
-    // tears the task down).
-    let _atc_heartbeat =
-        crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
-    tracing::info!("ATC heartbeat cron spawned");
+        // Name the rows written before the daemon authored `display_name` at all.
+        // Every existing row is NULL there, and a session nothing observes again
+        // would never be named by the writers alone, so the roster's name search
+        // would stay dead for exactly the sessions an operator has to search for.
+        match ainb_hangar_store::repo::fleet::FleetRepo::backfill_display_names(
+            store.pool(),
+            crate::fleet::display_name_for_cwd,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(named) => tracing::info!(named, "named fleet sessions left unnamed by older builds"),
+            Err(error) => tracing::error!(%error, "could not backfill fleet display names at boot"),
+        }
 
-    // e38.18: the webhook ingress. OPT-IN — it only binds when
-    // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come
-    // up by default). It binds 127.0.0.1 ONLY (never 0.0.0.0), so it is
-    // unreachable off-host. A bind failure is non-fatal to the claim loop,
-    // mirroring the RPC socket. Pass `0` for an ephemeral port.
-    if let Some(port) = std::env::var_os("AINB_HANGAR_WEBHOOK_PORT")
-        .and_then(|v| v.into_string().ok())
-        .and_then(|v| v.trim().parse::<u16>().ok())
-    {
-        use std::sync::Arc;
+        // Tmux reconciliation keeps unhooked and standalone provider sessions in
+        // the canonical Fleet roster as degraded rows with exact pane identity.
+        let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
 
-        use ainb_hangar_core::clock::SystemClock;
-        use ainb_hangar_store::repo::autopilot_webhook::WebhookSecretStore;
+        // Two slow janitors, each on its OWN clock rather than folded into the 3s
+        // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
+        // sessions were dead EXITED rows that every snapshot scanned, and
+        // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
+        // Both are pure cleanup with no deadline, so neither belongs on a hot path.
+        let _fleet_archiver =
+            crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
+        let _fleet_retention =
+            crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
 
-        match crate::webhook_ingress::bind(port).await {
-            Ok(listener) => {
-                let addr = listener.local_addr().ok();
-                tracing::info!(
-                    bind = ?addr,
-                    "hangar webhook ingress listening (127.0.0.1 only)"
-                );
-                let secrets = Arc::new(WebhookSecretStore::in_home(&dir));
-                let clock: Arc<dyn ainb_hangar_core::clock::HangarClock + Send + Sync> =
-                    Arc::new(SystemClock);
-                tokio::spawn(crate::webhook_ingress::serve(
-                    listener,
-                    store.pool().clone(),
-                    secrets,
-                    clock,
-                ));
+        // Managed Codex transport starts independently from daemon readiness. A
+        // missing or incompatible Codex binary leaves hook and tmux observation
+        // running, while the service records an honest transport downgrade.
+        let _codex_manager = if !once
+            && std::env::var_os("AINB_CODEX_MANAGED")
+                .as_deref()
+                .is_none_or(|value| value != "0")
+        {
+            let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
+            let socket = dir.join("codex-app-server.sock");
+            // Reap any app-server orphaned by a SIGKILLed/OOM-reaped prior daemon (or a
+            // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
+            // SIGKILL, so this boot-time sweep is the only backstop that survives it.
+            let reaped =
+                crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
+            if reaped > 0 {
+                tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
             }
+            Some(crate::fleet_provider::codex_manager::spawn_service(
+                crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
+                store.pool().clone(),
+                broker.sink(),
+            ))
+        } else {
+            None
+        };
+
+        // P5 (T6): reconcile the agent-profile index against the on-disk masters and
+        // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`
+        // is picked up into the `profile` index without an RPC. Best-effort — a
+        // watcher-setup fault is logged inside the helper and swallowed (the
+        // `profile/upsert` RPC still refreshes the index directly). The returned
+        // watcher is HELD for the process lifetime; dropping it would stop the watch,
+        // so it lives in `boot`'s scope alongside the other background handles.
+        let _profile_watch = crate::profile::profiles_dir()
+            .and_then(|dir| crate::profile::spawn_index_watch(store.pool().clone(), dir));
+
+        // Fleet Usage survives TUI restarts: load the daemon-owned bounded snapshot
+        // now, then refresh it on a background worker before Fleet opens its socket.
+        crate::fleet_usage::install(&dir).await;
+        crate::fleet_quota::install(&dir).await;
+
+        // P4.10: bind the JSON-RPC socket beside the database and serve plugin
+        // connections on a background task. A bind failure is non-fatal — the
+        // daemon's claim loop must still run even if no plugin can reach it (and a
+        // stale socket from a crashed daemon is removed in `rpc::bind`).
+        //
+        // e38.1: the socket-auth credential is ensured BEFORE the bind so the
+        // token file exists by the time a client can dial (clients read it and
+        // present it on their first frame). A mint failure disables the listener
+        // (an unauthenticated control plane must never come up) but stays
+        // non-fatal to the claim loop, mirroring the bind-failure path.
+        let socket_path = rpc::socket_path_in(&dir);
+        match rpc::auth::ensure_socket_token(store.pool(), &dir).await {
+            Ok(token_path) => match rpc::bind(&socket_path) {
+                Ok(listener) => {
+                    let health = rpc::DaemonHealth {
+                        socket_path: socket_path.to_string_lossy().into_owned(),
+                        pid: std::process::id(),
+                        started_at: std::time::Instant::now(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        stats: stats.clone(),
+                    };
+                    tracing::info!(
+                        socket = %socket_path.display(),
+                        token_file = %token_path.display(),
+                        "hangar rpc listening"
+                    );
+                    tokio::spawn(rpc::serve(
+                        listener,
+                        store.pool().clone(),
+                        health,
+                        broker.clone(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed");
+                }
+            },
             Err(e) => {
-                tracing::warn!(error = %e, port, "hangar webhook ingress bind failed");
+                tracing::warn!(
+                    error = %e,
+                    socket = %socket_path.display(),
+                    "hangar rpc socket-token mint failed; rpc listener disabled"
+                );
             }
         }
+
+        // P7.3: spawn the autopilot scheduler. It is a daemon-global cron tick loop
+        // over every enabled autopilot; guarded so a scheduler fault is non-fatal to
+        // the claim loop (one bad autopilot must never down the daemon). The token is
+        // never cancelled here (process exit tears the task down); a future
+        // supervisor can cancel it for graceful shutdown.
+        {
+            use std::sync::Arc;
+
+            use ainb_hangar_core::clock::SystemClock;
+            use tokio_util::sync::CancellationToken;
+
+            let scheduler = crate::scheduler::AutopilotScheduler::new(
+                store.pool().clone(),
+                Arc::new(SystemClock),
+                CancellationToken::new(),
+            )
+            .with_hangar_events(broker.sink());
+            tokio::spawn(scheduler.run());
+            tracing::info!("autopilot scheduler spawned");
+        }
+
+        // Spec P9 (D13): spawn the auto-standup watcher — a daemon-global periodic
+        // scan that WRITES `/standup` into a stagnant, idle-at-prompt session behind
+        // every guardrail (global toggle default OFF/opt-in, per-session opt-out, 60-min
+        // cooldown, max-one concurrent). It writes via the one verified send path
+        // (INV-2) and raises a `waiting` "standup ready" attention row when a fired
+        // standup's turn completes. Non-fatal like the scheduler: a discovery / send /
+        // store fault is warned and degraded, never a daemon-down. The handle is
+        // dropped (process exit tears the task down).
+        let _standup = crate::standup::StandupWatcher::spawn(store.pool().clone(), broker.sink());
+        tracing::info!("auto-standup watcher spawned");
+
+        // Spec P9 (D12): spawn the ATC heartbeat cron — the launchd/systemd timer's
+        // daemon-native replacement. It reuses the autopilot scheduler's DB-durable
+        // tick loop over `atc_instance.next_tick_at`, fires each instance's heartbeat
+        // on its cron (enforcing the store-backed retry cap and escalating exhausted
+        // sessions through the attention pipeline), and reschedules from the fired
+        // slot. Non-fatal like the scheduler; the handle is dropped (process exit
+        // tears the task down).
+        let _atc_heartbeat =
+            crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
+        tracing::info!("ATC heartbeat cron spawned");
+
+        // e38.18: the webhook ingress. OPT-IN — it only binds when
+        // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come
+        // up by default). It binds 127.0.0.1 ONLY (never 0.0.0.0), so it is
+        // unreachable off-host. A bind failure is non-fatal to the claim loop,
+        // mirroring the RPC socket. Pass `0` for an ephemeral port.
+        if let Some(port) = std::env::var_os("AINB_HANGAR_WEBHOOK_PORT")
+            .and_then(|v| v.into_string().ok())
+            .and_then(|v| v.trim().parse::<u16>().ok())
+        {
+            use std::sync::Arc;
+
+            use ainb_hangar_core::clock::SystemClock;
+            use ainb_hangar_store::repo::autopilot_webhook::WebhookSecretStore;
+
+            match crate::webhook_ingress::bind(port).await {
+                Ok(listener) => {
+                    let addr = listener.local_addr().ok();
+                    tracing::info!(
+                        bind = ?addr,
+                        "hangar webhook ingress listening (127.0.0.1 only)"
+                    );
+                    let secrets = Arc::new(WebhookSecretStore::in_home(&dir));
+                    let clock: Arc<dyn ainb_hangar_core::clock::HangarClock + Send + Sync> =
+                        Arc::new(SystemClock);
+                    tokio::spawn(crate::webhook_ingress::serve(
+                        listener,
+                        store.pool().clone(),
+                        secrets,
+                        clock,
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, port, "hangar webhook ingress bind failed");
+                }
+            }
+        }
+
+        tracing::info!(idle = true, "ainb-hangar-daemon ready idle=true");
+        if once {
+            return Ok(());
+        }
+        // Self-register this pid so EVERY running daemon is DISCOVERABLE, not just
+        // one started via `ainb hangar daemon start`. Discovery only — the exclusion
+        // that actually stops a duplicate is `single_instance`'s lock, taken at the
+        // top of this function. This file is what `status` prints and what a
+        // pre-lock CLI still reads.
+        //
+        // `ensure_hangar_daemon` (the TUI's autostart) decides "is a daemon already
+        // up?" purely from `<hangar_home>/hangar/daemon.pid`. Only the CLI `start`
+        // verb used to write that file, so a daemon launched any other way — the
+        // `ainb-hangar-daemon` binary directly, systemd/launchd, a test harness —
+        // was invisible: the TUI spawned a SECOND daemon, `rpc::bind` unlinked the
+        // live socket out from under the first, and two claim loops + two sweepers
+        // then raced one SQLite home while the TUI talked to the newcomer's empty
+        // in-memory state.
+        //
+        // Writing the pid here made those daemons visible; it did NOT close the hole,
+        // because it happens at the END of boot and nothing checked it under
+        // exclusion. The lock at the top of `boot` is the actual fix — this line is
+        // now bookkeeping for humans and for `status`.
+        let _pid_file = PidFile::register(&dir);
+        let mut cfg = DaemonConfig::from_env();
+        // The claim loop MUST key off the runtime id that is actually registered (and
+        // that the seeded/created agents are bound to). A runtime cannot be renamed —
+        // `agent.runtime_id` is an enforced FK — so an existing row's id wins over a
+        // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
+        // Resolving here keeps the registered row, the agents, and the claim loop on
+        // ONE id instead of claiming for an id nothing is bound to.
+        let now =
+            ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
+        cfg.runtime_id =
+            Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
+        // Boot is done; from here the run loop owns shutdown.
+        let _ = running_tx.send(());
+        run(store.pool().clone(), cfg, stats, broker.sink(), shutdown).await
+    };
+
+    tokio::select! {
+        result = booted => result,
+        cause = async move {
+            let raced = tokio::select! {
+                cause = during_boot.recv() => Some(cause),
+                _ = running_rx => None,
+            };
+            match raced {
+                Some(cause) => cause,
+                // The run loop took over. Park forever so this arm can never
+                // resolve and cancel it.
+                None => std::future::pending().await,
+            }
+        } => {
+            tracing::info!(
+                signal = cause.as_str(),
+                "ainb-hangar-daemon shutting down during boot"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PidFile, pid_path_in};
+
+    /// The happy path: a clean exit takes our own registration with it, so the
+    /// next `ensure_hangar_daemon` does not read a dead pid.
+    #[test]
+    fn drop_removes_our_own_registration() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+
+        let pid_file = PidFile::register(home.path());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("registered"),
+            std::process::id().to_string()
+        );
+
+        drop(pid_file);
+        assert!(!path.exists(), "our own registration should be removed");
     }
 
-    tracing::info!(idle = true, "ainb-hangar-daemon ready idle=true");
-    if once {
-        return Ok(());
+    /// The ratchet regression. `register` is last-write-wins, so a daemon that
+    /// started later owns the file's contents. When the EARLIER daemon exits, a
+    /// blind unlink deletes the LIVE daemon's registration — the next autostart
+    /// then reads "nothing running" and spawns yet another. That is how one
+    /// machine reached 69 daemons instead of settling at two.
+    #[test]
+    fn drop_keeps_a_registration_another_daemon_overwrote() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+
+        let ours = PidFile::register(home.path());
+        // A later daemon self-registers over the top of ours.
+        std::fs::write(&path, "424242").expect("overwrite with a newer daemon's pid");
+
+        drop(ours);
+
+        assert!(
+            path.exists(),
+            "an exiting daemon must not delete the live daemon's registration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still registered").trim(),
+            "424242"
+        );
     }
-    // Self-register this pid so EVERY running daemon is discoverable, not just
-    // one started via `ainb hangar daemon start`.
-    //
-    // `ensure_hangar_daemon` (the TUI's autostart) decides "is a daemon already
-    // up?" purely from `<hangar_home>/hangar/daemon.pid`. Only the CLI `start`
-    // verb used to write that file, so a daemon launched any other way — the
-    // `ainb-hangar-daemon` binary directly, systemd/launchd, a test harness —
-    // was invisible: the TUI spawned a SECOND daemon, `rpc::bind` unlinked the
-    // live socket out from under the first, and two claim loops + two sweepers
-    // then raced one SQLite home while the TUI talked to the newcomer's empty
-    // in-memory state. Writing the pid here closes that hole at the source.
-    let _pid_file = PidFile::register(&dir);
-    let mut cfg = DaemonConfig::from_env();
-    // The claim loop MUST key off the runtime id that is actually registered (and
-    // that the seeded/created agents are bound to). A runtime cannot be renamed —
-    // `agent.runtime_id` is an enforced FK — so an existing row's id wins over a
-    // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
-    // Resolving here keeps the registered row, the agents, and the claim loop on
-    // ONE id instead of claiming for an id nothing is bound to.
-    let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
-    cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
-    run(store.pool().clone(), cfg, stats, broker.sink()).await
+
+    /// An unwritable home yields an unregistered handle, and dropping it must not
+    /// touch anything.
+    #[test]
+    fn dropping_an_unregistered_handle_is_a_no_op() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let path = pid_path_in(home.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "424242").expect("seed someone else's registration");
+
+        drop(PidFile(None));
+
+        assert!(path.exists(), "a no-op handle must not remove anything");
+    }
 }

@@ -622,6 +622,27 @@ impl DaemonProcess {
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
+
+    /// Poll until the daemon has exited, bounded by `budget`.
+    ///
+    /// Must be used instead of `kill(pid, 0)` to prove a signalled daemon died:
+    /// this test process is its PARENT, so an exited-but-unreaped daemon is a
+    /// ZOMBIE, and a zombie answers `kill(pid, 0)` exactly like a live process.
+    /// `try_wait` reaps it, which is the only reading that distinguishes the two.
+    pub fn wait_for_exit(&mut self, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 impl Drop for DaemonProcess {

@@ -1,6 +1,6 @@
 {
   "name": "ainb-hooks",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Emit every safely observable Claude Code lifecycle event into Hangar's durable provider log. User-facing events still reach ainb-notifyd over its Unix socket. The same notify.sh powers ATC structured control when installed with AINB_MANAGED=atc. stall_guard.py additionally blocks turn-end when a session would idle on in-flight work with no wake armed, so ATC-managed sessions do not silently park on a running CI job.",
   "author": {
     "name": "Agents-in-a-Box"
@@ -13,7 +13,7 @@
     "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "UserPromptExpansion": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "MessageDisplay": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
-    "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 3600 }] }],
+    "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 10 }] }],
     "PermissionRequest": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "PostToolUseFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],

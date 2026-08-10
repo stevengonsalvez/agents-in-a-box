@@ -311,6 +311,11 @@ struct FleetAnswerQueue: View {
 
             Text(question.header).font(.title3.weight(.semibold))
             Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
+            if deck.mirroredPicker {
+                Text("Claude picker is also open. Submit here to select the same answer there. Text answers unavailable.")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(FleetPalette.mint)
+            }
             if deck.nativePicker {
                 Text("Claude picker active. Answer in the attached Claude session, then Fleet refreshes the same interview state.")
                     .font(.callout.weight(.medium))
@@ -362,7 +367,7 @@ struct FleetAnswerQueue: View {
                 }
                 Button("Submit all answers") { submit(deck) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(deck.nativePicker || !complete(deck) || store.pendingIntentID != nil)
+                    .disabled(deck.nativePicker || !complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
             }
 
             if let notice = store.controlNotice {
@@ -418,6 +423,12 @@ struct FleetAnswerQueue: View {
         return Binding(get: { textAnswers[answerKey, default: ""] }, set: { textAnswers[answerKey] = $0 })
     }
 
+    private func hasTextAnswer(_ deck: FleetInterviewDeck) -> Bool {
+        deck.questions.contains {
+            !textAnswers[key(deck, $0), default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     private func answered(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Bool {
         let answerKey = key(deck, question)
         if question.options.isEmpty { return !textAnswers[answerKey, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -449,6 +460,7 @@ struct FleetInterviewDeck {
     let session: FleetSession
     let questions: [FleetInterviewQuestion]
     let nativePicker: Bool
+    let mirroredPicker: Bool
 
     init?(session: FleetSession) {
         guard session.attention == .ask,
@@ -472,6 +484,7 @@ struct FleetInterviewDeck {
         self.session = session
         self.questions = questions
         self.nativePicker = request.value("fleet_delivery")?.stringValue == "native_claude"
+        self.mirroredPicker = request.value("fleet_delivery")?.stringValue == "mirrored"
     }
 
     static func priority(_ session: FleetSession) -> (Int, Int64) {

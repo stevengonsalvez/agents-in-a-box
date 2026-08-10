@@ -242,3 +242,111 @@ fn daemon_exits_when_its_test_parent_is_sigkilled() {
         "daemon {daemon_pid} survived its SIGKILLed test parent"
     );
 }
+/// Read the ownership lock — the record that decides who owns the home.
+fn read_lock_pid(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(home.join("hangar").join("daemon.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A second `start` is a no-op that reports the incumbent, and above all leaves
+/// no second daemon behind — the failure mode that reached 69 on one machine.
+#[test]
+fn a_second_start_reports_the_incumbent_and_spawns_nothing() {
+    let Some(daemon) = daemon_bin() else {
+        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "daemon start should exit 0; out={out}");
+    let pid = read_pid(home).expect("daemon start wrote a pid file");
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .join("hangar.sock")
+            .exists()),
+        "the daemon must bind its control socket"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "a second start should exit 0; out={out}");
+    assert!(
+        out.contains("already running"),
+        "a second start must report the incumbent:\n{out}"
+    );
+    assert_eq!(
+        read_pid(home),
+        Some(pid),
+        "a second start must not re-point the pid file"
+    );
+    assert_eq!(
+        read_lock_pid(home),
+        Some(pid),
+        "the incumbent must still own the home"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "cleanup stop should exit 0; out={out}");
+    if pid_alive(pid) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+}
+
+/// `restart` must leave exactly one daemon: a new one, and the old one gone.
+///
+/// The regression this guards is self-inflicted and subtle. Shutdown is now
+/// graceful, so it takes time; a restart that hands off while the outgoing
+/// daemon still holds the home gets "already running" from `start`, returns —
+/// and when that daemon finishes dying the home is left with NOTHING.
+#[test]
+fn restart_leaves_exactly_one_daemon_running() {
+    let Some(daemon) = daemon_bin() else {
+        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "daemon start should exit 0; out={out}");
+    let first = read_pid(home).expect("daemon start wrote a pid file");
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .join("hangar.sock")
+            .exists()),
+        "the daemon must bind its control socket"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "restart"]);
+    assert!(ok, "daemon restart should exit 0; out={out}");
+
+    let second = read_pid(home).expect("restart recorded a pid");
+    assert_ne!(second, first, "restart should replace the daemon");
+    assert!(
+        !pid_alive(first),
+        "the old daemon must be gone after restart"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || pid_alive(second)),
+        "restart must leave a live daemon, not an empty home"
+    );
+    assert_eq!(
+        read_lock_pid(home),
+        Some(second),
+        "the lock must name the surviving daemon"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "cleanup stop should exit 0; out={out}");
+    if pid_alive(second) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(second as i32), Signal::SIGKILL);
+    }
+}

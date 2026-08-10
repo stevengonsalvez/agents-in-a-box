@@ -51,7 +51,8 @@ struct TmuxIsolation {
     /// Whatever `TMUX_TMPDIR` was before we overrode it, so a probe can still
     /// reach the AMBIENT server on purpose.
     ambient: Option<String>,
-    /// Current-client socket. tmux prefers this over `TMUX_TMPDIR` unless removed.
+    /// `TMUX` names the current client socket and takes precedence over
+    /// `TMUX_TMPDIR`, so it must be cleared for the private server to apply.
     ambient_client: Option<String>,
 }
 
@@ -185,7 +186,6 @@ async fn launched_command(
         resume_transcript,
         resume_requested,
         false, // headroom_enabled (keep the env prefix off the critical path)
-        None,
     )
     .await
     .expect("start_cli_in_tmux");

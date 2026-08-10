@@ -2589,12 +2589,9 @@ async fn dispatch_pipeline(cmd: PipelineCommand) -> Result<()> {
     .await
     .context("read the pipeline health")?;
 
-    // The daemon light reuses the SAME pid-file probe `hangar daemon status`
+    // The daemon light reuses the SAME ownership probe `hangar daemon status`
     // prints, so the strip and that command can never disagree about liveness.
-    let daemon_alive = daemon_pid_path()
-        .ok()
-        .and_then(|p| read_daemon_pid(&p))
-        .is_some_and(pid_is_running);
+    let daemon_alive = running_daemon_pid().ok().flatten().is_some();
     let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
     for line in pipeline_view::render(&health, daemon_alive, color) {
         println!("{line}");
@@ -7880,12 +7877,79 @@ fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
     text.trim().parse().ok()
 }
 
+/// The pid of the daemon that currently owns this hangar home, if any.
+///
+/// Ownership lives in `<hangar_home>/hangar/daemon.lock`, which the daemon
+/// publishes atomically as the first statement of `boot` and holds for its whole
+/// life — unlike `daemon.pid`, a last-write-wins note written at the end of boot.
+///
+/// The ownership lock answers first. The pid file is consulted only as a
+/// fallback, for the upgrade window in which a daemon built before the lock
+/// existed is still running — it registers a pid but never takes the lock, and
+/// without this shim `status` and `stop` would report it as not running.
+//
+// ponytail: drop the pid-file fallback a release after the lock ships; by then
+// no pre-lock daemon can still be alive.
+fn running_daemon_pid() -> Result<Option<u32>> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(running_daemon_pid_in(&home))
+}
+
+/// [`running_daemon_pid`] against an explicit hangar home, so the
+/// lock-beats-pid-file precedence is testable without touching the environment.
+fn running_daemon_pid_in(home: &std::path::Path) -> Option<u32> {
+    let socket = home.join("hangar.sock");
+    let owner = |path: std::path::PathBuf| {
+        read_daemon_pid(&path).filter(|pid| pid_owns_a_home(*pid, &socket))
+    };
+    owner(ainb_hangar_daemon::single_instance::lock_path_in(home))
+        .or_else(|| owner(ainb_hangar_daemon::pid_path_in(home)))
+}
+
+/// Is `pid` this home's daemon?
+///
+/// PROOF first: a process holding `<hangar home>/hangar.sock` under our uid is
+/// this home's daemon and can be nothing else ([`OwnedPid::holding_socket`]).
+/// That is the same evidence `stop` demands before signalling, so every verb now
+/// agrees about who is running.
+///
+/// The argv shape is the boot-window fallback ONLY. The daemon publishes its
+/// lock as the first statement of `boot` but binds the socket at the end, so in
+/// between there is a live, legitimate daemon holding no socket yet.
+/// `is_hangar_daemon_args` is deliberately narrow and must NEVER credit a bare
+/// `ainb`: on a layout with no sidecar binary the daemon self-execs as
+/// `ainb hangar daemon run`, so daemon and TUI share an executable, and a
+/// recycled pid landing on the user's TUI would otherwise read as this home's
+/// daemon — wedging the home with ZERO daemons for as long as that TUI lived.
+fn pid_owns_a_home(pid: u32, socket: &std::path::Path) -> bool {
+    if !pid_is_running(pid) {
+        return false;
+    }
+    if OwnedPid::holding_socket(pid, socket).is_some() {
+        return true;
+    }
+    i32::try_from(pid).is_ok_and(|pid| {
+        ainb_hangar_daemon::single_instance::process_argv(pid)
+            .is_some_and(|args| ainb_hangar_daemon::single_instance::is_hangar_daemon_args(&args))
+    })
+}
+
 /// Is `pid` a live process? `kill(pid, 0)` succeeds iff it exists (and we may
 /// signal it), so this is a non-destructive liveness probe.
+///
+/// `EPERM` counts as ALIVE: the process exists, we simply do not own it. Reading
+/// it as dead (the prior behaviour) would let a daemon running under another
+/// account be treated as absent and duplicated. Matches the daemon-side
+/// `beads_adapter::lock::pid_alive`, so both halves agree on what "running"
+/// means.
 fn pid_is_running(pid: u32) -> bool {
+    use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
-    matches!(kill(Pid::from_raw(pid as i32), None), Ok(()))
+    matches!(
+        kill(Pid::from_raw(pid as i32), None),
+        Ok(()) | Err(Errno::EPERM)
+    )
 }
 
 /// Resolve how `start` launches the daemon: the dedicated
@@ -8332,8 +8396,12 @@ async fn run_daemon_status() -> Result<()> {
         .context("resolve hangar home")?
         .join("hangar.sock");
 
-    match read_daemon_pid(&pid_path) {
-        Some(pid) if pid_is_running(pid) => {
+    // The owner decides "running". The raw pid file is consulted ONLY to quote a
+    // stale record back; it must never promote an unproven pid to "running", or
+    // `status` and the autostart guard would disagree about the same process.
+    let owner = running_daemon_pid()?;
+    match owner.or_else(|| read_daemon_pid(&pid_path)) {
+        Some(pid) if owner == Some(pid) => {
             let sock = if socket.exists() {
                 "socket bound"
             } else {
@@ -8401,20 +8469,16 @@ async fn run_daemon_run() -> Result<()> {
         )
     };
 
-    // Same crash breadcrumbs the standalone binary lays down: this is the SAME
-    // long-lived daemon process, just launched through `ainb`, and the launcher
-    // picks this path whenever the sidecar binary is missing or stale. A
-    // heartbeat that only an observed exit removes is what turns a SIGKILL (a
+    // The same crash breadcrumbs the standalone binary lays down — this is the
+    // SAME long-lived daemon process, just launched through `ainb`, and the
+    // launcher picks this path whenever the sidecar binary is missing or stale.
+    // A heartbeat that only an observed exit removes is what turns a SIGKILL (a
     // death that runs no user code, so no panic hook can catch it) into
     // evidence.
-    match ainb_hangar_daemon::hangar_dir() {
-        Ok(dir) => {
-            ainb_hangar_daemon::observability::note_phase("boot");
-            ainb_hangar_daemon::observability::start_breadcrumbs(&dir);
-        }
-        Err(e) => tracing::warn!(error = %e, "no hangar home; crash breadcrumbs disabled"),
-    }
-
+    //
+    // `boot` installs them itself, once it has taken the home's ownership lock.
+    // Installing them here would let a duplicate that goes on to DECLINE erase
+    // the incumbent's exit record and overwrite its heartbeat on the way past.
     let result = ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)");
 
     ainb_hangar_daemon::observability::note_phase("shutdown");
@@ -8498,16 +8562,22 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     let pid_path = daemon_pid_path()?;
 
     // Already running? Bail out cleanly rather than spawning a duplicate.
-    if let Some(pid) = read_daemon_pid(&pid_path) {
-        if pid_is_running(pid) {
-            if announce {
-                println!("hangar daemon: already running (pid {pid})");
-            }
-            return Ok(());
+    //
+    // This is now an OPTIMISATION, not the guard. It is still a check-then-act
+    // across two processes, so it can lose a race — but a duplicate that gets
+    // spawned anyway declines the home for itself (the daemon takes an exclusive
+    // lock before it opens anything) and exits, which is what makes the residual
+    // race harmless rather than a pile of daemons.
+    if let Some(pid) = running_daemon_pid()? {
+        if announce {
+            println!("hangar daemon: already running (pid {pid})");
         }
-        // Stale pid file from a crashed daemon: drop it before re-spawning.
-        std::fs::remove_file(&pid_path).ok();
+        return Ok(());
     }
+    // Stale pid file from a crashed daemon: drop it before re-spawning. The
+    // stale LOCK needs no handling here — the booting daemon reclaims it
+    // atomically, which is the only race-free way to take it.
+    std::fs::remove_file(&pid_path).ok();
 
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent).context("create hangar home dir")?;
@@ -8559,30 +8629,66 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     // the offline panel sat there forever. Give the child a beat, then
     // reap-check: `try_wait` returns the exit status iff it already died.
     std::thread::sleep(std::time::Duration::from_millis(400));
-    if let Some(status) = child.try_wait().context("probe daemon child")? {
+    let exited = child.try_wait().context("probe daemon child")?;
+    // A clean exit is not a failure: it is how a daemon reports that another one
+    // already owns this home (it lost the ownership lock and declined). Only a
+    // NON-ZERO exit means the daemon could not boot.
+    if let Some(status) = exited.filter(|status| !status.success()) {
         anyhow::bail!(
             "daemon exited immediately ({status}) — launched `{launched}`; \
              run `ainb hangar daemon run` in a terminal to see why"
         );
     }
 
-    let pid = child.id();
-    // Write the EXACT child pid (the one we just spawned) so `stop` signals this
-    // process and no other. `child` is intentionally dropped without `wait` —
-    // the daemon is meant to outlive this CLI invocation.
+    // Record the pid of the daemon that actually OWNS the home, which on a lost
+    // race is the incumbent rather than the child we just spawned. The child
+    // publishes the lock as its first action, so it is on disk by now; falling
+    // back to the child pid keeps a slow-starting daemon recorded.
+    let mut owner = running_daemon_pid()?;
+    if exited.is_some() && owner.is_none() {
+        // Our child exited 0 (it lost the lock) and yet nobody owns the home —
+        // the incumbent it lost to has since exited too. Nothing is wrong here,
+        // the home is simply free again, so try once more before calling it a
+        // failure. Only a second empty-handed attempt is worth an error.
+        if let Some(pid) = respawn_once(&bin, &args)? {
+            owner = Some(pid);
+        } else {
+            anyhow::bail!(
+                "daemon exited immediately ({}) without claiming the home — launched \
+                 `{launched}`; run `ainb hangar daemon run` in a terminal to see why",
+                exited.map_or_else(|| "?".to_string(), |s| s.to_string())
+            );
+        }
+    }
+    let pid = owner.unwrap_or_else(|| child.id());
+    // `child` is intentionally dropped without `wait` — the daemon is meant to
+    // outlive this CLI invocation.
     std::fs::write(&pid_path, format!("{pid}\n"))
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
     // Record the version of the binary now serving, beside the pid. The launcher
     // and the daemon it spawns share the workspace version, so this is the
-    // running daemon's version. Best-effort: a write failure must not fail the
-    // start (the skew check just degrades to "unknown").
-    if let Ok(vpath) = daemon_version_path() {
-        std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
+    // running daemon's version — but ONLY when our child is the one serving.
+    // On the lost-race path the incumbent is some other build, and stamping our
+    // version over it would silence the very skew warning `status` exists to
+    // print. Best-effort: a write failure must not fail the start (the skew
+    // check just degrades to "unknown").
+    // Only when OUR child is the daemon now serving. `exited.is_none()` is not
+    // that test: a child still alive at the probe may be a slow starter that
+    // goes on to lose the lock, and stamping our version over the incumbent's
+    // silences the very skew warning `status` exists to print.
+    if owner == Some(child.id()) {
+        if let Ok(vpath) = daemon_version_path() {
+            std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
+        }
     }
 
     if announce {
-        println!("hangar daemon: started (pid {pid})");
+        if exited.is_some() {
+            println!("hangar daemon: already running (pid {pid})");
+        } else {
+            println!("hangar daemon: started (pid {pid})");
+        }
     }
     Ok(())
 }
@@ -8640,6 +8746,11 @@ fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
 fn daemon_socket_path() -> Result<std::path::PathBuf> {
     let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
     Ok(home.join("hangar.sock"))
+}
+
+/// The ownership lock that sits beside `<home>/hangar/daemon.pid`.
+fn lock_beside(pid_path: &std::path::Path) -> std::path::PathBuf {
+    pid_path.with_file_name("daemon.lock")
 }
 
 /// A pid this process has PROVED it may signal.
@@ -8725,7 +8836,14 @@ enum StopDecision {
 /// ownership. Split out from [`run_daemon_stop`] so the decision is testable
 /// against real decoy processes without signalling anything.
 fn stop_decision(pid_path: &std::path::Path, socket: &std::path::Path) -> StopDecision {
-    match read_daemon_pid(pid_path) {
+    // The ownership lock is published as the FIRST statement of boot; the pid
+    // file is written at the very end of it. Reading only the pid file left a
+    // window — seconds on a cold home — in which a daemon started by launchd, by
+    // the binary directly, or by any route other than `daemon start` was
+    // unstoppable: `stop` said "not running" while `start` said "already
+    // running". Ask the lock first, exactly like `status` and the autostart do.
+    let recorded = read_daemon_pid(&lock_beside(pid_path)).or_else(|| read_daemon_pid(pid_path));
+    match recorded {
         None => StopDecision::NotRecorded,
         Some(pid) if !pid_is_running(pid) => StopDecision::Stale(pid),
         Some(pid) => match OwnedPid::holding_socket(pid, socket) {
@@ -8802,9 +8920,76 @@ fn run_daemon_stop() -> Result<()> {
 }
 
 /// `hangar daemon restart`: `stop` (if running) then `start`.
+///
+/// A failed stop does NOT abort the start. `stop` now waits for the daemon to
+/// exit and errors if it outlasts its budget — propagating that would return
+/// with the old daemon mid-shutdown and nothing scheduled to replace it, so a
+/// daemon that finished dying a moment later left the home empty until something
+/// else autostarted it. Report the stop problem and start anyway: if the old
+/// daemon is somehow still up, `start` is a no-op that says so.
 pub(crate) fn run_daemon_restart() -> Result<()> {
-    run_daemon_stop()?;
+    if let Err(e) = run_daemon_stop() {
+        println!("hangar daemon: stop reported a problem, starting anyway: {e}");
+    }
+    // A stop that could not confirm the exit leaves a daemon mid-shutdown, still
+    // holding its lock and its socket. Starting into that reads as "already
+    // running" and returns — and when the old daemon finishes dying moments
+    // later the home is left with NOTHING. Wait for the owner to actually go.
+    let vacated = wait_until(RESTART_VACATE_BUDGET, || {
+        matches!(running_daemon_pid(), Ok(None))
+    });
+    if !vacated {
+        if let Ok(Some(pid)) = running_daemon_pid() {
+            println!(
+                "hangar daemon: pid {pid} still owns this home after {}s; not starting a \
+                 second one (re-run stop, or `kill -9 {pid}`)",
+                RESTART_VACATE_BUDGET.as_secs()
+            );
+            return Ok(());
+        }
+    }
     run_daemon_start()
+}
+
+/// Spawn the daemon once more and report the pid that ends up owning the home.
+///
+/// Used only on the "our child declined and the incumbent then vanished" path:
+/// the home was contested a moment ago and is free now, which is a race to
+/// re-run, not a failure to report.
+fn respawn_once(bin: &std::path::Path, args: &[&str]) -> Result<Option<u32>> {
+    let mut command = std::process::Command::new(bin);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command.spawn().context("respawn daemon")?;
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    // `child` is intentionally dropped without `wait` — the daemon outlives us.
+    let _ = child;
+    running_daemon_pid()
+}
+
+/// How long `restart` waits for the outgoing daemon to release the home.
+const RESTART_VACATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Poll `cond` until true or `budget` elapses.
+fn wait_until(budget: std::time::Duration, cond: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if cond() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// `hangar daemon setup`: one-command bring-up.
@@ -10401,6 +10586,72 @@ mod tests {
         assert_eq!(
             stop_decision(&pid_path, &socket),
             StopDecision::Stale(dead_pid)
+        );
+    }
+
+    /// A process we do not own still counts as running.
+    ///
+    /// `kill(pid, 0)` answers `EPERM` for another user's process; reading that as
+    /// "not running" (the prior behaviour) would let the CLI treat a daemon
+    /// owned by another account as absent and spawn a duplicate against the same
+    /// home. PID 1 exists on every unix and is owned by root.
+    #[test]
+    fn a_process_we_may_not_signal_still_counts_as_running() {
+        assert!(pid_is_running(1), "pid 1 must read as running");
+    }
+
+    /// The ownership lock outranks the pid file — and "owner" means PROVED.
+    ///
+    /// The proof is the same one `stop` demands: the pid must hold this home's
+    /// socket. An earlier version of this test seeded its OWN pid, which is why
+    /// it could not catch the hole review found — the CLI credited any process
+    /// running `ainb` as the home's daemon, so a recycled pid landing on the
+    /// user's TUI wedged the home with zero daemons.
+    #[test]
+    fn the_ownership_lock_outranks_the_pid_file() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let hangar = home.path().join("hangar");
+        std::fs::create_dir_all(&hangar).expect("mkdir");
+        let socket = home.path().join("hangar.sock");
+        let daemon = SocketDecoy::holding(&socket);
+
+        // Lock names the socket holder, pid file names a dead process.
+        std::fs::write(hangar.join("daemon.pid"), "424242\n").expect("write pid file");
+        std::fs::write(hangar.join("daemon.lock"), daemon.pid().to_string()).expect("write lock");
+        assert_eq!(running_daemon_pid_in(home.path()), Some(daemon.pid()));
+
+        // Fallback: no lock at all (a daemon from before the lock shipped) still
+        // resolves through the pid file, so an upgrade does not make a running
+        // daemon invisible.
+        std::fs::remove_file(hangar.join("daemon.lock")).expect("drop lock");
+        std::fs::write(hangar.join("daemon.pid"), format!("{}\n", daemon.pid()))
+            .expect("rewrite pid");
+        assert_eq!(running_daemon_pid_in(home.path()), Some(daemon.pid()));
+
+        // Neither file names a live process -> nobody owns the home.
+        std::fs::write(hangar.join("daemon.pid"), "424242\n").expect("rewrite pid");
+        assert_eq!(running_daemon_pid_in(home.path()), None);
+    }
+
+    /// A live process that is merely OURS is not this home's daemon.
+    ///
+    /// The regression under test: `ainb` and a self-exec'd daemon share an
+    /// executable (`ainb hangar daemon run`), so an identity check written in
+    /// terms of "runs our binary" credits the TUI. A recycled pid in the lock
+    /// then reads as a running daemon and the autostart declines forever.
+    #[test]
+    fn our_own_process_is_not_this_homes_daemon() {
+        let home = tempfile::tempdir().expect("tmpdir");
+        let hangar = home.path().join("hangar");
+        std::fs::create_dir_all(&hangar).expect("mkdir");
+
+        // This test binary is live, is "an ainb process", and holds no socket.
+        std::fs::write(hangar.join("daemon.lock"), std::process::id().to_string())
+            .expect("write lock");
+        assert_eq!(
+            running_daemon_pid_in(home.path()),
+            None,
+            "a live non-daemon in the lock must not be read as the home's owner"
         );
     }
 
