@@ -617,8 +617,10 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // sessions were dead EXITED rows that every snapshot scanned, and
         // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
         // Both are pure cleanup with no deadline, so neither belongs on a hot path.
-        let _fleet_archiver = crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
-        let _fleet_retention = crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
+        let _fleet_archiver =
+            crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
+        let _fleet_retention =
+            crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
 
         // Managed Codex transport starts independently from daemon readiness. A
         // missing or incompatible Codex binary leaves hook and tmux observation
@@ -819,8 +821,10 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
         // Resolving here keeps the registered row, the agents, and the claim loop on
         // ONE id instead of claiming for an id nothing is bound to.
-        let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
-        cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
+        let now =
+            ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
+        cfg.runtime_id =
+            Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
         run(store.pool().clone(), cfg, stats, broker.sink(), shutdown).await
     };
 
