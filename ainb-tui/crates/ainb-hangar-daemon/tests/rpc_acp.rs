@@ -18,9 +18,9 @@
 //!   DURING the turn: the first `acp.message` precedes `acp.turn_completed`.
 //! * **R8** a permission round trips: attention row with option ids and the
 //!   pending JSON-RPC id, `fleet/action` Approve, a REAL outcome on the wire,
-//!   a fingerprint nothing raised refused, TWO concurrent asks both answerable,
-//!   and an adapter death mid-permission closing the rows instead of leaving
-//!   ghosts.
+//!   a fingerprint nothing raised refused, a STALE `expected_version` refused
+//!   with the ask left open, TWO concurrent asks both answerable, and an
+//!   adapter death mid-permission closing the rows instead of leaving ghosts.
 //! * **Receipts** an ACP chat leg leaves the same `fleet/receipt_get`-visible
 //!   action receipt a tmux leg does, despite bypassing `execute_fleet_action`.
 //!
@@ -942,6 +942,109 @@ async fn a_permission_round_trips_through_fleet_action() {
     .expect("fleet row");
     assert_eq!(attention_state, "NONE");
     assert_eq!(current, None);
+
+    harness.finish().await;
+}
+
+/// The optimistic-concurrency guard on `fleet/action`, with the version
+/// CONTROLLED rather than observed: an answer naming a version older than the
+/// session's is refused BEFORE it reaches the pool, the ask survives, and no
+/// receipt is minted for it.
+///
+/// `a_permission_round_trips_through_fleet_action` used to carry this claim by
+/// accident, by racing the version it had just read. That made a guard doing
+/// its job look like a flake, and told nobody whether the guard actually bites.
+/// Here the staleness is CONSTRUCTED by subtraction, so it is stale whatever
+/// else has written the row, and the assertion cannot pass or fail on timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_expected_version_is_refused_and_leaves_the_ask_open() {
+    let harness = Harness::start(
+        &[
+            ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+            ("FAKE_ACP_CHUNKS", "1"),
+        ],
+        |_| {},
+    )
+    .await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "rm -rf /tmp/fixture",
+                "request_id": "req-acp-stale-version",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent}");
+    let (attention_id, payload) = harness.await_open_attention(&session_key).await;
+    let fingerprint = payload["requestFingerprint"].as_str().expect("fingerprint").to_string();
+    let version = version_showing_ask(&mut client, &session_key, &fingerprint).await;
+    assert!(
+        version > 1,
+        "the ask's own event moved the version, so version - 1 is genuinely \
+         stale rather than merely non-positive: {version}"
+    );
+
+    let refused = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": session_key,
+                "expected_version": version - 1,
+                "request_id": "req-acp-stale-version-answer",
+                "action": { "action": "approve", "request_fingerprint": fingerprint },
+            }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert!(
+        refused["error"]["message"].as_str().unwrap_or_default().contains("version is"),
+        "the refusal names the version it found: {refused}"
+    );
+
+    // REFUSED, not merely complained about: the answer never reached the pool,
+    // so the adapter is still blocked and the operator's ask is still clickable.
+    let (still_open,): (String,) = sqlx::query_as("SELECT state FROM attention WHERE id = ?")
+        .bind(&attention_id)
+        .fetch_one(harness.store.pool())
+        .await
+        .expect("attention row");
+    assert_eq!(still_open, "open");
+    // Validation runs ahead of the durable claim, so the refusal did not spend
+    // the request id either.
+    let receipt: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM fleet_action_receipt WHERE request_id = ?")
+            .bind("req-acp-stale-version-answer")
+            .fetch_optional(harness.store.pool())
+            .await
+            .expect("receipt query");
+    assert!(
+        receipt.is_none(),
+        "a refused action must mint no receipt: {receipt:?}"
+    );
+
+    // ... and the honest version still answers that same ask, so what was
+    // refused was the version and not the answer.
+    let approved = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": session_key,
+                "expected_version": version,
+                "request_id": "req-acp-stale-version-retry",
+                "action": { "action": "approve", "request_fingerprint": fingerprint },
+            }),
+        )
+        .await;
+    assert!(approved["error"].is_null(), "{approved}");
+    assert_eq!(
+        approved["result"]["receipt"]["status"], "DELIVERED",
+        "{approved}"
+    );
 
     harness.finish().await;
 }
