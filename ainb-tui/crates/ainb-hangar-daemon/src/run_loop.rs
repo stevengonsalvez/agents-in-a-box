@@ -435,7 +435,7 @@ pub async fn run(
     cfg: DaemonConfig,
     stats: Arc<HealthStats>,
     events: EventSink,
-    mut shutdown: crate::shutdown::Watch,
+    mut shutdown: crate::shutdown::Handle,
 ) -> anyhow::Result<()> {
     // hangar-e2e-5: record the resolved headless OS-sandbox posture once at boot.
     // Without this line an exit-65 dispatch failure was ambiguous between "fix

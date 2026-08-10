@@ -79,7 +79,7 @@ pub struct Watch {
 }
 
 /// Install one signal handler, logging and degrading rather than failing.
-fn install(
+fn install_handler(
     kind: tokio::signal::unix::SignalKind,
     name: &str,
 ) -> Option<tokio::signal::unix::Signal> {
@@ -118,8 +118,8 @@ impl Watch {
     pub fn new() -> Self {
         use tokio::signal::unix::SignalKind;
         Self {
-            interrupt: install(SignalKind::interrupt(), "SIGINT"),
-            terminate: install(SignalKind::terminate(), "SIGTERM"),
+            interrupt: install_handler(SignalKind::interrupt(), "SIGINT"),
+            terminate: install_handler(SignalKind::terminate(), "SIGTERM"),
             lock_lost: None,
         }
     }
@@ -188,6 +188,55 @@ impl Watch {
             }
         }
     }
+}
+
+/// An observer of the shutdown seam, clonable so the boot phase and the run
+/// loop can both wait on the SAME first cause.
+///
+/// [`install`] is what boot calls: it registers the signal handlers immediately
+/// — before the store, the migrations and the socket bind — so a SIGTERM
+/// arriving mid-boot is queued and answered rather than killing the process on
+/// the OS default disposition with the ownership lock still on disk.
+#[derive(Debug, Clone)]
+pub struct Handle {
+    cause: tokio::sync::watch::Receiver<Option<Cause>>,
+}
+
+impl Handle {
+    /// Resolve with the first cause that asked the daemon to stop.
+    pub async fn recv(&mut self) -> Cause {
+        loop {
+            if let Some(cause) = *self.cause.borrow_and_update() {
+                return cause;
+            }
+            if self.cause.changed().await.is_err() {
+                // The publisher task is gone, so no cause can ever arrive. Park
+                // rather than inventing one: a dropped channel is not a
+                // shutdown request, and resolving here would tear the daemon
+                // down on a task fault.
+                never().await;
+            }
+        }
+    }
+}
+
+/// Install the signal handlers NOW and publish the first shutdown cause.
+///
+/// Registration happens synchronously in this call, so the handlers are live
+/// before the caller does any further work; the waiting happens on a spawned
+/// task feeding every [`Handle`].
+#[must_use]
+pub fn install(lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>) -> Handle {
+    let mut watch = Watch::new();
+    if let Some(lock_lost) = lock_lost {
+        watch = watch.on_lock_lost(lock_lost);
+    }
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    tokio::spawn(async move {
+        let cause = watch.recv().await;
+        let _ = tx.send(Some(cause));
+    });
+    Handle { cause: rx }
 }
 
 impl Default for Watch {

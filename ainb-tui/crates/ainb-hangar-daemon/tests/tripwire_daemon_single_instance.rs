@@ -312,3 +312,48 @@ fn a_missing_lock_does_not_shut_the_daemon_down() {
         "the daemon shut down over a missing lock file"
     );
 }
+
+/// SIGTERM during BOOT must be answered, not fatal.
+///
+/// The handlers used to be installed at the very end of boot, so a SIGTERM
+/// arriving while the daemon was still migrating, minting its token or binding
+/// its socket killed it on the OS default disposition — no teardown, and the
+/// ownership lock left on disk naming a dead pid. `daemon restart` and system
+/// shutdown both land in exactly that window.
+///
+/// The signal is sent the instant the lock appears, which is now the FIRST thing
+/// boot does, so on a debug build it usually lands mid-boot. It is not
+/// deterministic, so the assertions hold either way: the daemon exits, and the
+/// home is left FREE rather than locked by a corpse.
+#[test]
+fn sigterm_during_boot_is_answered_and_releases_the_home() {
+    let home = tempfile::tempdir().expect("tempdir home");
+    let mut booting = DaemonProcess::spawn(home.path(), &[CODEX_OFF]);
+    let pid = wait_for_lock(home.path());
+
+    let signalled = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(signalled.success(), "kill -TERM {pid} failed");
+
+    assert!(
+        booting.wait_for_exit(Duration::from_secs(30)),
+        "a daemon signalled during boot must exit"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || (!lock_path(home.path())
+            .exists())
+        .then_some(()))
+        .is_some(),
+        "a daemon signalled during boot must still release the home; a lock left \
+         behind naming a dead pid is what the old end-of-boot handler produced"
+    );
+
+    // And the home is immediately usable by a successor, with no stealing.
+    let successor = DaemonProcess::spawn(home.path(), &[CODEX_OFF]);
+    assert_eq!(
+        wait_for_lock(home.path()),
+        i32::try_from(successor.pid()).expect("pid fits i32")
+    );
+}
