@@ -54,6 +54,25 @@ count_alive() {
   echo "$n"
 }
 
+# Poll until exactly one of the given pids is left, or the deadline passes.
+#
+# The property under test is "exactly one daemon ENDS UP running", not "exactly
+# one is running at some fixed instant". A loser is a real process: it has to be
+# exec'd, linked and scheduled before it can even look at the lock, and under a
+# loaded box with a fleet starting at once that can outlast a fixed sleep. Poll
+# for the settled state instead, so a slow decline reads as slow rather than as
+# the double-hold this script exists to detect.
+SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-30}"
+wait_until_settled() {
+  local deadline=$((SECONDS + SETTLE_TIMEOUT)) alive
+  while true; do
+    alive="$(count_alive "$@")"
+    [[ "$alive" -eq 1 ]] && { echo "$alive"; return 0; }
+    [[ "$SECONDS" -ge "$deadline" ]] && { echo "$alive"; return 1; }
+    sleep 0.5
+  done
+}
+
 if [[ ! -x "$BIN" ]]; then
   echo "Building daemon (debug)..."
   ( cd "$REPO" && cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon ) || {
@@ -83,23 +102,15 @@ for ((round = 1; round <= ROUNDS; round++)); do
     STARTED+=("$pid")
   done
 
-  # Settle past the boot probe: the losers take the lock's fail-fast window
-  # (500ms) plus process startup.
-  sleep 3
-
-  alive="$(count_alive "${round_pids[@]}")"
-  if [[ "$alive" -gt 1 ]]; then
-    # A loser that has not finished exiting yet is not a duplicate daemon. Give
-    # it a grace window and re-count: a REAL duplicate is stable, because both
-    # processes are in their run loops and never leave. Print what was still up
-    # so a genuine failure is diagnosable after the fact.
-    echo "round $round: $alive alive at first count, re-checking after grace..."
+  alive="$(wait_until_settled "${round_pids[@]}")" || {
+    # Never settled. Print who is still up so a genuine double-hold is
+    # diagnosable after the fact — a real one is STABLE, both processes sitting
+    # in their run loops.
+    echo "round $round: did not settle to 1 within ${SETTLE_TIMEOUT}s; still up:"
     for p in "${round_pids[@]}"; do
       kill -0 "$p" 2>/dev/null && ps -p "$p" -o pid=,stat=,etime=,args= 2>/dev/null | head -1
     done
-    sleep 5
-    alive="$(count_alive "${round_pids[@]}")"
-  fi
+  }
   [[ "$alive" -gt "$worst" ]] && worst="$alive"
   if [[ "$alive" -ne 1 ]]; then
     echo "round $round: FAIL — $alive daemons alive, expected exactly 1"

@@ -57,6 +57,25 @@ count_alive() {
   echo "$n"
 }
 
+# Poll until exactly one of the given pids is left, or the deadline passes.
+#
+# The property under test is "exactly one daemon ENDS UP running", not "exactly
+# one is running at some fixed instant". A loser is a real process: it has to be
+# exec'd, linked and scheduled before it can even look at the lock, and under a
+# loaded box with a fleet starting at once that can outlast a fixed sleep. Poll
+# for the settled state instead, so a slow decline reads as slow rather than as
+# the double-hold this script exists to detect.
+SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-30}"
+wait_until_settled() {
+  local deadline=$((SECONDS + SETTLE_TIMEOUT)) alive
+  while true; do
+    alive="$(count_alive "$@")"
+    [[ "$alive" -eq 1 ]] && { echo "$alive"; return 0; }
+    [[ "$SECONDS" -ge "$deadline" ]] && { echo "$alive"; return 1; }
+    sleep 0.5
+  done
+}
+
 if [[ ! -x "$BIN" ]]; then
   echo "Building daemon (debug)..."
   ( cd "$REPO" && cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon ) || {
@@ -103,20 +122,12 @@ for ((round = 1; round <= ROUNDS; round++)); do
     round_pids+=("$pid")
     STARTED+=("$pid")
   done
-  sleep 3
-
-  alive="$(count_alive "${round_pids[@]}")"
-  if [[ "$alive" -gt 1 ]]; then
-    # Distinguish a genuine double-hold from a loser that had not finished
-    # exiting yet: give it a grace window and re-count. A real double-hold is
-    # stable — both processes are in their run loops and never leave.
-    echo "round $round: $alive alive at first count, re-checking after grace..."
+  alive="$(wait_until_settled "${round_pids[@]}")" || {
+    echo "round $round: did not settle to 1 within ${SETTLE_TIMEOUT}s; still up:"
     for p in "${round_pids[@]}"; do
       kill -0 "$p" 2>/dev/null && ps -p "$p" -o pid=,stat=,etime=,args= 2>/dev/null | head -1
     done
-    sleep 5
-    alive="$(count_alive "${round_pids[@]}")"
-  fi
+  }
   if [[ "$alive" -ne 1 ]]; then
     if [[ "$alive" -eq 0 ]]; then
       echo "round $round: FAIL — the home stayed wedged by the stale lock of $held"
