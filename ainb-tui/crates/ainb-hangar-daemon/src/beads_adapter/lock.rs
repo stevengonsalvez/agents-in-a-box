@@ -140,6 +140,26 @@ impl BdLock {
         self.acquire_within(TRY_ACQUIRE_TIMEOUT, holder_is_live)
     }
 
+    /// Take the lock or report who holds it, spinning for `timeout` first.
+    ///
+    /// The escalation [`try_acquire_with`](Self::try_acquire_with) needs when it
+    /// cannot name a holder: churn is not evidence that anyone won, so a caller
+    /// that declined on it could leave nobody holding the lock at all.
+    ///
+    /// # Errors
+    ///
+    /// As [`try_acquire_with`](Self::try_acquire_with).
+    pub fn acquire_within_with<F>(
+        &self,
+        timeout: Duration,
+        holder_is_live: F,
+    ) -> Result<BdLockGuard, LockHeld>
+    where
+        F: Fn(i32) -> bool,
+    {
+        self.acquire_within(timeout, holder_is_live)
+    }
+
     /// Spin for the lock until `timeout` elapses, judging holders with
     /// `holder_is_live`. The one acquisition path; both public entry points are
     /// this function with a different deadline and predicate.

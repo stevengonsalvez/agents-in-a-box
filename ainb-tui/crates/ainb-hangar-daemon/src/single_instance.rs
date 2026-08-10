@@ -74,14 +74,34 @@ pub enum Ownership {
 /// than a reason to boot unguarded.
 pub fn acquire(dir: &Path) -> std::io::Result<Ownership> {
     match acquire_with(dir, holder_is_live_daemon)? {
-        // Sample twice before declining on `Contended`. That verdict means the
-        // path churned for the whole window without ever naming a live holder,
-        // which is NOT evidence that someone else won it — and if every
-        // contender declined on one such sample, the home would end up with no
-        // daemon at all. A second pass costs one fail-fast window and turns the
-        // usual case (someone did win) into an honest `HeldBy`.
-        Ownership::Contended => acquire_with(dir, holder_is_live_daemon),
+        // `Contended` means the path churned for a whole window without ever
+        // naming a live holder. That is NOT evidence anyone won it, so declining
+        // on it is the one way this guard could leave a home with NO daemon:
+        // symmetric contenders all sampling churn, all standing down.
+        //
+        // Escalate instead of declining. A blocking attempt either takes the
+        // lock (nobody had it — exactly the case a fail-fast sample cannot tell
+        // apart from a busy one) or resolves into an honest `HeldBy` once a
+        // winner publishes. Only if THAT still cannot name anyone do we decline,
+        // by which point a real owner has had seconds to appear.
+        Ownership::Contended => Ok(escalate(dir)),
         won_or_held => Ok(won_or_held),
+    }
+}
+
+/// How long the `Contended` escalation blocks before giving up.
+const CONTENDED_ESCALATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One blocking attempt after fail-fast could not name a holder.
+fn escalate(dir: &Path) -> Ownership {
+    match BdLock::new(lock_path_in(dir))
+        .acquire_within_with(CONTENDED_ESCALATION, holder_is_live_daemon)
+    {
+        Ok(guard) => Ownership::Acquired(guard),
+        Err(LockHeld::By(pid)) => Ownership::HeldBy(pid),
+        // Still nobody nameable. Decline: something is churning the path that we
+        // cannot identify, and booting alongside it is the worse failure.
+        Err(LockHeld::Contended | LockHeld::Io(_)) => Ownership::Contended,
     }
 }
 
@@ -109,8 +129,8 @@ where
 ///
 /// 1. `ps` cannot answer → respect (the original fail-safe).
 /// 2. The argv is a recognised daemon shape → respect.
-/// 3. The argv is unrecognised but the holder is running the SAME executable we
-///    are → respect. This covers every daemon whose argv
+/// 3. The argv is unrecognised but is the SAME COMMAND LINE we were invoked
+///    with → respect. This covers every daemon whose argv
 ///    [`is_hangar_daemon_args`] cannot know about: an `AINB_HANGAR_DAEMON_BIN`
 ///    override pointing at a wrapper or a dev binary, an install path
 ///    containing a space (`ps` renders argv whitespace-separated, so
@@ -130,24 +150,42 @@ pub fn holder_is_live_daemon(pid: i32) -> bool {
     let Some(args) = process_argv(pid) else {
         return true;
     };
-    is_hangar_daemon_args(&args) || runs_our_executable(&args)
+    is_hangar_daemon_args(&args) || shares_our_command_line(&args)
 }
 
-/// Is this argv running the same binary as us?
+/// Is this argv the SAME INVOCATION as ours — the whole command line, not just
+/// the executable?
 ///
-/// Prefix-matched against [`std::env::current_exe`] rather than compared
-/// token-wise, because `ps` renders argv whitespace-separated and an executable
-/// path may itself contain spaces. An unresolvable `current_exe` answers `true`
-/// (respect the holder), keeping every unknown on the fail-safe side.
-fn runs_our_executable(args: &str) -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return true;
+/// Comparing executables alone was a hole: on a Homebrew layout there is no
+/// sidecar binary, so the daemon self-execs as `ainb hangar daemon run` and its
+/// `current_exe` is plain `ainb` — the same executable the TUI runs. A recycled
+/// pid landing on the user's TUI would then be respected as this home's owner,
+/// and the daemon would decline to boot for as long as that TUI lived: zero
+/// daemons, silently, which is the failure this module exists to prevent turned
+/// inside out.
+///
+/// The full command line separates them (`…/ainb` vs `…/ainb hangar daemon
+/// run`) while still covering everything [`is_hangar_daemon_args`] cannot know
+/// about — an `AINB_HANGAR_DAEMON_BIN` wrapper, an install path containing a
+/// space, an in-process `boot()` in a test binary — because two processes of
+/// that kind share one command line.
+///
+/// An unresolvable argv answers `true` (respect the holder), keeping every
+/// unknown on the fail-safe side.
+fn shares_our_command_line(args: &str) -> bool {
+    our_command_line().is_none_or(|ours| args == ours)
+}
+
+/// This process's own argv, rendered the way `ps -o args=` renders it.
+fn our_command_line() -> Option<String> {
+    let exe = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+    let rest: Vec<String> = std::env::args().skip(1).collect();
+    let line = if rest.is_empty() {
+        exe
+    } else {
+        format!("{exe} {}", rest.join(" "))
     };
-    let exe = exe.to_string_lossy().into_owned();
-    if exe.is_empty() {
-        return true;
-    }
-    args == exe || args.starts_with(&format!("{exe} "))
+    (!line.trim().is_empty()).then_some(line)
 }
 
 /// How long to wait for `ps` before treating the process table as unreadable.
@@ -421,14 +459,12 @@ mod tests {
     /// in-process `boot()` in a test binary — must still be respected, or a
     /// second daemon steals its lock and both end up serving one home.
     #[test]
-    fn a_holder_running_our_own_binary_is_respected_whatever_its_argv() {
-        let exe = std::env::current_exe().expect("current_exe");
-        let exe = exe.to_string_lossy().into_owned();
+    fn a_holder_sharing_our_command_line_is_respected_whatever_its_argv() {
+        let ours = our_command_line().expect("our own command line");
 
-        assert!(runs_our_executable(&exe), "bare invocation");
-        assert!(runs_our_executable(&format!("{exe} --once")), "with args");
+        assert!(shares_our_command_line(&ours), "our exact invocation");
         assert!(
-            !is_hangar_daemon_args(&exe),
+            !is_hangar_daemon_args(&ours),
             "this test binary's argv is exactly the unrecognised shape under test"
         );
         assert!(
@@ -437,16 +473,30 @@ mod tests {
         );
     }
 
+    /// The hole this replaced an executable-only check to close.
+    ///
+    /// On a Homebrew layout the daemon self-execs as `ainb hangar daemon run`,
+    /// so its executable IS the TUI's executable. Crediting a bare `ainb` as
+    /// this home's daemon would let a recycled pid landing on the user's TUI
+    /// wedge the home with zero daemons for as long as that TUI lives.
+    #[test]
+    fn our_executable_running_a_different_command_line_is_not_us() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let exe = exe.to_string_lossy().into_owned();
+
+        // Same binary, different invocation — e.g. the TUI next to a self-exec'd
+        // daemon. Not us, and not a recognised daemon shape either.
+        assert!(!shares_our_command_line(&exe) || std::env::args().len() == 1);
+        assert!(!shares_our_command_line(&format!("{exe} tui")));
+        assert!(!is_hangar_daemon_args(&exe));
+    }
+
     /// The other half: a genuinely different program is not protected, or a
     /// recycled pid would wedge the home forever.
     #[test]
     fn a_different_executable_is_not_ours() {
-        assert!(!runs_our_executable("/bin/sleep 30"));
-        assert!(!runs_our_executable("/usr/bin/vim"));
-        // A prefix of our path is not our path.
-        let exe = std::env::current_exe().expect("current_exe");
-        let truncated = &exe.to_string_lossy()[..exe.to_string_lossy().len() - 1];
-        assert!(!runs_our_executable(truncated));
+        assert!(!shares_our_command_line("/bin/sleep 30"));
+        assert!(!shares_our_command_line("/usr/bin/vim"));
     }
 
     /// The watchdog's whole decision table. The dangerous cell is `Unknown`:
