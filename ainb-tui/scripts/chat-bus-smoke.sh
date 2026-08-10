@@ -1371,6 +1371,13 @@ journey_j7() {
   tmux_cmd send-keys -t "$TUI_SESSION" Tab
   wait_until 20 "focus to reach the cards (their own help line)" \
     tui_pane_has "$CHAT_CARDS_MARKER" || return 1
+  # Focus does NOT arm a card. Nothing is selected until the operator picks one,
+  # which the surface says itself ("pick a card with up/down before answering").
+  # That is deliberate: a background poll used to adopt the first card, so `y`
+  # could approve a destructive call nobody had read. Approving now takes two
+  # keys and this journey presses both.
+  step "pressing \`Down\` ONCE to pick the card, which focus deliberately does not do"
+  tmux_cmd send-keys -t "$TUI_SESSION" Down
   step "pressing \`y\` ONCE to approve, from the pane"
   tmux_cmd send-keys -t "$TUI_SESSION" y
   wait_until 45 "the daemon to record the answer" \
