@@ -2240,6 +2240,27 @@ impl HangarPlugin {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
+        // A cursor of 0 means this is a FRESH round, not resuming one a full
+        // writer cut short mid-batch (that case must keep the SAME generation:
+        // it is still sending the one round's unsent tail). `fetch_pending` can
+        // be re-armed (a pushed event, a mutation reply, a config write, etc.)
+        // before the PREVIOUS round's replies have all landed: two fresh rounds
+        // can be outstanding on the wire at once. Reusing the generation for
+        // both would hand every request in round 2 (including `boards_list`)
+        // the IDENTICAL wire id round 1 already used. The daemon echoes each
+        // request's id verbatim, so both replies carry that same id; the first
+        // to arrive is found in `snapshot_response_ids` and consumes the entry,
+        // so the SECOND (which may be the fresher one, e.g. carrying a card a
+        // user just created) finds nothing to normalize against and is
+        // silently dropped by `on_daemon_response`, discarding whichever
+        // round's answer happened to land second. Bumping the generation per
+        // fresh round keeps every outstanding round's wire ids distinct, so
+        // every reply is found and applied; per-connection FIFO still
+        // guarantees the newer round's reply is written after the older
+        // round's, so the freshest data always wins the last write.
+        if self.snapshot_fetch_cursor == 0 {
+            self.snapshot_generation = self.snapshot_generation.saturating_add(1);
+        }
         let ws = self.app_state().ws_id.as_str().to_string();
         let scoped = serde_json::json!({ "workspace_id": ws.clone() });
         let requests = [
@@ -8253,6 +8274,126 @@ mod tests {
         assert!(
             plugin.screens.issue_list.all_rows().is_empty(),
             "current workspace reply must still apply"
+        );
+    }
+
+    /// The real-world case behind the empty-board tripwire: a `boards_list`
+    /// refresh round is re-armed (a pushed event, a mutation reply, etc.)
+    /// before the PREVIOUS round's own `boards_list` reply has landed. Both
+    /// rounds are otherwise identical requests for the same workspace: the
+    /// only thing that changed is that a card was created in between. Without
+    /// a per-round generation bump, both rounds share one wire id, and
+    /// whichever reply arrives second (here: round 2's, carrying the new
+    /// card) has no entry left in `snapshot_response_ids` to normalize
+    /// against and is dropped, so the board renders round 1's stale,
+    /// card-less snapshot forever, exactly like the tripwire's "card IS in
+    /// the store but NOT rendered" failure.
+    #[test]
+    fn overlapping_snapshot_rounds_do_not_drop_the_newer_boards_reply() {
+        use ainb_hangar_proto::snapshots::{
+            BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult,
+        };
+
+        let mut plugin = connected_plugin_with_issue();
+
+        // Round 1: a full bundle send (e.g. the post-subscribe pull). Every
+        // request, including `boards_list`, is queued under generation G.
+        plugin.fetch_pending = true;
+        plugin.drain_pending_refreshes_with(|_, _| Ok(NotificationEnqueueOutcome::Queued));
+        let round1_boards_id = plugin.snapshot_wire_id(BOARDS_REQ_ID);
+        assert!(
+            plugin.snapshot_response_ids.contains_key(&round1_boards_id),
+            "round 1 must have an outstanding boards_list request"
+        );
+
+        // Round 2 fires before round 1's replies land (the re-pull a card
+        // create's own pushed event arms). The fix must give it a NEW
+        // generation, so its `boards_list` id differs from round 1's.
+        plugin.fetch_pending = true;
+        plugin.drain_pending_refreshes_with(|_, _| Ok(NotificationEnqueueOutcome::Queued));
+        let round2_boards_id = plugin.snapshot_wire_id(BOARDS_REQ_ID);
+        assert_ne!(
+            round1_boards_id, round2_boards_id,
+            "two overlapping rounds must not reuse one boards_list wire id"
+        );
+
+        // The two rounds' replies land in FIFO send order: round 1's (stale,
+        // no card) first, round 2's (fresh, WITH the new card) second.
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(round1_boards_id),
+            result: Some(
+                serde_json::to_value(BoardsListResult {
+                    boards: vec![BoardWireRow {
+                        id: "b1".into(),
+                        name: "Delivery".into(),
+                        auto_move: false,
+                        columns: vec![BoardColumnWireRow {
+                            id: "c-todo".into(),
+                            name: "Todo".into(),
+                            ord: 0,
+                            fsm_state: None,
+                            auto_move: false,
+                            cards: Vec::new(),
+                            health: None,
+                        }],
+                        unmapped: Vec::new(),
+                    }],
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+        plugin.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(round2_boards_id),
+            result: Some(
+                serde_json::to_value(BoardsListResult {
+                    boards: vec![BoardWireRow {
+                        id: "b1".into(),
+                        name: "Delivery".into(),
+                        auto_move: false,
+                        columns: vec![BoardColumnWireRow {
+                            id: "c-todo".into(),
+                            name: "Todo".into(),
+                            ord: 0,
+                            fsm_state: None,
+                            auto_move: false,
+                            cards: vec![BoardCardWireRow {
+                                issue_id: "issue-2".into(),
+                                title: "Rerunlifecycletripwire".into(),
+                                display_id: "2".into(),
+                                state: None,
+                                session_name: None,
+                                repo_ref: None,
+                                agent: None,
+                                squad_id: None,
+                                member_states: Vec::new(),
+                                blocked_by: Vec::new(),
+                                auto_run: false,
+                                blocks: Vec::new(),
+                                related: Vec::new(),
+                            }],
+                            health: None,
+                        }],
+                        unmapped: Vec::new(),
+                    }],
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let titles: Vec<&str> = plugin.screens.boards.boards()[0].columns[0]
+            .cards
+            .iter()
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Rerunlifecycletripwire"],
+            "round 2's fresher boards_list reply must not be dropped just because it shares \
+             round 1's wire id: the board must show the card the store has: {titles:?}"
         );
     }
 
