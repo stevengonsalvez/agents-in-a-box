@@ -32,9 +32,13 @@ Validation method (the one used to sign off the table):
 2. Read the late frames (the journey prints its verdict at the end).
 3. Assert the expected text is present verbatim.
 
-`j1`–`j5e` recorded 2026-08-07 against `origin/main` at `f49488c9` (all six
-phases merged), adapter mode `fixture`, turn deadline compressed to 45000 ms via
-`AINB_ACP_TURN_DEADLINE_MS` so the 30 minute production default is observable.
+`j1`–`j5e` re-recorded 2026-08-10 against `fix/tui-tripwire-hangar-home` at
+`2946ef9d` (`ainb 1.20.0`), adapter mode `fixture`, turn deadline compressed to
+45000 ms via `AINB_ACP_TURN_DEADLINE_MS` so the 30 minute production default is
+observable. This re-record exists because the previous artifacts pre-dated the
+tape fix (repo-relative `Output` paths, and `Wait+Screen` terminating on the
+journey's own `SMOKE-RESULT` line instead of a guessed `Sleep`), so the
+committed videos and the tapes that produce them disagreed.
 
 `j6` recorded 2026-08-08 against `ainb 1.18.0 (bd17c8d1)`, which is the first
 build containing `193c3e3c` — the `provider_label` fix j6 was written to catch.
@@ -57,7 +61,7 @@ through `SMOKE-RESULT overall PASS`. Do not try to "fix" the duration with
 
 | Tape | Journey | Expected text, verified in-frame |
 |---|---|---|
-| `j1.gif` / `.mp4` | chat bus on tmux | `RECEIVED:[j1 ...] hello fleet, deliver me verbatim` and `3/3 DELIVERED · 3/3 panes verbatim · follower saw it` then `✓ j1 PASS` |
+| `j1.gif` / `.mp4` | chat bus on tmux | `RECEIVED:-y [j1 ...] hello fleet, deliver me verbatim` (the leading `-y` is part of the payload on purpose — `chat-bus-smoke.sh:593` — so a dash-leading body proves the CLI does not eat it as a flag) and `3/3 DELIVERED · 3/3 panes verbatim · follower saw it` then `✓ j1 PASS` |
 | `j2.gif` / `.mp4` | ACP leg | `7 transcript chunks · 1 timeline reply · first chunk line 3 < turn end line 8` then `✓ j2 PASS` |
 | `j3.gif` / `.mp4` | resume across a daemon SIGKILL | `resumed via [loaded] on the same session_key · 2 agent replies · 0 ghost attention rows` then `✓ j3 PASS` |
 | `j4.gif` / `.mp4` | convergence, adapter only | `converged UNKNOWN/adapter_exit; ... · same daemon pid ... · next message DELIVERED` then `✓ j4 PASS` |
