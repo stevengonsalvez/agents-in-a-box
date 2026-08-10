@@ -61,11 +61,16 @@ impl Cause {
 /// A long-lived watcher for every signal that ends the daemon.
 ///
 /// Built ONCE outside the claim loop and polled from its `select!`, rather than
-/// re-registering a handler on every tick.
+/// re-registering a handler on every tick. Both signal streams are OWNED here,
+/// so a signal delivered while another `select!` branch was winning is queued
+/// rather than lost.
 #[derive(Debug)]
 pub struct Watch {
-    /// `None` only when the SIGTERM handler could not be installed; the daemon
-    /// then degrades to SIGINT rather than refusing to run.
+    /// `None` only when the handler could not be installed; the daemon then
+    /// degrades to whichever signal it did manage to register rather than
+    /// refusing to run.
+    interrupt: Option<tokio::signal::unix::Signal>,
+    /// `None` only when the SIGTERM handler could not be installed.
     terminate: Option<tokio::signal::unix::Signal>,
     /// Resolves with the new owner's pid if this daemon ever stops owning its
     /// home. `None` for a daemon that holds no lock (a test harness driving the
@@ -73,24 +78,48 @@ pub struct Watch {
     lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>,
 }
 
+/// Install one signal handler, logging and degrading rather than failing.
+fn install(
+    kind: tokio::signal::unix::SignalKind,
+    name: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(signal) => Some(signal),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                signal = name,
+                "could not install a shutdown signal handler; this process will die on \
+                 that signal's default disposition instead of shutting down cleanly"
+            );
+            None
+        }
+    }
+}
+
+/// Never resolves — the arm for a handler that could not be installed.
+async fn never() {
+    std::future::pending::<()>().await;
+}
+
+/// Wait for one more delivery of `signal`, or forever if it is absent.
+async fn fires(signal: Option<&mut tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => never().await,
+    }
+}
+
 impl Watch {
     /// Install the signal handlers.
     #[must_use]
     pub fn new() -> Self {
-        let terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(signal) => Some(signal),
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "could not install the SIGTERM handler; `daemon stop` will kill \
-                         this process ungracefully"
-                    );
-                    None
-                }
-            };
+        use tokio::signal::unix::SignalKind;
         Self {
-            terminate,
+            interrupt: install(SignalKind::interrupt(), "SIGINT"),
+            terminate: install(SignalKind::terminate(), "SIGTERM"),
             lock_lost: None,
         }
     }
@@ -106,40 +135,57 @@ impl Watch {
     /// Resolve on the first signal asking the daemon to stop.
     ///
     /// Cancel-safe, so it can live in a `select!` arm that loses to other
-    /// branches: `Signal::recv` is cancel-safe by contract, and a dropped
-    /// `ctrl_c()` future leaves the process-wide handler installed.
+    /// branches: `Signal::recv` is cancel-safe by contract, and the streams
+    /// themselves are owned by this struct, so nothing is deregistered when a
+    /// losing branch's future is dropped.
     pub async fn recv(&mut self) -> Cause {
-        // `Option::as_mut` + `futures::future::OptionFuture` would read better,
-        // but a never-resolving branch keeps this to one dependency-free
-        // `select!` whose arms are all cancel-safe.
-        let signalled = async {
-            match self.terminate.as_mut() {
-                Some(terminate) => {
+        loop {
+            // Destructured so the three sources are disjoint borrows and can be
+            // polled in one `select!`.
+            let Self {
+                interrupt,
+                terminate,
+                lock_lost,
+            } = self;
+            let cause = match lock_lost {
+                Some(lock_lost) => {
                     tokio::select! {
-                        _ = tokio::signal::ctrl_c() => Cause::Interrupt,
-                        _ = terminate.recv() => Cause::Terminate,
+                        () = fires(interrupt.as_mut()) => Some(Cause::Interrupt),
+                        () = fires(terminate.as_mut()) => Some(Cause::Terminate),
+                        owner = lock_lost => match owner {
+                            Ok(pid) => Some(Cause::LockLost(pid)),
+                            // The watchdog ended without reporting a loss (its
+                            // task panicked, or a refactor let it return). That
+                            // is NOT a lost lock.
+                            //
+                            // It must also not be answered inside this arm:
+                            // `select!` has already DROPPED the other branches'
+                            // futures by the time an arm body runs, so awaiting
+                            // `pending()` here — the previous shape — stranded
+                            // the signal streams and the daemon stopped
+                            // answering SIGINT and SIGTERM entirely. Forget the
+                            // channel and re-enter the select instead.
+                            Err(_) => None,
+                        },
                     }
                 }
                 None => {
-                    let _ = tokio::signal::ctrl_c().await;
-                    Cause::Interrupt
+                    tokio::select! {
+                        () = fires(interrupt.as_mut()) => Some(Cause::Interrupt),
+                        () = fires(terminate.as_mut()) => Some(Cause::Terminate),
+                    }
+                }
+            };
+            match cause {
+                Some(cause) => return cause,
+                None => {
+                    tracing::warn!(
+                        "the hangar ownership watchdog ended without reporting a loss; \
+                         continuing to serve and watching signals only"
+                    );
+                    self.lock_lost = None;
                 }
             }
-        };
-        match self.lock_lost.as_mut() {
-            Some(lock_lost) => {
-                tokio::select! {
-                    cause = signalled => cause,
-                    // A dropped sender (the watchdog task died) is not a lost
-                    // lock, so it must never masquerade as one: fall back to
-                    // waiting on the signals alone.
-                    owner = lock_lost => match owner {
-                        Ok(pid) => Cause::LockLost(pid),
-                        Err(_) => std::future::pending().await,
-                    },
-                }
-            }
-            None => signalled.await,
         }
     }
 }
@@ -153,6 +199,10 @@ impl Default for Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Signals are process-wide: two tests raising SIGTERM concurrently would
+    /// race for one delivery, and either could observe the other's.
+    static SIGNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The behavioural difference between the two causes, stated once so the
     /// run loop's teardown cannot drift from the documented contract.
@@ -181,6 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolved_watchdog_stands_the_daemon_down() {
+        let _serialised = SIGNAL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut watch = Watch::new().on_lock_lost(rx);
         tx.send(9001).expect("send new owner");
@@ -191,6 +242,10 @@ mod tests {
     /// the daemon down on a task panic.
     #[tokio::test]
     async fn a_dropped_watchdog_is_not_a_lost_lock() {
+        // Any installed `Watch` sees process-wide signals, so this must not
+        // overlap a sibling test that raises one — it would observe that
+        // delivery and read as "the seam resolved".
+        let _serialised = SIGNAL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
         let mut watch = Watch::new().on_lock_lost(rx);
         drop(tx);
@@ -200,5 +255,58 @@ mod tests {
                 .is_err(),
             "a dropped watchdog resolved the shutdown seam"
         );
+    }
+
+    /// ...and the daemon must still ANSWER signals afterwards.
+    ///
+    /// The regression this pins: handling the dropped watchdog inside a
+    /// `select!` arm stranded the signal streams, because `select!` drops the
+    /// losing branches' futures before an arm body runs. The daemon then
+    /// ignored SIGTERM forever — `daemon stop` would burn its whole budget and
+    /// only SIGKILL could end the process, skipping every guard's release.
+    ///
+    /// `a_dropped_watchdog_is_not_a_lost_lock` cannot see that: "still waiting"
+    /// and "hung forever" look identical to a timeout. This one delivers a real
+    /// signal, which is the only way to tell them apart.
+    ///
+    /// Safe to raise in-process: `Watch::new()` installs tokio's handler for
+    /// SIGTERM before the raise, so the default terminate disposition is already
+    /// replaced. Serialised against the sibling raise test by `SIGNAL_LOCK` —
+    /// signals are process-wide, and two watches would race for one delivery.
+    #[tokio::test]
+    async fn signals_still_arrive_after_the_watchdog_is_dropped() {
+        let _serialised = SIGNAL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let mut watch = Watch::new().on_lock_lost(rx);
+        drop(tx);
+
+        tokio::task::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).expect("raise SIGTERM");
+        });
+
+        let cause = tokio::time::timeout(std::time::Duration::from_secs(5), watch.recv())
+            .await
+            .expect("a dropped watchdog must not strand the signal handlers");
+        assert_eq!(cause, Cause::Terminate);
+    }
+
+    /// The plain path, so the raise-based proof above is anchored: a SIGTERM
+    /// with a live watchdog attached still reads as a terminate.
+    #[tokio::test]
+    async fn sigterm_resolves_the_seam() {
+        let _serialised = SIGNAL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let mut watch = Watch::new().on_lock_lost(rx);
+
+        tokio::task::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).expect("raise SIGTERM");
+        });
+
+        let cause = tokio::time::timeout(std::time::Duration::from_secs(5), watch.recv())
+            .await
+            .expect("SIGTERM must resolve the shutdown seam");
+        assert_eq!(cause, Cause::Terminate);
     }
 }
