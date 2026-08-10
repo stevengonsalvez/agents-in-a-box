@@ -134,7 +134,14 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         .expect("home tempdir");
     seed_isolated_home(home_tmp.path());
     let hangar_home = home_tmp.path().join("hangar-home");
+    fs::create_dir_all(&hangar_home).expect("create isolated hangar home");
+    fs::write(
+        hangar_home.join("install.json"),
+        r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#,
+    )
+    .expect("dismiss notification prompt in daemon home");
     let _ainb_home = EnvGuard::set("AINB_HOME", home_tmp.path().join(".agents-in-a-box"));
+    let _hangar_home_guard = EnvGuard::set("AINB_HANGAR_HOME", &hangar_home);
     let _disable_tmux_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
     let hangar = FleetHangar::start(&hangar_home);
     let questions = serde_json::json!([
@@ -274,7 +281,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     // Real broker plus the actual lifecycle-hook executable. Fleet answer must
     // traverse TUI -> fleet/action -> Hangar -> broker -> hook stdout, which is
     // the exact JSON Claude receives to resume its AskUserQuestion tool call.
-    let paths = Paths::under(home_tmp.path().join(".agents-in-a-box"));
+    let paths = Paths::under(&hangar_home);
     let broker_runtime = tokio::runtime::Runtime::new().expect("broker runtime");
     let broker_state = BrokerState::new();
     {
@@ -292,7 +299,8 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let hook_cwd = home_tmp.path().join("fleet-tripwire-project");
     let mut hook = Command::new(ainb_bin())
         .env("HOME", home_tmp.path())
-        .env("AINB_HOME", home_tmp.path().join(".agents-in-a-box"))
+        .env("AINB_HOME", &hangar_home)
+        .env("AINB_HANGAR_HOME", &hangar_home)
         .env("AINB_PARENT_SESSION", "fleet-panel-parent")
         .args([
             "fleet",
@@ -350,7 +358,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let peers_db = home_tmp.path().join("peers.db");
     let jobs_dir = home_tmp.path().join("jobs");
     let cmd = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
+        "HOME={home} AINB_HOME={hangar} AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home_tmp.path().display(),
         hangar = hangar_home.display(),
         peers = peers_db.display(),

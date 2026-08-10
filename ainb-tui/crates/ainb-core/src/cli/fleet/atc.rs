@@ -2951,7 +2951,16 @@ mod tests {
             original_questions.as_array().unwrap().clone()
         );
         let fingerprint = pending.request_fingerprint.unwrap();
-        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        let events = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Ok(events) = std::fs::read_to_string(home.path().join("events.jsonl")) {
+                    break events;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Fleet event must appear after broker registration");
         assert!(
             events.contains("ask-session"),
             "Fleet event must appear only after broker registration"

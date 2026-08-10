@@ -9419,6 +9419,22 @@ mod text_input_guard_tests {
         use crate::components::GitViewState;
         use std::path::PathBuf;
 
+        fn reset_text_context_state(state: &mut AppState) {
+            state.current_screen = screen_ids::HOME.to_string();
+            state.other_tmux_rename_mode = false;
+            state.ssh_session_rename_mode = false;
+            state.quick_commit_message = None;
+            state.auth_provider_popup_state.show_popup = false;
+            state.config_screen_state = Default::default();
+            state.config_popup_state = Default::default();
+            state.skills_state.search_active = false;
+            state.git_view_state = None;
+        }
+
+        // AppState construction refreshes session recovery from disk. Reuse one
+        // state because this predicate test only needs to vary its input flags.
+        let mut state = AppState::default();
+
         // Screen-only branches: switching `current_screen` is enough.
         // (Config is intentionally excluded — it's gated on edit state,
         // covered separately below.)
@@ -9428,7 +9444,7 @@ mod text_input_guard_tests {
             screen_ids::AUTH_SETUP,
             screen_ids::ATTACHED_TERMINAL,
         ] {
-            let mut state = AppState::default();
+            reset_text_context_state(&mut state);
             state.current_screen = (*screen).to_string();
             assert!(
                 EventHandler::is_text_input_context(&state),
@@ -9441,14 +9457,14 @@ mod text_input_guard_tests {
         // a setting or entering an API key, NOT when navigating the
         // categories list. Suppressing globals during plain navigation
         // would regress the help shortcut UX.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::CONFIG.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Config without edit mode must NOT be treated as text input"
         );
 
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::CONFIG.to_string();
         state.config_screen_state.editing = true;
         assert!(
@@ -9456,7 +9472,7 @@ mod text_input_guard_tests {
             "Config + editing = true must be treated as text input"
         );
 
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::CONFIG.to_string();
         state.config_screen_state.api_key_input_mode = true;
         assert!(
@@ -9470,7 +9486,7 @@ mod text_input_guard_tests {
         // the public `open_text` API so the test exercises a real
         // popup-open code path and stays valid if the popup_type
         // representation changes.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::CONFIG.to_string();
         state.config_popup_state.open_text("Title", "Desc", "key", "value");
         assert!(
@@ -9480,7 +9496,7 @@ mod text_input_guard_tests {
 
         // Negative control: a Choice popup is navigation-only (arrow
         // keys / Enter), so `H` should still toggle help.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::CONFIG.to_string();
         state.config_popup_state.open_choice(
             "Title",
@@ -9511,7 +9527,7 @@ mod text_input_guard_tests {
             }),
         ];
         for (label, setup) in cases {
-            let mut state = AppState::default();
+            reset_text_context_state(&mut state);
             setup(&mut state);
             assert!(
                 EventHandler::is_text_input_context(&state),
@@ -9529,7 +9545,7 @@ mod text_input_guard_tests {
         // text entry.
 
         // Skills search overlay.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::SKILLS.to_string();
         state.skills_state.search_active = true;
         assert!(
@@ -9538,7 +9554,7 @@ mod text_input_guard_tests {
         );
 
         // GitView commit-message mode.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::GIT_VIEW.to_string();
         let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
         git_state.start_commit_message_input();
@@ -9550,7 +9566,7 @@ mod text_input_guard_tests {
 
         // Negative control: GitView without commit mode active is NOT
         // a text input — it's a navigable screen.
-        let mut state = AppState::default();
+        reset_text_context_state(&mut state);
         state.current_screen = screen_ids::GIT_VIEW.to_string();
         state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
         assert!(
@@ -9560,7 +9576,7 @@ mod text_input_guard_tests {
 
         // Negative control: bare default state on HomeScreen is not a
         // text input.
-        let state = AppState::default();
+        reset_text_context_state(&mut state);
         assert!(
             !EventHandler::is_text_input_context(&state),
             "HomeScreen with no modal flags must NOT be treated as text input"

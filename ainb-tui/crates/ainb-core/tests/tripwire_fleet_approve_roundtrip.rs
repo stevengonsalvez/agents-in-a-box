@@ -53,7 +53,7 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
-    let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
 }
 
@@ -113,6 +113,12 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     fs::create_dir_all(&home).expect("create short-path home");
     seed_isolated_home(&home);
     let hangar_home = home.join("hangar-home");
+    fs::create_dir_all(&hangar_home).expect("create isolated hangar home");
+    fs::write(
+        hangar_home.join("install.json"),
+        r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#,
+    )
+    .expect("dismiss notification prompt in daemon home");
     let _ainb_home = EnvGuard::set("AINB_HOME", home.join(".agents-in-a-box"));
     let _disable_tmux_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
     let hangar = FleetHangar::start(&hangar_home);
@@ -145,7 +151,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         .expect("seeded approval has exact request fingerprint");
 
     // Real broker on the isolated approve.sock, riding a test-owned runtime.
-    let paths = Paths::under(home.join(".agents-in-a-box"));
+    let paths = Paths::under(&hangar_home);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let broker_state = BrokerState::new();
     {
@@ -185,7 +191,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     let peers_db = home.join("peers.db");
     let jobs_dir = home.join("jobs");
     let cmd = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home.display(),
         hangar = hangar_home.display(),
         peers = peers_db.display(),
@@ -213,13 +219,11 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         capture_pane(&session)
     );
     let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
-        c.contains("APPR")
-            && c.contains("STARTI")
-            && c.contains("State: IDLE / APPROVAL")
-            && c.contains("claude:fleet-ap")
-            && c.contains("claude:fleet-st")
+        c.contains("Fleet · 2 sessions")
             && c.contains("approving-project")
-            && c.contains("hangar-authoritative")
+            && c.contains("Approval required for Bash")
+            && c.contains("1 INPUT")
+            && c.contains("1 RUN")
     });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
@@ -229,7 +233,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         );
     };
     assert!(
-        open_cap.contains("y") && open_cap.contains("approve"),
+        open_cap.contains("y Approve"),
         "help bar must advertise the y approve lever:\n{open_cap}"
     );
     assert!(

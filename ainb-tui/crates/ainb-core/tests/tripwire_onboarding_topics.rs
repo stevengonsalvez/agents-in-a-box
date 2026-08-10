@@ -75,11 +75,12 @@ fn onboarding_dependency_step_renders_topics() {
         panic!("wizard welcome never rendered:\n{last}");
     }
 
-    // Advance Welcome -> Source -> Role -> UseCase -> DependencyCheck. The
-    // wizard has three questionnaire steps between Welcome and the dependency
-    // step; each accepts its default selection on Enter. The final Enter lands
-    // on DependencyCheck and auto-triggers the catalog detect.
-    for _ in 0..4 {
+    // Advance through the questionnaire steps. Detect the dependency screen
+    // rather than pinning a step count, since onboarding can grow questions.
+    for _ in 0..6 {
+        if capture(&session).contains("i install") {
+            break;
+        }
         Command::new("tmux")
             .args(["send-keys", "-t", &session, "Enter"])
             .status()
