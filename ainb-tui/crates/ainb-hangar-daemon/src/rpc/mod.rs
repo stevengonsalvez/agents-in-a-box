@@ -4044,6 +4044,37 @@ mod fleet_launch_tests {
     }
 
     #[test]
+    fn mirrored_claude_picker_single_select_stops_after_option_enter() {
+        let question = serde_json::json!({
+            "id": "choice",
+            "question": "Choose silver or indigo",
+            "options": [{"label": "silver"}, {"label": "indigo"}],
+        });
+        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+            question_id: "choice".to_string(),
+            selected_options: vec!["indigo".to_string()],
+            text: None,
+        }];
+        assert_eq!(
+            mirrored_claude_picker_steps(&[question.clone()], &answers),
+            Ok(vec![
+                MirroredClaudePickerStep::QuestionKey {
+                    question,
+                    key: "Down".to_string(),
+                },
+                MirroredClaudePickerStep::QuestionKey {
+                    question: serde_json::json!({
+                        "id": "choice",
+                        "question": "Choose silver or indigo",
+                        "options": [{"label": "silver"}, {"label": "indigo"}],
+                    }),
+                    key: "Enter".to_string(),
+                },
+            ])
+        );
+    }
+
+    #[test]
     fn mirrored_claude_picker_rejects_unverified_text_route() {
         let questions = vec![serde_json::json!({
             "id": "region",
@@ -4781,6 +4812,14 @@ fn mirrored_claude_picker_steps(
                 key: "Enter".to_string(),
             });
         }
+    }
+    if questions.len() == 1
+        && !questions[0]
+            .get("multiSelect")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Ok(steps);
     }
     steps.push(MirroredClaudePickerStep::Submit {
         answers: answers.to_vec(),
