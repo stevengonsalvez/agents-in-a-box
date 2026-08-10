@@ -296,9 +296,13 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
-      - name: Install tmux (Linux only; macOS runner ships it)
+      # lsof backs the notifyd ownership proof: a pid is only signalled once it is
+      # shown to hold this home's socket. The proof fails closed, so without lsof
+      # nothing is ever proven and reaping silently becomes a no-op, which fails
+      # `reap_signals_a_notifyd_serving_this_home` on Linux while macOS passes.
+      - name: Install tmux and lsof (Linux only; macOS runner ships them)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
+        run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
       - name: Verify hook script parses on the runner
         if: >-
           always() && (github.event_name != 'pull_request' ||

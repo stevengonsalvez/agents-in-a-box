@@ -85,6 +85,23 @@ impl FleetDaemonHealth {
     pub const fn is_online(&self) -> bool {
         matches!(self, Self::Online)
     }
+
+    /// Whether the daemon has been probed and found unreachable.
+    ///
+    /// Distinct from `!is_online()`: [`Self::Connecting`] is merely unprobed.
+    /// Collapsing the two is what made the first paint of every Fleet screen
+    /// claim the daemon was offline, and what disabled high-risk actions
+    /// before anything had actually failed.
+    #[must_use]
+    pub const fn is_offline(&self) -> bool {
+        matches!(self, Self::Offline(_))
+    }
+
+    /// Whether the subscription is still dialing and has reported nothing yet.
+    #[must_use]
+    pub const fn is_connecting(&self) -> bool {
+        matches!(self, Self::Connecting)
+    }
 }
 
 /// Ordered update from the persistent Fleet subscription worker.

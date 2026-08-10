@@ -1245,15 +1245,62 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
         // reason `b` is: the reserved-key invariant test refuses a browse
         // binding on a char the router or host swallows first (#450).
         FleetKey::Char('m') => state.mode = FleetMode::Chat(Box::new(ChatState::opening())),
+        // `r` is reconcile-or-explain, never restart. It used to fall through
+        // into `FleetAction::Restart` whenever reconcile was unavailable, which
+        // turned a non-destructive key into a destructive one on exactly the
+        // rows the footer had advertised `r Reconcile` for. Restart keeps its
+        // own binding on uppercase `R` (`events.rs`), matching the house
+        // convention every other screen follows: lowercase refreshes, uppercase
+        // does the heavy thing.
         FleetKey::Char('r') => {
             if let Some(intent) = reconcile_structured_intent(state) {
                 return Some(intent);
             }
-            return request_action(state, FleetAction::Restart);
+            state.feedback = Some(reconcile_refusal(state));
         }
         _ => {}
     }
     None
+}
+
+/// Why `r` cannot reconcile this row, or `None` when it can.
+///
+/// Single source of truth for the reconcile precondition: [`reduce_browse_key`]
+/// refuses exactly when this returns `Some`, and [`available_action_labels`]
+/// advertises `r Reconcile` exactly when it returns `None`. They were separate
+/// predicates and drifted (the label guard checked neither the provider nor
+/// the request fingerprint), so the footer promised an action the reducer
+/// declined. Keeping one function is what stops them diverging again.
+fn reconcile_blocked_reason(row: &FleetSessionRow) -> Option<&'static str> {
+    if !row.provider.eq_ignore_ascii_case("claude") {
+        return Some("reconcile is a Claude-only action");
+    }
+    if !row.is_managed() {
+        return Some("degraded session has no reconcile channel");
+    }
+    if !row.attention_state.eq_ignore_ascii_case("ASK") {
+        return Some("session is not waiting on a structured question");
+    }
+    if !row.capabilities.contains("structured_answer") {
+        return Some("session lacks structured_answer capability");
+    }
+    if row.current_request_fingerprint.is_none() {
+        return Some("no live structured request to reconcile");
+    }
+    None
+}
+
+/// Whether the footer may advertise `r Reconcile` for this row.
+fn reconcile_available(row: &FleetSessionRow) -> bool {
+    reconcile_blocked_reason(row).is_none()
+}
+
+/// Feedback shown when `r` cannot reconcile, so the refusal is never silent.
+fn reconcile_refusal(state: &FleetPaneState) -> String {
+    let reason = state.selected_session().map_or("no Fleet session selected", |row| {
+        reconcile_blocked_reason(row).unwrap_or("reconcile unavailable")
+    });
+    format!("{reason} (R restarts)")
 }
 
 /// Translate a pane key for the chat surface and act on what it did.
@@ -1292,14 +1339,10 @@ fn reconcile_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent
         .selected_key
         .as_deref()
         .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
-    let request_fingerprint = row.current_request_fingerprint.clone()?;
-    if !row.provider.eq_ignore_ascii_case("claude")
-        || !row.is_managed()
-        || !row.attention_state.eq_ignore_ascii_case("ASK")
-        || !row.capabilities.contains("structured_answer")
-    {
+    if !reconcile_available(row) {
         return None;
     }
+    let request_fingerprint = row.current_request_fingerprint.clone()?;
     Some(FleetIntent::Execute {
         session_key: row.session_key.clone(),
         expected_version: row.version,
@@ -2405,6 +2448,23 @@ pub fn render_degraded_banner(buffer: &mut WireBuffer, area_width: u16, top: u16
     );
 }
 
+/// Overlay the pre-probe banner: the subscription is dialing, nothing failed.
+///
+/// Separate from [`render_degraded_banner`] on purpose. An unprobed daemon is
+/// not an offline one, and the first frame of every Fleet screen is unprobed:
+/// claiming "offline, high-risk actions disabled" there was a lie that only
+/// cleared on a manual refresh.
+pub fn render_connecting_banner(buffer: &mut WireBuffer, area_width: u16, top: u16) {
+    put_str(
+        buffer,
+        0,
+        top,
+        "Connecting to the Fleet daemon…",
+        MUTED,
+        area_width,
+    );
+}
+
 fn render_session_card(
     buffer: &mut WireBuffer,
     row_y: u16,
@@ -2818,6 +2878,10 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
             actions.push("Enter Answer");
             actions.push("c Open in Claude");
         }
+    }
+    // Advertised through the same predicate the reducer refuses on, so the
+    // footer can never promise a reconcile that `r` declines.
+    if reconcile_available(session) {
         actions.push("r Reconcile");
     }
     if session.attention_state.eq_ignore_ascii_case("APPROVAL")
@@ -2840,12 +2904,11 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
     if session.capabilities.contains("stop") {
         actions.push("s Stop");
     }
-    if session.capabilities.contains("restart")
-        && !(session.attention_state.eq_ignore_ascii_case("ASK")
-            && session.is_managed()
-            && session.capabilities.contains("structured_answer"))
-    {
-        actions.push("r Restart");
+    // Uppercase, always. Restart is bound to `R`; the conditional suppression
+    // that used to live here existed only to stop two meanings of `r` being
+    // advertised at once, and `r` no longer restarts anything.
+    if session.capabilities.contains("restart") {
+        actions.push("R Restart");
     }
     actions
 }
@@ -4093,8 +4156,10 @@ mod tests {
         );
     }
 
+    /// `r` used to fall through into `FleetAction::Restart` whenever reconcile
+    /// was unavailable, so a non-destructive key opened a destructive modal.
     #[test]
-    fn reconcile_key_keeps_restart_confirmation_for_non_interview_session() {
+    fn reconcile_key_never_falls_through_to_restart_for_non_interview_session() {
         let mut state = FleetPaneState::default();
         state.set_sessions(vec![session(
             "claude:waiting",
@@ -4107,17 +4172,20 @@ mod tests {
         let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
 
         assert!(reduced.intent.is_none());
-        assert!(matches!(
+        assert_eq!(
             reduced.state.mode,
-            FleetMode::Confirm {
-                action: FleetAction::Restart,
-                ..
-            }
-        ));
+            FleetMode::Browse,
+            "r must not open a destructive modal"
+        );
+        assert_eq!(
+            reduced.state.feedback(),
+            Some("session is not waiting on a structured question (R restarts)"),
+            "the refusal must say why, and where restart actually lives"
+        );
     }
 
     #[test]
-    fn reconcile_key_keeps_restart_confirmation_for_codex_interview() {
+    fn reconcile_key_never_falls_through_to_restart_for_codex_interview() {
         let mut state = FleetPaneState::default();
         let mut row = session("codex:ask", "codex", "IDLE", "ASK", "managed");
         row.current_request_fingerprint = Some("fingerprint-1".into());
@@ -4126,13 +4194,76 @@ mod tests {
         let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
 
         assert!(reduced.intent.is_none());
-        assert!(matches!(
-            reduced.state.mode,
-            FleetMode::Confirm {
-                action: FleetAction::Restart,
-                ..
+        assert_eq!(reduced.state.mode, FleetMode::Browse);
+        assert_eq!(
+            reduced.state.feedback(),
+            Some("reconcile is a Claude-only action (R restarts)")
+        );
+    }
+
+    /// A Claude ASK row whose request fingerprint has not landed yet is the
+    /// exact shape the old label guard advertised `r Reconcile` for and the
+    /// reducer then turned into a Restart modal.
+    #[test]
+    fn reconcile_key_refuses_ask_row_without_a_live_request_fingerprint() {
+        let mut state = FleetPaneState::default();
+        let mut row = session("claude:ask", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = None;
+        state.set_sessions(vec![row]);
+
+        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
+
+        assert!(reduced.intent.is_none());
+        assert_eq!(reduced.state.mode, FleetMode::Browse);
+        assert_eq!(
+            reduced.state.feedback(),
+            Some("no live structured request to reconcile (R restarts)")
+        );
+    }
+
+    /// The footer must never promise an action the reducer declines. Both read
+    /// the same predicate; this pins that they still agree across the whole
+    /// matrix of rows the divergence used to hide in.
+    #[test]
+    fn footer_advertises_reconcile_exactly_when_the_reducer_accepts_it() {
+        let mut checked = 0;
+        for provider in ["claude", "codex", "copilot"] {
+            for attention in ["ASK", "WAITING", "NONE", "APPROVAL"] {
+                for management in ["managed", "degraded"] {
+                    for fingerprint in [None, Some("fingerprint-1")] {
+                        let key = "row:under:test";
+                        let mut row = session(key, provider, "IDLE", attention, management);
+                        row.current_request_fingerprint = fingerprint.map(str::to_string);
+                        let labels = available_action_labels(&row);
+                        let advertised = labels.contains(&"r Reconcile");
+                        assert!(
+                            !labels.contains(&"r Restart"),
+                            "lowercase r must never be advertised as restart"
+                        );
+
+                        let mut state = FleetPaneState::default();
+                        state.set_sessions(vec![row]);
+                        let reduced = apply(&state, FleetEvent::Key(FleetKey::Char('r')));
+                        let reconciled = matches!(
+                            reduced.intent,
+                            Some(FleetIntent::Execute {
+                                action: FleetAction::ReconcileStructured { .. },
+                                ..
+                            })
+                        );
+
+                        assert_eq!(
+                            advertised, reconciled,
+                            "footer/reducer disagree for \
+                             provider={provider} attention={attention} \
+                             management={management} fingerprint={fingerprint:?}"
+                        );
+                        checked += 1;
+                    }
+                }
             }
-        ));
+        }
+        assert_eq!(checked, 48, "matrix size changed, re-check the guard");
     }
 
     #[test]

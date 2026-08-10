@@ -392,7 +392,19 @@ fn find_open_ask_user_question(rows: &[Option<Value>]) -> Option<AskUserQuestion
 /// Extract [`AskUserQuestionData`] from an AskUserQuestion `tool_use` block's
 /// `input`. Returns None if the block is malformed (no `questions` array).
 fn parse_ask_data(block: &Value) -> Option<AskUserQuestionData> {
-    let input = block.get("input")?;
+    ask_data_from_tool_input(block.get("input")?)
+}
+
+/// Extract [`AskUserQuestionData`] from an AskUserQuestion tool INPUT, the
+/// `{"questions":[…]}` object, wherever it came from.
+///
+/// The transcript carries it as a `tool_use` block's `input`; a Claude hook line
+/// carries the identical object as `payload.tool_input`, and carries it at the
+/// moment the picker OPENS rather than when it resolves. Both producers parse
+/// through this one function so the [`AskUserQuestionData`] they yield (and
+/// therefore the request key derived from it) is identical for one question.
+#[must_use]
+pub fn ask_data_from_tool_input(input: &Value) -> Option<AskUserQuestionData> {
     let questions = input.get("questions").and_then(Value::as_array)?;
     let first = questions.first()?;
     Some(AskUserQuestionData {

@@ -8,7 +8,7 @@
 use ainb_hangar_daemon::beads_sync::reconcile;
 use ainb_hangar_daemon::beads_sync::reconcile::cli::{BeadsCli, BeadsCommand};
 use ainb_hangar_daemon::observability::{self, ObservabilityOpts};
-use ainb_hangar_daemon::{boot, log_dir};
+use ainb_hangar_daemon::{boot, hangar_dir, log_dir};
 use clap::{Parser, Subcommand};
 
 /// Hangar control-plane daemon.
@@ -55,13 +55,21 @@ async fn main() -> anyhow::Result<()> {
     opts.otlp = observability::OtlpOpts::from_env();
     let guard = observability::install(opts)?;
 
+    // This binary had NO panic hook, while the `ainb` binary that embeds the
+    // same daemon library has had one all along, and the launcher prefers this
+    // binary whenever it is fresh. So the daemon most likely to be running was
+    // the one whose panics reached nothing but a discarded stderr.
+    observability::install_panic_hook();
+
     let args = Args::parse();
     let result = match args.command {
         Some(Command::Beads(cli)) => {
             let BeadsCommand::Reconcile(reconcile_args) = cli.command;
             reconcile::dispatch(&reconcile_args).await
         }
-        None => boot(args.once).await,
+        // Only the long-lived daemon leaves crash breadcrumbs; `beads reconcile`
+        // is a short-lived subcommand whose exit is the caller's exit code.
+        None => run_daemon(args.once).await,
     };
 
     // P8.2 graceful shutdown (tokio-runtime-drop trap): the daemon's run loop
@@ -72,5 +80,35 @@ async fn main() -> anyhow::Result<()> {
     // and Err paths so a daemon error still exports its final spans.
     guard.shutdown();
 
+    result
+}
+
+/// Boot the daemon under crash breadcrumbs.
+///
+/// The breadcrumbs are the half of the diagnosis a panic hook cannot provide:
+/// SIGKILL, `abort`, and an OOM kill run no user code at all, and two of the
+/// four observed daemon deaths left no ERROR line and no panic, just a JSON log
+/// that stops mid-stream. A heartbeat file that is only ever removed on an
+/// exit we observed turns that silence into evidence.
+///
+/// `record_exit` runs on both the `Ok` and `Err` arms so a boot failure (an
+/// unmigratable database, a bind error) is recorded as an explained exit rather
+/// than reading as a hard kill.
+async fn run_daemon(once: bool) -> anyhow::Result<()> {
+    match hangar_dir() {
+        Ok(dir) => {
+            observability::note_phase("boot");
+            observability::start_breadcrumbs(&dir);
+        }
+        Err(e) => tracing::warn!(error = %e, "no hangar home; crash breadcrumbs disabled"),
+    }
+
+    let result = boot(once).await;
+
+    observability::note_phase("shutdown");
+    match &result {
+        Ok(()) => observability::record_exit("clean exit: daemon run loop returned"),
+        Err(e) => observability::record_exit(&format!("error: {e:#}")),
+    }
     result
 }

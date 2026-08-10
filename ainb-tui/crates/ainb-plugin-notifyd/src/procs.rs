@@ -14,9 +14,95 @@
 //! `-axo pid=,etime=,args=`, and the classification logic — the part worth
 //! testing — is a pure function over the parsed rows.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::Paths;
+
+/// A pid this process has PROVED it is allowed to signal.
+///
+/// The only constructor is [`OwnedPid::holding_one_of`], and every signal sent by
+/// this module takes an `OwnedPid`, so "signal a process we do not own" is a type
+/// error rather than something a reviewer has to spot.
+///
+/// It exists because [`enumerate`] reads `ps -axo` across every user and every
+/// `$AINB_HANGAR_HOME` on the host, while [`scan`] resolves the live-owner list from
+/// exactly ONE home. A notifyd serving a different home was therefore classified
+/// [`DaemonClass::Orphan`] and SIGTERM/SIGKILLed. Observed live: `ainb notifyd
+/// restart` inside an isolated sandbox home killed the developer's real daemon.
+#[derive(Debug)]
+struct OwnedPid(u32);
+
+impl OwnedPid {
+    /// Prove `pid` belongs to this stack, or refuse to signal it.
+    ///
+    /// The proof is possession: the process must hold a unix socket bound to one of
+    /// `sockets` (this home's `notify.sock` / `approve.sock`), under the current uid.
+    /// Both are bound by the daemon at startup, so a wedged owner that stopped
+    /// serving still proves ownership, while a notifyd from another home never can.
+    ///
+    /// Fails closed. No `lsof`, an unreadable process, a released socket, or any
+    /// other ambiguity answers `None`, and the caller spares the process: leaking an
+    /// orphan is cheap, killing a live foreign daemon is not.
+    fn holding_one_of(pid: u32, sockets: &[&Path]) -> Option<Self> {
+        sockets.iter().any(|socket| pid_holds_socket(pid, socket)).then_some(Self(pid))
+    }
+
+    /// The proven pid, for reporting.
+    fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+/// Does `pid` hold a unix socket bound to `socket`, under the current uid?
+///
+/// `lsof -a -p <pid> -u <uid> -U -F n` lists the bound NAME of every unix socket the
+/// process holds; `-a` ANDs the pid and uid filters, so another user's process
+/// answers empty. Matching the bound name (rather than looking the path up with
+/// `lsof -- <path>`) is deliberate: a daemon whose socket file was replaced by a
+/// successor still reports the name it bound, which is exactly the wedged owner a
+/// reap is for.
+fn pid_holds_socket(pid: u32, socket: &Path) -> bool {
+    let uid = nix::unistd::Uid::current().as_raw().to_string();
+    let Ok(out) = Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-u", &uid, "-U", "-F", "n"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(ainb_hangar_core::lsof::strip_type_suffix)
+        .any(|name| socket_names_match(name, socket))
+}
+
+/// Compare a bound socket name from `lsof` to the path we expect.
+///
+/// Exact string match first: the daemon binds the very path [`Paths`] resolves. The
+/// fallback re-resolves both parent directories so a home reached through a symlink
+/// (`/tmp` -> `/private/tmp` on macOS) still matches; the socket file itself is not
+/// canonicalized because a wedged owner's path may already have been replaced.
+fn socket_names_match(name: &str, expected: &Path) -> bool {
+    if Path::new(name) == expected {
+        return true;
+    }
+    let real_dir = |p: &Path| p.parent().and_then(|d| std::fs::canonicalize(d).ok());
+    match (
+        real_dir(Path::new(name)),
+        real_dir(expected),
+        Path::new(name).file_name(),
+        expected.file_name(),
+    ) {
+        (Some(a), Some(b), Some(x), Some(y)) => a == b && x == y,
+        _ => false,
+    }
+}
 
 /// One running notifyd-family process discovered on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,12 +198,17 @@ fn parse_ps_line(line: &str) -> Option<NotifydProc> {
     })
 }
 
-/// Does this process look like a *daemon* notifyd? Matches the long-running
-/// forms — `ainb notifyd` / `ainb notifyd run`, or the slim `ainb-notifyd`
-/// (`run`) binary — but NOT the transient CLI subcommands (`status`, `stop`,
-/// `install`, `uninstall`, `list`): those are short-lived invocations, and
-/// labelling one ORPHAN with a "kill it" hint would be actively wrong. The
-/// `ainb` TUI itself never carries a `notifyd` token, so it is not matched.
+/// Does this process look like a *daemon* notifyd? Matches only the explicit
+/// daemon forms — `ainb notifyd run` and the slim `ainb-notifyd run` binary.
+///
+/// The subcommand must be exactly `run`. A missing subcommand used to count as
+/// daemon mode, which made every command line whose FINAL token happens to be
+/// `notifyd` — `ainb logs notifyd`, `ainb plugin install notifyd` — classify as a
+/// reapable daemon. The cost of the two mistakes is not symmetric: missing a
+/// bare-invoked daemon leaves it running, matching a CLI invocation kills it.
+///
+/// Transient `ainb notifyd status|stop|install|uninstall|list` calls are excluded
+/// for the same reason. The `ainb` TUI itself never carries a `notifyd` token.
 fn is_notifyd(p: &NotifydProc) -> bool {
     let base = p.bin.rsplit('/').next().unwrap_or(&p.bin);
     let toks: Vec<&str> = p.cmd.split_whitespace().collect();
@@ -130,8 +221,8 @@ fn is_notifyd(p: &NotifydProc) -> bool {
         "ainb-notifyd" => toks.get(1).copied(),
         _ => return false,
     };
-    // Daemon mode is the bare command or an explicit `run`.
-    matches!(sub, None | Some("run"))
+    // Daemon mode is an explicit `run`, never the bare command.
+    sub == Some("run")
 }
 
 /// Classify each discovered process. `live_pids` is the set of pids that
@@ -214,6 +305,10 @@ pub struct ReapReport {
     pub failed: Vec<(u32, String)>,
     /// The healthy live owner left untouched, if one was found.
     pub spared: Option<u32>,
+    /// Pids left alone because this process could not prove they belong to this
+    /// home (see [`OwnedPid`]) — typically a notifyd serving a different
+    /// `$AINB_HANGAR_HOME`, which is never ours to kill.
+    pub spared_unproven: Vec<u32>,
 }
 
 /// The pids worth reaping from a classified set: everything that is not a
@@ -223,45 +318,76 @@ pub(crate) fn reapable(daemons: &[ClassifiedDaemon]) -> Vec<u32> {
     daemons.iter().filter(|d| !d.class.is_healthy()).map(|d| d.proc.pid).collect()
 }
 
-fn signal_pid(pid: u32, sig: nix::sys::signal::Signal) -> nix::Result<()> {
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), sig)
+/// Deliver a real signal. Takes an [`OwnedPid`], so it is unreachable without a
+/// completed ownership proof.
+fn signal_owned(owned: &OwnedPid, sig: nix::sys::signal::Signal) -> nix::Result<()> {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(owned.0 as i32), sig)
 }
 
+/// Signal-delivery seam, so a test can observe what a reap DECIDED to signal
+/// without any process actually dying.
+type Signaller<'a> = &'a dyn Fn(&OwnedPid, nix::sys::signal::Signal) -> nix::Result<()>;
+
 /// Kill every notifyd process that isn't the healthy live owner — the
-/// orphans (and a wedged stale owner) the TUI flags. Sends `SIGTERM`,
-/// waits briefly, then `SIGKILL`s any survivor: wedged daemons don't
-/// always honour `SIGTERM`. The live owner is spared, and this very
-/// process can't be hit because its `notifyd reap` command line is
-/// excluded by the scan filter. Kills by exact pid only — never a name
-/// match or signal broadcast.
+/// orphans (and a wedged stale owner) the TUI flags — but only after proving
+/// each one belongs to THIS home (see [`OwnedPid`]). Sends `SIGTERM`, waits
+/// briefly, then `SIGKILL`s any survivor: wedged daemons don't always honour
+/// `SIGTERM`. Kills by exact proven pid only — never a name match or signal
+/// broadcast.
 pub fn reap() -> ReapReport {
+    let Ok(paths) = Paths::from_home() else {
+        return ReapReport::default();
+    };
+    reap_with(&paths, &scan(), &signal_owned)
+}
+
+/// The reap decision, parameterised on the home and the signal delivery so it can
+/// be driven end-to-end in a test against decoy processes we spawned ourselves.
+fn reap_with(paths: &Paths, daemons: &[ClassifiedDaemon], signal: Signaller<'_>) -> ReapReport {
     use nix::errno::Errno;
     use nix::sys::signal::Signal;
 
-    let daemons = scan();
+    // Both sockets are bound by our daemon at startup; holding either proves the
+    // process belongs to this home.
+    let sockets = [paths.socket.as_path(), paths.approve_socket.as_path()];
     let spared = daemons.iter().find(|d| d.class.is_healthy()).map(|d| d.proc.pid);
     let mut report = ReapReport {
         spared,
         ..Default::default()
     };
 
-    // Phase 1 — SIGTERM each target; collect the ones that took the signal.
+    // Phase 1 — prove ownership, then SIGTERM; collect the ones that took it.
     let mut pending = Vec::new();
-    for pid in reapable(&daemons) {
-        match signal_pid(pid, Signal::SIGTERM) {
-            Ok(()) => pending.push(pid),
+    for pid in reapable(daemons) {
+        let Some(owned) = OwnedPid::holding_one_of(pid, &sockets) else {
+            report.spared_unproven.push(pid);
+            continue;
+        };
+        match signal(&owned, Signal::SIGTERM) {
+            Ok(()) => pending.push(owned),
             Err(Errno::ESRCH) => report.killed.push(pid), // already gone
             Err(e) => report.failed.push((pid, e.to_string())), // EPERM, etc.
         }
     }
 
-    // Phase 2 — give them a moment, then SIGKILL any survivor and confirm.
+    // Phase 2 — give them a moment, then SIGKILL any survivor and confirm. The
+    // proof is REDONE first: a target that died during the grace can have its pid
+    // recycled by an unrelated process, which must not inherit our SIGKILL.
     if !pending.is_empty() {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        for pid in pending {
+        for owned in pending {
+            let pid = owned.get();
             if crate::pid::is_running(pid) {
-                let _ = signal_pid(pid, Signal::SIGKILL);
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                match OwnedPid::holding_one_of(pid, &sockets) {
+                    Some(still_ours) => {
+                        let _ = signal(&still_ours, Signal::SIGKILL);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    None => {
+                        report.spared_unproven.push(pid);
+                        continue;
+                    }
+                }
             }
             if crate::pid::is_running(pid) {
                 report.failed.push((pid, "survived SIGKILL".to_string()));
@@ -276,9 +402,7 @@ pub fn reap() -> ReapReport {
     // read a stale owner, mirroring what `cmd_stop` does. A SIGKILL'd owner
     // never runs its `PidFile::Drop`, so this is the only cleanup point.
     if report.spared.is_none() && !report.killed.is_empty() {
-        if let Ok(paths) = Paths::from_home() {
-            let _ = std::fs::remove_file(&paths.pid);
-        }
+        let _ = std::fs::remove_file(&paths.pid);
     }
 
     report
@@ -291,6 +415,10 @@ pub fn reap() -> ReapReport {
 pub struct RestartOutcome {
     /// The prior owner pid that was signalled to stop, if one was live.
     pub stopped: Option<u32>,
+    /// A live pid recorded in `notify.pid` that was NOT signalled because it
+    /// could not be proved to hold one of this home's sockets — a recycled pid,
+    /// or a pid file copied from another home. Left running on purpose.
+    pub stop_refused: Option<u32>,
     /// Wedged / orphan pids reaped before the fresh spawn.
     pub reaped: Vec<u32>,
     /// Pid of the freshly detach-spawned daemon.
@@ -376,18 +504,31 @@ pub fn restart(bind_timeout: std::time::Duration) -> anyhow::Result<RestartOutco
     let mut outcome = RestartOutcome::default();
 
     // 1. Stop the recorded owner and wait for it to actually exit — spawning
-    //    while it still holds the pid would make the new daemon bail.
+    //    while it still holds the pid would make the new daemon bail. The pid file
+    //    is a claim, not proof: a pid recorded before a crash can be recycled by an
+    //    unrelated process, so the owner is signalled only once it proves it holds
+    //    one of this home's sockets.
+    let sockets = [paths.socket.as_path(), paths.approve_socket.as_path()];
     if let Ok(Some(pid)) = crate::pid::read(&paths.pid) {
         if crate::pid::is_running(pid) {
-            let _ = signal_pid(pid, Signal::SIGTERM);
-            outcome.stopped = Some(pid);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while crate::pid::is_running(pid) && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if crate::pid::is_running(pid) {
-                let _ = signal_pid(pid, Signal::SIGKILL);
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            match OwnedPid::holding_one_of(pid, &sockets) {
+                Some(owned) => {
+                    let _ = signal_owned(&owned, Signal::SIGTERM);
+                    outcome.stopped = Some(pid);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while crate::pid::is_running(pid) && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    // Re-prove before escalating: the pid may have exited and been
+                    // recycled inside the grace window.
+                    if crate::pid::is_running(pid) {
+                        if let Some(still_ours) = OwnedPid::holding_one_of(pid, &sockets) {
+                            let _ = signal_owned(&still_ours, Signal::SIGKILL);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+                None => outcome.stop_refused = Some(pid),
             }
         }
     }
@@ -427,6 +568,8 @@ pub fn scan() -> Vec<ClassifiedDaemon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::sys::signal::Signal;
+    use tempfile::TempDir;
 
     fn proc(pid: u32, bin: &str) -> NotifydProc {
         NotifydProc {
@@ -435,6 +578,154 @@ mod tests {
             cmd: format!("{bin} notifyd run"),
             etime: "01:23".to_string(),
         }
+    }
+
+    /// A real process, spawned by us, that holds `socket` open.
+    ///
+    /// The listener is bound here and handed to a `sleep` child as its stdin, so
+    /// `lsof` reports the child holding that bound name — the same evidence a real
+    /// notifyd leaves. Killed by its exact pid on drop; never by name.
+    struct Decoy {
+        _listener: std::os::unix::net::UnixListener,
+        child: std::process::Child,
+    }
+
+    impl Decoy {
+        fn holding(socket: &Path) -> Self {
+            let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind decoy");
+            let handed = listener.try_clone().expect("clone decoy socket");
+            let child = Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                    handed,
+                )))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn decoy");
+            Self {
+                _listener: listener,
+                child,
+            }
+        }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for Decoy {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Raw `lsof` output for `pid`'s unix sockets, for failure messages only.
+    ///
+    /// Mirrors the argv [`pid_holds_socket`] uses, and reports the exit status and
+    /// stderr it discards, so a red test says which of the two it hit: no name to
+    /// match, or a name that did not match.
+    fn lsof_dump(pid: u32) -> String {
+        let uid = nix::unistd::Uid::current().as_raw().to_string();
+        match Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-u", &uid, "-U", "-F", "n"])
+            .output()
+        {
+            Ok(out) => format!(
+                "  status={}\n  stdout={:?}\n  stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => format!("  lsof failed to spawn: {e}"),
+        }
+    }
+
+    /// One orphan row for `pid`, as `scan()` would classify a stranger notifyd.
+    fn orphan_row(pid: u32) -> Vec<ClassifiedDaemon> {
+        vec![ClassifiedDaemon {
+            proc: proc(pid, "/usr/local/bin/ainb"),
+            class: DaemonClass::Orphan,
+            binary_drift: false,
+        }]
+    }
+
+    /// Run a reap against `paths`, recording what it decided to signal instead of
+    /// delivering it. Nothing dies; the decision is the thing under test.
+    fn reap_recording(
+        paths: &Paths,
+        daemons: &[ClassifiedDaemon],
+    ) -> (ReapReport, Vec<(u32, Signal)>) {
+        let delivered = std::sync::Mutex::new(Vec::new());
+        let report = reap_with(paths, daemons, &|owned: &OwnedPid, sig: Signal| {
+            delivered.lock().unwrap().push((owned.get(), sig));
+            Ok(())
+        });
+        let delivered = delivered.into_inner().unwrap();
+        (report, delivered)
+    }
+
+    /// The live incident: `ainb notifyd restart` under an isolated sandbox home
+    /// SIGKILLed the developer's real daemon, because `enumerate()` sees every
+    /// home on the host while `scan()` resolves the owner from just one.
+    #[test]
+    fn reap_spares_a_notifyd_serving_another_home() {
+        let mine = TempDir::new().unwrap();
+        let theirs = TempDir::new().unwrap();
+        let my_paths = Paths::under(mine.path());
+        let their_paths = Paths::under(theirs.path());
+        let decoy = Decoy::holding(&their_paths.socket);
+
+        let (report, delivered) = reap_recording(&my_paths, &orphan_row(decoy.pid()));
+
+        assert!(
+            delivered.is_empty(),
+            "a notifyd holding another home's socket must never be signalled, got {delivered:?}"
+        );
+        assert_eq!(report.spared_unproven, vec![decoy.pid()]);
+        assert!(report.killed.is_empty());
+    }
+
+    /// The other half: the guard must not turn the reaper into a no-op. A wedged
+    /// daemon holding THIS home's socket is still reaped, SIGTERM then SIGKILL.
+    #[test]
+    fn reap_signals_a_notifyd_serving_this_home() {
+        let mine = TempDir::new().unwrap();
+        let my_paths = Paths::under(mine.path());
+        let decoy = Decoy::holding(&my_paths.socket);
+
+        let (report, delivered) = reap_recording(&my_paths, &orphan_row(decoy.pid()));
+
+        // The recording signaller never actually kills, so the decoy survives the
+        // grace and the escalation fires too — both signals prove the target was
+        // accepted by the ownership proof at both decision points.
+        //
+        // On a mismatch, dump what the proof actually saw. A bare `left == right`
+        // says only that nothing was signalled, which is indistinguishable from
+        // the proof failing for an environmental reason: `pid_holds_socket` folds
+        // a missing `lsof`, a non-zero exit and an unparsable name into the same
+        // `false`. The raw output separates "lsof cannot name this socket here"
+        // from "the matching logic is wrong".
+        assert_eq!(
+            delivered,
+            vec![
+                (decoy.pid(), Signal::SIGTERM),
+                (decoy.pid(), Signal::SIGKILL)
+            ],
+            "ownership proof did not hold for the decoy.\n\
+             spared_unproven={:?}\n\
+             expected socket={}\n\
+             pid_holds_socket={}\n\
+             raw lsof -a -p {} -u {} -U -F n:\n{}",
+            report.spared_unproven,
+            my_paths.socket.display(),
+            pid_holds_socket(decoy.pid(), &my_paths.socket),
+            decoy.pid(),
+            nix::unistd::Uid::current().as_raw(),
+            lsof_dump(decoy.pid()),
+        );
+        assert!(report.spared_unproven.is_empty());
     }
 
     fn classified(class: DaemonClass, pid: u32) -> ClassifiedDaemon {
@@ -576,7 +867,7 @@ mod tests {
     #[test]
     fn parse_ps_line_extracts_fields() {
         let p = parse_ps_line(
-            "  41530 06-04:04:24 /opt/homebrew/Cellar/ainb/1.7.4/libexec/ainb notifyd",
+            "  41530 06-04:04:24 /opt/homebrew/Cellar/ainb/1.7.4/libexec/ainb notifyd run",
         )
         .unwrap();
         assert_eq!(p.pid, 41530);
@@ -607,15 +898,27 @@ mod tests {
         assert!(is_notifyd(&p));
     }
 
+    /// Was `is_notifyd_accepts_bare_subcommand`, which asserted the opposite.
+    /// A missing subcommand meant "daemon" to the old matcher, so ANY command
+    /// line ending in `notifyd` — `ainb logs notifyd`, `ainb plugin install
+    /// notifyd` — was classified as a reapable daemon. Losing a bare-invoked
+    /// daemon from the overlay costs nothing; SIGKILLing a CLI call does.
     #[test]
-    fn is_notifyd_accepts_bare_subcommand() {
-        let p = NotifydProc {
-            pid: 1,
-            bin: "/usr/local/bin/ainb".to_string(),
-            cmd: "/usr/local/bin/ainb notifyd".to_string(),
-            etime: "01:00".to_string(),
-        };
-        assert!(is_notifyd(&p));
+    fn is_notifyd_rejects_argv_without_an_explicit_run() {
+        for cmd in [
+            "/usr/local/bin/ainb notifyd",
+            "/usr/local/bin/ainb logs notifyd",
+            "/usr/local/bin/ainb plugin install notifyd",
+            "/usr/local/bin/ainb-notifyd",
+        ] {
+            let p = NotifydProc {
+                pid: 1,
+                bin: cmd.split_whitespace().next().unwrap().to_string(),
+                cmd: cmd.to_string(),
+                etime: "01:00".to_string(),
+            };
+            assert!(!is_notifyd(&p), "should reject `{cmd}`");
+        }
     }
 
     #[test]

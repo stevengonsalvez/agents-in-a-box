@@ -239,6 +239,32 @@ pub const ATTENTION_ASK_OPTION_3: &str = "canary";
 /// router's C1 resolve finds an exact-id match and the last-mile send delivers.
 pub const ATTENTION_ASK_SESSION: &str = "s-deploy";
 
+/// `created_at` for a seeded ASK/WAIT pair, as `(ask_ms, wait_ms)`.
+///
+/// Must be relative to NOW, not a fixed constant. These fixtures are consumed
+/// by tripwires that boot a REAL daemon against the wall clock, and the daemon
+/// sweeps unclaimed open rows at boot: `close_unclaimed_open` closes every
+/// `open` `ask_user_question` / `waiting` / `error` row older than
+/// `SWEEP_GRACE_MS` (15 min) that no `fleet_session` claims, stamping
+/// `answered_by='resolved:sweep'`. These rows are deliberately seeded with no
+/// claiming session, so a fixed 2023-era constant put them permanently outside
+/// the grace: both were closed before the TUI ever subscribed, and the control
+/// center rendered nothing but its tab bar.
+///
+/// The ASK stays EARLIER than the WAIT, which the urgency-rank assertion needs
+/// (a purely-recency sort would put the newer WAIT first). Both sit minutes
+/// inside the grace, so a slow run cannot age them out mid-test.
+fn attention_seed_times() -> (i64, i64) {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_millis(),
+    )
+    .expect("epoch millis fit in i64");
+    (now - 120_000, now - 60_000)
+}
+
 /// Seed one NEWER `waiting` row + one OLDER `ask_user_question` row into an
 /// about-to-be-opened `hangar.db`, both scoped to no workspace (a hand-started
 /// fleet session) so the fleet-wide `attention/subscribe` snapshot returns them
@@ -256,6 +282,7 @@ fn seed_attention_pair(home: &Path) {
             .await
             .expect("open attention-seed store");
         let pool = store.pool();
+        let (ask_ms, wait_ms) = attention_seed_times();
 
         // Newer WAIT row (idle-at-prompt marker).
         AttentionRepo::insert(
@@ -272,7 +299,7 @@ fn seed_attention_pair(home: &Path) {
                 })
                 .to_string(),
                 degraded: false,
-                created_at: 1_700_000_000_000,
+                created_at: wait_ms,
                 raise_transcript: None,
                 channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
@@ -302,7 +329,7 @@ fn seed_attention_pair(home: &Path) {
                 })
                 .to_string(),
                 degraded: false,
-                created_at: 1_699_999_000_000,
+                created_at: ask_ms,
                 raise_transcript: None,
                 channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
@@ -1622,6 +1649,7 @@ fn seed_deliverable_ask(home: &Path) {
             .await
             .expect("open deliverable-ask store");
         let pool = store.pool();
+        let (ask_ms, wait_ms) = attention_seed_times();
 
         AttentionRepo::insert(
             pool,
@@ -1637,7 +1665,7 @@ fn seed_deliverable_ask(home: &Path) {
                 })
                 .to_string(),
                 degraded: false,
-                created_at: 1_700_000_000_000,
+                created_at: wait_ms,
                 raise_transcript: None,
                 channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
@@ -1666,7 +1694,7 @@ fn seed_deliverable_ask(home: &Path) {
                 })
                 .to_string(),
                 degraded: false,
-                created_at: 1_699_999_000_000,
+                created_at: ask_ms,
                 raise_transcript: None,
                 channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
