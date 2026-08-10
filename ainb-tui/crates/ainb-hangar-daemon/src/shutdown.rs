@@ -232,6 +232,24 @@ pub fn install(lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>) -> Handle
     tokio::spawn(async move {
         let cause = watch.recv().await;
         let _ = tx.send(Some(cause));
+
+        // Keep OWNING the signal streams after publishing. tokio never
+        // unregisters a handler, so a task that returned here would leave
+        // SIGTERM caught and then silently discarded — and a daemon whose
+        // teardown wedges (a hung `tmux` call, a run that will not abort) could
+        // no longer be stopped by the supported command at all, while still
+        // holding the home's lock.
+        //
+        // A second signal escalates instead: the operator asked twice, and the
+        // graceful path has demonstrably not finished. Exiting here skips the
+        // remaining teardown deliberately — that is what "again" means — and is
+        // still better than an unkillable process holding a home.
+        let second = watch.recv().await;
+        tracing::warn!(
+            signal = second.as_str(),
+            "second shutdown signal during teardown; exiting immediately"
+        );
+        std::process::exit(1);
     });
     Handle { cause: rx }
 }
