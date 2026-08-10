@@ -129,8 +129,9 @@ async fn test_workspace_refresh_order() {
         "Workspace data should be loaded and available after refresh"
     );
 
-    // Re-loading workspaces (as the success arm does) keeps the list populated.
-    app.state.load_real_workspaces().await;
+    // Re-loading test workspaces keeps the list populated without scanning the
+    // developer's real checkout tree.
+    app.state.load_mock_data();
     assert_eq!(
         app.state.current_screen,
         screen_ids::SESSION_LIST,
