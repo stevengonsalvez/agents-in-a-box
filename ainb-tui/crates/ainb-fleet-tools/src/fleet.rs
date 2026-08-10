@@ -11,15 +11,19 @@
 //! which is what the copilot should branch on; the fenced text is for reading,
 //! never for obeying.
 
+use std::time::Duration;
+
 use ainb_hangar_client::{DaemonClient, DaemonError};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_proto::events::AttentionRow;
 use ainb_hangar_proto::fleet::{
-    FLEET_TRANSCRIPT_LIST_MAX, FleetMessageSendParams, FleetTranscriptListParams,
+    FLEET_CONFIRM_TTL_MS, FLEET_TRANSCRIPT_LIST_MAX, FleetCopilotGateParams,
+    FleetCopilotGateResult, FleetMessageSendParams, FleetTranscriptListParams,
 };
+use ainb_hangar_proto::methods;
 use ainb_hangar_proto::reprime::{REPRIME_ROWS, rows_that_fit};
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::envelope::{observed, row};
 
@@ -82,6 +86,19 @@ pub enum ToolFailure {
         /// The daemon's explanation.
         reason: String,
     },
+    /// The arguments the GATE returned do not satisfy the tool's shape.
+    ///
+    /// Reachable through the `edit` answer: the card's own arguments were
+    /// classified on the way in, but an operator who edits the buffer can drop a
+    /// required key. Failing here beats substituting a default, which for
+    /// `answer_need` would resolve another agent's need with an empty answer.
+    #[error("`{tool}`: {detail}")]
+    BadArguments {
+        /// The tool that could not run.
+        tool: String,
+        /// Which argument was missing or malformed.
+        detail: String,
+    },
     /// The tool exists and was allowed, but its execution arm ships with the
     /// confirm card in A2 (`spawn_session`, `interrupt`, `kill`, `archive`).
     /// Only reachable through an operator override.
@@ -117,6 +134,7 @@ impl ToolFailure {
             Self::AmbiguousNeed { .. } => "ambiguous_need",
             Self::AlreadyAnswered { .. } => "already_answered",
             Self::NotDelivered { .. } => "not_delivered",
+            Self::BadArguments { .. } => "bad_arguments",
             Self::NotWired { .. } => "not_wired",
             Self::Daemon { .. } => "daemon",
         }
@@ -177,11 +195,50 @@ pub struct FleetTools {
     client: DaemonClient,
 }
 
+/// How long a gate call waits before it gives up on the daemon.
+///
+/// Deliberately OUTSIDE the daemon's own card lifetime, computed from the same
+/// shared constant rather than restated: the daemon expires an unanswered card
+/// and answers `expired`, so anything this bound catches is a daemon that died
+/// holding the card, never a card an operator is still reading. A shorter bound
+/// would surface a live dialog as a retryable transport failure, and the retry
+/// would mint a second card for the same action.
+pub const GATE_TIMEOUT: Duration =
+    Duration::from_millis(FLEET_CONFIRM_TTL_MS.saturating_add(60_000));
+
 impl FleetTools {
     /// Wrap an authenticated daemon client.
     #[must_use]
     pub const fn new(client: DaemonClient) -> Self {
         Self { client }
+    }
+
+    /// Offer one tool call to the daemon's guardrail and wait for its verdict.
+    ///
+    /// The ONE classification in the system. This process deliberately does not
+    /// pre-classify: a second copy of the rules here would be a second thing to
+    /// keep in step with the daemon's, and the copy that is easiest to soften is
+    /// the one running downstream of every transcript the copilot has read.
+    ///
+    /// Blocks for as long as the operator's confirm card is open. A failure here
+    /// fails CLOSED at the call site, because a verdict that never arrived is
+    /// not an approval.
+    pub async fn gate(
+        &self,
+        tool: &str,
+        arguments: &Map<String, Value>,
+    ) -> Result<FleetCopilotGateResult, ToolFailure> {
+        Ok(self
+            .client
+            .call_typed_within(
+                methods::FLEET_COPILOT_GATE,
+                &FleetCopilotGateParams {
+                    tool: tool.to_string(),
+                    arguments: arguments.clone(),
+                },
+                GATE_TIMEOUT,
+            )
+            .await?)
     }
 
     /// `fleet_status`: the authoritative fleet snapshot, one record per session.
@@ -439,6 +496,10 @@ impl FleetTools {
                 // operator whose turn happened to trigger this call.
                 actor: Some(ACTOR.to_string()),
                 targets: targets.to_vec(),
+                // Unthreaded: a copilot prompt opens a conversation rather than
+                // answering one. The agent's reply is what carries the origin,
+                // and the daemon sets that itself at turn end.
+                origin_message_id: None,
                 text: text.to_string(),
                 request_id: request_id.clone(),
             })

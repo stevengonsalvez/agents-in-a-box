@@ -10,22 +10,28 @@
 //!   copilot ACP session
 //!        │ MCP stdio
 //!        ▼
-//!   ┌──────────────────────┐   classify first, always
-//!   │ [`server`]           │──▶ [`guardrail`] Auto | Confirm | Refused
-//!   └─────────┬────────────┘
-//!             │ Auto only
+//!   ┌──────────────────────┐   gate first, always
+//!   │ [`server`]           │──▶ fleet/copilot_gate ──▶ [`guardrail`] IN THE
+//!   └─────────┬────────────┘    (hangar.sock)          DAEMON, which parks a
+//!             │ run only                               confirm card and waits
 //!             ▼
 //!   ┌──────────────────────┐   reads wrapped by [`envelope`]
 //!   │ [`fleet`]            │──▶ hangar.sock (ainb-hangar-client)
 //!   └──────────────────────┘
 //! ```
 //!
-//! Two rules hold the crate together, both from the plan's Trust boundary:
+//! Three rules hold the crate together, the first two from the plan's Trust
+//! boundary:
 //!
 //! 1. The classifier decides on the tool and its arguments plus daemon-pinned
 //!    turn state. Never on anything the model wrote as prose.
 //! 2. Everything the tools return that was authored by another agent goes back
 //!    inside part 1's fenced, escaped envelope, framed as observed data.
+//! 3. The classifier RUNS in the daemon, not here. [`guardrail`] is pure and
+//!    lives here because it is this crate's contract (its tool table and its
+//!    argument shapes), but this process never calls it: a second live copy of
+//!    the rules, running downstream of every transcript the copilot has read,
+//!    is a second thing to keep in step and the easier one to soften.
 //!
 //! The crate is independently testable: [`fleet::FleetTools`] talks to whatever
 //! socket its [`ainb_hangar_client::DaemonClient`] was built with, so
