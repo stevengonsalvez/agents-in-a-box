@@ -312,7 +312,7 @@ struct FleetAnswerQueue: View {
             Text(question.header).font(.title3.weight(.semibold))
             Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
             if deck.mirroredPicker {
-                Text("Claude picker is also open. Submit here to select the same answer there.")
+                Text("Claude picker is also open. Submit here to select the same answer there. Text answers unavailable.")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(FleetPalette.mint)
             }
@@ -367,7 +367,7 @@ struct FleetAnswerQueue: View {
                 }
                 Button("Submit all answers") { submit(deck) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(deck.nativePicker || !complete(deck) || store.pendingIntentID != nil)
+                    .disabled(deck.nativePicker || !complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
             }
 
             if let notice = store.controlNotice {
@@ -421,6 +421,12 @@ struct FleetAnswerQueue: View {
     private func textBinding(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Binding<String> {
         let answerKey = key(deck, question)
         return Binding(get: { textAnswers[answerKey, default: ""] }, set: { textAnswers[answerKey] = $0 })
+    }
+
+    private func hasTextAnswer(_ deck: FleetInterviewDeck) -> Bool {
+        deck.questions.contains {
+            !textAnswers[key(deck, $0), default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     private func answered(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Bool {

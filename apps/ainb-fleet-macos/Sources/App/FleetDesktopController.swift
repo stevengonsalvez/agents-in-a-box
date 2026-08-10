@@ -527,7 +527,7 @@ private struct FleetNotchDetail: View {
                 }
             } else if let deck, let question = deck.questions[safe: clampedIndex(deck)] {
                 if deck.mirroredPicker {
-                    Text("Claude picker also open. Submit here selects same answer there.")
+                    Text("Claude picker is also open. Submit here to select the same answer there. Text answers unavailable.")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(FleetNotchPalette.mint)
                 }
@@ -642,7 +642,7 @@ private struct FleetNotchDetail: View {
             Button("Submit") { submit(deck) }
                 .buttonStyle(.borderedProminent)
                 .font(.caption)
-                .disabled(!complete(deck) || store.pendingIntentID != nil)
+                .disabled(!complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
         }
     }
 
@@ -672,6 +672,12 @@ private struct FleetNotchDetail: View {
     private func textBinding(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Binding<String> {
         let key = answerKey(deck, question)
         return Binding(get: { textAnswers[key, default: ""] }, set: { textAnswers[key] = $0 })
+    }
+
+    private func hasTextAnswer(_ deck: FleetInterviewDeck) -> Bool {
+        deck.questions.contains {
+            !textAnswers[answerKey(deck, $0), default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     private func answered(deck: FleetInterviewDeck, question: FleetInterviewQuestion) -> Bool {

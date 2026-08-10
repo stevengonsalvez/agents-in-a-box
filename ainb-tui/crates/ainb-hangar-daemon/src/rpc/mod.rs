@@ -4029,7 +4029,7 @@ mod fleet_launch_tests {
                 },
                 MirroredClaudePickerStep::QuestionKey {
                     question: questions[1].clone(),
-                    key: "Tab".to_string()
+                    key: "Enter".to_string()
                 },
                 MirroredClaudePickerStep::Submit { answers },
             ])
@@ -4666,7 +4666,10 @@ async fn execute_claude_mirrored_picker(
         Ok(steps) => steps,
         Err(detail) => return (ActionReceiptStatus::Rejected, Some(detail)),
     };
-    for step in steps {
+    for (index, step) in steps.into_iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
         let (status, detail) = verified_tmux_picker_for_mirrored_step(
             pool,
             session,
@@ -4676,9 +4679,14 @@ async fn execute_claude_mirrored_picker(
         )
         .await;
         if status != ActionReceiptStatus::Delivered {
-            return (status, detail);
+            let detail = detail.unwrap_or_else(|| "mirrored Claude picker step failed".to_string());
+            let detail = if index == 0 {
+                detail
+            } else {
+                format!("{detail}; native picker already advanced {index} key(s)")
+            };
+            return (status, Some(detail));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
     (
         ActionReceiptStatus::Delivered,
@@ -4763,7 +4771,7 @@ fn mirrored_claude_picker_steps(
         if multi_select {
             steps.push(MirroredClaudePickerStep::QuestionKey {
                 question: question.clone(),
-                key: "Tab".to_string(),
+                key: "Enter".to_string(),
             });
         }
     }
@@ -4878,12 +4886,15 @@ fn verify_claude_picker_submit(
     answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
     pane: &str,
 ) -> Result<(), String> {
-    if !pane.contains("Review your answers") || !pane.contains("Submit answers") {
+    let visible = normalize_picker_text(pane);
+    if !visible.contains(&normalize_picker_text(CLAUDE_PICKER_REVIEW_HEADING))
+        || !visible.contains(&normalize_picker_text(CLAUDE_PICKER_SUBMIT_ACTION))
+    {
         return Err("Claude native picker is not ready to submit".to_string());
     }
     for answer in answers {
         for selected in &answer.selected_options {
-            if !pane.contains(selected) {
+            if !visible.contains(&normalize_picker_text(selected)) {
                 return Err(
                     "Claude native picker review does not match selected answer".to_string()
                 );
@@ -5212,6 +5223,10 @@ async fn reconcile_claude_structured(
 fn claude_native_picker_is_visible(pane: &str) -> bool {
     pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
 }
+
+// Observed in Claude Code 2.1.226, exercised by the mirrored-picker live test.
+const CLAUDE_PICKER_REVIEW_HEADING: &str = "Review your answers";
+const CLAUDE_PICKER_SUBMIT_ACTION: &str = "Submit answers";
 
 /// The approve broker socket this daemon delivers answers and permission
 /// decisions on.
