@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.2] - 2026-08-10
+### Added
+- Merge pull request #663 from stevengonsalvez/f/remote-control-codex
+- **hangar-daemon**: add fail-fast BdLock acquisition
+- **hangar-daemon**: name a session after its worktree
+- **hangar-daemon**: stand down when this daemon no longer owns its home
+- **hangar-store**: name rows written before display_name existed
+- enable remote control for Hangar Codex
+- manage remote Codex threads
+
+### Fixed
+- Merge pull request #640 from stevengonsalvez/fix/reproducible-tapes
+- Merge pull request #655 from stevengonsalvez/fix/fleet-display-name
+- Merge pull request #656 from stevengonsalvez/fix/hangar-daemon-single-instance
+- Merge pull request #659 from stevengonsalvez/f/interview-in-both
+- Merge pull request #661 from stevengonsalvez/fix/acp-permission-version-race
+- **fleet**: stop after single-select answer
+- **hangar**: give every fresh snapshot round its own wire ids
+- **hangar**: ship interactive Codex migration
+- **hangar-cli**: never read an unidentified live process as a free home
+- **hangar-cli**: prove a daemon by its socket, not by being an ainb
+- **hangar-cli**: resolve the running daemon from the ownership lock
+- **hangar-daemon**: answer SIGTERM for the whole of boot, not just after it
+- **hangar-daemon**: delete the pid file on drop only when it still names us
+- **hangar-daemon**: escalate on a second shutdown signal
+- **hangar-daemon**: handle SIGTERM so the supported stop is graceful
+- **hangar-daemon**: identify a lock holder by its whole command line
+- **hangar-daemon**: install crash breadcrumbs only once the home is ours
+- **hangar-daemon**: keep the contended path fail-fast, not blocking
+- **hangar-daemon**: never judge a holder a stranger without positive evidence
+- **hangar-daemon**: refuse to boot when another daemon owns the home
+- **hangar-daemon**: release the lock by compare-and-delete
+- **hangar-daemon**: sample twice before declining a contended home
+- **hangar-daemon**: stop a dead watchdog from stranding the signal handlers
+- **hangar-daemon**: stop the boot-phase race from cancelling the run loop
+- **recordings**: make every tape reproducible
+- contain orphaned Hangar test daemons
+- publish structured broker updates
+- show onboarding dependency controls
+
+### Documentation
+- **hangar-daemon**: name the residual window in the lock's release path
+
+### Other
+- Merge pull request #652 from stevengonsalvez/chore/release-v1.20.0
+
+
 ## [1.20.0] - 2026-08-10
 ### Added
 - Merge pull request #649 from stevengonsalvez/f/interview-in-both
