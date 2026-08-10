@@ -65,6 +65,7 @@ pub struct InteractiveSession {
     pub model: Option<String>,        // Raw provider model ID passed through to the CLI
     pub headroom_enabled: bool,       // Route this session's CLI through the local Headroom proxy
     pub rtk_enabled: bool,            // RTK PreToolUse hook wired in session's worktree
+    pub codex_thread_id: Option<String>, // Exact shared app-server thread for Codex sessions
 }
 
 /// How the persisted model value should be interpreted.
@@ -111,6 +112,49 @@ pub struct SessionMetadata {
     /// Legacy Codex-only field. New writes use provider-agnostic `model`.
     #[serde(default)]
     pub codex_model: Option<CodexModel>,
+    /// Exact daemon-owned remote thread. Missing legacy values migrate lazily.
+    #[serde(default)]
+    pub codex_thread_id: Option<String>,
+}
+
+/// Create or resume one exact shared Codex app-server thread for Interactive.
+pub(crate) async fn ensure_codex_remote_thread(
+    session_id: Uuid,
+    cwd: &std::path::Path,
+    model: Option<&str>,
+    skip_permissions: bool,
+    headroom_enabled: bool,
+    existing_thread_id: Option<String>,
+) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+    if headroom_enabled {
+        anyhow::bail!(
+            "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
+        );
+    }
+    crate::cli::hangar::ensure_hangar_daemon();
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
+    client
+        .codex_session_ensure(ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+            session_id: session_id.to_string(),
+            cwd: cwd.display().to_string(),
+            model: model.map(str::to_owned),
+            thread_id: existing_thread_id,
+            skip_permissions,
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("prepare shared Codex thread: {error}"))
+}
+
+pub(crate) fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
+    SessionStore::mutate(|store| {
+        if let Some(metadata) =
+            store.sessions.values_mut().find(|metadata| metadata.session_id == session_id)
+        {
+            metadata.codex_thread_id = Some(thread_id);
+        }
+    })?;
+    Ok(())
 }
 
 impl SessionMetadata {
@@ -477,6 +521,22 @@ impl InteractiveSessionManager {
             }
         }
 
+        let codex_remote = if agent_type == SessionAgentType::Codex {
+            Some(
+                ensure_codex_remote_thread(
+                    session_id,
+                    &worktree_info.path,
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         // Step 2: Create tmux session name (format: tmux_{folder}_{branch})
         let worktree_folder = Self::extract_worktree_folder(&worktree_info.path);
         let tmux_session_name = Self::generate_tmux_name(&worktree_folder, &branch_name);
@@ -503,6 +563,7 @@ impl InteractiveSessionManager {
                     None,
                     false, // resume_requested — fresh launch
                     headroom_enabled,
+                    codex_remote.as_ref(),
                 )
                 .await?;
             }
@@ -526,6 +587,7 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
+            codex_thread_id: codex_remote.as_ref().map(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -544,6 +606,7 @@ impl InteractiveSessionManager {
             model,
             model_source: ModelSource::Raw,
             codex_model: None,
+            codex_thread_id: codex_remote.map(|remote| remote.thread_id),
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
@@ -645,6 +708,22 @@ impl InteractiveSessionManager {
             }
         }
 
+        let codex_remote = if agent_type == SessionAgentType::Codex {
+            Some(
+                ensure_codex_remote_thread(
+                    session_id,
+                    &existing_worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         // Step 1: Create tmux session name (format: tmux_{folder}_{branch})
         let worktree_folder = Self::extract_worktree_folder(&existing_worktree_path);
         let tmux_session_name = Self::generate_tmux_name(&worktree_folder, &branch_name);
@@ -671,6 +750,7 @@ impl InteractiveSessionManager {
                     None,
                     false, // resume_requested — fresh launch
                     headroom_enabled,
+                    codex_remote.as_ref(),
                 )
                 .await?;
             }
@@ -695,6 +775,7 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
+            codex_thread_id: codex_remote.as_ref().map(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -713,6 +794,7 @@ impl InteractiveSessionManager {
             model,
             model_source: ModelSource::Raw,
             codex_model: None,
+            codex_thread_id: codex_remote.map(|remote| remote.thread_id),
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
         if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
@@ -840,6 +922,7 @@ impl InteractiveSessionManager {
                     model: metadata.launch_model(),
                     headroom_enabled: metadata.headroom_enabled,
                     rtk_enabled: metadata.rtk_enabled,
+                    codex_thread_id: metadata.codex_thread_id.clone(),
                 });
             } else {
                 debug!(
@@ -891,6 +974,7 @@ impl InteractiveSessionManager {
                     model: None,
                     headroom_enabled: false,
                     rtk_enabled: false,
+                    codex_thread_id: None,
                 });
             }
         }
@@ -1670,6 +1754,7 @@ impl InteractiveSessionManager {
         resume_transcript: Option<PathBuf>,
         resume_requested: bool,
         headroom_enabled: bool,
+        codex_remote: Option<&ainb_hangar_proto::fleet::CodexSessionEnsureResult>,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
 
@@ -1730,14 +1815,29 @@ impl InteractiveSessionManager {
         // Build the CLI command with appropriate flags. Pure assembly lives in
         // `build_cli_cmd_parts` (unit-tested); `resume_transcript.is_some()` is
         // the "has prior history" guard for Claude's `--continue`.
-        let cmd_parts = Self::build_cli_cmd_parts(
-            &provider,
-            agent_type,
-            skip_permissions,
-            model.as_deref(),
-            resume_requested,
-            resume_transcript.is_some(),
-        );
+        let cmd_parts = if let Some(remote) = codex_remote {
+            if agent_type != SessionAgentType::Codex {
+                return Err(InteractiveSessionError::Other(anyhow::anyhow!(
+                    "remote Codex thread used for a non-Codex session"
+                )));
+            }
+            vec![
+                provider.command().to_string(),
+                "--remote".to_string(),
+                remote.endpoint.clone(),
+                "resume".to_string(),
+                remote.thread_id.clone(),
+            ]
+        } else {
+            Self::build_cli_cmd_parts(
+                &provider,
+                agent_type,
+                skip_permissions,
+                model.as_deref(),
+                resume_requested,
+                resume_transcript.is_some(),
+            )
+        };
 
         let cli_cmd = cmd_parts.join(" ");
 
@@ -2025,6 +2125,21 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_remote_codex_rejects_headroom_before_daemon_startup() {
+        let error = ensure_codex_remote_thread(
+            uuid::Uuid::new_v4(),
+            Path::new("/worktree"),
+            None,
+            false,
+            true,
+            None,
+        )
+        .await
+        .expect_err("Headroom cannot be routed through the shared app-server");
+        assert!(error.to_string().contains("Headroom is unavailable"));
+    }
 
     #[test]
     fn headroom_env_prefix_routes_claude_and_codex_only() {
@@ -2554,6 +2669,7 @@ mod tests {
             model: None,
             model_source: ModelSource::Raw,
             codex_model: None,
+            codex_thread_id: None,
         };
         assert_eq!(metadata.display_workspace_name(), "shotclubhouse");
 
@@ -2682,6 +2798,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         });
         store.save().expect("save");
 
@@ -2733,6 +2850,7 @@ mod tests {
                 model: Some("gpt-5.6-luna".to_string()),
                 model_source: ModelSource::Raw,
                 codex_model: Some(CodexModel::Gpt55),
+                codex_thread_id: None,
             });
         })
         .expect("save");
@@ -2834,6 +2952,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         const WRITERS: usize = 12;

@@ -80,6 +80,7 @@ pub struct CodexManagerHandle {
     commands: mpsc::Sender<ManagerCommand>,
     capabilities: Arc<CodexCapabilities>,
     socket_path: Arc<PathBuf>,
+    owns_server: bool,
     request_timeout: Duration,
 }
 
@@ -87,6 +88,16 @@ impl CodexManagerHandle {
     /// Negotiated version-probed capabilities.
     pub fn capabilities(&self) -> &CodexCapabilities {
         &self.capabilities
+    }
+
+    /// Canonical Unix socket shared by every Ainb-managed Codex thread.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Ownership of the app-server bound at [`Self::socket_path`].
+    pub fn ownership(&self) -> &'static str {
+        if self.owns_server { "owned" } else { "adopted" }
     }
 
     /// Managed TUI command connected to this manager's shared app-server.
@@ -105,6 +116,25 @@ impl CodexManagerHandle {
         model: Option<&str>,
     ) -> Result<String, ProviderError> {
         let result = self.request("thread/start", json!({ "cwd": cwd, "model": model })).await?;
+        nested_id(&result, "thread")
+    }
+
+    /// Start an Interactive thread with its launch policy set on the server.
+    ///
+    /// Remote clients do not carry CLI environment or permission flags to the
+    /// app-server, so this policy must be attached when the thread is created.
+    pub async fn thread_start_interactive(
+        &self,
+        cwd: &Path,
+        model: Option<&str>,
+        skip_permissions: bool,
+    ) -> Result<String, ProviderError> {
+        let result = self
+            .request(
+                "thread/start",
+                interactive_thread_start_params(cwd, model, skip_permissions),
+            )
+            .await?;
         nested_id(&result, "thread")
     }
 
@@ -274,6 +304,20 @@ impl CodexManagerHandle {
     }
 }
 
+fn interactive_thread_start_params(
+    cwd: &Path,
+    model: Option<&str>,
+    skip_permissions: bool,
+) -> Value {
+    let mut params = json!({ "cwd": cwd, "model": model });
+    if skip_permissions {
+        let object = params.as_object_mut().expect("interactive thread params are an object");
+        object.insert("approvalPolicy".into(), json!("never"));
+        object.insert("sandbox".into(), json!("danger-full-access"));
+    }
+    params
+}
+
 /// Running manager, ordered inbound receiver, and actor join handle.
 pub struct ManagedCodexManager {
     /// Cloneable control handle.
@@ -295,6 +339,20 @@ impl ManagedCodexManager {
 /// Return active process-wide Codex manager handle when transport is healthy.
 pub async fn active_handle() -> Option<CodexManagerHandle> {
     active_manager().read().await.clone()
+}
+
+/// Wait briefly for daemon startup to publish its manager handle.
+pub async fn wait_for_active_handle(timeout: Duration) -> Option<CodexManagerHandle> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(handle) = active_handle().await {
+            return Some(handle);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Health of the managed Codex transport, for the daemon's status surfaces.
@@ -326,6 +384,59 @@ pub struct CodexTransportHealth {
 /// status RPC in `rpc/mod.rs`; both are outside this file.
 pub async fn transport_health() -> CodexTransportHealth {
     transport_health_state().read().await.clone()
+}
+
+/// One locally discovered Codex app-server. Socket paths stay private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerInventoryRow {
+    /// Local process identifier.
+    pub pid: u32,
+    /// `owned`, `adopted`, or `external`.
+    pub ownership: String,
+    /// Whether the process requested remote control enrollment.
+    pub remote_control: bool,
+    /// Managed transport health, or `unknown` for external processes.
+    pub health: String,
+}
+
+/// Bounded local app-server inventory for diagnostics.
+pub async fn app_server_inventory() -> Vec<CodexAppServerInventoryRow> {
+    let active = active_handle().await;
+    let health = transport_health().await;
+    let Some(ps_output) = ps_process_table().await else {
+        return Vec::new();
+    };
+    ps_output
+        .lines()
+        .filter_map(parse_ps_row)
+        .filter(|row| is_codex_app_server(row.args) && !row.args.contains("app-server proxy"))
+        .map(|row| {
+            let managed = active.as_ref().is_some_and(|handle| {
+                codex_server_socket(row.args)
+                    .is_some_and(|socket| socket == handle.socket_path().to_string_lossy())
+            });
+            CodexAppServerInventoryRow {
+                pid: row.pid,
+                ownership: if managed {
+                    active.as_ref().expect("active checked").ownership().to_string()
+                } else {
+                    "external".to_string()
+                },
+                remote_control: row.args.split_whitespace().any(|arg| arg == "--remote-control"),
+                health: if managed {
+                    if health.degraded {
+                        "degraded"
+                    } else {
+                        "healthy"
+                    }
+                    .to_string()
+                } else {
+                    "unknown".to_string()
+                },
+            }
+        })
+        .take(DEFAULT_CODEX_MAX_SERVERS)
+        .collect()
 }
 
 /// Consecutive failures after which the transport is called degraded and logged at
@@ -656,6 +767,7 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
         stdin,
         capabilities,
         config,
+        owns_server,
         preparation.marker_repair,
         cleanup,
     )
@@ -1541,6 +1653,7 @@ async fn spawn_connection<R, W>(
     mut writer: W,
     capabilities: CodexCapabilities,
     config: CodexManagerConfig,
+    owns_server: bool,
     marker_repair: Option<MarkerRepair>,
     mut cleanup: Box<dyn ProcessCleanup>,
 ) -> Result<ManagedCodexManager, ProviderError>
@@ -1572,6 +1685,7 @@ where
         commands,
         capabilities: Arc::clone(&capabilities),
         socket_path: Arc::new(config.socket_path),
+        owns_server,
         request_timeout: config.request_timeout,
     };
     let task = tokio::spawn(async move {
@@ -2712,6 +2826,7 @@ mod tests {
             manager_write,
             capabilities(true),
             config(),
+            false,
             Some(MarkerRepair {
                 path: repair_path.clone(),
                 expected: None,
@@ -2797,6 +2912,7 @@ mod tests {
             manager_write,
             capabilities(false),
             config(),
+            false,
             None,
             Box::new(FakeCleanup(cleanup_flag)),
         )
@@ -3024,5 +3140,17 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+
+    #[test]
+    fn interactive_yolo_policy_is_sent_to_the_app_server() {
+        let params = interactive_thread_start_params(Path::new("/worktree"), Some("gpt-5"), true);
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandbox"], "danger-full-access");
+        assert_eq!(params["model"], "gpt-5");
+
+        let default_params = interactive_thread_start_params(Path::new("/worktree"), None, false);
+        assert!(default_params.get("approvalPolicy").is_none());
+        assert!(default_params.get("sandbox").is_none());
     }
 }

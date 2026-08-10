@@ -159,13 +159,20 @@ fn launch_and_goto_sessions(home: &Path, session: &str) {
         capture(session)
     );
 
-    Command::new("tmux")
-        .args(["send-keys", "-t", session, "s"])
-        .status()
-        .expect("send s");
-
     let nav_deadline = Instant::now() + Duration::from_secs(20);
-    let post = poll(session, nav_deadline, is_on_sessions_screen);
+    let mut post = None;
+    while Instant::now() < nav_deadline {
+        let cap = capture(session);
+        if is_on_sessions_screen(&cap) {
+            post = Some(cap);
+            break;
+        }
+        Command::new("tmux")
+            .args(["send-keys", "-t", session, "s"])
+            .status()
+            .expect("send s");
+        thread::sleep(Duration::from_millis(500));
+    }
     assert!(
         post.is_some(),
         "sessions screen never rendered after 's'.\n{}",

@@ -155,6 +155,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         let session2 = SessionMetadata {
@@ -170,6 +171,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         store.sessions.insert(session1.tmux_session_name.clone(), session1);

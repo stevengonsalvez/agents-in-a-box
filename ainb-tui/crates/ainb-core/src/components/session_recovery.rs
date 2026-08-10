@@ -194,26 +194,30 @@ pub struct RecoveryResultLine {
 
 impl Default for SessionRecoveryState {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
 
 impl SessionRecoveryState {
     pub fn new() -> Self {
-        let mut state = Self {
+        let mut state = Self::empty();
+        state.refresh();
+        state
+    }
+
+    fn empty() -> Self {
+        Self {
             orphaned_sessions: Vec::new(),
             orphaned_worktrees: Vec::new(),
             view_mode: RecoveryViewMode::default(),
             selected_index: 0,
             selected_items: HashSet::new(),
             list_state: ListState::default(),
-            loading: true,
+            loading: false,
             last_error: None,
             action_result: None,
             recovery_overlay: None,
-        };
-        state.refresh();
-        state
+        }
     }
 
     /// Get the total count of items in current view (includes separator in All view)
@@ -823,6 +827,7 @@ impl SessionRecoveryState {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         // Locked RMW (pu4): serialise this recovery re-register against live
@@ -2083,5 +2088,19 @@ impl SessionRecovery {
             .style(Style::default().bg(PANEL_BG));
 
         frame.render_widget(paragraph, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionRecoveryState;
+
+    #[test]
+    fn default_defers_recovery_scan_until_the_screen_is_opened() {
+        let state = SessionRecoveryState::default();
+
+        assert!(!state.loading);
+        assert!(state.orphaned_sessions.is_empty());
+        assert!(state.orphaned_worktrees.is_empty());
     }
 }

@@ -443,7 +443,7 @@ fn parse_csv(raw: &str) -> HashSet<String> {
 /// Operator-controlled kill switch. Recognises `1`, `true`, `yes`, `on`
 /// (case-insensitive) — anything else, including unset, leaves plugins
 /// enabled so a typo doesn't silently disable the runtime.
-fn plugins_disabled() -> bool {
+pub(crate) fn plugins_disabled() -> bool {
     match std::env::var("AINB_DISABLE_PLUGINS") {
         Ok(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),

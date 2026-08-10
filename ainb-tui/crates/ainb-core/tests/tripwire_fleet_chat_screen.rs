@@ -144,7 +144,7 @@ where
 /// catch, and a retry loop makes it invisible. The spacing in the home banner
 /// is load-bearing too, the setup wizard's splash also says "Agents in a Box".
 fn open_chat_surface(session: &str) -> bool {
-    if !wait_for(session, "A I N B", 60) {
+    if !wait_for(session, "Enter select | Tab content", 60) {
         return false;
     }
     send_key(session, "f");
@@ -173,7 +173,7 @@ fn chat_journey(prefix: &str) -> (tempfile::TempDir, FleetHangar, ExactTmuxSessi
     let name = format!("{prefix}{}", std::process::id());
     let tmux = ExactTmuxSession::create(name, "180", "50");
     let command = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} \
+        "HOME={home} AINB_HOME={hangar} AINB_HANGAR_HOME={hangar} \
          AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 \
          CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home_tmp.path().display(),

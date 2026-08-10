@@ -181,11 +181,14 @@ fn help_overlay_documents_panels_section() {
     let session = format!("tripwire-help-{}", std::process::id());
     launch_to_home(&session, home_tmp.path());
 
-    // `?` opens the global help overlay.
-    send_key(&session, "?");
-    let cap = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
-        c.contains("Panels (closing returns here)")
-    });
+    // `?` opens the global help overlay. Re-send during the bounded startup
+    // window because the terminal can paint before its first key is accepted.
+    let cap = poll_capture_resending(
+        &session,
+        "?",
+        Instant::now() + Duration::from_secs(30),
+        |c| c.contains("Panels (closing returns here)"),
+    );
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
     kill_session(&session);
 

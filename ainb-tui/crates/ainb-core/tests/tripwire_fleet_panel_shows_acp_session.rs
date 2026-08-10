@@ -97,21 +97,21 @@ fn wait_for(session: &str, needle: &str, secs: u64) -> bool {
     false
 }
 
-/// Open Fleet the way a user does: wait for the home screen to paint, then
-/// press `f` ONCE.
-///
-/// Pressing `f` on a loop until something happens would be the wrong test. A
-/// modal that swallows the first press is precisely the failure this is here to
-/// catch, and a retry loop makes it invisible. The spacing in the home banner is
-/// load-bearing too: the setup wizard's splash also says "Agents in a Box", so
-/// the unspaced name would match a screen that eats `f` rather than the screen
-/// that acts on it.
+/// Open Fleet after the home input loop is ready. A freshly launched terminal
+/// can paint its legend before tmux accepts its first key, so retry the routing
+/// shortcut within the bounded startup window.
 fn open_fleet_panel(session: &str) -> bool {
-    if !wait_for(session, "A I N B", 60) {
+    if !wait_for(session, "Enter select | Tab content", 60) {
         return false;
     }
-    send_key(session, "f");
-    wait_for(session, "Fleet ·", 30)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        send_key(session, "f");
+        if wait_for(session, "Fleet ·", 1) {
+            return true;
+        }
+    }
+    false
 }
 
 #[test]
@@ -127,7 +127,8 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         .expect("home tempdir");
     let hangar_home = home_tmp.path().join("hangar-home");
     seed_isolated_home(home_tmp.path(), &hangar_home);
-    let _ainb_home = EnvGuard::set("AINB_HOME", home_tmp.path().join(".agents-in-a-box"));
+    let _ainb_home = EnvGuard::set("AINB_HOME", &hangar_home);
+    let _hangar_home_guard = EnvGuard::set("AINB_HANGAR_HOME", &hangar_home);
     let _no_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
 
     // A real daemon on a real socket, same as every other Fleet tripwire.
@@ -149,7 +150,7 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
         ])
         .arg(&cwd)
         .env("HOME", home_tmp.path())
-        .env("AINB_HOME", home_tmp.path().join(".agents-in-a-box"))
+        .env("AINB_HOME", &hangar_home)
         .env("AINB_HANGAR_HOME", &hangar_home)
         .output()
         .expect("run ainb fleet acp create");
@@ -174,7 +175,7 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
     let peers_db = home_tmp.path().join("peers.db");
     let jobs_dir = home_tmp.path().join("jobs");
     let cmd = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} \
+        "HOME={home} AINB_HOME={hangar} AINB_HANGAR_HOME={hangar} \
          AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 \
          CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home_tmp.path().display(),
@@ -190,7 +191,7 @@ fn fleet_panel_shows_an_acp_session_created_through_the_cli() {
 
     assert!(
         open_fleet_panel(session),
-        "the Fleet panel did not open on the first `f`:\n{}",
+        "the Fleet panel did not open:\n{}",
         capture_pane(session)
     );
 

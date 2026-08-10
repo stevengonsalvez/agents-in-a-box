@@ -27,6 +27,7 @@ fn create_session_metadata(
         model: None,
         model_source: Default::default(),
         codex_model: None,
+        codex_thread_id: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn create_session_metadata_with_id(
         model: None,
         model_source: Default::default(),
         codex_model: None,
+        codex_thread_id: None,
     }
 }
 

@@ -367,6 +367,7 @@ mod tests {
             model: None,
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         let session = AppState::stopped_session_from_metadata(&metadata);
@@ -406,6 +407,7 @@ mod tests {
             model: Some("claude-opus-4-8".to_string()),
             model_source: Default::default(),
             codex_model: None,
+            codex_thread_id: None,
         };
 
         let session = AppState::stopped_session_from_metadata(&metadata);
@@ -417,8 +419,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_restart_respawns_a_dead_codex_pane_with_launch_settings() {
-        use crate::models::{Session, SessionStatus, Workspace};
+    async fn idle_restart_respawns_a_dead_codex_pane_with_exact_remote_thread() {
+        use crate::interactive::InteractiveSessionManager;
         use std::process::Command;
         use std::time::Duration;
 
@@ -437,8 +439,6 @@ mod tests {
                 let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
             }
         }
-
-        let home = tempfile::tempdir().expect("temp home");
 
         let tmux_name = format!("ainb-idle-restart-{}", uuid::Uuid::new_v4());
         let _tmux = ExactTmuxSession(tmux_name.clone());
@@ -478,30 +478,24 @@ mod tests {
         }
         assert!(pane_dead, "precondition: pane must be dead before restart");
 
-        let session_id = uuid::Uuid::new_v4();
-        let worktree = home.path().join("worktree");
-        std::fs::create_dir_all(&worktree).expect("worktree");
-        let model = "gpt-5.6-luna".to_string();
-
-        let mut session = Session::new_with_options(
-            "idle-restart".to_string(),
-            worktree.to_string_lossy().to_string(),
-            true,
-            SessionMode::Interactive,
-            None,
-            SessionAgentType::Codex,
-            Some(model),
-        );
-        session.id = session_id;
-        session.status = SessionStatus::Idle;
-        session.tmux_session_name = Some(tmux_name.clone());
-
-        let mut workspace = Workspace::new("idle-restart".to_string(), worktree);
-        workspace.add_session(session);
-        let mut state = AppState::new();
-        state.workspaces.push(workspace);
-
-        state.restart_cli_in_tmux(session_id).await.expect("idle restart");
+        let remote = ainb_hangar_proto::fleet::CodexSessionEnsureResult {
+            endpoint: "unix:///tmp/ainb-idle-restart.sock".to_string(),
+            thread_id: "thread-idle-restart".to_string(),
+        };
+        InteractiveSessionManager::new()
+            .expect("session manager")
+            .start_cli_in_tmux(
+                &tmux_name,
+                true,
+                Some("gpt-5.6-luna".to_string()),
+                SessionAgentType::Codex,
+                None,
+                true,
+                false,
+                Some(&remote),
+            )
+            .await
+            .expect("respawn remote Codex pane");
 
         let pane = Command::new("tmux")
             .args([
@@ -516,10 +510,11 @@ mod tests {
         let pane_command = String::from_utf8_lossy(&pane.stdout);
         assert!(
             pane_command.contains(
-                "codex resume --last --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
+                "codex --remote 'unix:///tmp/ainb-idle-restart.sock' resume thread-idle-restart"
             ),
-            "idle restart must replace dead pane with persisted Codex argv, got: {pane_command}"
+            "idle restart must replace dead pane with exact remote Codex argv, got: {pane_command}"
         );
+        assert!(!pane_command.contains("--last"));
     }
 
     // -- SessionFilter tests ------------------------------------------------
@@ -612,6 +607,9 @@ mod tests {
     #[test]
     fn test_cycle_session_filter_advances_state() {
         let mut state = AppState::new();
+        // AppState restores the user's persisted UI preference; cycle behavior
+        // itself must remain independent of that ambient configuration.
+        state.session_filter = SessionFilter::All;
         assert_eq!(state.session_filter, SessionFilter::All);
         state.cycle_session_filter();
         assert_eq!(state.session_filter, SessionFilter::ActiveOnly);

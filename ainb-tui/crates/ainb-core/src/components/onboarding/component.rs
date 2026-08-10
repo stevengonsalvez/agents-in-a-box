@@ -422,7 +422,7 @@ impl OnboardingComponent {
             .margin(1)
             .constraints([
                 Constraint::Length(3), // Status summary + one-liner legend
-                Constraint::Min(8),    // Dependency columns
+                Constraint::Fill(1),   // Dependency columns
                 Constraint::Length(4), // Focused-dep detail band (docs link + install)
                 Constraint::Length(2), // Instructions
             ])
@@ -557,7 +557,7 @@ impl OnboardingComponent {
             )
         } else if let Some(msg) = &state.status_message {
             Span::styled(
-                msg.clone(),
+                format!("{msg} • ↑↓←→ focus • i install • r recheck • t tmux"),
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             )
         } else {
@@ -1330,6 +1330,23 @@ impl OnboardingComponent {
             spans.push(Span::styled("↑↓←→", Style::default().fg(GOLD)));
             spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
             spans.push(Span::styled(" navigate", Style::default().fg(MUTED_GRAY)));
+            spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled("i install", Style::default().fg(GOLD)));
+            spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
+            spans.push(Span::styled("t tmux", Style::default().fg(GOLD)));
+            if let Some(dep) = state.focused_dep() {
+                if let Some(url) = crate::docs::docs_url_for(dep.id) {
+                    spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
+                    spans.push(Span::styled(url, Style::default().fg(CORNFLOWER_BLUE)));
+                }
+                if !dep.satisfied {
+                    spans.push(Span::styled("  |  ", Style::default().fg(SUBDUED_BORDER)));
+                    spans.push(Span::styled(
+                        "press i to install",
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    ));
+                }
+            }
         } else {
             spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
             spans.push(Span::styled("Esc", Style::default().fg(GOLD)));

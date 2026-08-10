@@ -16,7 +16,9 @@ use uuid::Uuid;
 use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
-use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
+use crate::interactive::session_manager::{
+    ModelSource, SessionMetadata, SessionStore, ensure_codex_remote_thread,
+};
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
 
@@ -102,8 +104,27 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         setup_mcp_pool(&work_dir, &session_name);
     }
 
-    // Step 6: Build Claude command
-    let claude_cmd = build_agent_command(&args);
+    // Step 6: Allocate the daemon-owned remote thread before tmux starts.
+    let codex_remote = if provider == CliProvider::Codex {
+        Some(
+            ensure_codex_remote_thread(
+                session_id,
+                &work_dir,
+                model.as_deref(),
+                args.dangerously_skip_permissions,
+                false,
+                None,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let claude_cmd = codex_remote
+        .as_ref()
+        .map(remote_codex_command)
+        .unwrap_or_else(|| build_agent_command(&args));
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
     // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
@@ -170,6 +191,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         model: model.clone(),
         model_source: ModelSource::Raw,
         codex_model: None,
+        codex_thread_id: codex_remote.map(|remote| remote.thread_id),
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
@@ -461,6 +483,20 @@ fn build_agent_command(args: &RunArgs) -> String {
         .join(" ")
 }
 
+fn remote_codex_command(remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult) -> String {
+    [
+        "codex",
+        "--remote",
+        &remote.endpoint,
+        "resume",
+        &remote.thread_id,
+    ]
+    .into_iter()
+    .map(|part| shell_escape::escape(part.into()).into_owned())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
 /// Best-effort: on timeout we send anyway rather than drop the prompt.
 async fn wait_for_prompt_ready(session_name: &str, timeout: Duration) {
@@ -703,6 +739,19 @@ mod tests {
             "AINB must pass Claude's raw model value through, got: {cmd}"
         );
         assert!(cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn remote_codex_command_resumes_exact_thread() {
+        let command = remote_codex_command(&ainb_hangar_proto::fleet::CodexSessionEnsureResult {
+            endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
+            thread_id: "thread-123".to_string(),
+        });
+        assert_eq!(
+            command,
+            "codex --remote 'unix:///tmp/codex-app-server.sock' resume thread-123"
+        );
+        assert!(!command.contains("--last"));
     }
 
     #[test]

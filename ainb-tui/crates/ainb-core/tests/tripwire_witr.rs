@@ -182,11 +182,15 @@ fn pressing_w_embeds_witr_interactive_browser() {
     }
 
     // The ainb-witr pane must show witr's real interactive browser, not a
-    // shell or a "command not found". Positive: the tab strip + the search
-    // prompt witr's TUI paints. Negative: no launch failure.
+    // shell or a "command not found". Positive: the interactive mode, process
+    // search, and ancestry pane that witr's current TUI paints. Negative: no
+    // launch failure.
     let browser_ok = poll(Instant::now() + Duration::from_secs(30), || {
         let c = capture_pane(WITR_SESSION);
-        c.contains("Processes") && c.contains("Search") && !c.contains("command not found")
+        c.contains("Mode: Navigation")
+            && c.contains("Search PID, Name, User, Command")
+            && c.contains("Ancestry Tree:")
+            && !c.contains("command not found")
     });
     let witr_pane = capture_pane(WITR_SESSION);
 

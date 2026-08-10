@@ -9311,6 +9311,25 @@ impl AppState {
                 None
             };
 
+            let codex_remote = if metadata.agent_type == SessionAgentType::Codex {
+                let remote = crate::interactive::session_manager::ensure_codex_remote_thread(
+                    metadata.session_id,
+                    &metadata.worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    metadata.headroom_enabled,
+                    metadata.codex_thread_id.clone(),
+                )
+                .await?;
+                crate::interactive::session_manager::persist_codex_thread_id(
+                    metadata.session_id,
+                    remote.thread_id.clone(),
+                )?;
+                Some(remote)
+            } else {
+                None
+            };
+
             let manager = InteractiveSessionManager::new()?;
             manager
                 .start_cli_in_tmux(
@@ -9321,6 +9340,7 @@ impl AppState {
                     transcript.clone(),
                     true, // resume_requested — Enter/r on a Stopped session
                     metadata.headroom_enabled,
+                    codex_remote.as_ref(),
                 )
                 .await?;
 
@@ -10949,6 +10969,24 @@ impl AppState {
             None
         };
         let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
+        let codex_remote = if agent_type == SessionAgentType::Codex {
+            let remote = crate::interactive::session_manager::ensure_codex_remote_thread(
+                session_id,
+                std::path::Path::new(&workspace_path),
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                metadata.and_then(|m| m.codex_thread_id.clone()),
+            )
+            .await?;
+            crate::interactive::session_manager::persist_codex_thread_id(
+                session_id,
+                remote.thread_id.clone(),
+            )?;
+            Some(remote)
+        } else {
+            None
+        };
 
         info!(
             "Restarting {} in tmux session '{}' for workspace '{}'",
@@ -10966,6 +11004,7 @@ impl AppState {
                 resume_transcript,
                 true,
                 headroom_enabled,
+                codex_remote.as_ref(),
             )
             .await?;
 

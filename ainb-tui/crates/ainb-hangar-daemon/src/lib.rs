@@ -413,6 +413,41 @@ impl Drop for PidFile {
     }
 }
 
+/// Test-only parent-death backstop. The tripwire harness gives every daemon its
+/// own parent PID. When the harness is SIGKILLed or OOM-reaped, macOS reparents
+/// the daemon to launchd, so normal Rust drop cleanup cannot run. Signal this
+/// process through its existing Ctrl-C shutdown path instead.
+fn spawn_test_parent_watchdog() {
+    let Some(parent_pid) = std::env::var("HANGAR_TEST_PARENT_PID")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return;
+    };
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            match nix::sys::signal::kill(nix::unistd::Pid::from_raw(parent_pid), None) {
+                Ok(()) | Err(nix::errno::Errno::EPERM) => {}
+                Err(nix::errno::Errno::ESRCH) => {
+                    tracing::warn!(parent_pid, "tripwire parent exited, stopping daemon");
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(std::process::id() as i32),
+                        nix::sys::signal::Signal::SIGINT,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(parent_pid, %error, "could not check tripwire parent");
+                }
+            }
+        }
+    });
+}
+
 /// Boot the daemon: open the persistence layer and run the claim loop.
 ///
 /// Resolves the database directory the same way every Hangar consumer does
@@ -430,6 +465,7 @@ impl Drop for PidFile {
 /// Returns an error if the store cannot be opened (directory not writable, a
 /// migration fails) or if the run loop's shutdown handler fails.
 pub async fn boot(once: bool) -> anyhow::Result<()> {
+    spawn_test_parent_watchdog();
     let dir = hangar_dir()?;
 
     // FIRST, before the store, the broker, the sweepers and `rpc::bind`. Every
