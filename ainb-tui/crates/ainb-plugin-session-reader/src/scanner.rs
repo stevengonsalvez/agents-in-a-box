@@ -759,7 +759,7 @@ struct CompletenessAcc {
 
 impl CompletenessAcc {
     fn ingest(&mut self, call: &ProviderCall) {
-        let priced = call.cost_usd.is_some();
+        let priced = effective_cost_usd(call).is_some();
         let day = call.timestamp.date_naive();
         *self.overall.get_or_insert(true) &= priced;
         and_into(&mut self.daily, day, priced);
@@ -1156,7 +1156,7 @@ pub(crate) fn fold(mut calls: Vec<ProviderCall>) -> AggState {
 
     for call in &calls {
         let bucket = call_bucket(call);
-        let cost = call.cost_usd.map(usd_to_nanos);
+        let cost = effective_cost_usd(call).map(usd_to_nanos);
         let day = call.timestamp.date_naive();
         let week = week_start(day);
         let session_key = format!(
@@ -1608,6 +1608,28 @@ fn add_cost_nanos(into: &mut Option<i64>, from: Option<i64>) {
         (None, Some(b)) => Some(b),
         (None, None) => None,
     };
+}
+
+/// A call's cost, treating a call that moved no tokens as PRICED at zero.
+///
+/// Claude Code emits `<synthetic>` assistant turns for things like interrupted
+/// or tool-only steps. There is no rate for that pseudo-model, so the parser
+/// leaves `cost_usd` as `None`, but every one of them carries a zero-token
+/// usage block: measured across this machine's corpus, 187 of 187 sampled
+/// synthetic calls moved zero tokens. Zero tokens cost zero dollars, so `None`
+/// there is not "price unknown", it is "nothing to price".
+///
+/// The distinction matters because completeness is an AND across a bucket. A
+/// single unpriced call blanks the cost of its day, its week, its model, its
+/// project and the grand total. Synthetic turns are common (roughly 4% of
+/// assistant messages here), so in practice every headline cost rendered blank
+/// even when every real call was priced.
+fn effective_cost_usd(call: &ProviderCall) -> Option<f64> {
+    match call.cost_usd {
+        Some(cost) => Some(cost),
+        None if call_bucket(call).total() == 0 => Some(0.0),
+        None => None,
+    }
 }
 
 fn call_bucket(call: &ProviderCall) -> TokenBucket {

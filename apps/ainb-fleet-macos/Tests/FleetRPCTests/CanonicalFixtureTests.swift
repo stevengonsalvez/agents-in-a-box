@@ -99,6 +99,69 @@ final class CanonicalFixtureTests: XCTestCase {
         XCTAssertTrue(weeks.allSatisfy { $0.days.count == 7 }, "every column is a full week")
     }
 
+    /// Idle weeks must occupy a column, not vanish.
+    ///
+    /// The daemon ships a SPARSE heatmap (only days with calls). Emitting one
+    /// column per populated week collapses real gaps: on a live corpus a
+    /// two-month break across November and December rendered as adjacent
+    /// columns and read as unbroken activity. The x-axis is only meaningful if
+    /// it is a calendar.
+    func testHeatmapKeepsIdleWeeksAsEmptyColumns() throws {
+        // 2026-08-03 and 2026-08-24 are Mondays three weeks apart, so the two
+        // weeks between them are genuinely idle.
+        let weeks = FleetHeatmapLayout.weekColumns([
+            FleetHeatmapCell(date: "2026-08-03", callCount: 5, costUSD: nil),
+            FleetHeatmapCell(date: "2026-08-24", callCount: 9, costUSD: nil),
+        ])
+
+        XCTAssertEqual(weeks.count, 4, "two active weeks plus the two idle ones between them")
+        XCTAssertEqual(weeks.map(\.weekStart), [
+            "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24",
+        ], "columns advance one calendar week at a time")
+        XCTAssertEqual(weeks[0].days[0]?.callCount, 5)
+        XCTAssertEqual(weeks[3].days[0]?.callCount, 9)
+        XCTAssertTrue(
+            weeks[1].days.allSatisfy { $0 == nil } && weeks[2].days.allSatisfy { $0 == nil },
+            "an idle week is present but empty, so the gap is visible"
+        )
+    }
+
+    /// The scanner's project key is a mangled absolute path. Rendered raw it is
+    /// unreadable at panel width, every row shares a long identical prefix, and
+    /// it puts the operator's username on screen.
+    func testProjectLabelStripsTheOperatorsHomePrefix() throws {
+        let home = URL(fileURLWithPath: "/Users/someone", isDirectory: true)
+
+        XCTAssertEqual(
+            FleetProjectLabel.display(
+                "Users-someone-.agents-in-a-box-worktrees-by-name-proj--f-atc--96da95da",
+                repo: nil,
+                home: home
+            ),
+            "agents-in-a-box-worktrees-by-name-proj--f-atc--96da95da",
+            "the home prefix and its separators are dropped, the distinguishing tail stays"
+        )
+        // The leading-separator form the scanner also emits.
+        XCTAssertEqual(
+            FleetProjectLabel.display("-Users-someone--claude-jobs-tmp-wt", repo: nil, home: home),
+            "claude-jobs-tmp-wt"
+        )
+        XCTAssertFalse(
+            FleetProjectLabel.display("Users-someone-d-git-thing", repo: nil, home: home).contains("someone"),
+            "the username must not survive into the label"
+        )
+        // A real repo name is better than any derived label, so it wins.
+        XCTAssertEqual(
+            FleetProjectLabel.display("Users-someone-d-git-thing", repo: "owner/thing", home: home),
+            "owner/thing"
+        )
+        // A path outside the home is left alone rather than mangled further.
+        XCTAssertEqual(
+            FleetProjectLabel.display("opt-shared-thing", repo: nil, home: home),
+            "opt-shared-thing"
+        )
+    }
+
     func testHeatmapSkipsUnparseableDatesRatherThanCrashing() throws {
         let weeks = FleetHeatmapLayout.weekColumns([
             FleetHeatmapCell(date: "not-a-date", callCount: 9, costUSD: nil),

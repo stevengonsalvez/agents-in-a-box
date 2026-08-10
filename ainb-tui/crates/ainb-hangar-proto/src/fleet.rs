@@ -358,6 +358,17 @@ pub struct FleetSession {
     pub lifecycle_updated_at: i64,
     /// Last attention observation time in epoch milliseconds.
     pub attention_updated_at: i64,
+    /// Provider-reported model id, verbatim. Absent means never observed, which
+    /// is NOT the same as a default model: the key is omitted rather than null
+    /// so a client cannot mistake absence for an explicit value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider-reported reasoning effort, verbatim. Absent means never observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Last model observation time in epoch milliseconds. 0 means never observed.
+    #[serde(default)]
+    pub model_updated_at: i64,
     /// Optimistic concurrency version.
     pub version: i64,
     /// Global revision that last changed this session.
@@ -757,7 +768,12 @@ pub struct FleetUsageWeeklyBucket {
 /// One session usage bucket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetUsageSessionBucket {
-    /// Session identity (provider:project:session_id).
+    /// The BARE session id, not a composite.
+    ///
+    /// `provider` and `project` are separate fields below; a client that wants
+    /// the full identity joins the three itself. This once shipped as
+    /// `provider:project:session_id`, which no client could re-split because a
+    /// project label may contain a colon.
     pub session_id: String,
     /// Provider for this session.
     pub provider: String,
@@ -1924,6 +1940,102 @@ pub struct FleetActivityEventParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session with no observed model, in the shape every roster row starts
+    /// in.
+    fn session_without_model() -> FleetSession {
+        FleetSession {
+            session_key: "claude:s-1".to_string(),
+            provider: FleetProvider::Claude,
+            provider_session_id: Some("s-1".to_string()),
+            tmux_target: None,
+            process_start_fingerprint: None,
+            cwd: "/repo".to_string(),
+            display_name: None,
+            lifecycle: LifecycleState::Running,
+            active_work_count: 0,
+            attention: AttentionState::None,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: ManagementState::Managed,
+            transport_health: TransportHealth::Healthy,
+            capabilities: FleetCapabilities::default(),
+            provenance: FleetProvenance::Authoritative,
+            confidence: FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: 2,
+            lifecycle_updated_at: 2,
+            attention_updated_at: 1,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: 1,
+            updated_revision: 3,
+        }
+    }
+
+    /// Absence renders as ABSENCE. An unobserved model must omit its keys, not
+    /// emit `null`: an explicit null is a value a decoder can round-trip back
+    /// into the object, which would break the Swift decode-then-re-encode
+    /// equality gate the moment a full-session sample joins the canonical
+    /// fixtures.
+    #[test]
+    fn fleet_session_omits_absent_model_keys() {
+        let session = session_without_model();
+        let encoded = serde_json::to_value(&session).unwrap();
+        let object = encoded.as_object().expect("a session encodes as an object");
+        assert!(
+            !object.contains_key("model"),
+            "an unobserved model must be absent, not null: {encoded}"
+        );
+        assert!(
+            !object.contains_key("reasoning_effort"),
+            "an unobserved effort must be absent, not null: {encoded}"
+        );
+        assert_eq!(
+            object.get("model_updated_at"),
+            Some(&serde_json::json!(0)),
+            "the group clock is always present; 0 means never observed"
+        );
+
+        let decoded: FleetSession = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, session, "the absent shape must round-trip");
+    }
+
+    /// The observed shape carries both keys verbatim and round-trips.
+    #[test]
+    fn fleet_session_carries_observed_model_keys() {
+        let session = FleetSession {
+            model: Some("claude-opus-5".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            model_updated_at: 1_700,
+            ..session_without_model()
+        };
+        let encoded = serde_json::to_value(&session).unwrap();
+        assert_eq!(encoded["model"], "claude-opus-5");
+        assert_eq!(encoded["reasoning_effort"], "high");
+        assert_eq!(encoded["model_updated_at"], 1_700);
+
+        let decoded: FleetSession = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, session);
+    }
+
+    /// A snapshot minted before 0084 has none of the three keys. It must still
+    /// decode, to the never-observed shape.
+    #[test]
+    fn fleet_session_decodes_a_payload_without_model_keys() {
+        let mut encoded = serde_json::to_value(session_without_model()).unwrap();
+        encoded
+            .as_object_mut()
+            .expect("object")
+            .remove("model_updated_at")
+            .expect("the clock is present before removal");
+
+        let decoded: FleetSession = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.model, None);
+        assert_eq!(decoded.reasoning_effort, None);
+        assert_eq!(decoded.model_updated_at, 0);
+    }
 
     #[test]
     fn lifecycle_and_attention_serialize_independently() {

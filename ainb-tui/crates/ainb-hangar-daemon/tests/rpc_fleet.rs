@@ -172,6 +172,7 @@ async fn apply_hook(
             event_type,
             payload,
             observed_at,
+            transcript_model: None,
         },
     )
     .await

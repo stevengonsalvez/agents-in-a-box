@@ -5,6 +5,7 @@
 //! subscribers after the matching revision commits.
 
 use ainb_fleet_core::discover::{discover_all_tmux_panes, discover_from_tmux};
+use ainb_fleet_core::read::ModelInfo;
 use ainb_fleet_core::types::{
     AttentionState, Confidence, FleetSession, LifecycleState, ManagementState, Provider,
     SessionKey, TransportHealth,
@@ -43,6 +44,12 @@ pub struct HookObservation<'a> {
     pub payload: &'a Value,
     /// Observation time in epoch milliseconds.
     pub observed_at: i64,
+    /// Model + effort read from this session's transcript tail, when the caller
+    /// took that bounded read for this line (see [`crate::attention_ingest`]).
+    ///
+    /// Whichever field the hook payload also carries, the hook wins: it describes
+    /// this exact event, while the tail describes the newest record on disk.
+    pub transcript_model: Option<ModelInfo>,
 }
 
 /// Reprojecting an old Claude interview failed its explicit safety gate.
@@ -176,6 +183,109 @@ pub async fn reproject_claude_interview(
     Ok(result)
 }
 
+/// Longest provider model or effort token the roster will store.
+///
+/// The longest real id observed is well under half this. The bound exists so a
+/// lying or compromised provider cannot turn a per-session column into a
+/// storage channel, not to fit any particular vendor's naming.
+const MODEL_TOKEN_MAX: usize = 64;
+
+/// One provider-reported model or effort token, clamped.
+///
+/// Rejects empty, over [`MODEL_TOKEN_MAX`] bytes, or any character outside
+/// `[A-Za-z0-9._:@/+-]`. This is the privacy clamp and the lying-provider clamp
+/// in one predicate: a rejected token is stored as "never observed" rather than
+/// rendered, so nothing a provider says can reach the roster as free text. The
+/// charset also rejects Claude's `<synthetic>` placeholder, which is not a
+/// model and appeared in half of one recent transcript sample.
+///
+/// Accepted tokens are otherwise stored VERBATIM. No case folding, no
+/// vendor-prefix stripping: presentation is the client's job, and a
+/// normalisation here would be indistinguishable from an observation once it is
+/// in the column.
+///
+/// The ONE exception is a trailing `[...]`, which is stripped before the token
+/// is validated. Claude's hooks report `claude-opus-5[1m]` where its transcript
+/// writes `claude-opus-5`; the bracket carries the context window, not the model
+/// identity. Both producers must therefore collapse onto one token, or a single
+/// session renders two different models depending on which one observed it last.
+/// Widening the charset to admit brackets would do the opposite: it would let
+/// the two spellings coexist as distinct values.
+///
+/// Rejecting the bracketed form outright would leave a NEW Claude session blank
+/// until its first turn ends. Claude reports a model on exactly one hook,
+/// `SessionStart` (measured: 46 occurrences in a 54826-payload window, every one
+/// of them a `SessionStart`, and 38 of the 46 spelled with the bracket). At that
+/// moment the session's transcript exists but holds no assistant record yet, so
+/// the transcript producer has nothing to return and the hook is the only
+/// source. Stripping is what lets the row name its model from the start.
+pub(crate) fn model_token(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.len() > MODEL_TOKEN_MAX {
+        return None;
+    }
+    let identity = raw
+        .strip_suffix(']')
+        .and_then(|head| head.rsplit_once('[').map(|(identity, _)| identity))
+        .unwrap_or(raw);
+    (!identity.is_empty()
+        && identity.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b':' | b'@' | b'/' | b'+' | b'-')
+        }))
+    .then(|| identity.to_string())
+}
+
+/// Whether a hook payload describes the session's OWN thread rather than one of
+/// its subagents.
+///
+/// Claude reports every subagent's hook under the SAME `session_id` as the main
+/// thread, carrying that subagent's model and effort. Ungated, a roster row shows
+/// whichever `Task()` ran most recently — a value that changes several times a
+/// minute, always looks plausible, and leaves nothing red in CI.
+///
+/// Only an ABSENT `agent_type` (what the main thread actually emits) or the
+/// literal `MAIN` passes. An EMPTY string does not: measured live, 80 of 81
+/// empty-string events in a 3000-event window were `SubagentStop` carrying an
+/// `agent_transcript_path`.
+pub(crate) fn is_main_thread(payload: &Value) -> bool {
+    payload
+        .pointer("/payload/agent_type")
+        .and_then(Value::as_str)
+        .is_none_or(|agent| agent == "MAIN")
+}
+
+/// The `(model, reasoning_effort)` this hook line establishes for its session.
+///
+/// Both providers are served by the same two producers, crossed over: Claude
+/// hooks carry the effort and their transcript carries the model, Codex hooks
+/// carry the model and their rollout carries the effort. Reading both sources
+/// unconditionally of provider needs no provider branch — the source that does
+/// not apply is simply absent.
+///
+/// [`model_token`] is applied to each candidate INDEPENDENTLY before the
+/// fallback, so a hook value the clamp rejects (Claude's `claude-opus-5[1m]`)
+/// yields to the transcript's spelling rather than suppressing it.
+fn observed_model_pair(observation: &HookObservation<'_>) -> (Option<String>, Option<String>) {
+    if !is_main_thread(observation.payload) {
+        return (None, None);
+    }
+    let transcript = observation.transcript_model.as_ref();
+    let from_hook = |pointer: &str| {
+        observation
+            .payload
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .and_then(model_token)
+    };
+    let from_transcript =
+        |field: fn(&ModelInfo) -> Option<&str>| transcript.and_then(field).and_then(model_token);
+    (
+        from_hook("/payload/model").or_else(|| from_transcript(|info| info.model.as_deref())),
+        from_hook("/payload/effort/level")
+            .or_else(|| from_transcript(|info| info.effort.as_deref())),
+    )
+}
+
 /// Apply one exact provider hook and wake revision subscribers after commit.
 pub async fn apply_hook(
     pool: &SqlitePool,
@@ -217,6 +327,7 @@ pub async fn apply_hook(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
+    let (model, reasoning_effort) = observed_model_pair(&observation);
     let (lifecycle_state, attention_state) = if preserve_active_request {
         (None, None)
     } else {
@@ -267,6 +378,8 @@ pub async fn apply_hook(
             attention_state: attention_state.map(attention_token),
             current_request_fingerprint: request_fingerprint,
             transport_health: (provider == Provider::Claude).then(|| "HEALTHY".to_string()),
+            model,
+            reasoning_effort,
             ..FleetSessionPatch::default()
         },
     };
@@ -1100,6 +1213,9 @@ fn session_wire(
         last_observed_at: row.last_observed_at,
         lifecycle_updated_at: row.lifecycle_updated_at,
         attention_updated_at: row.attention_updated_at,
+        model: row.model.clone(),
+        reasoning_effort: row.reasoning_effort.clone(),
+        model_updated_at: row.model_updated_at,
         version: row.version,
         updated_revision: row.updated_revision,
     }
@@ -2301,6 +2417,393 @@ mod tests {
     use super::*;
     use crate::events::EventBroker;
 
+    /// Real provider ids pass through byte-for-byte; everything a provider
+    /// could turn into a storage or injection channel does not.
+    #[test]
+    fn model_token_admits_real_ids_and_clamps_the_rest() {
+        for accepted in [
+            "claude-opus-5",
+            "claude-sonnet-4-5",
+            "gpt-5.6-terra",
+            "high",
+            "xhigh",
+            "o3_mini",
+            "anthropic/claude-opus-5",
+            "model:v1.2+build",
+            "a".repeat(MODEL_TOKEN_MAX).as_str(),
+        ] {
+            assert_eq!(
+                model_token(accepted).as_deref(),
+                Some(accepted),
+                "{accepted} is a real provider token and must survive VERBATIM"
+            );
+        }
+
+        for rejected in [
+            "",
+            "<synthetic>",
+            "claude opus 5",
+            "opus\n5",
+            "opus\u{0}5",
+            "\u{1b}[31mopus",
+            "модель",
+            "claude-opus-5; DROP TABLE fleet_session",
+            "a".repeat(MODEL_TOKEN_MAX + 1).as_str(),
+        ] {
+            assert_eq!(
+                model_token(rejected),
+                None,
+                "{rejected:?} must clamp to never-observed, not reach the roster"
+            );
+        }
+    }
+
+    /// The session under test for every model/effort capture case below.
+    const MODEL_SESSION_KEY: &str = "claude:sess-model";
+
+    /// One hook observation carrying `payload`, all on [`MODEL_SESSION_KEY`]'s
+    /// session so successive events exercise the model state group.
+    fn model_hook<'a>(
+        provider: &'a str,
+        event_id: &str,
+        payload: &'a Value,
+        observed_at: i64,
+    ) -> HookObservation<'a> {
+        HookObservation {
+            event_id: event_id.to_string(),
+            provider,
+            provider_session_id: "sess-model",
+            cwd: "/repo",
+            event_type: "PreToolUse",
+            payload,
+            observed_at,
+            transcript_model: None,
+        }
+    }
+
+    /// The `(model, reasoning_effort)` pair currently on `key`'s row.
+    async fn model_pair(pool: &SqlitePool, key: &str) -> (Option<String>, Option<String>) {
+        let session = FleetRepo::get_session(pool, key)
+            .await
+            .expect("session query")
+            .expect("session exists");
+        (session.model, session.reasoning_effort)
+    }
+
+    /// THE load-bearing gate.
+    ///
+    /// Claude reports every subagent's hook under the SAME `session_id` as the
+    /// main thread, carrying the SUBAGENT's own effort. Ungated, the roster shows
+    /// whatever `Task()` ran last — changing several times a minute, always a
+    /// plausible value, with nothing red in CI and nothing odd in the logs.
+    ///
+    /// The main thread omits `agent_type` entirely; the literal `"MAIN"` the
+    /// original plan expected was never observed live, so this fixture is built
+    /// on absence.
+    #[tokio::test]
+    async fn subagent_hook_effort_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let main = serde_json::json!({ "payload": { "effort": { "level": "high" } } });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("claude", "e-main", &main, 1),
+        )
+        .await
+        .expect("main-thread hook applies");
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await.1.as_deref(),
+            Some("high"),
+            "the main thread's own effort must reach the row"
+        );
+
+        // A subagent dispatched from that same session, running at a different
+        // effort. Its hook is indistinguishable from the main thread's except for
+        // `agent_type`.
+        let subagent = serde_json::json!({
+            "payload": { "agent_type": "superstar-engineer", "effort": { "level": "xhigh" } }
+        });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("claude", "e-subagent", &subagent, 2),
+        )
+        .await
+        .expect("subagent hook applies");
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await.1.as_deref(),
+            Some("high"),
+            "a subagent's effort must never overwrite the session's own"
+        );
+    }
+
+    /// `agent_type: ""` is NOT the main thread, and treating it as one is the
+    /// obvious "helpful" mistake. Measured live: 80 of the 81 empty-string events
+    /// in a 3000-event window were `SubagentStop` carrying an
+    /// `agent_transcript_path`.
+    #[tokio::test]
+    async fn empty_agent_type_is_treated_as_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let main = serde_json::json!({ "payload": { "effort": { "level": "high" } } });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("claude", "e-main", &main, 1),
+        )
+        .await
+        .expect("main-thread hook applies");
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await.1.as_deref(),
+            Some("high"),
+            "the main thread's own effort must reach the row"
+        );
+
+        let empty_agent = serde_json::json!({
+            "payload": {
+                "agent_type": "",
+                "agent_transcript_path": "/tmp/subagent.jsonl",
+                "effort": { "level": "xhigh" }
+            }
+        });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("claude", "e-empty", &empty_agent, 2),
+        )
+        .await
+        .expect("empty-agent hook applies");
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await.1.as_deref(),
+            Some("high"),
+            "an empty agent_type is a subagent, not the main thread"
+        );
+    }
+
+    /// Claude hooks carry the effort and no model. Measured live: 3390 hits on
+    /// `/payload/effort/level` in a 6000-event window, against one stray model.
+    #[tokio::test]
+    async fn claude_hook_effort_lands_on_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let payload = serde_json::json!({ "payload": { "effort": { "level": "high" } } });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("claude", "e-effort", &payload, 1),
+        )
+        .await
+        .expect("hook applies");
+
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await,
+            (None, Some("high".to_string())),
+            "the Claude hook establishes the effort and says nothing about the model"
+        );
+    }
+
+    /// Codex hooks carry the model and no effort — the mirror image of Claude,
+    /// which is why one provider-blind read serves both. Measured live: 42 of 42
+    /// Codex hook payloads carried `/payload/model`.
+    #[tokio::test]
+    async fn codex_hook_model_lands_on_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let payload = serde_json::json!({ "payload": { "model": "gpt-5.6-terra" } });
+        apply_hook(
+            store.pool(),
+            &sink,
+            model_hook("codex", "e-model", &payload, 1),
+        )
+        .await
+        .expect("hook applies");
+
+        assert_eq!(
+            model_pair(store.pool(), "codex:sess-model").await,
+            (Some("gpt-5.6-terra".to_string()), None),
+            "the Codex hook establishes the model and says nothing about the effort"
+        );
+    }
+
+    /// The hook describes THIS event; the transcript tail describes the newest
+    /// record on disk, which may be a turn older. So the hook wins per field —
+    /// but only when the clamp accepts it, or Claude's `claude-opus-5[1m]` would
+    /// suppress the transcript's `claude-opus-5` and leave the model blank.
+    #[tokio::test]
+    async fn hook_value_beats_transcript_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let payload = serde_json::json!({
+            "payload": { "model": "gpt-5.6-terra", "effort": { "level": "high" } }
+        });
+        let mut observation = model_hook("codex", "e-both", &payload, 1);
+        observation.transcript_model = Some(ModelInfo {
+            model: Some("gpt-5.5-stale".to_string()),
+            effort: Some("low".to_string()),
+        });
+        apply_hook(store.pool(), &sink, observation).await.expect("hook applies");
+
+        assert_eq!(
+            model_pair(store.pool(), "codex:sess-model").await,
+            (Some("gpt-5.6-terra".to_string()), Some("high".to_string())),
+            "the fresher hook value must win both fields"
+        );
+    }
+
+    /// Pins the `claude-opus-5[1m]` decision end to end, not just in the clamp:
+    /// the two producers spell one model differently, the clamp strips the
+    /// context-window marker off the hook's spelling, and the row carries the
+    /// single identity both of them agree on.
+    #[tokio::test]
+    async fn model_token_handles_context_window_suffix() {
+        assert_eq!(
+            model_token("claude-opus-5[1m]").as_deref(),
+            Some("claude-opus-5"),
+            "the context-window suffix is not part of the model identity"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+
+        let payload = serde_json::json!({ "payload": { "model": "claude-opus-5[1m]" } });
+        let mut observation = model_hook("claude", "e-suffix", &payload, 1);
+        observation.transcript_model = Some(ModelInfo {
+            model: Some("claude-opus-5".to_string()),
+            effort: None,
+        });
+        apply_hook(store.pool(), &sink, observation).await.expect("hook applies");
+
+        assert_eq!(
+            model_pair(store.pool(), MODEL_SESSION_KEY).await.0.as_deref(),
+            Some("claude-opus-5"),
+            "both producers must land the same identity, whichever one wins"
+        );
+    }
+
+    /// The hook spelling and the transcript spelling of ONE model must produce
+    /// ONE token.
+    ///
+    /// Measured on the live host: Claude hooks report `claude-opus-5[1m]` while
+    /// the transcript writes `claude-opus-5`. Two producers feed the same state
+    /// group, so if the bracket survived, a row's model would flip between two
+    /// spellings of the same thing depending on which producer observed it last
+    /// — a churn that looks exactly like a real `/model` switch and would mint a
+    /// revision every time.
+    #[test]
+    fn model_token_strips_context_window_suffix() {
+        assert_eq!(
+            model_token("claude-opus-5[1m]").as_deref(),
+            Some("claude-opus-5"),
+            "the context-window marker is not part of model identity"
+        );
+        assert_eq!(
+            model_token("claude-opus-5[1m]"),
+            model_token("claude-opus-5"),
+            "both producers of one model must converge on one token"
+        );
+        assert_eq!(
+            model_token("claude-sonnet-5[200k]").as_deref(),
+            Some("claude-sonnet-5")
+        );
+
+        // Stripping must not become a way to smuggle a token past the charset:
+        // anything left over is still validated, and a bracket that survives
+        // the strip fails closed.
+        assert_eq!(model_token("[1m]"), None, "the marker alone is not a model");
+        assert_eq!(model_token("claude opus 5[1m]"), None);
+        assert_eq!(model_token("a[b][c]"), None);
+        assert_eq!(model_token("<synthetic>[1m]"), None);
+        assert_eq!(
+            model_token(&format!("{}[1m]", "a".repeat(MODEL_TOKEN_MAX))),
+            None,
+            "the byte bound is measured on what the provider SENT"
+        );
+    }
+
+    /// `session_wire` is the ONE Rust literal of the wire session type, and it
+    /// is reached from `subscription_snapshot_wire`, which serves both
+    /// `fleet/snapshot` and the subscribe bootstrap. A column the store now
+    /// carries but this literal omits is invisible to every client, with
+    /// nothing red anywhere else.
+    #[tokio::test]
+    async fn session_wire_carries_model_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        for (event_id, key, patch) in [
+            (
+                "e-observed",
+                "claude:with-model",
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    model: Some("claude-opus-5".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+            (
+                "e-unobserved",
+                "claude:without-model",
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        ] {
+            FleetRepo::apply_event(
+                pool,
+                &NewFleetEvent {
+                    event_id: event_id.to_string(),
+                    session_key: key.to_string(),
+                    observed_at: 1_700,
+                    authority: ObservationAuthority::Authoritative,
+                    event_type: "observation".to_string(),
+                    payload: "{}".to_string(),
+                    patch,
+                },
+            )
+            .await
+            .expect("event applies");
+        }
+
+        let projection = subscription_wire(pool, 0, 100).await.expect("projection");
+        let snapshot = subscription_snapshot_wire(&projection);
+        let session = |key: &str| {
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.session_key == key)
+                .expect("session reaches the wire")
+                .clone()
+        };
+
+        let observed = session("claude:with-model");
+        assert_eq!(observed.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(observed.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(observed.model_updated_at, 1_700);
+
+        // Absence stays absence all the way to the wire: no placeholder, no
+        // synthesised default, and a zero clock the client can read as
+        // "never observed".
+        let unobserved = session("claude:without-model");
+        assert_eq!(unobserved.model, None);
+        assert_eq!(unobserved.reasoning_effort, None);
+        assert_eq!(unobserved.model_updated_at, 0);
+    }
+
     /// The reaper retires what nothing can observe, and then goes quiet.
     ///
     /// Covers both stranded shapes in one pass: a `Notification` row parked at
@@ -2329,6 +2832,7 @@ mod tests {
                 cwd: "/tmp/ephemeral",
                 payload: &serde_json::json!({}),
                 observed_at: 0,
+                transcript_model: None,
             },
         )
         .await
@@ -3093,6 +3597,7 @@ mod tests {
                 event_type: "AskUserQuestion",
                 payload: &ask,
                 observed_at: 1,
+                transcript_model: None,
             },
         )
         .await
@@ -3128,6 +3633,7 @@ mod tests {
                     event_type,
                     payload,
                     observed_at,
+                    transcript_model: None,
                 },
             )
             .await
@@ -3172,6 +3678,7 @@ mod tests {
                 event_type: "AskUserQuestion",
                 payload: &ask,
                 observed_at: 1,
+                transcript_model: None,
             },
         )
         .await
@@ -3303,6 +3810,7 @@ mod tests {
                     event_type: "AskUserQuestion",
                     payload: &payload,
                     observed_at: 100,
+                    transcript_model: None,
                 },
             )
             .await
@@ -3328,6 +3836,7 @@ mod tests {
                 event_type: "Stop",
                 payload: &serde_json::json!({}),
                 observed_at: 200,
+                transcript_model: None,
             },
         )
         .await
@@ -3362,6 +3871,7 @@ mod tests {
                 event_type: "SubagentStart",
                 payload: &start,
                 observed_at: 100,
+                transcript_model: None,
             },
         )
         .await
@@ -3382,6 +3892,7 @@ mod tests {
                 event_type: "SubagentStop",
                 payload: &stop,
                 observed_at: 200,
+                transcript_model: None,
             },
         )
         .await
@@ -3402,6 +3913,7 @@ mod tests {
                 event_type: "SubagentStop",
                 payload: &stop,
                 observed_at: 200,
+                transcript_model: None,
             },
         )
         .await
@@ -3436,6 +3948,7 @@ mod tests {
                 event_type: "UserPromptSubmit",
                 payload: &payload,
                 observed_at: 100,
+                transcript_model: None,
             },
         )
         .await
@@ -3487,6 +4000,7 @@ mod tests {
                 event_type: "UserPromptSubmit",
                 payload: &payload,
                 observed_at: 100,
+                transcript_model: None,
             },
         )
         .await
@@ -3579,6 +4093,7 @@ mod tests {
                 event_type: "SessionStart",
                 payload: &payload,
                 observed_at: 200,
+                transcript_model: None,
             },
         )
         .await
@@ -4560,6 +5075,7 @@ mod tests {
                 cwd: "/tmp/ephemeral",
                 payload: &serde_json::json!({}),
                 observed_at: 0,
+                transcript_model: None,
             },
         )
         .await

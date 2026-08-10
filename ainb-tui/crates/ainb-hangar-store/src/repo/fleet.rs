@@ -163,6 +163,10 @@ pub struct FleetSessionPatch {
     pub current_request_fingerprint: Option<Option<String>>,
     /// Independent transport health.
     pub transport_health: Option<String>,
+    /// Provider-reported model id, verbatim.
+    pub model: Option<String>,
+    /// Provider-reported reasoning effort, verbatim.
+    pub reasoning_effort: Option<String>,
 }
 
 impl FleetSessionPatch {
@@ -257,6 +261,14 @@ pub struct FleetSessionRow {
     pub transport_updated_at: i64,
     /// Transport group authority.
     pub transport_authority: String,
+    /// Provider-reported model id, verbatim. `None` means never observed.
+    pub model: Option<String>,
+    /// Provider-reported reasoning effort, verbatim. `None` means never observed.
+    pub reasoning_effort: Option<String>,
+    /// Model group timestamp.
+    pub model_updated_at: i64,
+    /// Model group authority.
+    pub model_authority: String,
     /// Optimistic concurrency version.
     pub version: i64,
     /// Revision that last changed this row.
@@ -1121,7 +1133,8 @@ const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_sess
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
+    model, reasoning_effort, model_updated_at, model_authority \
     FROM fleet_session WHERE session_key = ?";
 
 const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session_id, \
@@ -1130,7 +1143,8 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
+    model, reasoning_effort, model_updated_at, model_authority \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
 /// The archived roster: hidden by [`FleetRepo::archive_session`], NOT by
@@ -1142,7 +1156,8 @@ const SESSION_SELECT_ARCHIVED: &str = "SELECT session_key, provider, provider_se
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
+    model, reasoning_effort, model_updated_at, model_authority \
     FROM fleet_session WHERE visible = 0 AND superseded_by IS NULL \
     ORDER BY last_observed_at DESC LIMIT ?";
 
@@ -1185,6 +1200,14 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
     };
     let transport_at = event.patch.transport_health.as_ref().map_or(0, |_| event.observed_at);
     let workload_at = event.patch.active_work_count.map_or(0, |_| event.observed_at);
+    let model_at = if event.patch.model.is_some() || event.patch.reasoning_effort.is_some() {
+        event.observed_at
+    } else {
+        0
+    };
+    // Bound before the literal: the transport group MOVES `authority`, and the
+    // model group is written after it.
+    let authority_for_model = authority.clone();
     FleetSessionRow {
         session_key: event.session_key.clone(),
         provider: event.patch.provider.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -1242,6 +1265,17 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
         } else {
             authority
         },
+        // Seeded from the patch like every other group: a session's FIRST event
+        // is a real observation, and for a managed Codex thread it is the only
+        // one that carries the pair until the settings feed fires.
+        model: event.patch.model.clone(),
+        reasoning_effort: event.patch.reasoning_effort.clone(),
+        model_updated_at: model_at,
+        model_authority: if model_at == 0 {
+            "inferred".to_string()
+        } else {
+            authority_for_model
+        },
         version: 1,
         updated_revision: 0,
     }
@@ -1277,6 +1311,25 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
         assign_if_some(&mut row.confidence, &event.patch.confidence);
         row.metadata_updated_at = event.observed_at;
         row.metadata_authority.clone_from(&authority_token);
+        changed = true;
+    }
+
+    // The model group is deliberately NOT folded into `has_metadata()`. The
+    // metadata group is authoritative on every hook, so an inferred model
+    // producer could never land against it; and a model-only observation must
+    // not restamp an unrelated group's freshness.
+    if (event.patch.model.is_some() || event.patch.reasoning_effort.is_some())
+        && should_replace(
+            authority,
+            event.observed_at,
+            &row.model_authority,
+            row.model_updated_at,
+        )
+    {
+        assign_option_if_some(&mut row.model, &event.patch.model);
+        assign_option_if_some(&mut row.reasoning_effort, &event.patch.reasoning_effort);
+        row.model_updated_at = event.observed_at;
+        row.model_authority.clone_from(&authority_token);
         changed = true;
     }
 
@@ -1376,8 +1429,9 @@ async fn insert_session(
             confidence, discovered_at, last_observed_at, metadata_updated_at, \
             metadata_authority, lifecycle_updated_at, lifecycle_authority, \
             attention_updated_at, attention_authority, transport_updated_at, \
-            transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
+            model, reasoning_effort, model_updated_at, model_authority) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     bind_session(query, row).execute(&mut **tx).await?;
     Ok(())
@@ -1413,7 +1467,8 @@ async fn update_session(
             discovered_at = ?, last_observed_at = ?, metadata_updated_at = ?, \
             metadata_authority = ?, lifecycle_updated_at = ?, lifecycle_authority = ?, \
             attention_updated_at = ?, attention_authority = ?, transport_updated_at = ?, \
-            transport_authority = ?, active_work_count = ?, workload_updated_at = ?, workload_authority = ?, version = ?, updated_revision = ? \
+            transport_authority = ?, active_work_count = ?, workload_updated_at = ?, workload_authority = ?, version = ?, updated_revision = ?, \
+            model = ?, reasoning_effort = ?, model_updated_at = ?, model_authority = ? \
          WHERE session_key = ?",
     )
     .bind(&row.provider)
@@ -1445,6 +1500,10 @@ async fn update_session(
     .bind(&row.workload_authority)
     .bind(row.version)
     .bind(row.updated_revision)
+    .bind(&row.model)
+    .bind(&row.reasoning_effort)
+    .bind(row.model_updated_at)
+    .bind(&row.model_authority)
     .bind(&row.session_key)
     .execute(&mut **tx)
     .await?;
@@ -1486,6 +1545,10 @@ fn bind_session<'q>(
         .bind(&row.workload_authority)
         .bind(row.version)
         .bind(row.updated_revision)
+        .bind(&row.model)
+        .bind(&row.reasoning_effort)
+        .bind(row.model_updated_at)
+        .bind(&row.model_authority)
 }
 
 fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sqlx::Error> {
@@ -1518,6 +1581,10 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sq
         active_work_count: row.try_get("active_work_count")?,
         workload_updated_at: row.try_get("workload_updated_at")?,
         workload_authority: row.try_get("workload_authority")?,
+        model: row.try_get("model")?,
+        reasoning_effort: row.try_get("reasoning_effort")?,
+        model_updated_at: row.try_get("model_updated_at")?,
+        model_authority: row.try_get("model_authority")?,
         version: row.try_get("version")?,
         updated_revision: row.try_get("updated_revision")?,
     })
@@ -1788,6 +1855,264 @@ mod tests {
             FleetRepo::events_after(store.pool(), 0, 100).await.unwrap().len(),
             2
         );
+    }
+
+    /// Seed one session through a metadata patch and return its key.
+    async fn seeded_session(store: &Store, key: &str, at: i64) {
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                &format!("e-seed-{key}"),
+                key,
+                at,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The model group must be a state group of its own, not a rider on the
+    /// metadata group's `has_metadata()` gate.
+    ///
+    /// A patch carrying ONLY a model is what every real producer emits — a hook
+    /// that observed an effort, a transcript tail that observed a model. If it
+    /// does not win a group, `apply_patch` returns `changed = false`, the row's
+    /// `version` never moves and `updated_revision` is never set, so the macOS
+    /// client (which re-snapshots per revision) never learns the model exists.
+    /// The failure is total and completely silent.
+    #[tokio::test]
+    async fn model_only_patch_bumps_version_and_mints_revision() {
+        let (_dir, store) = store().await;
+        seeded_session(&store, "claude:s-1", 100).await;
+
+        let result = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-model",
+                "claude:s-1",
+                200,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    model: Some("claude-opus-5".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.applied,
+            "a model-only patch must win a state group of its own"
+        );
+        assert_eq!(result.session.version, 2, "the row version must advance");
+        assert_eq!(
+            result.session.updated_revision, result.revision,
+            "the change must be pinned to a fresh revision, or no subscriber sees it"
+        );
+        assert_eq!(result.session.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(result.session.model_updated_at, 200);
+        assert_eq!(result.session.model_authority, "authoritative");
+    }
+
+    /// A session's FIRST event takes the `new_session` path, which bypasses
+    /// `apply_patch` entirely. Every other group seeds itself from the patch
+    /// there; if the model group did not, a managed Codex thread seeded with
+    /// its pair at spawn would land with an empty model and stay empty until
+    /// the settings feed happened to fire.
+    #[tokio::test]
+    async fn model_on_a_first_event_seeds_the_new_row() {
+        let (_dir, store) = store().await;
+        let result = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-spawn",
+                "codex:thread-1",
+                400,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("codex".to_string()),
+                    model: Some("gpt-5.6-terra".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.applied);
+        assert_eq!(result.session.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(result.session.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(result.session.model_updated_at, 400);
+        assert_eq!(result.session.model_authority, "authoritative");
+
+        // And it is DURABLE, not just present on the returned row: the insert
+        // and the re-read must agree.
+        let stored = FleetRepo::get_session(store.pool(), "codex:thread-1")
+            .await
+            .unwrap()
+            .expect("session persisted");
+        assert_eq!(stored.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(stored.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(stored.model_updated_at, 400);
+        assert_eq!(stored.model_authority, "authoritative");
+    }
+
+    /// A first event with no model leaves the group at its weakest prior, so
+    /// the next observation of any authority can land.
+    #[tokio::test]
+    async fn first_event_without_model_leaves_the_group_unobserved() {
+        let (_dir, store) = store().await;
+        seeded_session(&store, "claude:s-1", 100).await;
+        let stored = FleetRepo::get_session(store.pool(), "claude:s-1")
+            .await
+            .unwrap()
+            .expect("session persisted");
+
+        assert_eq!(stored.model, None);
+        assert_eq!(stored.reasoning_effort, None);
+        assert_eq!(stored.model_updated_at, 0);
+        assert_eq!(stored.model_authority, "inferred");
+    }
+
+    /// The two fields share one group but are assigned independently: a later
+    /// effort-only observation must not blank a model already known.
+    #[tokio::test]
+    async fn effort_only_patch_does_not_clear_model() {
+        let (_dir, store) = store().await;
+        seeded_session(&store, "claude:s-1", 100).await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-pair",
+                "claude:s-1",
+                200,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    model: Some("claude-opus-5".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-effort",
+                "claude:s-1",
+                300,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    reasoning_effort: Some("xhigh".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.applied);
+        assert_eq!(
+            result.session.model.as_deref(),
+            Some("claude-opus-5"),
+            "an effort-only observation says nothing about the model"
+        );
+        assert_eq!(result.session.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(result.session.model_updated_at, 300);
+    }
+
+    /// The whole reason the group carries its own authority: an inferred
+    /// producer must never overwrite what a provider stated, however much later
+    /// it observed.
+    #[tokio::test]
+    async fn inferred_model_cannot_clobber_authoritative() {
+        let (_dir, store) = store().await;
+        seeded_session(&store, "codex:s-1", 50).await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-auth-model",
+                "codex:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    model: Some("gpt-5.6-terra".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let inferred = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-inferred-model",
+                "codex:s-1",
+                200,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    model: Some("gpt-4".to_string()),
+                    reasoning_effort: Some("low".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(!inferred.applied);
+        assert_eq!(inferred.session.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(inferred.session.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(inferred.session.model_updated_at, 100);
+        assert_eq!(inferred.session.model_authority, "authoritative");
+    }
+
+    /// Folding the model into `has_metadata()` would make every model-only
+    /// observation restamp the metadata group's freshness, corrupting an
+    /// unrelated group's authority clock. It must not.
+    #[tokio::test]
+    async fn model_group_does_not_disturb_metadata_freshness() {
+        let (_dir, store) = store().await;
+        seeded_session(&store, "claude:s-1", 100).await;
+
+        let result = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-model",
+                "claude:s-1",
+                900,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    model: Some("claude-opus-5".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.session.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(
+            result.session.metadata_updated_at, 100,
+            "the metadata group's clock belongs to the metadata group"
+        );
+        assert_eq!(
+            result.session.metadata_authority, "authoritative",
+            "an inferred model observation must not weaken metadata authority"
+        );
+        assert_eq!(result.session.cwd, "/repo");
     }
 
     #[tokio::test]
