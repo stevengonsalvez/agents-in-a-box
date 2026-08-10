@@ -464,6 +464,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         }
     };
 
+    // Crash breadcrumbs start HERE, once this process owns the home — never
+    // before. They live in the SHARED home: `start_breadcrumbs` deletes the
+    // previous run's exit reason and begins overwriting `daemon.heartbeat` with
+    // our pid. A duplicate that goes on to decline would therefore erase the
+    // INCUMBENT's death record and impersonate its heartbeat, and the decline's
+    // own `record_exit` would then file a clean exit for a daemon that is still
+    // running. Behind the lock, a decliner installs nothing and `record_exit`
+    // is a no-op for it.
+    crate::observability::note_phase("boot");
+    crate::observability::start_breadcrumbs(&dir);
+
     // The ownership watchdog: the one layer that survives every exit path not
     // running. If this daemon ever stops owning its home — an operator deleting
     // the lock, a home restored from a backup — it stands down instead of racing
