@@ -4586,6 +4586,7 @@ mod tests {
                     "process_start_fingerprint": hook_fingerprint,
                 }),
                 observed_at: 2_000,
+                transcript_model: None,
             },
         )
         .await
@@ -4711,6 +4712,7 @@ mod tests {
                     "process_start_fingerprint": fingerprint,
                 }),
                 observed_at,
+                transcript_model: None,
             },
         )
         .await
@@ -5049,6 +5051,10 @@ mod tests {
             attention_authority: "inferred".to_string(),
             transport_updated_at: 0,
             transport_authority: "inferred".to_string(),
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            model_authority: "inferred".to_string(),
             version: 1,
             updated_revision: 1,
         }
