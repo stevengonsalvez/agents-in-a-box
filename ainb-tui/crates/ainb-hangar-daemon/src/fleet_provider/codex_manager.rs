@@ -15,13 +15,13 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
@@ -782,14 +782,13 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
 /// ChatGPT login without copying its credential file. This prevents Codex
 /// Desktop and Ainb from racing for one persisted remote server identity.
 async fn prepare_scoped_codex_home(socket_path: &Path) -> Result<PathBuf, ProviderError> {
-    let scoped_home = socket_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("codex-home");
+    let scoped_home = socket_path.parent().unwrap_or_else(|| Path::new(".")).join("codex-home");
     let source_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-        .ok_or_else(|| ProviderError::Transport("cannot resolve Codex authentication home".into()))?;
+        .ok_or_else(|| {
+            ProviderError::Transport("cannot resolve Codex authentication home".into())
+        })?;
     prepare_scoped_codex_home_with_auth(&scoped_home, &source_home.join("auth.json")).await?;
     Ok(scoped_home)
 }
@@ -2058,19 +2057,20 @@ mod tests {
         std::fs::write(&source_auth, "existing ChatGPT credentials").unwrap();
         let scoped_home = root.path().join("ainb/codex-home");
 
-        prepare_scoped_codex_home_with_auth(&scoped_home, &source_auth)
-            .await
-            .unwrap();
+        prepare_scoped_codex_home_with_auth(&scoped_home, &source_auth).await.unwrap();
 
         let scoped_auth = scoped_home.join("auth.json");
-        assert!(std::fs::symlink_metadata(&scoped_auth)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(std::fs::symlink_metadata(&scoped_auth).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_link(&scoped_auth).unwrap(), source_auth);
-        assert_eq!(std::fs::read_to_string(&scoped_auth).unwrap(), "existing ChatGPT credentials");
+        assert_eq!(
+            std::fs::read_to_string(&scoped_auth).unwrap(),
+            "existing ChatGPT credentials"
+        );
         #[cfg(unix)]
-        assert_eq!(std::fs::metadata(&scoped_home).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&scoped_home).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]
