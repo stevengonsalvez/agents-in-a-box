@@ -17,7 +17,7 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, ensure_codex_remote_thread,
+    ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread, ensure_codex_remote_thread,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -155,6 +155,20 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
+
+    let codex_remote = match codex_remote {
+        Some(remote) if remote.thread_id.is_none() => Some(
+            claim_codex_remote_thread(
+                session_id,
+                &work_dir,
+                model.as_deref(),
+                args.dangerously_skip_permissions,
+                false,
+            )
+            .await?,
+        ),
+        remote => remote,
+    };
 
     // Step 8: send the initial prompt (if any) once the input box is ready.
     // A fixed sleep loses keystrokes into Claude Code's not-yet-ready splash.
@@ -484,14 +498,12 @@ fn build_agent_command(args: &RunArgs) -> String {
 }
 
 fn remote_codex_command(remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult) -> String {
-    [
-        "codex",
-        "--remote",
-        &remote.endpoint,
-        "resume",
-        &remote.thread_id,
-    ]
-    .into_iter()
+    let mut parts = vec!["codex".to_string(), "--remote".to_string(), remote.endpoint.clone()];
+    if let Some(thread_id) = remote.thread_id.as_ref() {
+        parts.extend(["resume".to_string(), thread_id.clone()]);
+    }
+    parts
+    .iter()
     .map(|part| shell_escape::escape(part.into()).into_owned())
     .collect::<Vec<_>>()
     .join(" ")
@@ -745,13 +757,22 @@ mod tests {
     fn remote_codex_command_resumes_exact_thread() {
         let command = remote_codex_command(&ainb_hangar_proto::fleet::CodexSessionEnsureResult {
             endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
-            thread_id: "thread-123".to_string(),
+            thread_id: Some("thread-123".to_string()),
         });
         assert_eq!(
             command,
             "codex --remote 'unix:///tmp/codex-app-server.sock' resume thread-123"
         );
         assert!(!command.contains("--last"));
+    }
+
+    #[test]
+    fn remote_codex_command_starts_fresh_thread() {
+        let command = remote_codex_command(&ainb_hangar_proto::fleet::CodexSessionEnsureResult {
+            endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
+            thread_id: None,
+        });
+        assert_eq!(command, "codex --remote 'unix:///tmp/codex-app-server.sock'");
     }
 
     #[test]
