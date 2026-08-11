@@ -3112,11 +3112,22 @@ async fn handle_codex_session_ensure(
     if params.session_id.trim().is_empty() || params.cwd.trim().is_empty() {
         return Err(invalid_params("session_id and cwd must not be empty"));
     }
-    let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+    let manager = match crate::fleet_provider::codex_manager::wait_for_active_handle(
         std::time::Duration::from_secs(15),
     )
     .await
-    .ok_or_else(|| internal("Ainb Codex runtime is unavailable"))?;
+    {
+        Some(manager) => manager,
+        None => {
+            let detail = crate::fleet_provider::codex_manager::transport_health()
+                .await
+                .last_failure
+                .unwrap_or_else(|| "still starting".to_string());
+            return Err(internal(&format!(
+                "Ainb Codex remote control unavailable: {detail}"
+            )));
+        }
+    };
     let existing: Option<Option<String>> =
         sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
             .bind(&params.session_id)
