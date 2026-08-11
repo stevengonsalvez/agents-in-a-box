@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -663,10 +665,12 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
     let mut server = if !owns_server {
         None
     } else {
+        let codex_home = prepare_scoped_codex_home(&config.socket_path).await?;
         let mut server_command = tokio_command(app_server_command(
             &config.codex_binary,
             &config.socket_path,
         ));
+        server_command.env("CODEX_HOME", &codex_home);
         server_command.kill_on_drop(true);
         let mut child = server_command
             .stdin(Stdio::null())
@@ -772,6 +776,47 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
         cleanup,
     )
     .await
+}
+
+/// Ainb owns remote-control enrollment state, while reusing the user's existing
+/// ChatGPT login without copying its credential file. This prevents Codex
+/// Desktop and Ainb from racing for one persisted remote server identity.
+async fn prepare_scoped_codex_home(socket_path: &Path) -> Result<PathBuf, ProviderError> {
+    let scoped_home = socket_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("codex-home");
+    let source_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .ok_or_else(|| ProviderError::Transport("cannot resolve Codex authentication home".into()))?;
+    prepare_scoped_codex_home_with_auth(&scoped_home, &source_home.join("auth.json")).await?;
+    Ok(scoped_home)
+}
+
+async fn prepare_scoped_codex_home_with_auth(
+    scoped_home: &Path,
+    source_auth: &Path,
+) -> Result<(), ProviderError> {
+    tokio::fs::create_dir_all(scoped_home).await?;
+    #[cfg(unix)]
+    tokio::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700)).await?;
+
+    let scoped_auth = scoped_home.join("auth.json");
+    match tokio::fs::symlink_metadata(&scoped_auth).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if !source_auth.is_file() {
+        return Err(ProviderError::Transport(format!(
+            "Codex ChatGPT login unavailable at {}",
+            source_auth.display()
+        )));
+    }
+    #[cfg(unix)]
+    tokio::fs::symlink(source_auth, &scoped_auth).await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2005,6 +2050,28 @@ mod tests {
     use super::*;
     use crate::fleet_provider::codex::CodexInbound;
     use crate::fleet_provider::{QuestionOption, StructuredQuestion};
+
+    #[tokio::test]
+    async fn scoped_codex_home_symlinks_existing_auth() {
+        let root = tempfile::tempdir().unwrap();
+        let source_auth = root.path().join("source-auth.json");
+        std::fs::write(&source_auth, "existing ChatGPT credentials").unwrap();
+        let scoped_home = root.path().join("ainb/codex-home");
+
+        prepare_scoped_codex_home_with_auth(&scoped_home, &source_auth)
+            .await
+            .unwrap();
+
+        let scoped_auth = scoped_home.join("auth.json");
+        assert!(std::fs::symlink_metadata(&scoped_auth)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&scoped_auth).unwrap(), source_auth);
+        assert_eq!(std::fs::read_to_string(&scoped_auth).unwrap(), "existing ChatGPT credentials");
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(&scoped_home).unwrap().permissions().mode() & 0o777, 0o700);
+    }
 
     #[test]
     fn bound_by_child_rejects_race_losers() {
