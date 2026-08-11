@@ -122,7 +122,7 @@ impl CodexManagerHandle {
         let result = self
             .request(
                 "thread/start",
-                json!({ "cwd": cwd, "model": model, "ephemeral": false }),
+                json!({ "cwd": cwd, "model": model, "ephemeral": false, "threadSource": "user" }),
             )
             .await?;
         nested_id(&result, "thread")
@@ -318,7 +318,8 @@ fn interactive_thread_start_params(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> Value {
-    let mut params = json!({ "cwd": cwd, "model": model, "ephemeral": false });
+    let mut params =
+        json!({ "cwd": cwd, "model": model, "ephemeral": false, "threadSource": "user" });
     if skip_permissions {
         let object = params.as_object_mut().expect("interactive thread params are an object");
         object.insert("approvalPolicy".into(), json!("never"));
@@ -3184,10 +3185,12 @@ mod tests {
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["model"], "gpt-5");
         assert_eq!(params["ephemeral"], false);
+        assert_eq!(params["threadSource"], "user");
 
         let default_params = interactive_thread_start_params(Path::new("/worktree"), None, false);
         assert!(default_params.get("approvalPolicy").is_none());
         assert!(default_params.get("sandbox").is_none());
         assert_eq!(default_params["ephemeral"], false);
+        assert_eq!(default_params["threadSource"], "user");
     }
 }
