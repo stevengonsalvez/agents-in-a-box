@@ -3377,7 +3377,6 @@ async fn handle_codex_session_ensure(
         Some((None, _, watermark)) => claim_pending_codex_thread(
             pool,
             &params.session_id,
-            &cwd,
             watermark.unwrap_or_default(),
         )
         .await?,
@@ -3386,8 +3385,7 @@ async fn handle_codex_session_ensure(
                 match manager.thread_resume(thread_id).await {
                     Ok(_) => {}
                     Err(error) if error.to_string().contains("no rollout found") => {
-                        let watermark = codex_event_watermark(pool).await?;
-                        reserve_pending_codex_thread(pool, &params, &cwd, watermark).await?;
+                        reserve_pending_codex_thread(pool, &params, &cwd).await?;
                         return to_value(&CodexSessionEnsureResult {
                             thread_id: None,
                             endpoint: format!("unix://{}", manager.socket_path().display()),
@@ -3410,8 +3408,7 @@ async fn handle_codex_session_ensure(
                 Some(thread_id.to_string())
             }
             None => {
-                let watermark = codex_event_watermark(pool).await?;
-                reserve_pending_codex_thread(pool, &params, &cwd, watermark).await?;
+                reserve_pending_codex_thread(pool, &params, &cwd).await?;
                 None
             }
         },
@@ -3433,31 +3430,39 @@ async fn reserve_pending_codex_thread(
     pool: &SqlitePool,
     params: &ainb_hangar_proto::fleet::CodexSessionEnsureParams,
     cwd: &str,
-    watermark: i64,
 ) -> Result<(), RpcError> {
-    let inserted = sqlx::query(
-        "INSERT INTO interactive_codex_thread \
-         (session_id, thread_id, cwd, model, skip_permissions, event_watermark) \
-         VALUES (?, NULL, ?, ?, ?, ?)",
-    )
-    .bind(&params.session_id)
-    .bind(cwd)
-    .bind(&params.model)
-    .bind(params.skip_permissions)
-    .bind(watermark)
-    .execute(pool)
-    .await
-    .map_err(|error| internal(&format!("reserve Interactive Codex thread: {error}")))?;
-    if inserted.rows_affected() == 0 {
-        return Err(internal("reserve Interactive Codex thread affected no rows"));
+    // `thread/started` has no client correlation field. The migration admits
+    // one pending row globally, so wait for its launch to claim before taking
+    // the next cursor. This private app-server endpoint has one Ainb owner.
+    for _ in 0..100 {
+        let watermark = codex_event_watermark(pool).await?;
+        let inserted = sqlx::query(
+            "INSERT INTO interactive_codex_thread \
+             (session_id, thread_id, cwd, model, skip_permissions, event_watermark) \
+             VALUES (?, NULL, ?, ?, ?, ?)",
+        )
+        .bind(&params.session_id)
+        .bind(cwd)
+        .bind(&params.model)
+        .bind(params.skip_permissions)
+        .bind(watermark)
+        .execute(pool)
+        .await;
+        match inserted {
+            Ok(result) if result.rows_affected() == 1 => return Ok(()),
+            Ok(_) => return Err(internal("reserve Interactive Codex thread affected no rows")),
+            Err(sqlx::Error::Database(error)) if error.message().contains("UNIQUE constraint failed") => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(internal(&format!("reserve Interactive Codex thread: {error}"))),
+        }
     }
-    Ok(())
+    Err(internal("another Ainb Codex session is still starting; retry shortly"))
 }
 
 async fn claim_pending_codex_thread(
     pool: &SqlitePool,
     session_id: &str,
-    cwd: &str,
     watermark: i64,
 ) -> Result<Option<String>, RpcError> {
     let payloads: Vec<String> = sqlx::query_scalar(
@@ -3471,7 +3476,7 @@ async fn claim_pending_codex_thread(
     .await
     .map_err(|error| internal(&format!("read pending Codex thread: {error}")))?;
     for payload in payloads {
-        let Some(thread_id) = codex_started_thread_for_cwd(&payload, cwd) else {
+        let Some(thread_id) = codex_started_thread_id(&payload) else {
             continue;
         };
         let claimed = sqlx::query(
@@ -3491,17 +3496,10 @@ async fn claim_pending_codex_thread(
     Ok(None)
 }
 
-fn codex_started_thread_for_cwd(payload: &str, cwd: &str) -> Option<String> {
+fn codex_started_thread_id(payload: &str) -> Option<String> {
     let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
     let thread = payload.pointer("/params/thread")?;
-    let event_cwd = thread.get("cwd")?.as_str()?;
-    let event_cwd = std::fs::canonicalize(event_cwd)
-        .unwrap_or_else(|_| std::path::PathBuf::from(event_cwd))
-        .display()
-        .to_string();
-    (event_cwd == cwd)
-        .then(|| thread.get("id")?.as_str().map(str::to_owned))
-        .flatten()
+    thread.get("id")?.as_str().map(str::to_owned)
 }
 
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
@@ -12911,19 +12909,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_started_thread_claim_requires_exact_cwd() {
-        let cwd = std::env::current_dir().unwrap().display().to_string();
+    fn codex_started_thread_claim_reads_thread_id() {
         let payload = serde_json::json!({
             "method": "thread/started",
-            "params": { "thread": { "id": "thread-1", "cwd": cwd } }
+            "params": { "thread": { "id": "thread-1", "cwd": "/app-server-cwd" } }
         })
         .to_string();
 
         assert_eq!(
-            codex_started_thread_for_cwd(&payload, &cwd),
+            codex_started_thread_id(&payload),
             Some("thread-1".to_string())
         );
-        assert_eq!(codex_started_thread_for_cwd(&payload, "/wrong-cwd"), None);
+        assert_eq!(codex_started_thread_id("{}"), None);
     }
     use ainb_hangar_store::Store;
 
