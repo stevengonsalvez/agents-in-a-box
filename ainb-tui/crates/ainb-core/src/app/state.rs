@@ -9330,7 +9330,7 @@ impl AppState {
                 .start_cli_in_tmux(
                     &metadata.tmux_session_name,
                     skip_permissions,
-                    model,
+                    model.clone(),
                     metadata.agent_type,
                     transcript.clone(),
                     true, // resume_requested — Enter/r on a Stopped session
