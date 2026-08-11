@@ -435,7 +435,7 @@ pub async fn app_server_inventory() -> Vec<CodexAppServerInventoryRow> {
                 },
             }
         })
-        .take(DEFAULT_CODEX_MAX_SERVERS)
+        .take(APP_SERVER_INVENTORY_LIMIT)
         .collect()
 }
 
@@ -644,18 +644,6 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             "installed Codex has no app-server stdio proxy".into(),
         ));
     }
-
-    // Fail loud before we add another app-server to an already-piled-up host. A
-    // SIGKILLed daemon leaks its child at ppid==1; the boot reaper handles that,
-    // but this cap is the second line of defence against an unbounded spawn loop
-    // (e.g. a wedged service-retry). Surfaces as a Transport error the service loop
-    // logs + backs off on, never a silent 900-process pileup.
-    //
-    // This runs BEFORE prepare_socket, so at the cap the daemon also declines to
-    // ADOPT the one healthy shared server it might otherwise reuse; an intentional,
-    // honest downgrade: on an already-saturated host we refuse loudly rather than
-    // quietly join the pile.
-    enforce_codex_server_cap().await?;
 
     let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
     let mut owns_server = preparation.owns_server;
@@ -998,8 +986,9 @@ fn bound_by_child(child_pid: u32, listeners: Option<&[u32]>) -> bool {
     listeners.is_none_or(|pids| pids.len() == 1 && pids[0] == child_pid)
 }
 
-/// Default max concurrent codex app-server processes before `spawn` refuses more.
-const DEFAULT_CODEX_MAX_SERVERS: usize = 8;
+/// Diagnostic output bound. This never gates spawning: other Codex clients and
+/// IDEs own independent app-servers, while Ainb reuses only its exact socket.
+const APP_SERVER_INVENTORY_LIMIT: usize = 8;
 
 /// One `ps -Ao pid,ppid,args` row, borrowed from the dump.
 struct PsRow<'a> {
@@ -1169,19 +1158,6 @@ fn codex_orphans_to_reap(ps_output: &str, adoption_credible: impl Fn(&str) -> bo
         .collect()
 }
 
-/// Count of live codex app-server SERVERS (any ppid) in a `ps` dump: argv contains
-/// `bin/codex` AND `app-server`, but NOT `app-server proxy`. Used to fail loud
-/// before piling on more. Proxy processes are excluded because each real server is
-/// fronted by a proxy; counting both would trip the cap at half the real server
-/// count (~4 server+proxy pairs against the default cap of 8).
-fn live_codex_app_server_count(ps_output: &str) -> usize {
-    ps_output
-        .lines()
-        .filter_map(parse_ps_row)
-        .filter(|row| is_codex_app_server(row.args) && !row.args.contains("app-server proxy"))
-        .count()
-}
-
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
 /// shared socket, then return who to signal.
 ///
@@ -1197,24 +1173,6 @@ fn reap_targets(candidates: &[u32], listeners: Option<&[u32]>, self_pid: u32) ->
         .collect()
 }
 
-/// Configured cap on concurrent codex app-server servers (`AINB_CODEX_MAX_SERVERS`,
-/// default `DEFAULT_CODEX_MAX_SERVERS`). A non-numeric override falls back to default.
-/// Clamped to a floor of 1 so `AINB_CODEX_MAX_SERVERS=0` cannot permanently refuse
-/// every spawn (the daemon must always be able to bring up at least one server).
-fn codex_server_cap() -> usize {
-    std::env::var("AINB_CODEX_MAX_SERVERS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_CODEX_MAX_SERVERS)
-        .max(1)
-}
-
-/// Whether the live codex app-server count in a `ps` dump has reached `cap`.
-/// Pure so the boundary (`count >= cap`) is unit-tested without spawning `ps`.
-fn codex_server_cap_reached(ps_output: &str, cap: usize) -> bool {
-    live_codex_app_server_count(ps_output) >= cap
-}
-
 /// Read the full process table via `ps -Ao pid,ppid,args`, or `None` on failure.
 async fn ps_process_table() -> Option<String> {
     let output = Command::new("ps")
@@ -1226,27 +1184,6 @@ async fn ps_process_table() -> Option<String> {
         .ok()
         .filter(|output| output.status.success())?;
     String::from_utf8(output.stdout).ok()
-}
-
-/// Refuse to spawn another shared app-server once the cap is already live.
-///
-/// Turns a silent process pileup (a SIGKILL/OOM leak loop that never runs Drop)
-/// into a loud spawn error the service loop logs and backs off on. Fails open when
-/// `ps` cannot answer: we never wedge boot on a host without a readable process
-/// table.
-async fn enforce_codex_server_cap() -> Result<(), ProviderError> {
-    let cap = codex_server_cap();
-    let Some(ps_output) = ps_process_table().await else {
-        return Ok(());
-    };
-    if codex_server_cap_reached(&ps_output, cap) {
-        let live = live_codex_app_server_count(&ps_output);
-        return Err(ProviderError::Transport(format!(
-            "refusing to spawn Codex app-server: {live} already live, at or above cap {cap} \
-             (raise with AINB_CODEX_MAX_SERVERS)"
-        )));
-    }
-    Ok(())
 }
 
 /// Waits governing one reap sweep's SIGTERM → SIGKILL escalation.
@@ -2175,11 +2112,6 @@ mod tests {
                 codex_orphans_to_reap(line, |_| true).is_empty(),
                 "must not target: {line}"
             );
-            assert_eq!(
-                live_codex_app_server_count(line),
-                0,
-                "must not count: {line}"
-            );
         }
 
         // The real shapes still match, from both `codex ...` and `node .../codex ...`.
@@ -2642,29 +2574,6 @@ mod tests {
         assert_eq!(reap_targets(&candidates, None, 999), vec![501, 777]);
         // Our own pid is never a target.
         assert_eq!(reap_targets(&[501, 777, 999], None, 999), vec![501, 777]);
-    }
-
-    #[test]
-    fn live_count_counts_servers_not_proxies() {
-        // 501 + 777 are real servers = 2. The 1500 `app-server proxy` line is a
-        // consumer, not a server, so it is NOT counted (counting proxies would trip
-        // the cap at half the real server count). Desktop app + header excluded.
-        assert_eq!(live_codex_app_server_count(PS_FIXTURE), 2);
-        // A lone proxy line, regardless of ppid, counts as zero servers.
-        let proxy_only = " 1500     1 /home/u/.nvm/bin/codex app-server proxy --sock /tmp/x.sock\n";
-        assert_eq!(live_codex_app_server_count(proxy_only), 0);
-    }
-
-    #[test]
-    fn cap_reached_at_or_above_boundary() {
-        // Fixture has 2 live SERVERS (proxies excluded).
-        assert!(!codex_server_cap_reached(PS_FIXTURE, 3)); // below the cap
-        assert!(codex_server_cap_reached(PS_FIXTURE, 2)); // at the cap
-        assert!(codex_server_cap_reached(PS_FIXTURE, 1)); // above the cap
-        assert!(!codex_server_cap_reached(
-            PS_FIXTURE,
-            DEFAULT_CODEX_MAX_SERVERS
-        ));
     }
 
     struct FakeCleanup(Arc<AtomicBool>);
