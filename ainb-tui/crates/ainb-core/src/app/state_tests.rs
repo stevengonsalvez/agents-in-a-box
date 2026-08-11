@@ -480,7 +480,7 @@ mod tests {
 
         let remote = ainb_hangar_proto::fleet::CodexSessionEnsureResult {
             endpoint: "unix:///tmp/ainb-idle-restart.sock".to_string(),
-            thread_id: "thread-idle-restart".to_string(),
+            thread_id: Some("thread-idle-restart".to_string()),
         };
         InteractiveSessionManager::new()
             .expect("session manager")
