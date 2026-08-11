@@ -146,6 +146,38 @@ pub(crate) async fn ensure_codex_remote_thread(
         .map_err(|error| anyhow::anyhow!("Codex remote control unavailable: {error}"))
 }
 
+/// Wait briefly for the freshly started remote terminal to publish its exact
+/// thread identity through the daemon's app-server event stream.
+pub(crate) async fn claim_codex_remote_thread(
+    session_id: Uuid,
+    cwd: &std::path::Path,
+    model: Option<&str>,
+    skip_permissions: bool,
+    headroom_enabled: bool,
+) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remote = ensure_codex_remote_thread(
+            session_id,
+            cwd,
+            model,
+            skip_permissions,
+            headroom_enabled,
+            None,
+        )
+        .await?;
+        if remote.thread_id.is_some() {
+            return Ok(remote);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Codex started but did not publish a remote thread within 10 seconds; keep the pane open and retry"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub(crate) fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
     SessionStore::mutate(|store| {
         if let Some(metadata) =
@@ -572,6 +604,20 @@ impl InteractiveSessionManager {
             }
         }
 
+        let codex_remote = match codex_remote {
+            Some(remote) if remote.thread_id.is_none() => Some(
+                claim_codex_remote_thread(
+                    session_id,
+                    &worktree_info.path,
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                )
+                .await?,
+            ),
+            remote => remote,
+        };
+
         // Step 5: Create session record
         let created_at = Utc::now();
         let session = InteractiveSession {
@@ -587,7 +633,9 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
-            codex_thread_id: codex_remote.as_ref().map(|remote| remote.thread_id.clone()),
+            codex_thread_id: codex_remote
+                .as_ref()
+                .and_then(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -606,7 +654,7 @@ impl InteractiveSessionManager {
             model,
             model_source: ModelSource::Raw,
             codex_model: None,
-            codex_thread_id: codex_remote.map(|remote| remote.thread_id),
+            codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
@@ -759,6 +807,20 @@ impl InteractiveSessionManager {
             }
         }
 
+        let codex_remote = match codex_remote {
+            Some(remote) if remote.thread_id.is_none() => Some(
+                claim_codex_remote_thread(
+                    session_id,
+                    &existing_worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                )
+                .await?,
+            ),
+            remote => remote,
+        };
+
         // Step 4: Create session record
         let created_at = Utc::now();
         let worktree_path_clone = existing_worktree_path.clone();
@@ -775,7 +837,9 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
-            codex_thread_id: codex_remote.as_ref().map(|remote| remote.thread_id.clone()),
+            codex_thread_id: codex_remote
+                .as_ref()
+                .and_then(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -794,7 +858,7 @@ impl InteractiveSessionManager {
             model,
             model_source: ModelSource::Raw,
             codex_model: None,
-            codex_thread_id: codex_remote.map(|remote| remote.thread_id),
+            codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
         if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
@@ -1821,13 +1885,15 @@ impl InteractiveSessionManager {
                     "remote Codex thread used for a non-Codex session"
                 )));
             }
-            vec![
+            let mut command = vec![
                 provider.command().to_string(),
                 "--remote".to_string(),
                 remote.endpoint.clone(),
-                "resume".to_string(),
-                remote.thread_id.clone(),
-            ]
+            ];
+            if let Some(thread_id) = remote.thread_id.as_ref() {
+                command.extend(["resume".to_string(), thread_id.clone()]);
+            }
+            command
         } else {
             Self::build_cli_cmd_parts(
                 &provider,
