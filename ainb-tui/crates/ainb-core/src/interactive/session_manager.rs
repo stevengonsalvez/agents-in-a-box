@@ -143,7 +143,7 @@ pub(crate) async fn ensure_codex_remote_thread(
             skip_permissions,
         })
         .await
-        .map_err(|error| anyhow::anyhow!("prepare shared Codex thread: {error}"))
+        .map_err(|error| anyhow::anyhow!("Codex remote control unavailable: {error}"))
 }
 
 pub(crate) fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
