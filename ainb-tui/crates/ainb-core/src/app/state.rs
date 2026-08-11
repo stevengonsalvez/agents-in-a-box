@@ -8492,7 +8492,7 @@ impl AppState {
                     session_id,
                     skip_permissions,
                     agent_type,
-                    model,
+                    model.clone(),
                     existing_worktree,
                     base_start_point,
                     headroom_enabled,
@@ -11014,7 +11014,7 @@ impl AppState {
             .start_cli_in_tmux(
                 &tmux_session_name,
                 skip_permissions,
-                model,
+                model.clone(),
                 agent_type,
                 resume_transcript,
                 true,
