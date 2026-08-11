@@ -3540,7 +3540,7 @@ fn codex_started_thread_id(payload: &str, cwd: &str) -> Option<String> {
         .display()
         .to_string();
     (event_cwd == cwd
-        && thread.get("source")?.as_str() == Some("vscode")
+        && thread.get("source")?.as_str() == Some("cli")
         && thread.get("threadSource")?.as_str() == Some("user")
         && thread.get("forkedFromId").is_some_and(serde_json::Value::is_null))
     .then(|| thread.get("id")?.as_str().map(str::to_owned))
@@ -12961,7 +12961,7 @@ mod tests {
             "params": { "thread": {
                 "id": "thread-1",
                 "cwd": cwd,
-                "source": "vscode",
+                "source": "cli",
                 "threadSource": "user",
                 "forkedFromId": null
             } }
@@ -12973,7 +12973,7 @@ mod tests {
             Some("thread-1".to_string())
         );
         assert_eq!(codex_started_thread_id(&payload, "/wrong-cwd"), None);
-        let non_tui = payload.replace("\"source\":\"vscode\"", "\"source\":\"appServer\"");
+        let non_tui = payload.replace("\"source\":\"cli\"", "\"source\":\"appServer\"");
         assert_eq!(codex_started_thread_id(&non_tui, &cwd), None);
         let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
         assert_eq!(codex_started_thread_id(&fork, &cwd), None);
