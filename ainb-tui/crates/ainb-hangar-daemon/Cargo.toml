@@ -117,6 +117,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 # P6.2 skill importer: parse the YAML frontmatter block of each `SKILL.md`
 # (`name:` / `description:`) when syncing `toolkit/packages/skills/`.
 serde_yaml = { workspace = true }
