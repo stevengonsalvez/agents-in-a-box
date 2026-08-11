@@ -1291,7 +1291,8 @@ pub struct FleetStartResult {
 /// Parameters for `codex/session_ensure`.
 ///
 /// Interactive mode owns its tmux and session metadata. The daemon owns the
-/// shared app-server and returns the exact thread that tmux must resume.
+/// shared app-server. A new terminal creates its thread itself, then claims the
+/// resulting exact identity through this same request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexSessionEnsureParams {
     /// Stable Ainb Interactive session identity, used for validation and logs.
@@ -1312,8 +1313,11 @@ pub struct CodexSessionEnsureParams {
 /// Result for `codex/session_ensure`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexSessionEnsureResult {
-    /// Exact Codex thread identity.
-    pub thread_id: String,
+    /// Exact Codex thread identity once the remote terminal has started it.
+    /// `None` tells the caller to launch a fresh remote terminal without
+    /// `resume`, then retry this request to claim its `thread/started` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     /// Canonical Unix endpoint consumed by the Interactive tmux client.
     pub endpoint: String,
 }
