@@ -2056,6 +2056,28 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    #[ignore = "requires a locally installed Codex app-server"]
+    async fn managed_codex_listener_initializes_over_unix_websocket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("codex-app-server.sock");
+        let config = CodexManagerConfig {
+            codex_binary: std::env::var_os("AINB_TEST_CODEX_BINARY")
+                .unwrap_or_else(|| "codex".into()),
+            socket_path: socket_path.clone(),
+            client_version: "test".into(),
+            startup_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(10),
+            event_capacity: 8,
+        };
+
+        let manager = spawn(config).await.expect("initialize managed Codex listener");
+        assert!(socket_path.exists());
+        manager.handle.shutdown().await.expect("shutdown managed listener");
+        manager.wait().await.expect("reap managed listener");
+        assert!(!socket_path.exists());
+    }
+
     /// A realistic `ps -Ao pid,ppid,args` dump: header, one adopted ppid==1
     /// server, one unproxied orphan, a live proxy from another Hangar home, and
     /// the desktop Codex/ChatGPT app.
