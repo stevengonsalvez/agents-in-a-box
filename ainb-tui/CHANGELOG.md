@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-08-11
+### Added
+- Merge pull request #662 from stevengonsalvez/fix/tui-tripwire-hangar-home
+- Merge pull request #663 from stevengonsalvez/f/remote-control-codex
+- **cli**: channel send, and the reason each leg gave
+- **daemon**: make the confirm-card guardrail live
+- **hangar-daemon**: add fail-fast BdLock acquisition
+- **hangar-daemon**: name a session after its worktree
+- **hangar-daemon**: stand down when this daemon no longer owns its home
+- **hangar-store**: name rows written before display_name existed
+- **macos**: the Fleet chat pane
+- **proto**: carry the reason a leg did not deliver, and the gate
+- **store**: thread a reply to its origin, ordered by commit seq
+- **tui**: let an operator reopen a channel they already made
+- **tui**: make the new surfaces reachable, and say so on the bar
+- **tui**: threads and channels on the same chat surface
+- enable remote control for Hangar Codex
+- manage remote Codex threads
+
+### Fixed
+- Merge pull request #640 from stevengonsalvez/fix/reproducible-tapes
+- Merge pull request #655 from stevengonsalvez/fix/fleet-display-name
+- Merge pull request #656 from stevengonsalvez/fix/hangar-daemon-single-instance
+- Merge pull request #659 from stevengonsalvez/f/interview-in-both
+- Merge pull request #661 from stevengonsalvez/fix/acp-permission-version-race
+- **fleet**: stop after single-select answer
+- **hangar**: give every fresh snapshot round its own wire ids
+- **hangar**: ship interactive Codex migration
+- **hangar-cli**: never read an unidentified live process as a free home
+- **hangar-cli**: prove a daemon by its socket, not by being an ainb
+- **hangar-cli**: resolve the running daemon from the ownership lock
+- **hangar-daemon**: answer SIGTERM for the whole of boot, not just after it
+- **hangar-daemon**: delete the pid file on drop only when it still names us
+- **hangar-daemon**: escalate on a second shutdown signal
+- **hangar-daemon**: handle SIGTERM so the supported stop is graceful
+- **hangar-daemon**: identify a lock holder by its whole command line
+- **hangar-daemon**: install crash breadcrumbs only once the home is ours
+- **hangar-daemon**: keep the contended path fail-fast, not blocking
+- **hangar-daemon**: never judge a holder a stranger without positive evidence
+- **hangar-daemon**: refuse to boot when another daemon owns the home
+- **hangar-daemon**: release the lock by compare-and-delete
+- **hangar-daemon**: sample twice before declining a contended home
+- **hangar-daemon**: stop a dead watchdog from stranding the signal handlers
+- **hangar-daemon**: stop the boot-phase race from cancelling the run loop
+- **macos**: review findings on the chat pane
+- **recordings**: make every tape reproducible
+- **test**: pass the codex session argument the signature now takes
+- contain orphaned Hangar test daemons
+- publish structured broker updates
+- show onboarding dependency controls
+
+### Documentation
+- **explainer**: cover part 2, and name the surface for every claim
+- **hangar-daemon**: name the residual window in the lock's release path
+- **recordings**: re-record the nine journeys from the fixed tapes
+- record what part 2 proved and what it did not
+- write down how to tell infrastructure from a broken test
+
+### Other
+- Merge pull request #652 from stevengonsalvez/chore/release-v1.20.0
+- pin reflect plugin to v5.2.4
+- **fleet-tools**: one classifier, not two
+
+
 ## [1.20.0] - 2026-08-10
 ### Added
 - Merge pull request #649 from stevengonsalvez/f/interview-in-both
