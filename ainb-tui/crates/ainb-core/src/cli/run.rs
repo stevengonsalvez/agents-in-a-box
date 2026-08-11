@@ -205,7 +205,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         model: model.clone(),
         model_source: ModelSource::Raw,
         codex_model: None,
-        codex_thread_id: codex_remote.map(|remote| remote.thread_id),
+        codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
