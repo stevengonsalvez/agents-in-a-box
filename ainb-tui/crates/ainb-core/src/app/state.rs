@@ -8612,7 +8612,7 @@ impl AppState {
                     base_start_point,
                     skip_permissions,
                     agent_type,
-                    model,
+                    model.clone(),
                     headroom_enabled,
                     rtk_enabled,
                 )
