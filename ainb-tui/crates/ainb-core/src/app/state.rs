@@ -9311,8 +9311,8 @@ impl AppState {
                 None
             };
 
-            let codex_remote = if metadata.agent_type == SessionAgentType::Codex {
-                let remote = crate::interactive::session_manager::ensure_codex_remote_thread(
+            let mut codex_remote = if metadata.agent_type == SessionAgentType::Codex {
+                Some(crate::interactive::session_manager::ensure_codex_remote_thread(
                     metadata.session_id,
                     &metadata.worktree_path,
                     model.as_deref(),
@@ -9320,12 +9320,7 @@ impl AppState {
                     metadata.headroom_enabled,
                     metadata.codex_thread_id.clone(),
                 )
-                .await?;
-                crate::interactive::session_manager::persist_codex_thread_id(
-                    metadata.session_id,
-                    remote.thread_id.clone(),
-                )?;
-                Some(remote)
+                .await?)
             } else {
                 None
             };
@@ -9343,6 +9338,31 @@ impl AppState {
                     codex_remote.as_ref(),
                 )
                 .await?;
+
+            if codex_remote
+                .as_ref()
+                .is_some_and(|remote| remote.thread_id.is_none())
+            {
+                codex_remote = Some(
+                    crate::interactive::session_manager::claim_codex_remote_thread(
+                        metadata.session_id,
+                        &metadata.worktree_path,
+                        model.as_deref(),
+                        skip_permissions,
+                        metadata.headroom_enabled,
+                    )
+                    .await?,
+                );
+            }
+            if let Some(thread_id) = codex_remote
+                .as_ref()
+                .and_then(|remote| remote.thread_id.as_deref())
+            {
+                crate::interactive::session_manager::persist_codex_thread_id(
+                    metadata.session_id,
+                    thread_id.to_string(),
+                )?;
+            }
 
             // Re-register live tmux handle and flip status to Running.
             let tmux_session = crate::tmux::TmuxSession::new(
@@ -10969,8 +10989,8 @@ impl AppState {
             None
         };
         let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
-        let codex_remote = if agent_type == SessionAgentType::Codex {
-            let remote = crate::interactive::session_manager::ensure_codex_remote_thread(
+        let mut codex_remote = if agent_type == SessionAgentType::Codex {
+            Some(crate::interactive::session_manager::ensure_codex_remote_thread(
                 session_id,
                 std::path::Path::new(&workspace_path),
                 model.as_deref(),
@@ -10978,12 +10998,7 @@ impl AppState {
                 headroom_enabled,
                 metadata.and_then(|m| m.codex_thread_id.clone()),
             )
-            .await?;
-            crate::interactive::session_manager::persist_codex_thread_id(
-                session_id,
-                remote.thread_id.clone(),
-            )?;
-            Some(remote)
+            .await?)
         } else {
             None
         };
@@ -11007,6 +11022,31 @@ impl AppState {
                 codex_remote.as_ref(),
             )
             .await?;
+
+        if codex_remote
+            .as_ref()
+            .is_some_and(|remote| remote.thread_id.is_none())
+        {
+            codex_remote = Some(
+                crate::interactive::session_manager::claim_codex_remote_thread(
+                    session_id,
+                    std::path::Path::new(&workspace_path),
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                )
+                .await?,
+            );
+        }
+        if let Some(thread_id) = codex_remote
+            .as_ref()
+            .and_then(|remote| remote.thread_id.as_deref())
+        {
+            crate::interactive::session_manager::persist_codex_thread_id(
+                session_id,
+                thread_id.to_string(),
+            )?;
+        }
 
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(crate::models::SessionStatus::Running);
