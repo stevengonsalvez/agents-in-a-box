@@ -181,7 +181,7 @@ pub(crate) async fn claim_codex_remote_thread(
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+    }
 }
 
 pub(crate) fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
