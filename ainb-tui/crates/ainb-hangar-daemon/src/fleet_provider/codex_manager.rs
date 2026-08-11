@@ -122,7 +122,12 @@ impl CodexManagerHandle {
         cwd: &Path,
         model: Option<&str>,
     ) -> Result<String, ProviderError> {
-        let result = self.request("thread/start", json!({ "cwd": cwd, "model": model })).await?;
+        let result = self
+            .request(
+                "thread/start",
+                json!({ "cwd": cwd, "model": model, "ephemeral": false }),
+            )
+            .await?;
         nested_id(&result, "thread")
     }
 
@@ -316,7 +321,7 @@ fn interactive_thread_start_params(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> Value {
-    let mut params = json!({ "cwd": cwd, "model": model });
+    let mut params = json!({ "cwd": cwd, "model": model, "ephemeral": false });
     if skip_permissions {
         let object = params.as_object_mut().expect("interactive thread params are an object");
         object.insert("approvalPolicy".into(), json!("never"));
@@ -2141,6 +2146,8 @@ mod tests {
 
         let manager = spawn(config).await.expect("initialize managed Codex listener");
         assert!(socket_path.exists());
+        let thread_id = manager.handle.thread_start(dir.path(), None).await.unwrap();
+        manager.handle.thread_resume(&thread_id).await.unwrap();
         manager.handle.shutdown().await.expect("shutdown managed listener");
         manager.wait().await.expect("reap managed listener");
         assert!(!socket_path.exists());
@@ -3244,9 +3251,11 @@ mod tests {
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["model"], "gpt-5");
+        assert_eq!(params["ephemeral"], false);
 
         let default_params = interactive_thread_start_params(Path::new("/worktree"), None, false);
         assert!(default_params.get("approvalPolicy").is_none());
         assert!(default_params.get("sandbox").is_none());
+        assert_eq!(default_params["ephemeral"], false);
     }
 }
