@@ -15,23 +15,27 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
+use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
+
+#[cfg(test)]
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::codex::{
     CodexApprovalKind, CodexApprovalRequest, CodexCapabilities, CodexInboundEnvelope,
     CodexQuestionRequest, CommandSpec, RpcRequestId, app_server_command, managed_tui_command,
-    parse_inbound_envelope, probe_codex, proxy_command,
+    parse_inbound_envelope, probe_codex,
 };
 use super::{ApprovalDecision, ProviderError, ProviderReceipt, QuestionAnswer};
 
@@ -628,7 +632,7 @@ fn epoch_millis() -> i64 {
         })
 }
 
-/// Spawn shared app-server, one proxy, initialize protocol, then start manager.
+/// Spawn shared app-server, connect its Unix WebSocket, initialize protocol, then start manager.
 pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, ProviderError> {
     let probe_binary = config.codex_binary.clone();
     let capabilities = tokio::task::spawn_blocking(move || probe_codex(&probe_binary))
@@ -639,12 +643,6 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             "installed Codex cannot generate app-server schema".into(),
         ));
     }
-    if !capabilities.stdio_proxy {
-        return Err(ProviderError::Unsupported(
-            "installed Codex has no app-server stdio proxy".into(),
-        ));
-    }
-
     let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
     let mut owns_server = preparation.owns_server;
     let owner_marker_path = socket_owner_marker(&config.socket_path);
@@ -700,15 +698,8 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
         }
     };
 
-    let mut proxy_command = tokio_command(proxy_command(&config.codex_binary, &config.socket_path));
-    proxy_command.kill_on_drop(true);
-    let mut proxy = match proxy_command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(proxy) => proxy,
+    let socket = match UnixStream::connect(&config.socket_path).await {
+        Ok(socket) => socket,
         Err(error) => {
             if let Some(server) = server.as_mut() {
                 stop_child(server).await;
@@ -716,43 +707,33 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             if owns_server {
                 remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
             }
-            return Err(error.into());
+            return Err(ProviderError::Transport(format!(
+                "Codex app-server Unix socket connection failed: {error}"
+            )));
         }
     };
-    let Some(stdin) = proxy.stdin.take() else {
-        stop_child(&mut proxy).await;
-        if let Some(server) = server.as_mut() {
-            stop_child(server).await;
+    let websocket = match client_async("ws://localhost/", socket).await {
+        Ok((websocket, _)) => websocket,
+        Err(error) => {
+            if let Some(server) = server.as_mut() {
+                stop_child(server).await;
+            }
+            if owns_server {
+                remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
+            }
+            return Err(ProviderError::Transport(format!(
+                "Codex app-server WebSocket handshake failed: {error}"
+            )));
         }
-        if owns_server {
-            remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
-        }
-        return Err(ProviderError::Transport(
-            "Codex proxy stdin unavailable".into(),
-        ));
     };
-    let Some(stdout) = proxy.stdout.take() else {
-        stop_child(&mut proxy).await;
-        if let Some(server) = server.as_mut() {
-            stop_child(server).await;
-        }
-        if owns_server {
-            remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
-        }
-        return Err(ProviderError::Transport(
-            "Codex proxy stdout unavailable".into(),
-        ));
-    };
-    let cleanup: Box<dyn ProcessCleanup> = Box::new(ChildCleanup {
+    let cleanup: Box<dyn ProcessCleanup> = Box::new(ServerCleanup {
         server,
-        proxy,
         owned_socket_path: owns_server.then(|| config.socket_path.clone()),
         owner_marker_path: owns_server.then_some(owner_marker_path),
     });
 
     spawn_connection(
-        BufReader::new(stdout),
-        stdin,
+        WebSocketTransport { websocket },
         capabilities,
         config,
         owns_server,
@@ -1585,9 +1566,103 @@ struct PendingRequest {
     reply: oneshot::Sender<Result<Value, ProviderError>>,
 }
 
-async fn spawn_connection<R, W>(
-    mut reader: R,
-    mut writer: W,
+type JsonRpcFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ProviderError>> + Send + 'a>>;
+
+trait JsonRpcTransport: Send {
+    fn write_message<'a>(&'a mut self, message: &'a Value) -> JsonRpcFuture<'a, ()>;
+    fn read_message<'a>(&'a mut self) -> JsonRpcFuture<'a, Value>;
+}
+
+#[cfg(test)]
+struct LineTransport<R, W> {
+    reader: R,
+    writer: W,
+}
+
+#[cfg(test)]
+impl<R, W> LineTransport<R, W> {
+    const fn new(reader: R, writer: W) -> Self {
+        Self { reader, writer }
+    }
+}
+
+#[cfg(test)]
+impl<R, W> JsonRpcTransport for LineTransport<R, W>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    fn write_message<'a>(&'a mut self, message: &'a Value) -> JsonRpcFuture<'a, ()> {
+        Box::pin(write_message(&mut self.writer, message))
+    }
+
+    fn read_message<'a>(&'a mut self) -> JsonRpcFuture<'a, Value> {
+        Box::pin(read_message(&mut self.reader))
+    }
+}
+
+struct WebSocketTransport {
+    websocket: WebSocketStream<UnixStream>,
+}
+
+impl JsonRpcTransport for WebSocketTransport {
+    fn write_message<'a>(&'a mut self, message: &'a Value) -> JsonRpcFuture<'a, ()> {
+        Box::pin(async move {
+            let text = serde_json::to_string(message)?;
+            self.websocket.send(Message::Text(text)).await.map_err(|error| {
+                ProviderError::Transport(format!(
+                    "Codex app-server WebSocket write failed: {error}"
+                ))
+            })
+        })
+    }
+
+    fn read_message<'a>(&'a mut self) -> JsonRpcFuture<'a, Value> {
+        Box::pin(async move {
+            loop {
+                let message = self
+                    .websocket
+                    .next()
+                    .await
+                    .ok_or_else(|| {
+                        ProviderError::Transport("Codex app-server WebSocket closed".into())
+                    })?
+                    .map_err(|error| {
+                        ProviderError::Transport(format!(
+                            "Codex app-server WebSocket read failed: {error}"
+                        ))
+                    })?;
+                match message {
+                    Message::Text(text) => {
+                        return serde_json::from_str(&text).map_err(ProviderError::from);
+                    }
+                    Message::Ping(payload) => {
+                        self.websocket.send(Message::Pong(payload)).await.map_err(|error| {
+                            ProviderError::Transport(format!(
+                                "Codex app-server WebSocket pong failed: {error}"
+                            ))
+                        })?
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(frame) => {
+                        return Err(ProviderError::Transport(format!(
+                            "Codex app-server WebSocket closed: {frame:?}"
+                        )));
+                    }
+                    Message::Binary(_) => {
+                        return Err(ProviderError::Protocol(
+                            "Codex app-server sent a binary WebSocket message".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+}
+
+async fn spawn_connection<T>(
+    mut transport: T,
     capabilities: CodexCapabilities,
     config: CodexManagerConfig,
     owns_server: bool,
@@ -1595,13 +1670,12 @@ async fn spawn_connection<R, W>(
     mut cleanup: Box<dyn ProcessCleanup>,
 ) -> Result<ManagedCodexManager, ProviderError>
 where
-    R: AsyncBufRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
+    T: JsonRpcTransport + 'static,
 {
     let (events_tx, events) = mpsc::channel(config.event_capacity.max(1));
     let bootstrap = tokio::time::timeout(
         config.startup_timeout,
-        initialize_connection(&mut reader, &mut writer, &config.client_version, &events_tx),
+        initialize_connection(&mut transport, &config.client_version, &events_tx),
     )
     .await
     .map_err(|_| ProviderError::Transport("Codex initialize timed out".into()))
@@ -1626,7 +1700,7 @@ where
         request_timeout: config.request_timeout,
     };
     let task = tokio::spawn(async move {
-        let result = run_actor(reader, writer, command_rx, events_tx).await;
+        let result = run_actor(transport, command_rx, events_tx).await;
         cleanup.cleanup().await;
         result
     });
@@ -1637,19 +1711,16 @@ where
     })
 }
 
-async fn initialize_connection<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+async fn initialize_connection<T>(
+    transport: &mut T,
     client_version: &str,
     events: &mpsc::Sender<CodexInboundEnvelope>,
 ) -> Result<(), ProviderError>
 where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: JsonRpcTransport,
 {
-    write_message(
-        writer,
-        &json!({
+    transport
+        .write_message(&json!({
             "jsonrpc": "2.0",
             "id": INITIALIZE_ID,
             "method": "initialize",
@@ -1661,12 +1732,11 @@ where
                 },
                 "capabilities": { "experimentalApi": true },
             },
-        }),
-    )
-    .await?;
+        }))
+        .await?;
 
     loop {
-        let message = read_message(reader).await?;
+        let message = transport.read_message().await?;
         if message.get("id") == Some(&json!(INITIALIZE_ID)) {
             if let Some(error) = message.get("error") {
                 return Err(ProviderError::Protocol(format!(
@@ -1687,22 +1757,18 @@ where
             .map_err(|_| ProviderError::Transport("Codex event receiver closed".into()))?;
     }
 
-    write_message(
-        writer,
-        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
-    )
-    .await
+    transport
+        .write_message(&json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await
 }
 
-async fn run_actor<R, W>(
-    mut reader: R,
-    mut writer: W,
+async fn run_actor<T>(
+    mut transport: T,
     mut commands: mpsc::Receiver<ManagerCommand>,
     events: mpsc::Sender<CodexInboundEnvelope>,
 ) -> Result<(), ProviderError>
 where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
+    T: JsonRpcTransport,
 {
     let mut next_id = INITIALIZE_ID + 1;
     let mut pending = BTreeMap::<u64, PendingRequest>::new();
@@ -1721,8 +1787,7 @@ where
                         next_id = next_id.checked_add(1).ok_or_else(|| {
                             ProviderError::Protocol("Codex JSON-RPC request id exhausted".into())
                         })?;
-                        if let Err(error) = write_message(
-                            &mut writer,
+                        if let Err(error) = transport.write_message(
                             &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
                         ).await {
                             let _ = reply.send(Err(error));
@@ -1731,8 +1796,7 @@ where
                         pending.insert(id, PendingRequest { method, reply });
                     }
                     ManagerCommand::Respond { request_id, result, reply } => {
-                        let outcome = write_message(
-                            &mut writer,
+                        let outcome = transport.write_message(
                             &json!({ "jsonrpc": "2.0", "id": request_id.as_value(), "result": result }),
                         ).await;
                         let _ = reply.send(outcome);
@@ -1744,7 +1808,7 @@ where
                     }
                 }
             }
-            message = read_message(&mut reader) => {
+            message = transport.read_message() => {
                 let message = message?;
                 if message.get("result").is_some() || message.get("error").is_some() {
                     if let Some(id) = message.get("id").and_then(Value::as_u64) {
@@ -1779,6 +1843,7 @@ fn fail_pending(pending: &mut BTreeMap<u64, PendingRequest>, reason: &str) {
     }
 }
 
+#[cfg(test)]
 async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Value,
@@ -1790,6 +1855,7 @@ async fn write_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+#[cfg(test)]
 async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, ProviderError> {
     let mut line = String::new();
     if reader.read_line(&mut line).await? == 0 {
@@ -1880,17 +1946,15 @@ trait ProcessCleanup: Send {
     fn cleanup(&mut self) -> CleanupFuture<'_>;
 }
 
-struct ChildCleanup {
+struct ServerCleanup {
     server: Option<Child>,
-    proxy: Child,
     owned_socket_path: Option<PathBuf>,
     owner_marker_path: Option<PathBuf>,
 }
 
-impl ProcessCleanup for ChildCleanup {
+impl ProcessCleanup for ServerCleanup {
     fn cleanup(&mut self) -> CleanupFuture<'_> {
         Box::pin(async move {
-            stop_child(&mut self.proxy).await;
             if let Some(server) = self.server.as_mut() {
                 stop_child(server).await;
             }
@@ -1916,9 +1980,8 @@ async fn remove_owned_socket(socket_path: Option<&Path>, owner_marker_path: Opti
     }
 }
 
-impl Drop for ChildCleanup {
+impl Drop for ServerCleanup {
     fn drop(&mut self) {
-        let _ = self.proxy.start_kill();
         if let Some(server) = self.server.as_mut() {
             let _ = server.start_kill();
         }
@@ -1938,6 +2001,7 @@ mod tests {
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
     use tokio::net::UnixListener;
+    use tokio_tungstenite::accept_async;
 
     use super::*;
     use crate::fleet_provider::codex::CodexInbound;
@@ -1955,6 +2019,41 @@ mod tests {
         assert!(!bound_by_child(42, Some(&[])));
         // `lsof` unavailable: trust the spawn rather than kill a healthy server.
         assert!(bound_by_child(42, None));
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_round_trips_json_over_unix_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("app-server.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            let message = websocket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected JSON text frame");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap()["method"],
+                "initialize"
+            );
+            websocket
+                .send(Message::Text(
+                    json!({ "jsonrpc": "2.0", "id": 1, "result": {} }).to_string(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let socket = UnixStream::connect(&socket_path).await.unwrap();
+        let (websocket, _) = client_async("ws://localhost/", socket).await.unwrap();
+        let mut transport = WebSocketTransport { websocket };
+        transport
+            .write_message(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
+            .await
+            .unwrap();
+        assert_eq!(transport.read_message().await.unwrap()["id"], 1);
+        server.await.unwrap();
     }
 
     /// A realistic `ps -Ao pid,ppid,args` dump: header, one adopted ppid==1
@@ -2731,8 +2830,7 @@ mod tests {
         });
 
         let mut manager = spawn_connection(
-            BufReader::new(manager_read),
-            manager_write,
+            LineTransport::new(BufReader::new(manager_read), manager_write),
             capabilities(true),
             config(),
             false,
@@ -2817,8 +2915,7 @@ mod tests {
         });
         let cleanup_flag = Arc::new(AtomicBool::new(false));
         let manager = spawn_connection(
-            BufReader::new(manager_read),
-            manager_write,
+            LineTransport::new(BufReader::new(manager_read), manager_write),
             capabilities(false),
             config(),
             false,
