@@ -409,7 +409,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         );
     };
     assert!(
-        open_cap.contains("1-5 views") && open_cap.contains("q/Esc back"),
+        open_cap.contains("1 Needs input") && open_cap.contains("q back"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
     assert!(

@@ -326,31 +326,123 @@ impl FleetPanelState {
         &mut self,
         intent: ainb_plugin_hangar::screen::fleet_chat::ChatIntent,
     ) {
-        use ainb_plugin_hangar::screen::fleet_chat::ChatIntent;
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatIntent, ChatTopic};
 
         let sink = self.canonical_update_sink();
+        // Which conversation the page at the end of this worker reads. Carried
+        // on the intent rather than sniffed from the scope string: the surface
+        // already knows which conversation it is, and re-deriving that here
+        // would be the same fact written in two places.
+        let topic = match &intent {
+            ChatIntent::Refresh { topic, .. } | ChatIntent::Send { topic, .. } => topic.clone(),
+            // Guardrail cards exist only on the copilot channel.
+            ChatIntent::ConfirmAnswer(_) => ChatTopic::Copilot,
+            // A create has no conversation to page yet: the channel it mints IS
+            // the topic, and the surface opens on it when the daemon answers.
+            // A list has none either; both are handled on their own workers
+            // below and never reach the page.
+            ChatIntent::CreateChannel { .. } | ChatIntent::ListChannels => ChatTopic::Copilot,
+        };
+        // The picker's read. Its own worker for the same reason a create is:
+        // falling into the "write then page" path below would page the COPILOT
+        // channel behind a picker the operator opened to find a broadcast one.
+        if matches!(intent, ChatIntent::ListChannels) {
+            let spawned =
+                std::thread::Builder::new().name("ainb-fleet-channels".into()).spawn(move || {
+                    let event = match crate::fleet::control::channel_list_blocking() {
+                        Ok(channels) => FleetEvent::ChannelsListed(channels),
+                        // The picker's failure is the create form's failure:
+                        // one feedback line, and the form stays open so the
+                        // operator can still mint one.
+                        Err(detail) => FleetEvent::ChannelCreateFailed {
+                            detail: format!("channel list failed: {detail}"),
+                        },
+                    };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.push(event);
+                    }
+                });
+            if let Err(error) = spawned {
+                if let Ok(mut updates) = self.canonical_updates.lock() {
+                    updates.push(FleetEvent::ChannelCreateFailed {
+                        detail: format!("channel list worker did not start: {error}"),
+                    });
+                }
+            }
+            return;
+        }
+        // A create is its own worker with its own event: it must NOT fall into
+        // the "write then page" path below, which would page the COPILOT
+        // channel behind a broadcast channel the operator just made.
+        if let ChatIntent::CreateChannel { name, recipients } = intent {
+            let spawned =
+                std::thread::Builder::new().name("ainb-fleet-channel".into()).spawn(move || {
+                    let event = match crate::fleet::control::channel_create_blocking(
+                        name.clone(),
+                        recipients,
+                    ) {
+                        // The MINTED scope and the membership the daemon
+                        // actually recorded, never the ones we asked for: the
+                        // daemon deduplicates the list and owns the id.
+                        Ok(channel) => FleetEvent::ChannelCreated {
+                            scope_key: channel.scope_key,
+                            name: channel.name,
+                            recipients: channel.recipients,
+                        },
+                        Err(detail) => FleetEvent::ChannelCreateFailed { detail },
+                    };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.push(event);
+                    }
+                });
+            if let Err(error) = spawned {
+                if let Ok(mut updates) = self.canonical_updates.lock() {
+                    updates.push(FleetEvent::ChannelCreateFailed {
+                        detail: format!("channel worker did not start: {error}"),
+                    });
+                }
+            }
+            return;
+        }
         let spawned = std::thread::Builder::new().name("ainb-fleet-chat".into()).spawn(move || {
             // A WRITE always ends by paging: the surface's own in-flight latch
             // is cleared by the page, and the operator sees the durable row the
             // daemon actually stored rather than an optimistic local echo.
+            // The per-recipient legs of a send, kept so the surface can paint a
+            // receipt per recipient instead of one aggregate tick. A fan-out
+            // where one of four is refused is the case an operator has to read.
+            let mut receipts = None;
             let (write_failure, scope_key) = match intent {
-                ChatIntent::Refresh { scope_key } => (None, scope_key),
+                ChatIntent::Refresh { scope_key, .. } => (None, scope_key),
                 ChatIntent::Send {
                     scope_key,
-                    target_session_key,
+                    targets,
                     text,
                     request_id,
+                    ..
                 } => {
                     let params = ainb_hangar_proto::fleet::FleetMessageSendParams {
                         scope_key: Some(scope_key.clone()),
                         // Absent, so the daemon records `operator`. A copilot
                         // write never originates at a human's keyboard.
                         actor: None,
-                        targets: vec![target_session_key],
+                        targets,
+                        // A composed message OPENS a thread rather than
+                        // answering one: the agent's reply is the row that
+                        // carries the origin, and the daemon sets that at turn
+                        // end. An operator reply to a specific message is a
+                        // `--origin` send, and has no key on this surface yet.
+                        origin_message_id: None,
                         text,
                         request_id,
                     };
-                    let failure = crate::fleet::control::chat_send_blocking(params).err();
+                    let failure = match crate::fleet::control::chat_send_blocking(params) {
+                        Ok(result) => {
+                            receipts = Some(result.deliveries);
+                            None
+                        }
+                        Err(detail) => Some(detail),
+                    };
                     (failure, Some(scope_key))
                 }
                 ChatIntent::ConfirmAnswer(params) => {
@@ -360,12 +452,34 @@ impl FleetPanelState {
                         .map(|detail| format!("answering {confirm_id}: {detail}"));
                     (failure, None)
                 }
+                // Handled above, each on its own worker.
+                ChatIntent::CreateChannel { .. } | ChatIntent::ListChannels => (None, None),
             };
             let mut events = Vec::new();
             if let Some(detail) = write_failure {
                 events.push(FleetEvent::ChatSendFailed { detail });
             }
-            events.push(match crate::fleet::control::chat_page_blocking(scope_key) {
+            // BEFORE the page, so the receipts are on screen with the message
+            // they belong to rather than one poll interval behind it.
+            if let Some(deliveries) = receipts {
+                events.push(FleetEvent::ChatReceipts(deliveries));
+            }
+            // The copilot channel needs its channel, session, card and activity
+            // calls; a session thread needs one `fleet/message_list`. Branching
+            // on the TOPIC rather than on the scope string is what keeps a
+            // thread from paying for four round trips a second, and what keeps
+            // it from creating a copilot channel it has no business creating.
+            let page = match &topic {
+                ChatTopic::Copilot => crate::fleet::control::chat_page_blocking(scope_key),
+                // A channel pages exactly like a session thread: one
+                // `fleet/message_list` on the scope the TOPIC carries. It has
+                // no copilot machinery either, and its scope is minted, so
+                // asking the topic is the only correct way to get it.
+                ChatTopic::Session { .. } | ChatTopic::Channel { .. } => {
+                    crate::fleet::control::chat_thread_page_blocking(&topic)
+                }
+            };
+            events.push(match page {
                 Ok(snapshot) => FleetEvent::ChatSnapshot(snapshot),
                 Err(detail) => FleetEvent::ChatFailed { detail },
             });
@@ -1056,7 +1170,33 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .unwrap_or("no attachment");
     frame.render_widget(
         Paragraph::new(format!(
-            "1-5 views  ↑↓ select  Enter answer  F5 refresh  {attach_help}  m chat  B broadcast  q/Esc back"
+            // This bar is AT its width limit: on a 130-column pane the tail is
+            // the first thing to go, and a help bar that loses the way OUT to
+            // advertise one more way in is a bad trade.
+            //
+            // `M thread` is therefore not here; it is a per-row action and is
+            // advertised per row, beside the other session actions
+            // (`available_action_labels`). `N channel` IS here, because it is a
+            // GLOBAL action with no row to hang off, and an unadvertised global
+            // key is simply undiscoverable. That has already cost us once: the
+            // chat surface shipped reachable only by a key nothing named.
+            //
+            // The width for it was reclaimed from `1-5 views`, not appended.
+            // That entry was the one genuinely redundant thing here: the lens
+            // row rendered directly beneath spells out every number WITH its
+            // label, permanently (`1 Needs input 0   2 Idle 0   ...`), so nine
+            // characters advertised what the next row already says in full.
+            // `q/Esc back` also lost `/Esc`, since `q` and `Esc` do the same
+            // thing and naming both spent characters on nothing, but that
+            // reclaim alone was 4 against a cost of 11 and did NOT pay: the
+            // first attempt shipped a bar that clipped to `q bac`.
+            //
+            // THE NEXT ADDITION MUST DISPLACE SOMETHING TOO, and the worked
+            // example above is why. The contract is 100 COLUMNS: that is the
+            // width `empty_state_renders_without_panic` renders at, and it is
+            // the only guard between this bar and a silent clip. Measuring on
+            // your own 180-column terminal will show you nothing.
+            "↑↓ select  Enter answer  F5 refresh  {attach_help}  m chat  N channel  B broadcast  q back"
         ))
         .style(Style::default().fg(MUTED_GRAY)),
         Rect::new(
@@ -1686,8 +1826,12 @@ mod tests {
             out.contains("Hangar daemon not running") || out.contains("no fleet state"),
             "empty-state hint missing: {out}"
         );
-        assert!(out.contains("1-5 views"), "view help missing: {out}");
-        assert!(out.contains("q/Esc back"), "back help missing: {out}");
+        // The lens numbers moved OUT of the help bar, so this guards the row
+        // that actually renders them. Deleting it instead would have left
+        // the lens row with no guard at all.
+        assert!(out.contains("1 Needs input"), "lens row missing: {out}");
+        assert!(out.contains("q back"), "back help missing: {out}");
+        assert!(out.contains("N channel"), "channel help missing: {out}");
     }
 
     #[test]

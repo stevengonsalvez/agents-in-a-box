@@ -312,16 +312,18 @@ async fn serve_conn(
     // `hangar/*` method is dispatched and no event forwarder ever exists.
     let authed = async {
         let Some(first) = read_frame(&mut reader).await? else {
-            return Ok(false);
+            // A peer that closes before sending its first frame is
+            // unauthenticated, same as a rejected one: no caller identity.
+            return Ok(None);
         };
         match auth::authenticate_first_frame(&pool, &first).await {
-            Ok(ack) => {
+            Ok((ack, caller)) => {
                 let _ = out_tx.send(encode_frame(&ack)).await;
-                Ok(true)
+                Ok(Some(caller))
             }
             Err(rejection) => {
                 let _ = out_tx.send(encode_frame(&rejection)).await;
-                Ok(false)
+                Ok(None)
             }
         }
     }
@@ -334,11 +336,11 @@ async fn serve_conn(
             return Err(e);
         }
     };
-    if !proceed {
+    let Some(caller) = proceed else {
         drop(out_tx);
         let _ = writer.await;
         return Ok(());
-    }
+    };
 
     let events = broker.sink();
     // The connection's event subscription: at most one forwarder; a
@@ -402,7 +404,7 @@ async fn serve_conn(
                     .then(|| broker.subscribe_notifications())
             });
             let resp = match &req {
-                Ok(req) => dispatch(&pool, req, &health, &events).await,
+                Ok(req) => dispatch_as(&pool, req, &health, &events, &caller).await,
                 Err(e) => RpcResponse {
                     jsonrpc: ainb_hangar_proto::jsonrpc_version(),
                     // We could not parse an id; reply with a null/0 id so the
@@ -1017,7 +1019,25 @@ pub async fn dispatch(
     health: &DaemonHealth,
     events: &EventSink,
 ) -> RpcResponse {
-    let result = handle(pool, req, health, events).await;
+    dispatch_as(pool, req, health, events, &auth::Caller::Operator).await
+}
+
+/// [`dispatch`], for a connection whose credential says WHO is calling.
+///
+/// The socket resolves the caller once, at `auth/hello`, and every frame on
+/// that connection is dispatched as them. A copilot connection is refused every
+/// method outside its own tool table before any handler runs.
+pub async fn dispatch_as(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    health: &DaemonHealth,
+    events: &EventSink,
+    caller: &auth::Caller,
+) -> RpcResponse {
+    let result = match caller.authorize(&req.method) {
+        Ok(()) => handle(pool, req, health, events, caller).await,
+        Err(refusal) => Err(refusal),
+    };
     match result {
         Ok(value) => ok(req.id.clone(), value),
         Err(err) => RpcResponse {
@@ -1036,6 +1056,7 @@ async fn handle(
     req: &RpcRequest,
     health: &DaemonHealth,
     events: &EventSink,
+    caller: &auth::Caller,
 ) -> Result<serde_json::Value, RpcError> {
     match req.method.as_str() {
         methods::PING => Ok(serde_json::json!({})),
@@ -1247,7 +1268,7 @@ async fn handle(
         methods::FLEET_USAGE_SUMMARY => handle_fleet_usage_summary(req).await,
         methods::FLEET_USAGE_DASHBOARD => handle_fleet_usage_dashboard(req).await,
         methods::FLEET_QUOTA_SUMMARY => handle_fleet_quota_summary(req).await,
-        methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events).await,
+        methods::FLEET_MESSAGE_SEND => handle_fleet_message_send(pool, req, events, caller).await,
         methods::FLEET_MESSAGE_LIST => handle_fleet_message_list(pool, req).await,
         // Both subscribe acks carry a head cursor; their per-connection
         // forwarders are registered in `serve_conn` BEFORE that head is read.
@@ -1263,6 +1284,9 @@ async fn handle(
         methods::FLEET_CONFIRM_LIST => handle_fleet_confirm_list(pool, req).await,
         methods::FLEET_CONFIRM_ANSWER => handle_fleet_confirm_answer(pool, req, events).await,
         methods::FLEET_ACTIVITY_LIST => handle_fleet_activity_list(pool, req).await,
+        // The live producer of the cards the two arms above read and answer.
+        // Blocks for as long as its card is open, which is the point.
+        methods::FLEET_COPILOT_GATE => handle_fleet_copilot_gate(pool, req, events, caller).await,
         methods::FLEET_REPROJECT_CLAUDE_INTERVIEW => {
             handle_fleet_reproject_claude_interview(pool, req, events).await
         }
@@ -1719,13 +1743,34 @@ async fn handle_fleet_message_send(
     pool: &SqlitePool,
     req: &RpcRequest,
     events: &EventSink,
+    caller: &auth::Caller,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_proto::fleet::{FLEET_CAPABILITY_MESSAGE_SEND, FleetMessageSendParams};
     use tracing::Instrument as _;
 
     require_fleet_capability(FLEET_CAPABILITY_MESSAGE_SEND)?;
-    let params: FleetMessageSendParams =
-        parse_params(req, "{ scope_key?, targets, text, request_id }")?;
+    let mut params: FleetMessageSendParams = parse_params(
+        req,
+        "{ scope_key?, targets, origin_message_id?, text, request_id }",
+    )?;
+    // `actor` is caller-supplied, and `sender` is what the recipient's re-prime
+    // header attributes the message to. A copilot connection that could write
+    // `actor: "operator"` would never need the destructive tools: it could ask
+    // another agent to do the thing while wearing the human's name. So for that
+    // credential the value is PINNED, not validated.
+    if caller.copilot_scope().is_some() {
+        match params.actor.as_deref() {
+            None | Some(crate::copilot::COPILOT_ACTOR) => {
+                params.actor = Some(crate::copilot::COPILOT_ACTOR.to_string());
+            }
+            Some(other) => {
+                return Err(invalid_params(&format!(
+                    "the copilot credential writes as {:?}, never {other:?}",
+                    crate::copilot::COPILOT_ACTOR
+                )));
+            }
+        }
+    }
     let span = tracing::info_span!(
         "fleet.message.send",
         request_id = %params.request_id,
@@ -1776,6 +1821,13 @@ async fn message_send_inner(
     }
     if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
         return Err(invalid_params("scope_key must not be empty"));
+    }
+    if params
+        .origin_message_id
+        .as_deref()
+        .is_some_and(|origin| origin.trim().is_empty())
+    {
+        return Err(invalid_params("origin_message_id must not be empty"));
     }
     // A supplied actor is RECORDED, not trusted for authorisation — the socket
     // token already authenticated the caller. Rejecting a blank one keeps
@@ -1862,15 +1914,6 @@ async fn message_send_inner(
         }
     }
 
-    // The fingerprint hashes the REQUEST as the client wrote it, so a retry
-    // that omits scope_key (and would mint a fresh broadcast ulid) still
-    // replays instead of being rejected as a different message.
-    let request_fingerprint = stable_fingerprint(&format!(
-        "{}\u{0}{}\u{0}{}",
-        params.scope_key.as_deref().unwrap_or_default(),
-        targets.join("\u{1}"),
-        params.text
-    ));
     let scope_key = params.scope_key.clone().unwrap_or_else(|| {
         if targets.len() == 1 {
             format!("session:{}", targets[0])
@@ -1878,6 +1921,45 @@ async fn message_send_inner(
             format!("broadcast:{}", SystemIdGen.new_ulid())
         }
     });
+
+    // A supplied origin must NAME A REAL MESSAGE IN THIS SEND'S SCOPE, and it
+    // is checked against the store rather than trusted, exactly like the
+    // channel membership above and for the same reason: both are
+    // caller-controlled strings that decide where a row is filed. An origin in
+    // another scope threads this message into a conversation nobody addressed
+    // (`message_list {origin_id}` would return it to readers of a scope it was
+    // never sent to), and an origin naming nothing builds a thread no read can
+    // ever return. Fails CLOSED, before anything is persisted.
+    if let Some(origin_id) = params.origin_message_id.as_deref().map(str::trim) {
+        let origin = FleetMessageRepo::get_message(pool, origin_id)
+            .await
+            .map_err(|error| store_err(&error))?
+            .ok_or_else(|| {
+                invalid_params(&format!("origin_message_id {origin_id:?} names no message"))
+            })?;
+        if origin.scope_key != scope_key {
+            return Err(invalid_params(&format!(
+                "origin_message_id {origin_id:?} is in scope {:?}, not {scope_key:?}",
+                origin.scope_key
+            )));
+        }
+    }
+
+    // The fingerprint hashes the REQUEST as the client wrote it, so a retry
+    // that omits scope_key (and would mint a fresh broadcast ulid) still
+    // replays instead of being rejected as a different message.
+    //
+    // `origin_message_id` is deliberately NOT in it, the same call `actor` got:
+    // folding a new field in rehashes every row an older daemon wrote, so a
+    // legitimate retry of a stored message starts reading as a fingerprint
+    // mismatch. A reused request_id already replays the FIRST row rather than
+    // writing a second one, so nothing is threaded twice either way.
+    let request_fingerprint = stable_fingerprint(&format!(
+        "{}\u{0}{}\u{0}{}",
+        params.scope_key.as_deref().unwrap_or_default(),
+        targets.join("\u{1}"),
+        params.text
+    ));
     let minted_id = SystemIdGen.new_ulid();
     // The message row and its PENDING legs commit TOGETHER, so a replay (or a
     // concurrent duplicate) can never observe a message whose leg set is still
@@ -1889,7 +1971,10 @@ async fn message_send_inner(
             request_id: Some(params.request_id.clone()),
             request_fingerprint: Some(request_fingerprint),
             scope_key,
-            origin_message_id: None,
+            origin_message_id: params
+                .origin_message_id
+                .as_deref()
+                .map(|origin| origin.trim().to_string()),
             sender,
             kind: "user".to_string(),
             body: params.text.clone(),
@@ -1912,12 +1997,16 @@ async fn message_send_inner(
     // there, and a fresh request_id is the way to try again.
     if row.id != minted_id {
         span.record("replay", true);
-        let legs: HashMap<String, String> = FleetMessageRepo::deliveries_for_message(pool, &row.id)
-            .await
-            .map_err(|error| store_err(&error))?
-            .into_iter()
-            .map(|leg| (leg.session_key, leg.state))
-            .collect();
+        // The DETAIL rides along with the state, from the same durable row: a
+        // replay that answered REJECTED without the reason would be a strictly
+        // worse receipt than the first answer, for the same message.
+        let legs: HashMap<String, (String, Option<String>)> =
+            FleetMessageRepo::deliveries_for_message(pool, &row.id)
+                .await
+                .map_err(|error| store_err(&error))?
+                .into_iter()
+                .map(|leg| (leg.session_key, (leg.state, leg.detail)))
+                .collect();
         tracing::info!(message_id = %row.id, "fleet message send replayed");
         return to_value(&FleetMessageSendResult {
             message_id: row.id,
@@ -1925,9 +2014,12 @@ async fn message_send_inner(
                 .iter()
                 .map(|session_key| FleetMessageDelivery {
                     session_key: session_key.clone(),
-                    state: legs.get(session_key).map_or(ActionReceiptStatus::Unknown, |state| {
-                        delivery_state_wire(state)
-                    }),
+                    state: legs
+                        .get(session_key)
+                        .map_or(ActionReceiptStatus::Unknown, |(state, _)| {
+                            delivery_state_wire(state)
+                        }),
+                    detail: legs.get(session_key).and_then(|(_, detail)| detail.clone()),
                 })
                 .collect(),
         });
@@ -1982,6 +2074,10 @@ async fn message_send_inner(
         deliveries.push(FleetMessageDelivery {
             session_key: session_key.clone(),
             state: status,
+            // The reason was already computed and persisted; it used to be
+            // logged and dropped, which left every UI able to say REJECTED and
+            // none of them able to say why.
+            detail,
         });
     }
 
@@ -2568,7 +2664,7 @@ async fn handle_fleet_channel_create(
     let row = FleetChannelRepo::insert(pool, &row).await.map_err(|error| store_err(&error))?;
     tracing::info!(channel_id = %row.id, scope_key = %row.scope_key, "fleet channel created");
     to_value(&FleetChannelCreateResult {
-        channel: wire_channel(&row),
+        channel: wire_channel(&row)?,
     })
 }
 
@@ -2586,27 +2682,40 @@ async fn handle_fleet_channel_list(
     let _params: FleetChannelListParams = parse_params(req, "{}")?;
     let channels = FleetChannelRepo::list(pool).await.map_err(|error| store_err(&error))?;
     to_value(&FleetChannelListResult {
-        channels: channels.iter().map(wire_channel).collect(),
+        channels: channels.iter().map(wire_channel).collect::<Result<Vec<_>, _>>()?,
     })
 }
 
+/// One stored channel row as the wire type.
+///
+/// The kind is matched EXHAUSTIVELY on the two tokens `channel_create` writes.
+/// An `else Broadcast` fallback would render any third token as a broadcast
+/// channel, i.e. as one an operator may send into, on every client at once: a
+/// silent widening of who can be messaged is the worst possible default for an
+/// unknown value. Failing loudly keeps the day a third kind is added a daemon
+/// error somebody reads, not a shipped mis-render.
 fn wire_channel(
     row: &ainb_hangar_store::repo::fleet_chat::FleetChannelRow,
-) -> ainb_hangar_proto::fleet::FleetChannel {
+) -> Result<ainb_hangar_proto::fleet::FleetChannel, RpcError> {
     use ainb_hangar_proto::fleet::{FleetChannel, FleetChannelKind};
 
-    FleetChannel {
+    Ok(FleetChannel {
         id: row.id.clone(),
-        kind: if row.kind == "copilot" {
-            FleetChannelKind::Copilot
-        } else {
-            FleetChannelKind::Broadcast
+        kind: match row.kind.as_str() {
+            "copilot" => FleetChannelKind::Copilot,
+            "broadcast" => FleetChannelKind::Broadcast,
+            other => {
+                return Err(internal(&format!(
+                    "channel {} has unknown kind {other:?}",
+                    row.id
+                )));
+            }
         },
         name: row.name.clone(),
         scope_key: row.scope_key.clone(),
         recipients: row.recipients.clone(),
         created_at: row.created_at,
-    }
+    })
 }
 
 /// Write the copilot session's per-session adapter config (migration 0082).
@@ -2782,6 +2891,103 @@ async fn handle_fleet_confirm_answer(
     to_value(&FleetConfirmAnswerResult {
         confirm_id: card.confirm_id,
         state: card.state,
+    })
+}
+
+/// Run one copilot tool call through the guardrail: the LIVE producer of
+/// confirm cards.
+///
+/// The copilot's MCP tool server is a separate process (its stdio is owned by
+/// the ACP adapter), so this method is how a tool call reaches the gate that
+/// classifies and parks it. Everything the classifier reads is resolved HERE,
+/// on the daemon side of the socket:
+///
+/// * the SCOPE comes from the CREDENTIAL the daemon minted for this copilot
+///   session, never the wire. A caller-supplied scope would let the process
+///   furthest downstream of every untrusted transcript choose which channel its
+///   confirm cards appear on.
+/// * the GUARDRAIL state is the daemon's. It starts empty, which fails closed:
+///   `answer_need` against any session takes a card until the daemon pins the
+///   sessions an operator message named (phase B).
+///
+/// The call BLOCKS while a confirm card is open. That is the contract: the tool
+/// result the model is waiting on is the thing being held, and holding it is
+/// what stops the action. The hold is bounded by
+/// [`crate::copilot::confirm_ttl`].
+async fn handle_fleet_copilot_gate(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+    caller: &auth::Caller,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_fleet_tools::guardrail::Guardrail;
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_COPILOT_GATE, FleetCopilotGateParams, FleetCopilotGateResult,
+        FleetGateVerdict,
+    };
+    use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
+
+    require_fleet_capability(FLEET_CAPABILITY_COPILOT_GATE)?;
+    let params: FleetCopilotGateParams = parse_params(req, "{ tool, arguments? }")?;
+    if params.tool.trim().is_empty() {
+        return Err(invalid_params("tool must not be empty"));
+    }
+    // The scope is the CALLER's, resolved from the credential the daemon minted
+    // for this copilot session, and re-validated as a copilot channel here.
+    // `newest_of_kind` was wrong the moment two copilot channels could exist:
+    // a session bound to the older one would mint its cards and its activity
+    // rows under the newer one's scope, so the card would name a conversation
+    // the call did not come from and the older channel's feed would sit empty
+    // while its copilot acted.
+    let scope_key = caller.copilot_scope().ok_or_else(|| RpcError {
+        code: ainb_hangar_proto::auth::UNAUTHORIZED,
+        message: "fleet/copilot_gate needs the copilot credential, not the daemon token"
+            .to_string(),
+        data: None,
+    })?;
+    let channel = FleetChannelRepo::by_scope(pool, scope_key)
+        .await
+        .map_err(|error| store_err(&error))?
+        .filter(|channel| channel.kind == "copilot")
+        .ok_or_else(|| {
+            invalid_params(&format!(
+                "the credential's scope {scope_key:?} names no copilot channel"
+            ))
+        })?;
+
+    // ponytail: the pinned set is empty until phase B computes it from the
+    // operator message that triggered the turn. Empty is the FAIL-CLOSED value,
+    // not a stub: it makes every `answer_need` take a confirm card.
+    let guardrail = Guardrail::default();
+    let outcome = crate::copilot::gate(
+        pool,
+        events,
+        &channel.scope_key,
+        &params.tool,
+        &params.arguments,
+        &guardrail,
+        crate::copilot::confirm_ttl(),
+    )
+    .await;
+
+    let (verdict, arguments, detail) = match outcome {
+        crate::copilot::GateOutcome::Run(arguments) => (FleetGateVerdict::Run, arguments, None),
+        crate::copilot::GateOutcome::Denied => {
+            (FleetGateVerdict::Denied, serde_json::Map::new(), None)
+        }
+        crate::copilot::GateOutcome::Expired => {
+            (FleetGateVerdict::Expired, serde_json::Map::new(), None)
+        }
+        crate::copilot::GateOutcome::Refused(detail) => (
+            FleetGateVerdict::Refused,
+            serde_json::Map::new(),
+            Some(detail),
+        ),
+    };
+    to_value(&FleetCopilotGateResult {
+        verdict,
+        arguments,
+        detail,
     })
 }
 
@@ -6165,18 +6371,10 @@ fn stable_fingerprint(value: &str) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-const fn receipt_status_token(
-    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
-) -> &'static str {
-    use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    match status {
-        ActionReceiptStatus::Pending => "PENDING",
-        ActionReceiptStatus::Delivered => "DELIVERED",
-        ActionReceiptStatus::Failed => "FAILED",
-        ActionReceiptStatus::Unknown => "UNKNOWN",
-        ActionReceiptStatus::Rejected => "REJECTED",
-    }
-}
+// The receipt vocabulary is the PROTOCOL's, not this daemon's: the TUI pane and
+// the `ainb fleet msg` CLI print the same words, so the mapping lives once, in
+// `ainb-hangar-proto`, and every surface reads it from there.
+use ainb_hangar_proto::fleet::receipt_status_token;
 
 fn action_receipt_wire(
     row: &ainb_hangar_store::repo::fleet::ActionReceiptRow,
@@ -12579,6 +12777,41 @@ mod tests {
     use ainb_hangar_store::Store;
 
     static APPROVE_SOCKET_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A channel kind this build cannot name never ships as addressable.
+    ///
+    /// The fallback this replaces rendered ANY unknown token as a broadcast
+    /// channel, i.e. as one an operator may send into, on every client at
+    /// once. A wire mapping that silently widens who can be messaged is worse
+    /// than a loud refusal, so the third kind is an error somebody reads.
+    #[test]
+    fn a_channel_kind_this_build_cannot_name_is_refused_rather_than_broadcast() {
+        use ainb_hangar_proto::fleet::FleetChannelKind;
+        use ainb_hangar_store::repo::fleet_chat::FleetChannelRow;
+
+        let row = |kind: &str| FleetChannelRow {
+            id: "01J0CHAN".into(),
+            kind: kind.to_string(),
+            name: "ops".into(),
+            scope_key: "channel:01J0CHAN".into(),
+            recipients: vec!["claude:one".into()],
+            created_at: 1,
+        };
+
+        assert_eq!(
+            wire_channel(&row("broadcast")).expect("broadcast is known").kind,
+            FleetChannelKind::Broadcast
+        );
+        assert_eq!(
+            wire_channel(&row("copilot")).expect("copilot is known").kind,
+            FleetChannelKind::Copilot
+        );
+        let refused = wire_channel(&row("skunkworks")).expect_err("an unknown kind was accepted");
+        assert!(
+            refused.message.contains("skunkworks") && refused.message.contains("01J0CHAN"),
+            "the refusal does not name the row or the kind: {refused:?}"
+        );
+    }
 
     fn health() -> DaemonHealth {
         DaemonHealth {

@@ -327,7 +327,18 @@ fn the_copilot_chat_opens_attributes_and_answers_a_confirm_card() {
         capture_pane(session)
     );
 
+    // Tab focuses the card block; it does NOT arm a card. Nothing is selected
+    // until the operator picks one with the arrow keys, which is what the
+    // surface itself says when a key arrives with no selection ("pick a card
+    // with ↑↓ before answering").
+    //
+    // That is deliberate. `apply_snapshot` used to adopt the first card
+    // whenever nothing was selected, so a background poll returning cards armed
+    // `y` over a destructive call the operator had not read. Removing it means
+    // approving takes two keys, and this test presses both rather than
+    // asserting the pre-armed behaviour it was written against.
     send_key(session, "Tab");
+    send_key(session, "Down");
     send_key(session, "y");
     let resolved = {
         let deadline = Instant::now() + Duration::from_secs(25);

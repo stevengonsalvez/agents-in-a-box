@@ -83,6 +83,16 @@ pub const FLEET_CAPABILITY_COPILOT_CONFIGURE: &str = "fleet.copilot.configure";
 /// from `fleet.action.execute`: ACP permission requests stay part 1's
 /// attention rows answered through `fleet/action`.
 pub const FLEET_CAPABILITY_CONFIRM_ANSWER: &str = "fleet.confirm.answer";
+/// Negotiated capability required to run one copilot tool call through the
+/// guardrail (`fleet/copilot_gate`).
+///
+/// The copilot's MCP tool server is a separate process, so the classify-park-
+/// resolve decision has to cross a socket to reach the daemon that owns it.
+/// This is the ONLY caller-visible name for that crossing, and it is separate
+/// from [`FLEET_CAPABILITY_CONFIRM_ANSWER`] on purpose: minting a card and
+/// answering one are opposite ends of the same dialog, held by different
+/// processes.
+pub const FLEET_CAPABILITY_COPILOT_GATE: &str = "fleet.copilot.gate";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
 ///
@@ -98,6 +108,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_CHAT_WRITE,
     FLEET_CAPABILITY_CONFIRM_ANSWER,
     FLEET_CAPABILITY_COPILOT_CONFIGURE,
+    FLEET_CAPABILITY_COPILOT_GATE,
     FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
     FLEET_CAPABILITY_MESSAGE_READ,
@@ -1178,6 +1189,25 @@ pub enum ActionReceiptStatus {
     Rejected,
 }
 
+/// The ONE operator-facing token for a receipt status.
+///
+/// Lives beside the enum rather than in each surface because the daemon, the
+/// TUI chat pane and the `ainb fleet msg` CLI all print this word, and three
+/// private copies can drift independently: one saying `REFUSED` while another
+/// says `REJECTED` is a vocabulary split no test that only reads its own
+/// surface would catch. Wildcard-free, so a new variant is a compile error
+/// here instead of a leg rendering as whichever arm was written last.
+#[must_use]
+pub const fn receipt_status_token(status: ActionReceiptStatus) -> &'static str {
+    match status {
+        ActionReceiptStatus::Pending => "PENDING",
+        ActionReceiptStatus::Delivered => "DELIVERED",
+        ActionReceiptStatus::Failed => "FAILED",
+        ActionReceiptStatus::Unknown => "UNKNOWN",
+        ActionReceiptStatus::Rejected => "REJECTED",
+    }
+}
+
 /// Durable action result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetActionReceipt {
@@ -1436,6 +1466,14 @@ pub struct FleetMessageSendParams {
     pub actor: Option<String>,
     /// Recipient session keys; every target must already exist.
     pub targets: Vec<String>,
+    /// Replies only: the message this send answers, the thread join read back
+    /// by `fleet/message_list {origin_id}`.
+    ///
+    /// The daemon refuses an id it cannot find, and one whose message lives in
+    /// a different scope than this send: a thread that joins across scopes is
+    /// how a reply ends up in a conversation nobody addressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_message_id: Option<String>,
     /// Message body.
     pub text: String,
     /// Client idempotency token; replay with different content is rejected.
@@ -1449,6 +1487,20 @@ pub struct FleetMessageDelivery {
     pub session_key: String,
     /// Honest delivery status for this leg.
     pub state: ActionReceiptStatus,
+    /// Why this leg landed where it did (`target_unknown`, `target_not_running`,
+    /// `queue_full`, …), when the daemon has a reason to give.
+    ///
+    /// The daemon has always computed this per leg and persisted it on the
+    /// delivery row; it just never crossed the socket, so every surface could
+    /// say REJECTED and none of them could say why. A fan-out where one of four
+    /// recipients is refused is the case an operator actually has to read, and
+    /// "REJECTED" alone does not tell them whether to retry or to go look at
+    /// the session.
+    ///
+    /// Optional and skipped when absent: an older daemon simply omits it and an
+    /// older client ignores it, so this is additive on both sides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Result for `fleet/message_send`.
@@ -1898,6 +1950,78 @@ pub struct FleetConfirmEventParams {
     pub confirm: FleetConfirm,
 }
 
+/// Confirm-card lifetime, in milliseconds.
+///
+/// Here rather than in the daemon because BOTH ends of `fleet/copilot_gate`
+/// have to agree on it: the daemon expires the card at this age, and the tool
+/// server's client bound has to sit outside it, or a live card would come back
+/// to the copilot as a transport timeout and be retried into a second card.
+///
+/// Strictly shorter than part 1's 30-minute per-turn deadline, which is its
+/// whole justification: the card holds the copilot's ACP turn open, so a card
+/// that outlived the deadline would have the deadline converge the turn out
+/// from under a dialog the operator is still looking at.
+pub const FLEET_CONFIRM_TTL_MS: u64 = 10 * 60 * 1000;
+
+/// Parameters for `fleet/copilot_gate`: one tool call offered to the guardrail.
+///
+/// Deliberately carries NO scope, NO named-session set and NO class hint. The
+/// caller is the copilot's MCP tool server, which is downstream of every
+/// transcript the copilot has read, so anything it could put on this wire is
+/// model-reachable. The daemon resolves the scope from its own copilot channel
+/// and pins the turn state itself; all the caller gets to say is which tool the
+/// model asked for and with what arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCopilotGateParams {
+    /// The MCP tool name the model invoked.
+    pub tool: String,
+    /// The arguments the model supplied, verbatim and unprojected.
+    ///
+    /// Unprojected because projection is the DAEMON's obligation: it happens
+    /// once, immediately before a card is persisted, so there is exactly one
+    /// place that has to be right.
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What the guardrail decided about one tool call.
+///
+/// The three non-`run` variants are all "do not execute", kept distinct because
+/// the copilot should be able to tell "a human said no" from "nobody looked"
+/// from "that call was never executable", and an operator reading the activity
+/// feed should too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetGateVerdict {
+    /// Execute the tool with the returned arguments.
+    Run,
+    /// A human denied the confirm card.
+    Denied,
+    /// The confirm card reached its expiry unanswered.
+    Expired,
+    /// The call is not executable at all (unknown tool, malformed arguments).
+    Refused,
+}
+
+/// Result for `fleet/copilot_gate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCopilotGateResult {
+    /// The verdict.
+    pub verdict: FleetGateVerdict,
+    /// The arguments to execute with, only meaningful for
+    /// [`FleetGateVerdict::Run`].
+    ///
+    /// NOT an echo of the request: for a card answered `edit` these are the
+    /// OPERATOR's arguments, so the caller must execute THESE and never the
+    /// ones it sent.
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+    /// Why, for a refusal. Never model-authored prose: it is the classifier's
+    /// own token plus its detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Guardrail class of one copilot tool invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2196,6 +2320,9 @@ mod tests {
             FLEET_CAPABILITY_CHAT_READ,
             FLEET_CAPABILITY_COPILOT_CONFIGURE,
             FLEET_CAPABILITY_CONFIRM_ANSWER,
+            // The producer arm, landed with the tool server's live gate. Same
+            // rule: advertised WITH its handler, never before it.
+            FLEET_CAPABILITY_COPILOT_GATE,
         ] {
             assert!(
                 FLEET_PROTOCOL_CAPABILITY_IDS.contains(&id),
@@ -2282,6 +2409,7 @@ mod tests {
             scope_key: None,
             actor: None,
             targets: vec!["acp:01J0KEY".to_string()],
+            origin_message_id: None,
             text: "hello".to_string(),
             request_id: "req-1".to_string(),
         });
@@ -2289,6 +2417,7 @@ mod tests {
             scope_key: None,
             actor: Some("copilot".to_string()),
             targets: vec!["acp:01J0KEY".to_string()],
+            origin_message_id: Some("01J0ORIGIN".to_string()),
             text: "hello".to_string(),
             request_id: "req-1".to_string(),
         });
@@ -2301,11 +2430,16 @@ mod tests {
         }))
         .expect("a pre-actor frame still decodes");
         assert!(legacy.actor.is_none());
+        assert!(
+            legacy.origin_message_id.is_none(),
+            "an unthreaded send is the default, not a decode failure"
+        );
         round_trip(&FleetMessageSendResult {
             message_id: "01J0MSG".to_string(),
             deliveries: vec![FleetMessageDelivery {
                 session_key: "acp:01J0KEY".to_string(),
                 state: ActionReceiptStatus::Pending,
+                detail: None,
             }],
         });
         round_trip(&FleetMessageListParams {
@@ -2433,10 +2567,23 @@ mod tests {
         let delivery = serde_json::to_value(FleetMessageDelivery {
             session_key: "acp:01J0KEY".to_string(),
             state: ActionReceiptStatus::Rejected,
+            detail: Some("target_not_running".to_string()),
         })
         .unwrap();
         // Delivery states reuse the durable receipt vocabulary verbatim.
         assert_eq!(delivery["state"], "REJECTED");
+        // And the REASON rides with the state: a rejected leg with no reason is
+        // a receipt an operator cannot act on.
+        assert_eq!(delivery["detail"], "target_not_running");
+        // A leg with nothing to explain omits the key rather than sending null,
+        // so a pre-detail client sees exactly the frame it always saw.
+        let quiet = serde_json::to_value(FleetMessageDelivery {
+            session_key: "acp:01J0KEY".to_string(),
+            state: ActionReceiptStatus::Delivered,
+            detail: None,
+        })
+        .unwrap();
+        assert!(quiet.get("detail").is_none(), "{quiet}");
     }
 
     #[test]

@@ -29,7 +29,8 @@
 //!   runs before the row is persisted, so a model-authored `justification` or
 //!   `operator_approved` key never reaches the human's approve dialog. The
 //!   classifier already ignores undeclared keys; this is the same fence for the
-//!   human verdict.
+//!   human verdict. An `edit` answer is projected AND re-classified, because the
+//!   operator's replacement arguments have never been past the classifier.
 //! * **A card is single-use.** The store resolves under `WHERE state = 'open'`,
 //!   so an answer racing the expiry has exactly one winner and the loser gets a
 //!   typed error rather than a second execution.
@@ -74,7 +75,34 @@ pub const COPILOT_ACTOR: &str = "copilot";
 /// whole point: the card holds a turn open, so if the card outlived the
 /// deadline the deadline would converge the turn out from under a dialog the
 /// operator is still looking at.
-const CONFIRM_TTL_DEFAULT: Duration = Duration::from_mins(10);
+///
+/// Read from the PROTO, not stated here, because the tool server on the far
+/// side of `fleet/copilot_gate` has to bound its own wait outside this value.
+/// Two independently written durations is how a live card comes back to the
+/// copilot as a transport timeout and gets retried into a second card.
+const CONFIRM_TTL_DEFAULT: Duration =
+    Duration::from_millis(ainb_hangar_proto::fleet::FLEET_CONFIRM_TTL_MS);
+
+/// Shrunk card lifetime for tests that drive the LIVE path.
+///
+/// [`gate`] takes the lifetime as an argument, which is enough for a test that
+/// calls it directly. It is not enough for a test that goes through
+/// `fleet/copilot_gate`, because there the lifetime is chosen inside the daemon
+/// — and the expiry behaviour is exactly what such a test needs to prove.
+/// Follows the `set_approve_socket_for_test` precedent in `rpc`: a test-only
+/// seam behind an explicit feature, absent from every production build.
+#[cfg(any(test, feature = "test-support"))]
+static CONFIRM_TTL_OVERRIDE: std::sync::OnceLock<Mutex<Option<Duration>>> =
+    std::sync::OnceLock::new();
+
+/// Override the confirm-card lifetime for the current process.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_confirm_ttl_for_test(ttl: Option<Duration>) {
+    *CONFIRM_TTL_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = ttl;
+}
 
 /// The confirm-card lifetime a production copilot turn parks under.
 ///
@@ -84,7 +112,14 @@ const CONFIRM_TTL_DEFAULT: Duration = Duration::from_mins(10);
 /// [`gate`] takes the lifetime as an argument so a test can shrink it without
 /// process-global state; nothing else should pass anything but this.
 #[must_use]
-pub const fn confirm_ttl() -> Duration {
+pub fn confirm_ttl() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(ttl) = CONFIRM_TTL_OVERRIDE
+        .get()
+        .and_then(|cell| *cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    {
+        return ttl;
+    }
     CONFIRM_TTL_DEFAULT
 }
 
@@ -120,6 +155,19 @@ pub enum ConfirmError {
         /// Its terminal state.
         state: String,
     },
+    /// The operator's EDITED arguments do not satisfy the tool's own shape.
+    ///
+    /// The card is left OPEN: a fat-fingered edit is a typo to correct, not an
+    /// answer to burn the card on.
+    #[error("confirm card {confirm_id:?}: edited arguments are not valid for `{tool}`: {detail}")]
+    BadEdit {
+        /// The card that stays open.
+        confirm_id: String,
+        /// The tool whose shape the edit failed.
+        tool: String,
+        /// The classifier's own complaint.
+        detail: String,
+    },
     /// The store failed.
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
@@ -133,6 +181,16 @@ pub enum ConfirmError {
 /// resumed twice even if the store guard were ever loosened.
 static WAITERS: LazyLock<Mutex<HashMap<String, oneshot::Sender<Answer>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The waiter table, THROUGH a poisoned lock rather than around it.
+///
+/// A panic while some other card was being registered must not turn every
+/// subsequent park into a card nobody can resume: skipping the registration is
+/// the one outcome that leaves a card claiming to be answerable while its answer
+/// goes nowhere. Matches what [`confirm_ttl`] already does with its own lock.
+fn waiters() -> std::sync::MutexGuard<'static, HashMap<String, oneshot::Sender<Answer>>> {
+    WAITERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Answer {
@@ -222,13 +280,17 @@ async fn park(
         expires_at,
         answered_at: None,
     };
+    // The waiter goes in BEFORE the row, never after. `FleetConfirmRepo::insert`
+    // is what makes the card visible to `fleet/confirm_list` on every other
+    // connection, so an answer landing between the two would resolve the durable
+    // row to `approved`, find no waiter, and leave this park to time out — a
+    // card that reads APPROVED in every UI while the tool resolved EXPIRED.
+    let (tx, rx) = oneshot::channel();
+    waiters().insert(confirm_id.clone(), tx);
     if let Err(error) = FleetConfirmRepo::insert(pool, &card).await {
+        waiters().remove(&confirm_id);
         tracing::error!(%error, tool, "could not persist a confirm card; refusing the call");
         return GateOutcome::Refused(format!("store_error; {error}"));
-    }
-    let (tx, rx) = oneshot::channel();
-    if let Ok(mut waiters) = WAITERS.lock() {
-        waiters.insert(confirm_id.clone(), tx);
     }
     tracing::info!(
         %confirm_id,
@@ -241,9 +303,7 @@ async fn park(
     let answer = tokio::time::timeout(ttl, rx).await;
     // Whatever happened, this card is done waiting; a stale sender left behind
     // would keep a dead oneshot alive for the life of the daemon.
-    if let Ok(mut waiters) = WAITERS.lock() {
-        waiters.remove(&confirm_id);
-    }
+    waiters().remove(&confirm_id);
 
     match answer {
         Ok(Ok(Answer::Approved(arguments))) => {
@@ -328,6 +388,25 @@ pub async fn answer(
     // tool, but an operator UI relaying a model-supplied blob unchanged would
     // otherwise be a way back in for the keys the card just dropped.
     let edited = edited.map(|arguments| project_arguments(&existing.tool, &arguments));
+    // And RE-CLASSIFIED. The card's own arguments passed the classifier on the
+    // way in; the operator's replacement has never seen it. An edit that drops
+    // `answer` from an `answer_need` used to run as `answer_need(session, "")`,
+    // resolving another agent's open need with nothing — first-answer-wins, and
+    // unrecoverable. Only a REFUSAL blocks: a shape-valid edit that would now
+    // classify as `Confirm` is exactly what the human is answering.
+    if let Some(arguments) = &edited {
+        if let Verdict::Refused(refusal) = Guardrail::default().classify(&existing.tool, arguments)
+        {
+            return Err(ConfirmError::BadEdit {
+                confirm_id: confirm_id.to_string(),
+                tool: existing.tool.clone(),
+                detail: match refusal {
+                    Refusal::UnknownTool(name) => format!("unknown tool `{name}`"),
+                    Refusal::BadArguments(detail) => detail,
+                },
+            });
+        }
+    }
     let edited_json = edited.as_ref().map(|arguments| Value::Object(arguments.clone()).to_string());
     let now = SystemClock.now_ms();
     let resolved =
@@ -354,7 +433,7 @@ pub async fn answer(
             }
         };
 
-    let waiter = WAITERS.lock().ok().and_then(|mut waiters| waiters.remove(confirm_id));
+    let waiter = waiters().remove(confirm_id);
     if let Some(waiter) = waiter {
         let answer = if approve {
             let arguments = edited.unwrap_or_else(|| {
@@ -375,6 +454,138 @@ pub async fn answer(
         .unwrap_or(Value::Null),
     );
     Ok(card)
+}
+
+/// Path override for the tool-server binary, for a dev tree where the daemon
+/// and the tool server are not siblings.
+///
+/// A PATH, never a secret: the daemon token reaches the child only through the
+/// `0600` keyfile below.
+pub const TOOL_SERVER_BIN_ENV: &str = "AINB_FLEET_TOOLS_BIN";
+
+/// The MCP servers one ACP session gets at `session/new` and `session/load`.
+///
+/// EMPTY for every session except the copilot's. Adapter processes are pooled
+/// across sessions, so this is decided per session and never per adapter: the
+/// fleet's destructive tools belong to the one session an operator configured
+/// as their copilot, not to every agent that happens to share its adapter.
+///
+/// ```text
+///   daemon ──spawn──▶ ACP adapter ──spawn──▶ ainb-fleet-tools
+///     │                    (env: two PATHS)        │
+///     │                                            │ reads 0600 keyfile
+///     └──────────────── hangar.sock ◀──────────────┘
+/// ```
+///
+/// The token is NOT here. What crosses is the PATH of a `0600` token file, plus
+/// the socket path — because this env is set by the daemon on the adapter,
+/// inherited by the tool server, and visible to anything either of them spawns.
+/// `ainb_fleet_tools::keyfile` refuses to start if a token ever does arrive in
+/// its environment or its argv.
+///
+/// And it is not the DAEMON's token file either. The credential minted here is
+/// scoped to this copilot channel and, per
+/// [`Caller`](crate::rpc::auth::Caller), reaches only the read methods, the
+/// gate, and the two writes the tool table can perform after the gate said run.
+/// It cannot answer its own confirm cards and it cannot write a chat row wearing
+/// the operator's name. The keyfile ceremony stops the credential leaking into
+/// an unrelated child's environment; the SCOPE is what limits the agent the
+/// injection is steering.
+///
+/// What this still does not survive: a copilot adapter configured with shell or
+/// file tools of its own. Such an agent can read `~/.agents-in-a-box` as the
+/// operator, and the daemon token there is the operator's credential. The
+/// guardrail assumes the copilot's only reach into the fleet is this tool table.
+///
+/// Degrades to NO tools rather than to ungated ones: if the binary or the
+/// keyfile cannot be resolved, the copilot is a chat partner with no fleet
+/// access at all, which is the fail-closed direction.
+pub async fn session_mcp_servers(
+    pool: &SqlitePool,
+    scope_key: &str,
+) -> Vec<agent_client_protocol::schema::v1::McpServer> {
+    use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+    use ainb_fleet_tools::keyfile::{SOCKET_ENV, TOKEN_FILE_ENV};
+    use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
+
+    let channel = match FleetChannelRepo::by_scope(pool, scope_key).await {
+        Ok(Some(channel)) if channel.kind == "copilot" => channel,
+        Ok(_) => return Vec::new(),
+        Err(error) => {
+            tracing::error!(%error, scope_key, "could not read a session's channel; no tools");
+            return Vec::new();
+        }
+    };
+    let Some(command) = tool_server_binary() else {
+        tracing::error!(
+            scope_key = %channel.scope_key,
+            "the copilot tool server binary is not next to this daemon and {TOOL_SERVER_BIN_ENV} \
+             is unset; the copilot session gets NO fleet tools"
+        );
+        return Vec::new();
+    };
+    let Some(home) = ainb_hangar_core::hangar_home() else {
+        tracing::error!("hangar home is unresolvable; the copilot session gets NO fleet tools");
+        return Vec::new();
+    };
+    let socket = home.join("hangar.sock");
+    let token_file = match write_copilot_keyfile(&home, &channel.scope_key) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                scope_key = %channel.scope_key,
+                "could not write the copilot credential; the copilot session gets NO fleet tools"
+            );
+            return Vec::new();
+        }
+    };
+    tracing::info!(
+        scope_key = %channel.scope_key,
+        command = %command.display(),
+        "attaching the fleet tool server to the copilot session"
+    );
+    vec![McpServer::Stdio(
+        McpServerStdio::new("ainb-fleet", command).env(vec![
+            EnvVariable::new(SOCKET_ENV, socket.display().to_string()),
+            EnvVariable::new(TOKEN_FILE_ENV, token_file.display().to_string()),
+        ]),
+    )]
+}
+
+/// Mint this channel's copilot credential and write it where only the owner can
+/// read it. Returns the PATH, which is the only thing that crosses to the child.
+///
+/// One file per scope, rewritten on every `session/new` and `session/load`,
+/// because [`crate::rpc::auth::mint_copilot_token`] revokes the previous
+/// credential for the same scope at the same moment.
+fn write_copilot_keyfile(
+    home: &std::path::Path,
+    scope_key: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let slug: String = scope_key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let path = home.join("hangar").join(format!("copilot-{slug}.token"));
+    crate::rpc::auth::write_token_file(&path, &crate::rpc::auth::mint_copilot_token(scope_key))?;
+    Ok(path)
+}
+
+/// The tool-server binary: the override, else this daemon's own sibling.
+fn tool_server_binary() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os(TOOL_SERVER_BIN_ENV) {
+        let path = std::path::PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    let sibling = std::env::current_exe().ok()?.parent()?.join("ainb-fleet-tools");
+    sibling.is_file().then_some(sibling)
 }
 
 /// Post one copilot-authored line into a channel timeline.

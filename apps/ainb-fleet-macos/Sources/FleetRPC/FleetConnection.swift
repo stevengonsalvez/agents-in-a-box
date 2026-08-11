@@ -192,6 +192,57 @@ actor FleetConnection {
         return try await request("fleet/runtime_status", params: FleetRuntimeStatusParams(), result: FleetRuntimeStatusResult.self)
     }
 
+    // MARK: - Fleet chat, copilot and guardrails (buzz-port part 2)
+    //
+    // Every capability id below is the one its DAEMON ARM checks, not a
+    // plausible-looking neighbour: `fleet/message_*` is gated by
+    // `fleet.message.*` while the channel, confirm and activity reads share
+    // `fleet.chat.read`, and answering a card needs its own
+    // `fleet.confirm.answer`. Gating on the wrong id is how a surface either
+    // stays dark against a daemon that would have served it, or offers a
+    // control that answers -32601 on the click.
+
+    func channelList() async throws -> FleetChannelListResult {
+        try requireReadCapability("fleet.chat.read")
+        return try await request("fleet/channel_list", params: FleetChannelListParams(), result: FleetChannelListResult.self)
+    }
+
+    func channelCreate(_ params: FleetChannelCreateParams) async throws -> FleetChannelCreateResult {
+        try requireWriteCapability("fleet.chat.write")
+        return try await request("fleet/channel_create", params: params, result: FleetChannelCreateResult.self)
+    }
+
+    func acpSessionCreate(_ params: FleetAcpSessionCreateParams) async throws -> FleetAcpSessionCreateResult {
+        try requireWriteCapability("fleet.acp.spawn")
+        return try await request("fleet/acp_session_create", params: params, result: FleetAcpSessionCreateResult.self)
+    }
+
+    func messageList(_ params: FleetMessageListParams) async throws -> FleetMessageListResult {
+        try requireReadCapability("fleet.message.read")
+        return try await request("fleet/message_list", params: params, result: FleetMessageListResult.self)
+    }
+
+    func messageSend(_ params: FleetMessageSendParams) async throws -> FleetMessageSendResult {
+        try requireWriteCapability("fleet.message.send")
+        return try await request("fleet/message_send", params: params, result: FleetMessageSendResult.self)
+    }
+
+    /// Confirm cards as raw rows, so one undecodable card cannot blank the pane.
+    func confirmList(_ params: FleetConfirmListParams) async throws -> FleetConfirmListRawResult {
+        try requireReadCapability("fleet.chat.read")
+        return try await request("fleet/confirm_list", params: params, result: FleetConfirmListRawResult.self)
+    }
+
+    func confirmAnswer(_ params: FleetConfirmAnswerParams) async throws -> FleetConfirmAnswerResult {
+        try requireWriteCapability("fleet.confirm.answer")
+        return try await request("fleet/confirm_answer", params: params, result: FleetConfirmAnswerResult.self)
+    }
+
+    func activityList(_ params: FleetActivityListParams) async throws -> FleetActivityListResult {
+        try requireReadCapability("fleet.chat.read")
+        return try await request("fleet/activity_list", params: params, result: FleetActivityListResult.self)
+    }
+
     func incoming() -> AsyncStream<FleetIncoming> {
         AsyncStream { continuation in
             let id = UUID()

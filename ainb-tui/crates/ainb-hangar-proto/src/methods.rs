@@ -524,6 +524,17 @@ pub const FLEET_CONFIRM_ANSWER: &str = "fleet/confirm_answer";
 /// cursor is the commit-ordered `seq`, never a client-minted or wall-clock
 /// value (part 1's cursor rule).
 pub const FLEET_ACTIVITY_LIST: &str = "fleet/activity_list";
+/// Run one copilot tool call through the guardrail, parking it on a confirm
+/// card if a human is required.
+///
+/// Params: [`crate::fleet::FleetCopilotGateParams`]; result:
+/// [`crate::fleet::FleetCopilotGateResult`]. Gated by `fleet.copilot.gate`.
+///
+/// The ONE method that can legitimately take minutes to answer: a confirm-class
+/// call is held here until an operator answers the card or it expires. Clients
+/// must give it a timeout longer than the card lifetime
+/// (`ainb_hangar_daemon::copilot::confirm_ttl`), not the ordinary RPC bound.
+pub const FLEET_COPILOT_GATE: &str = "fleet/copilot_gate";
 
 /// Notification carrying one guardrail confirm card at its new state.
 ///
@@ -1830,6 +1841,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_CONFIRM_LIST,
     FLEET_CONFIRM_ANSWER,
     FLEET_ACTIVITY_LIST,
+    FLEET_COPILOT_GATE,
 ];
 
 #[cfg(test)]
@@ -2143,6 +2155,7 @@ mod tests {
             FLEET_CONFIRM_LIST,
             FLEET_CONFIRM_ANSWER,
             FLEET_ACTIVITY_LIST,
+            FLEET_COPILOT_GATE,
         ];
         for m in declared {
             assert!(

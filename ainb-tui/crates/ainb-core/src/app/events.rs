@@ -3050,6 +3050,16 @@ impl EventHandler {
             // pane reports a modal and EVERY key routes above, so the composer
             // gets its printable characters without a second key table here.
             KeyCode::Char('m') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m'))),
+            // `M` is the same surface over the SELECTED session's own thread.
+            // Forwarded like `m`: once the chat is open the pane reports a
+            // modal and every key routes above it.
+            KeyCode::Char('M') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('M'))),
+            // `N` opens the broadcast-channel form (name, then members). Not
+            // lowercase `n`: that char is already this table's deny / new-ATC
+            // key, and the obvious `C` is a reserved hangar router char (#450).
+            // Forwarded like `m`/`M`; once the form is open the pane reports a
+            // modal and every key routes above.
+            KeyCode::Char('N') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N'))),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
             KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),

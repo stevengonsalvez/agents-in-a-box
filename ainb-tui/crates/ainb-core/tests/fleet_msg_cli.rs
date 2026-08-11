@@ -58,14 +58,51 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                 json!({ "jsonrpc": "2.0", "id": id, "result": {} })
             }
             "fleet/message_send" => match behaviour {
+                // The message id ECHOES the thread join AND THE BODY, because
+                // the id is the only part of the response the CLI re-serialises
+                // verbatim: the fixture is the only witness to what actually
+                // crossed the socket, and an `--origin` the CLI drops, or a
+                // body it strips, splits or truncates, would be invisible
+                // otherwise. Asserting exit 0 alone proves clap accepted the
+                // argument, not that the operator's bytes reached the daemon.
                 SendBehaviour::Ok => json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "message_id": "msg-01",
-                        "deliveries": [
-                            { "session_key": request["params"]["targets"][0], "state": "DELIVERED" }
-                        ],
+                        "message_id": format!(
+                            "{}|text={}",
+                            request["params"]["origin_message_id"]
+                                .as_str()
+                                .map_or_else(
+                                    || "msg-01".to_string(),
+                                    |origin| format!("msg-01-reply-to-{origin}"),
+                                ),
+                            request["params"]["text"].as_str().unwrap_or("<missing>"),
+                        ),
+                        // ONE LEG PER TARGET, as the daemon answers: a fan-out
+                        // into a channel is one send with N legs, and a fixture
+                        // that always answered one leg could not tell a CLI
+                        // that renders every recipient from one that renders
+                        // the first. `claude:gone` is the fixture's dead
+                        // session, so the interesting case (partial failure,
+                        // with a reason) is reachable from a CLI test.
+                        "deliveries": request["params"]["targets"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|target| {
+                                if target == json!("claude:gone") {
+                                    json!({
+                                        "session_key": target,
+                                        "state": "REJECTED",
+                                        "detail": "target_not_running",
+                                    })
+                                } else {
+                                    json!({ "session_key": target, "state": "DELIVERED" })
+                                }
+                            })
+                            .collect::<Vec<Value>>(),
                     },
                 }),
                 SendBehaviour::IdempotencyConflict => json!({
@@ -114,6 +151,41 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                     })
                 }
             }
+            // The daemon MINTS `channel:<ulid>`; the fixture mints one too, so a
+            // CLI that composed its own scope would be visible here.
+            "fleet/channel_create" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "channel": {
+                        "id": "01J0CHAN",
+                        "kind": request["params"]["kind"],
+                        "name": request["params"]["name"],
+                        "scope_key": "channel:01J0CHAN",
+                        "recipients": request["params"]["recipients"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                        "created_at": 1,
+                    },
+                },
+            }),
+            "fleet/channel_list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "channels": [{
+                        "id": "01J0CHAN",
+                        "kind": "broadcast",
+                        "name": "#ops",
+                        "scope_key": "channel:01J0CHAN",
+                        // One member whose pane is gone, so `channel send`
+                        // answers the partial-failure case a real fleet has.
+                        "recipients": ["claude:one", "claude:two", "claude:gone"],
+                        "created_at": 1,
+                    }],
+                },
+            }),
             "fleet/transcript_list" => json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -329,7 +401,7 @@ async fn send_prints_json_on_stdout_and_exits_zero() {
             );
             let parsed: Value =
                 serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
-            assert_eq!(parsed["message_id"], "msg-01");
+            assert_eq!(parsed["message_id"], "msg-01|text=hello");
             assert_eq!(parsed["deliveries"][0]["state"], "DELIVERED");
         },
     )
@@ -393,7 +465,9 @@ async fn send_reads_the_body_from_stdin() {
         |output| {
             assert_eq!(output.status.code(), Some(0));
             let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
-            assert_eq!(parsed["message_id"], "msg-01");
+            // The body the fixture SAW, not just exit 0: stdin has to reach
+            // the wire intact.
+            assert_eq!(parsed["message_id"], "msg-01|text=piped body");
         },
     )
     .await;
@@ -478,6 +552,54 @@ async fn a_missing_daemon_is_a_retryable_exit_two() {
     assert_eq!(error["error"]["kind"], "daemon");
     assert_eq!(error["error"]["retryable"], true);
     assert!(error["error"]["next"].as_str().is_some_and(|next| next.contains("daemon")));
+}
+
+/// The threaded send: `--origin` reaches the daemon as `origin_message_id`.
+///
+/// CLI parity for part 2 Phase B. The read half (`msg list --origin`) already
+/// ships; without this the two halves of one thread are reachable from
+/// different clients, and the CLI can only start conversations, never answer
+/// one. `allow_hyphen_values` is proven the same way `--text` is: a value that
+/// LEADS with a dash must reach the daemon and come back as the daemon's own
+/// refusal, not die in clap as an unknown flag.
+#[tokio::test]
+async fn send_carries_the_thread_origin_to_the_daemon() {
+    for origin in ["msg-01", "-01J0LEADINGDASH"] {
+        with_fixture(
+            SendBehaviour::Ok,
+            &[
+                "--format",
+                "json",
+                "fleet",
+                "msg",
+                "send",
+                "--target",
+                "claude:one",
+                "--text",
+                "on it",
+                "--origin",
+                origin,
+                "--request-id",
+                "req-thread",
+            ],
+            None,
+            |output| {
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "stderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let parsed: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
+                assert_eq!(
+                    parsed["message_id"],
+                    format!("msg-01-reply-to-{origin}|text=on it"),
+                    "the origin never reached the wire"
+                );
+            },
+        )
+        .await;
+    }
 }
 
 /// `list` renders the daemon's page as JSON on stdout.
@@ -990,6 +1112,225 @@ async fn transcript_still_reads_by_positional_session_key() {
             );
             let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
             assert_eq!(parsed["chunks"][0]["ingest_order"], 4);
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------- part 2 phase C:
+// broadcast channels, from the CLI. `fleet channel create|list|send` is the
+// non-negotiable CLI half of the surface the TUI grew: same frozen methods,
+// same `--format json` contract, same semantic exit codes.
+
+/// The full operator round trip: mint a channel, read it back, send into it.
+///
+/// The three verbs are asserted TOGETHER because that is the only way to prove
+/// the minted scope survives the round trip: `create` prints a scope the client
+/// did not choose, `list` returns it, and `send` addresses it. A client that
+/// composed `channel:<name>` itself would pass any one of these alone.
+#[tokio::test]
+async fn channel_create_list_and_send_round_trip_as_json() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "channel",
+            "create",
+            "--kind",
+            "broadcast",
+            "--name",
+            "#ops",
+            "--recipient",
+            "claude:one",
+            "--recipient",
+            "claude:two",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(parsed["channel"]["scope_key"], "channel:01J0CHAN");
+            assert_eq!(parsed["channel"]["kind"], "broadcast");
+            assert_eq!(parsed["channel"]["recipients"][1], "claude:two");
+        },
+    )
+    .await;
+
+    with_fixture(
+        SendBehaviour::Ok,
+        &["--format", "json", "fleet", "channel", "list"],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(0));
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(parsed["channels"][0]["scope_key"], "channel:01J0CHAN");
+        },
+    )
+    .await;
+
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "channel",
+            "send",
+            "--channel",
+            "01J0CHAN",
+            "--text",
+            "run the tests",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            // ONE MESSAGE, THREE LEGS: the fan-out is a single send addressed to
+            // the channel's whole membership, resolved by the CLI rather than
+            // typed by the operator.
+            assert_eq!(parsed["message_id"], "msg-01|text=run the tests");
+            assert_eq!(
+                parsed["deliveries"].as_array().map(Vec::len),
+                Some(3),
+                "one leg per member: {parsed}"
+            );
+            // The partial failure is legible in JSON: the state AND the reason.
+            let rejected = parsed["deliveries"]
+                .as_array()
+                .expect("deliveries")
+                .iter()
+                .find(|leg| leg["session_key"] == "claude:gone")
+                .expect("the dead member has a leg");
+            assert_eq!(rejected["state"], "REJECTED");
+            assert_eq!(rejected["detail"], "target_not_running");
+        },
+    )
+    .await;
+}
+
+/// The text rendering of a fan-out is one line per recipient, carrying the
+/// reason. A single aggregate line is exactly the rendering that hides the one
+/// member an operator has to go and look at.
+#[tokio::test]
+async fn channel_send_prints_one_receipt_line_per_member_with_the_reason() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "fleet",
+            "channel",
+            "send",
+            "--channel",
+            "channel:01J0CHAN",
+            "--text",
+            "run the tests",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8_lossy(&output.stdout);
+            for member in ["claude:one", "claude:two", "claude:gone"] {
+                assert!(
+                    text.lines().any(|line| line.contains(member)),
+                    "{member} has no receipt line:\n{text}"
+                );
+            }
+            let rejected = text
+                .lines()
+                .find(|line| line.contains("claude:gone"))
+                .unwrap_or_else(|| panic!("no line for the dead member:\n{text}"));
+            assert!(
+                rejected.contains("REJECTED") && rejected.contains("target_not_running"),
+                "the rejected member's line does not say what happened or why: {rejected}"
+            );
+            assert!(
+                text.lines().any(|line| line.contains("channel:01J0CHAN")),
+                "the send does not name the scope it filed under:\n{text}"
+            );
+        },
+    )
+    .await;
+}
+
+/// A dash-prefixed body reaches the daemon instead of dying as an unknown flag.
+///
+/// The same trap `msg send --text` already carries, re-asserted on the new
+/// verb: `allow_hyphen_values` is per-argument, so a new free-text flag starts
+/// out broken unless it opts in.
+#[tokio::test]
+async fn channel_send_accepts_a_dash_prefixed_body() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "--format",
+            "json",
+            "fleet",
+            "channel",
+            "send",
+            "--channel",
+            "01J0CHAN",
+            "--text",
+            "-y run the tests",
+        ],
+        None,
+        |output| {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "a dash-prefixed body was eaten by clap; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&output.stdout).expect("json");
+            // The BODY, not just the exit code: a CLI that stripped, split or
+            // dropped the leading `-y` would still exit 0.
+            assert_eq!(parsed["message_id"], "msg-01|text=-y run the tests");
+        },
+    )
+    .await;
+}
+
+/// A channel nobody has heard of is bad input, named, with the command that
+/// answers the question, rather than a -32602 the operator has to decode.
+#[tokio::test]
+async fn channel_send_to_an_unknown_channel_is_bad_input() {
+    with_fixture(
+        SendBehaviour::Ok,
+        &[
+            "fleet",
+            "channel",
+            "send",
+            "--channel",
+            "01J0NOPE",
+            "--text",
+            "hello",
+        ],
+        None,
+        |output| {
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr_error(&output);
+            assert_eq!(error["error"]["kind"], "bad_input");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("01J0NOPE")),
+                "the refusal does not name the channel: {error}"
+            );
         },
     )
     .await;

@@ -2170,6 +2170,7 @@ Options:
       --target <target>          Recipient session_key (repeat for a broadcast)
       --text <text>              Message body, or `-` to read stdin
       --scope <scope>            Explicit scope key (default: the recipient's own scope)
+      --origin <origin>          Reply into this message's thread (read back with `msg list --origin`)
       --request-id <request-id>  Idempotency token; a replay with different content is refused
   -h, --help                     Print help
 
@@ -2310,6 +2311,7 @@ Usage: ainb fleet channel [OPTIONS] <COMMAND>
 Commands:
   create  Mint a channel and its channel:<id> scope
   list    List channels and their members
+  send    Send one message to every member of a channel, with per-member receipts
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2348,6 +2350,26 @@ Usage: ainb fleet channel list [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb fleet channel send`
+
+Send one message to every member of a channel, with per-member receipts
+
+```console
+$ ainb fleet channel send --help
+Send one message to every member of a channel, with per-member receipts
+
+Usage: ainb fleet channel send [OPTIONS] --channel <channel>
+
+Options:
+      --channel <channel>        Channel id or its channel:<id> scope
+      --format <format>          Output format [default: text] [possible values: text, json, csv, markdown]
+      --text <text>              Message body, or `-` to read stdin
+      --request-id <request-id>  Idempotency token; a replay with different content is refused
+  -h, --help                     Print help
+
+The recipient list is the CHANNEL's membership, resolved from the daemon. Exit 0 means the message was persisted and every leg reached a terminal state, NOT that any member received it: read deliveries[].state and deliveries[].detail for the per-member outcome.
 ```
 
 ### `ainb fleet copilot`

@@ -731,6 +731,63 @@ mod tests {
         );
     }
 
+    /// Ordering is the COMMIT-ordered `seq`, and the ULID is never a tiebreak.
+    ///
+    /// Every id here sorts backwards against its commit order, so a reader that
+    /// slipped an `ORDER BY id` (or paged by id) returns the thread reversed.
+    /// The ids in a real fleet are minted by different writers on different
+    /// clocks, so out-of-order minting is the normal case, not a contrived one.
+    #[tokio::test]
+    async fn thread_and_scope_reads_order_by_seq_when_ulids_are_minted_out_of_order() {
+        let (_dir, store) = store().await;
+        FleetMessageRepo::insert_message(store.pool(), &message("origin-row", "session:s-1"))
+            .await
+            .unwrap();
+        for id in ["zzz-first", "mmm-second", "aaa-third"] {
+            let mut reply = message(id, "session:s-1");
+            reply.origin_message_id = Some("origin-row".to_string());
+            reply.kind = "agent".to_string();
+            FleetMessageRepo::insert_message(store.pool(), &reply).await.unwrap();
+        }
+
+        let thread = FleetMessageRepo::list_by_origin(store.pool(), "origin-row", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            thread.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["zzz-first", "mmm-second", "aaa-third"],
+            "the thread is in commit order, not id order"
+        );
+        assert!(
+            thread.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+            "seq is not ascending: {thread:#?}"
+        );
+
+        let scoped = FleetMessageRepo::list_by_scope(store.pool(), "session:s-1", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            scoped.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["origin-row", "zzz-first", "mmm-second", "aaa-third"],
+            "the session thread reads in commit order too"
+        );
+
+        // The cursor is the same fact: after the FIRST-committed reply come the
+        // two committed later, which id order would get wrong in both
+        // directions.
+        let after_seq = FleetMessageRepo::seq_for_id(store.pool(), "zzz-first")
+            .await
+            .unwrap()
+            .expect("the row has a seq");
+        let next = FleetMessageRepo::list_by_origin(store.pool(), "origin-row", after_seq, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["mmm-second", "aaa-third"]
+        );
+    }
+
     #[tokio::test]
     async fn list_for_session_is_the_delivery_join_not_a_scope_filter() {
         let (_dir, store) = store().await;

@@ -581,6 +581,38 @@ impl DaemonClient {
             .map_err(|source| DaemonError::Decode(format!("decoding {method}: {source}")))
     }
 
+    /// [`Self::call_typed`] with a caller-chosen bound instead of
+    /// [`RPC_TIMEOUT`].
+    ///
+    /// For the one method that legitimately blocks on a HUMAN:
+    /// `fleet/copilot_gate` holds a confirm-class tool call until an operator
+    /// answers the card. The 5-second default would turn every confirm card
+    /// into a transport timeout, and a timeout is indistinguishable from a
+    /// wedged daemon — the copilot would retry, and the retry would mint a
+    /// second card for the same action.
+    ///
+    /// Still BOUNDED, and the caller's bound must sit OUTSIDE the daemon's card
+    /// lifetime: the daemon expires the card and answers `expired`, and this
+    /// timeout is only the backstop for a daemon that died holding it.
+    pub async fn call_typed_within<P, R>(
+        &self,
+        method: &str,
+        params: &P,
+        timeout: Duration,
+    ) -> Result<R, DaemonError>
+    where
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        let params = serde_json::to_value(params)
+            .map_err(|source| DaemonError::Decode(format!("encoding {method} params: {source}")))?;
+        let result = tokio::time::timeout(timeout, self.call_inner(method, params))
+            .await
+            .map_err(|_| DaemonError::Timeout(timeout))??;
+        serde_json::from_value(result)
+            .map_err(|source| DaemonError::Decode(format!("decoding {method}: {source}")))
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
         self.call_with_timeout(method, params, RPC_TIMEOUT).await
     }

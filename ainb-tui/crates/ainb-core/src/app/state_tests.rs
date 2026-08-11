@@ -508,12 +508,27 @@ mod tests {
             .output()
             .expect("read pane command");
         let pane_command = String::from_utf8_lossy(&pane.stdout);
-        assert!(
-            pane_command.contains(
-                "codex --remote 'unix:///tmp/ainb-idle-restart.sock' resume thread-idle-restart"
-            ),
-            "idle restart must replace dead pane with exact remote Codex argv, got: {pane_command}"
-        );
+        // Assert the ARGV, not tmux's rendering of it. `#{pane_start_command}`
+        // reports the command as tmux chose to quote it, and that differs
+        // between tmux versions: the socket comes back `'unix://...'` on some
+        // and bare `unix://...` on others. Matching the quoted form passed
+        // locally and failed on CI, which is a difference in the reporter
+        // rather than in what was launched. Strip the quotes and assert the
+        // pieces that carry meaning.
+        let unquoted = pane_command.replace(['\'', '"'], "");
+        for fragment in [
+            "codex",
+            "--remote",
+            "unix:///tmp/ainb-idle-restart.sock",
+            "resume",
+            "thread-idle-restart",
+        ] {
+            assert!(
+                unquoted.contains(fragment),
+                "idle restart must replace dead pane with the exact remote Codex argv; \
+                 missing {fragment:?} in: {pane_command}"
+            );
+        }
         assert!(!pane_command.contains("--last"));
     }
 

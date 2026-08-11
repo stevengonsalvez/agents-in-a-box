@@ -99,6 +99,7 @@ final class FleetStore: ObservableObject {
     @Published private(set) var usageDashboard: FleetUsageDashboardResult?
     @Published private(set) var quotaSummary: FleetQuotaSummaryResult?
     @Published private(set) var runtimeStatus: FleetRuntimeStatusResult?
+    @Published private(set) var chat = FleetChatSurface()
     @Published private(set) var pendingIntentID: String?
     @Published private(set) var controlNotice: String?
     @Published private(set) var lastStart: FleetStartResult?
@@ -183,6 +184,27 @@ final class FleetStore: ObservableObject {
 
     var canReadRuntime: Bool {
         connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.runtime.read") == true
+    }
+
+    // MARK: - Fleet chat (buzz-port part 2, Phase A3)
+    //
+    // Each surface is gated on the capability its own daemon arm checks, and
+    // gated SEPARATELY: a daemon built between phases serves the timeline while
+    // answering -32601 for confirm cards, and a single combined gate would
+    // either hide a working conversation or offer an approve button that
+    // errors on the click.
+
+    var canReadChat: Bool {
+        guard connectionState.isLive, let capabilities = negotiation?.capabilityIDs else { return false }
+        return capabilities.contains("fleet.chat.read") && capabilities.contains("fleet.message.read")
+    }
+
+    var canSendChat: Bool {
+        canWrite && negotiation?.capabilityIDs.contains("fleet.message.send") == true && pendingIntentID == nil
+    }
+
+    var canAnswerConfirms: Bool {
+        canWrite && negotiation?.capabilityIDs.contains("fleet.confirm.answer") == true && pendingIntentID == nil
     }
 
     var canStart: Bool {
@@ -599,6 +621,195 @@ final class FleetStore: ObservableObject {
                 controlNotice = "Runtime status refused: \(String(describing: error))"
             }
         }
+    }
+
+    // MARK: - Fleet chat
+
+    /// Page the copilot conversation: timeline, confirm cards, activity.
+    ///
+    /// Mirrors the TUI's resolution (`ainb-core/src/fleet/control.rs`) step for
+    /// step so the two clients cannot disagree about which channel `#copilot`
+    /// is. Anything else and an operator watching both surfaces sees two
+    /// conversations and has no way to tell which one the copilot is in.
+    func refreshChat() {
+        Task { [weak self] in await self?.refreshChatOnce() }
+    }
+
+    /// One page, awaited.
+    ///
+    /// The poll loop awaits THIS rather than firing `refreshChat()` on a timer:
+    /// a page that takes longer than the interval would otherwise stack, and
+    /// five overlapping RPC sets racing each other means whichever finishes
+    /// last wins and the pane can go backwards in time.
+    func refreshChatOnce() async {
+        guard canReadChat, let connection else {
+            // Assigned only on a real change: this runs once a second and a
+            // @Published write redraws the pane whether or not the value moved.
+            let unavailable = FleetChatSurface(sessionDetail: "Chat is unavailable for this daemon.")
+            if chat != unavailable { chat = unavailable }
+            return
+        }
+        do {
+            // Same guard as the unavailable branch above, for the same reason:
+            // this runs once a second and an unconditional @Published write
+            // re-evaluates the whole window subtree even when nothing moved.
+            // `FleetChatSurface` is Equatable, so the comparison is free.
+            let paged = try await Self.pageChat(using: connection, canWrite: canWrite)
+            if chat != paged { chat = paged }
+        } catch {
+            controlNotice = "Chat refresh refused: \(String(describing: error))"
+        }
+    }
+
+    /// Post one operator message into the copilot channel.
+    ///
+    /// No `actor` rides this and none can: `FleetMessageSendParams` has no such
+    /// field, so this surface cannot file a row under anybody but the operator
+    /// the daemon already authenticated.
+    func sendChatMessage(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSendChat,
+              !trimmed.isEmpty,
+              let scopeKey = chat.scopeKey,
+              let target = chat.targetSessionKey,
+              let connection else {
+            controlNotice = "Chat send is unavailable or incomplete."
+            return
+        }
+        let requestID = UUID().uuidString
+        pendingIntentID = requestID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                // The RESULT is the honest half. A 200 says the daemon accepted
+                // the send, not that anybody received it: a lone leg coming back
+                // REJECTED (`target_not_running`) or UNKNOWN
+                // (`tmux_identity_unknown`) answers 200 too, and discarding it
+                // would clear the composer, re-page, and leave the operator
+                // reading their own message in the timeline as proof it landed.
+                let result = try await connection.messageSend(FleetMessageSendParams(
+                    scopeKey: scopeKey,
+                    targets: [target],
+                    originMessageID: nil,
+                    text: trimmed,
+                    requestID: requestID
+                ))
+                self.controlNotice = FleetChatLabels.deliverySummary(result.deliveries)
+            } catch {
+                self.controlNotice = "Chat send refused: \(String(describing: error))"
+                return
+            }
+            self.chat = (try? await Self.pageChat(using: connection, canWrite: self.canWrite)) ?? self.chat
+        }
+    }
+
+    /// Answer one guardrail confirm card.
+    ///
+    /// The card's own `isAnswerable` is the gate, not a state comparison
+    /// rewritten here. A card whose state this build cannot name reports false
+    /// and is refused, which is the same answer the button already gave by
+    /// being disabled: this is the second lock, for the paths a disabled
+    /// control does not cover (a keyboard shortcut, a card that expired between
+    /// the render and the click).
+    func answerConfirm(_ card: FleetChatConfirmCard, answer: FleetConfirmAnswer) {
+        guard canAnswerConfirms, card.isAnswerable, let connection else {
+            controlNotice = card.isAnswerable
+                ? "Confirm answers are unavailable for this daemon."
+                : card.refusal
+            return
+        }
+        let intentID = UUID().uuidString
+        pendingIntentID = intentID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                let result = try await connection.confirmAnswer(
+                    FleetConfirmAnswerParams(confirmID: card.id, answer: answer)
+                )
+                self.controlNotice = "Card \(result.confirmID) is \(FleetChatLabels.confirmState(result.state))."
+            } catch {
+                self.controlNotice = "Confirm answer refused: \(String(describing: error))"
+            }
+            self.chat = (try? await Self.pageChat(using: connection, canWrite: self.canWrite)) ?? self.chat
+        }
+    }
+
+    /// Resolve the copilot channel and page everything filed under its scope.
+    ///
+    /// Only the timeline is fatal. The confirm and activity feeds degrade to an
+    /// explained absence: a daemon built between phases answers -32601 for
+    /// them, and a chat that refuses to render its conversation over that is a
+    /// worse surface than one that says which half is missing.
+    private static func pageChat(using connection: FleetConnection, canWrite: Bool) async throws -> FleetChatSurface {
+        var surface = FleetChatSurface()
+        let channels = try await connection.channelList().channels
+        // Newest-wins, matching the TUI: a race that created two copilot
+        // channels must not leave the two clients reading different ones.
+        let existing = channels.last { $0.kind == .copilot }
+        let channel: FleetChannel
+        if let existing {
+            channel = existing
+        } else if canWrite {
+            // Create-if-absent on a read path, deliberately: the copilot
+            // channel is a singleton an operator expects to simply exist and
+            // there is no other door to it here.
+            channel = try await connection.channelCreate(
+                FleetChannelCreateParams(kind: .copilot, name: "copilot", recipients: nil)
+            ).channel
+        } else {
+            surface.sessionDetail = "No copilot channel yet, and this connection may not create one."
+            return surface
+        }
+        surface.scopeKey = channel.scopeKey
+
+        // A COPILOT channel carries no recipient list: its membership is the
+        // ACP session that ANSWERS on the scope, so the recipient is resolved
+        // the way it is minted, by creating that session against this scope.
+        // The call is idempotent per live scope. The daemon's refusal is KEPT
+        // rather than swallowed: its wording is the only actionable thing an
+        // operator gets when a client in another directory already claimed it.
+        if canWrite {
+            do {
+                surface.targetSessionKey = try await connection.acpSessionCreate(FleetAcpSessionCreateParams(
+                    provider: copilotDefaultProvider,
+                    cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+                    scopeKey: channel.scopeKey
+                )).sessionKey
+            } catch {
+                surface.targetSessionKey = channel.recipients.first
+                surface.sessionDetail = String(describing: error)
+            }
+        } else {
+            surface.targetSessionKey = channel.recipients.first
+            surface.sessionDetail = "This connection may not open a copilot session."
+        }
+
+        surface.messages = try await connection.messageList(FleetMessageListParams(
+            scopeKey: channel.scopeKey,
+            originID: nil,
+            afterID: nil,
+            limit: fleetMessageListMax
+        )).messages.map(FleetChatMessageRow.init(message:))
+
+        do {
+            surface.confirms = try await connection
+                .confirmList(FleetConfirmListParams(scopeKey: channel.scopeKey))
+                .confirms
+                .map(FleetChatConfirmCard.decode)
+        } catch {
+            surface.confirms = []
+            surface.confirmsDetail = String(describing: error)
+        }
+        surface.activity = (try? await connection.activityList(FleetActivityListParams(
+            scopeKey: channel.scopeKey,
+            afterSeq: nil,
+            limit: fleetActivityListMax
+        )).activities) ?? []
+        return surface
     }
 
     private func beginConnection() {

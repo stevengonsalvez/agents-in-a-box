@@ -2125,9 +2125,18 @@ impl SessionActor {
         // chat timeline as if it had just arrived ("no client-side transcript
         // replay for session/load resume").
         self.reducer.set_replaying(true);
+        // Re-declared on load exactly like the static config options: adapter
+        // state does not survive a load, so a resumed copilot would otherwise
+        // come back with no fleet tools and no error saying so.
+        let mcp_servers =
+            crate::copilot::session_mcp_servers(self.pool.store.pool(), &self.scope_key).await;
         let loaded = process
             .process
-            .load_session(acp_session_id, std::path::Path::new(&self.cwd))
+            .load_session_with_mcp(
+                acp_session_id,
+                std::path::Path::new(&self.cwd),
+                &mcp_servers,
+            )
             .await;
         // Drained with the seam STILL ON, and LEFT on: the notifications sit in
         // the actor's channel until something reads them, and a replay tail
@@ -2175,15 +2184,20 @@ impl SessionActor {
         process: &Arc<ProviderProcess>,
         message_id: &str,
     ) -> Result<(), EnsureFailure> {
-        let acp_session_id =
-            process.process.new_session(std::path::Path::new(&self.cwd)).await.map_err(
-                |error| match error {
-                    error @ AcpError::ModeMismatch { .. } => {
-                        EnsureFailure::ModeUnproven(error.to_string())
-                    }
-                    other => EnsureFailure::NeverSent(other.to_string()),
-                },
-            )?;
+        // The copilot's session is the only one that gets fleet tools; every
+        // other scope resolves to an empty list. See `copilot::session_mcp_servers`.
+        let mcp_servers =
+            crate::copilot::session_mcp_servers(self.pool.store.pool(), &self.scope_key).await;
+        let acp_session_id = process
+            .process
+            .new_session_with_mcp(std::path::Path::new(&self.cwd), &mcp_servers)
+            .await
+            .map_err(|error| match error {
+                error @ AcpError::ModeMismatch { .. } => {
+                    EnsureFailure::ModeUnproven(error.to_string())
+                }
+                other => EnsureFailure::NeverSent(other.to_string()),
+            })?;
         self.attach_channels(process, &acp_session_id);
         let pool = self.pool.store.pool().clone();
         self.pending_prelude = render_resume_prelude(&pool, &self.session_key, message_id).await;
