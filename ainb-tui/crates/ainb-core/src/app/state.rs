@@ -1020,6 +1020,7 @@ pub struct DaemonsFetchResult {
     pub approve_reason: String,
     pub hangar_running: bool,
     pub hangar_reason: String,
+    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
 }
 
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
@@ -1036,6 +1037,7 @@ pub struct DaemonsOverlayState {
     pub approve_reason: String,
     pub hangar_running: bool,
     pub hangar_reason: String,
+    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
     pub loading: bool,
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
@@ -1058,6 +1060,7 @@ pub(crate) fn daemons_sync_probe() -> (
     Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
     (bool, String),
     (bool, String),
+    crate::cli::hangar::DaemonRuntimeStatus,
 ) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
     let headroom_consumers = crate::interactive::SessionStore::load()
@@ -1084,7 +1087,15 @@ pub(crate) fn daemons_sync_probe() -> (
         .map_or((false, "not running".to_string()), |_| {
             (true, "serving".to_string())
         });
-    (mcp_alive, headroom_consumers, notifyd, approve, hangar)
+    let hangar_runtime = crate::cli::hangar::daemon_runtime_status();
+    (
+        mcp_alive,
+        headroom_consumers,
+        notifyd,
+        approve,
+        hangar,
+        hangar_runtime,
+    )
 }
 
 // ============================================================================
@@ -5010,6 +5021,7 @@ impl AppState {
             notifyd_restart_status: None,
             hangar_running: false,
             hangar_reason: "probing…".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
         });
@@ -5036,13 +5048,14 @@ impl AppState {
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
             // blocking pool.
-            let (mcp_alive, headroom_consumers, notifyd, approve, hangar) =
+            let (mcp_alive, headroom_consumers, notifyd, approve, hangar, hangar_runtime) =
                 tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
                     false,
                     Vec::new(),
                     Vec::new(),
                     (false, "probe failed".to_string()),
                     (false, "probe failed".to_string()),
+                    crate::cli::hangar::DaemonRuntimeStatus::default(),
                 ));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
@@ -5055,6 +5068,7 @@ impl AppState {
                 approve_reason: approve.1,
                 hangar_running: hangar.0,
                 hangar_reason: hangar.1,
+                hangar_runtime,
             };
             let _ = tx.send(result);
         });
@@ -5139,6 +5153,7 @@ impl AppState {
                 o.approve_reason = result.approve_reason;
                 o.hangar_running = result.hangar_running;
                 o.hangar_reason = result.hangar_reason;
+                o.hangar_runtime = result.hangar_runtime;
                 o.last_refreshed = Some(std::time::Instant::now());
             }
         }

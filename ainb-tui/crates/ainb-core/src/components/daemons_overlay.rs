@@ -42,7 +42,9 @@ fn centered(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
-    let popup = centered(70, 55, area);
+    // Hangar has a second identity line. Keep it visible on a standard 80x24
+    // terminal instead of letting the fixed card rows squeeze it away.
+    let popup = centered(70, 70, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -93,18 +95,15 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
         return;
     }
 
-    // Rows: MCP, Headroom, consumers, Hangar, then notifyd.
+    // Rows: MCP, Headroom, consumers, Hangar, then notifyd. No spacers: this
+    // must fit both the Hangar identity line and notifyd on an 80x24 terminal.
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // MCP row
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Headroom row
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Headroom consumers
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Hangar row
-            Constraint::Length(1), // spacer
+            Constraint::Length(1), // MCP row
+            Constraint::Length(1), // Headroom row
+            Constraint::Length(1), // Headroom consumers
+            Constraint::Length(2), // Hangar status + owner path
             Constraint::Min(3),    // notifyd section
         ])
         .split(area);
@@ -157,7 +156,7 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
         ));
     }
     let headroom_line = Line::from(headroom_spans);
-    frame.render_widget(Paragraph::new(headroom_line), rows[2]);
+    frame.render_widget(Paragraph::new(headroom_line), rows[1]);
 
     // ── Headroom consumers ────────────────────────────────────────────────────
     let consumers_text = if state.headroom_consumers.is_empty() {
@@ -174,7 +173,7 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
             consumers_text,
             Style::default().fg(MUTED_GRAY),
         ))),
-        rows[4],
+        rows[2],
     );
 
     // ── notifyd processes ───────────────────────────────────────────────────────
@@ -189,6 +188,24 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
             Style::default().fg(MUTED_GRAY),
         ),
     ];
+    if let Some(pid) = state.hangar_runtime.pid {
+        hangar.push(Span::styled(
+            format!("   pid {pid}"),
+            Style::default().fg(SOFT_WHITE),
+        ));
+    }
+    if let Some(version) = &state.hangar_runtime.version {
+        hangar.push(Span::styled(
+            format!("   v{version}"),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
+    if state.hangar_runtime.old {
+        hangar.push(Span::styled(
+            "   ⚠ old",
+            Style::default().fg(CLAY).add_modifier(Modifier::BOLD),
+        ));
+    }
     if !state.hangar_running {
         hangar.push(Span::styled(
             "   S start",
@@ -201,9 +218,16 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
             Style::default().fg(MUTED_GRAY),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(hangar)), rows[6]);
+    let mut hangar_lines = vec![Line::from(hangar)];
+    if let Some(command) = &state.hangar_runtime.command {
+        hangar_lines.push(Line::from(vec![
+            Span::styled("    owner ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(command.clone(), Style::default().fg(MUTED_GRAY)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(hangar_lines), rows[3]);
 
-    render_notifyd_section(frame, rows[8], state);
+    render_notifyd_section(frame, rows[4], state);
 }
 
 /// Render every running `notifyd` process, one line each, with its
@@ -405,6 +429,7 @@ mod tests {
             notifyd_restart_status: None,
             hangar_running: false,
             hangar_reason: "not running".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
         }
@@ -453,6 +478,54 @@ mod tests {
     }
 
     #[test]
+    fn daemons_overlay_renders_hangar_owner_version_and_old_marker() {
+        let mut state = make_state(false, 8787, None, None);
+        state.hangar_running = true;
+        state.hangar_reason = "serving".to_string();
+        state.hangar_runtime = crate::cli::hangar::DaemonRuntimeStatus {
+            pid: Some(51851),
+            command: Some("/Users/stevie/d/git/ainb/ainb-tui/target/debug/ainb".to_string()),
+            version: Some("1.20.0".to_string()),
+            old: true,
+        };
+        let backend = TestBackend::new(180, 36);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, f.area(), &state)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            text.contains("Hangar daemon"),
+            "Hangar row missing:\n{text}"
+        );
+        assert!(text.contains("pid 51851"), "owner pid missing:\n{text}");
+        assert!(text.contains("v1.20.0"), "daemon version missing:\n{text}");
+        assert!(text.contains("⚠ old"), "old marker missing:\n{text}");
+        assert!(
+            text.contains("target/debug/ainb"),
+            "owner path missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn daemons_overlay_keeps_hangar_owner_on_standard_terminal() {
+        let mut state = make_state(false, 8787, None, None);
+        state.hangar_running = true;
+        state.hangar_runtime = crate::cli::hangar::DaemonRuntimeStatus {
+            command: Some("/Users/stevie/d/git/ainb/ainb-tui/target/debug/ainb".to_string()),
+            ..Default::default()
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, f.area(), &state)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            text.contains("owner /Users"),
+            "Hangar owner row missing:\n{text}"
+        );
+    }
+
+    #[test]
     fn daemons_overlay_renders_loading_state() {
         let state = DaemonsOverlayState {
             mcp_alive: false,
@@ -473,6 +546,7 @@ mod tests {
             notifyd_restart_status: None,
             hangar_running: false,
             hangar_reason: "not running".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
         };
