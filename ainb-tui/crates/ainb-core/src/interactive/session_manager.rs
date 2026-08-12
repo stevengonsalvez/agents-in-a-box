@@ -1909,8 +1909,6 @@ impl InteractiveSessionManager {
             }
             let mut command = vec![
                 provider.command().to_string(),
-                "--disable".to_string(),
-                "apps".to_string(),
                 "--remote".to_string(),
                 remote.endpoint.clone(),
                 "-C".to_string(),
