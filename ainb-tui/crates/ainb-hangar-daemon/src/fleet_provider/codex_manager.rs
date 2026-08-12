@@ -1199,6 +1199,8 @@ fn codex_orphans_to_reap(ps_output: &str, adoption_credible: impl Fn(&str) -> bo
 struct LegacyProxyDaemon {
     pid: u32,
     process_start_fingerprint: String,
+    proxy_pid: u32,
+    proxy_start_fingerprint: String,
 }
 
 /// Select orphaned legacy Hangar daemon pids whose direct proxy child targets
@@ -1207,22 +1209,29 @@ struct LegacyProxyDaemon {
 /// A proxy on its own is not authority to signal anything. The parent-child
 /// relationship confines this compatibility recovery to the obsolete Ainb
 /// topology that predated the native WebSocket manager.
-fn legacy_proxy_daemon_pids(ps_output: &str, live_socket: &Path) -> Vec<u32> {
+fn legacy_proxy_daemon_pairs(ps_output: &str, live_socket: &Path) -> Vec<(u32, u32)> {
     let expected_socket = live_socket.to_string_lossy();
     let rows = ps_output.lines().filter_map(parse_ps_row).collect::<Vec<_>>();
     rows.iter()
         .filter(|parent| {
             parent.ppid == 1 && crate::single_instance::is_hangar_daemon_args(parent.args)
         })
-        .filter(|parent| {
-            rows.iter().any(|child| {
-                child.ppid == parent.pid
+        .flat_map(|parent| {
+            rows.iter().filter_map(|child| {
+                (child.ppid == parent.pid
                     && is_codex_app_server(child.args)
                     && codex_proxy_socket(child.args)
-                        .is_some_and(|socket| socket == expected_socket)
+                        .is_some_and(|socket| socket == expected_socket))
+                .then_some((parent.pid, child.pid))
             })
         })
-        .map(|parent| parent.pid)
+        .collect()
+}
+
+fn legacy_proxy_daemon_pids(ps_output: &str, live_socket: &Path) -> Vec<u32> {
+    legacy_proxy_daemon_pairs(ps_output, live_socket)
+        .into_iter()
+        .map(|(pid, _)| pid)
         .collect()
 }
 
@@ -1238,9 +1247,30 @@ async fn legacy_proxy_daemon_is_current(
     process_identity(candidate.pid)
         .await
         .is_some_and(|identity| identity.process_start_fingerprint == candidate.process_start_fingerprint)
+        && process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
+            identity.process_start_fingerprint == candidate.proxy_start_fingerprint
+        })
         && ps_process_table()
             .await
-            .is_some_and(|ps_output| legacy_proxy_daemon_pids(&ps_output, live_socket).contains(&candidate.pid))
+            .is_some_and(|ps_output| {
+                legacy_proxy_daemon_pairs(&ps_output, live_socket)
+                    .contains(&(candidate.pid, candidate.proxy_pid))
+            })
+}
+
+/// Confirm the proxy child remains the exact same process after its parent exits.
+async fn legacy_proxy_child_is_current(candidate: &LegacyProxyDaemon, live_socket: &Path) -> bool {
+    process_identity(candidate.proxy_pid)
+        .await
+        .is_some_and(|identity| identity.process_start_fingerprint == candidate.proxy_start_fingerprint)
+        && ps_process_table().await.is_some_and(|ps_output| {
+            ps_output.lines().filter_map(parse_ps_row).any(|row| {
+                row.pid == candidate.proxy_pid
+                    && is_codex_app_server(row.args)
+                    && codex_proxy_socket(row.args)
+                        .is_some_and(|socket| socket == live_socket.to_string_lossy())
+            })
+        })
 }
 
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
@@ -1520,13 +1550,18 @@ pub async fn reap_legacy_codex_proxy_daemons(live_socket: &Path) -> usize {
         return 0;
     };
     let mut reaped = 0;
-    for pid in legacy_proxy_daemon_pids(&ps_output, live_socket) {
+    for (pid, proxy_pid) in legacy_proxy_daemon_pairs(&ps_output, live_socket) {
         let Some(identity) = process_identity(pid).await else {
+            continue;
+        };
+        let Some(proxy_identity) = process_identity(proxy_pid).await else {
             continue;
         };
         let candidate = LegacyProxyDaemon {
             pid,
             process_start_fingerprint: identity.process_start_fingerprint,
+            proxy_pid,
+            proxy_start_fingerprint: proxy_identity.process_start_fingerprint,
         };
         if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
             continue;
@@ -1538,30 +1573,82 @@ pub async fn reap_legacy_codex_proxy_daemons(live_socket: &Path) -> usize {
                 continue;
             }
         }
-        if wait_for_exit(&[pid], ReapTiming::PRODUCTION.term_grace, ReapTiming::PRODUCTION.poll, &nix_signal)
+        let parent_exited = wait_for_exit(
+            &[pid],
+            ReapTiming::PRODUCTION.term_grace,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty();
+        if parent_exited {
+            reaped += 1;
+        } else {
+            if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
+                continue;
+            }
+            match nix_signal(pid, Some(Signal::SIGKILL)) {
+                Ok(()) | Err(Errno::ESRCH) => {}
+                Err(error) => {
+                    tracing::warn!(pid, error = %error, "failed to kill legacy codex proxy daemon");
+                    continue;
+                }
+            }
+            if wait_for_exit(
+                &[pid],
+                ReapTiming::PRODUCTION.kill_confirm,
+                ReapTiming::PRODUCTION.poll,
+                &nix_signal,
+            )
             .await
             .is_empty()
-        {
-            reaped += 1;
-            continue;
-        }
-        if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
-            continue;
-        }
-        match nix_signal(pid, Some(Signal::SIGKILL)) {
-            Ok(()) | Err(Errno::ESRCH) => {}
-            Err(error) => {
-                tracing::warn!(pid, error = %error, "failed to kill legacy codex proxy daemon");
+            {
+                reaped += 1;
+            } else {
+                tracing::error!(pid, "legacy codex proxy daemon survived SIGKILL");
                 continue;
             }
         }
-        if wait_for_exit(&[pid], ReapTiming::PRODUCTION.kill_confirm, ReapTiming::PRODUCTION.poll, &nix_signal)
-            .await
-            .is_empty()
+        if !legacy_proxy_child_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        match nix_signal(proxy_pid, Some(Signal::SIGTERM)) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(proxy_pid, error = %error, "failed to stop legacy codex proxy child");
+                continue;
+            }
+        }
+        if wait_for_exit(
+            &[proxy_pid],
+            ReapTiming::PRODUCTION.term_grace,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty()
         {
-            reaped += 1;
-        } else {
-            tracing::error!(pid, "legacy codex proxy daemon survived SIGKILL");
+            continue;
+        }
+        if !legacy_proxy_child_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        if let Err(error) = nix_signal(proxy_pid, Some(Signal::SIGKILL)) {
+            if error != Errno::ESRCH {
+                tracing::warn!(proxy_pid, error = %error, "failed to kill legacy codex proxy child");
+            }
+            continue;
+        }
+        if !wait_for_exit(
+            &[proxy_pid],
+            ReapTiming::PRODUCTION.kill_confirm,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty()
+        {
+            tracing::error!(proxy_pid, "legacy codex proxy child survived SIGKILL");
         }
     }
     reaped
