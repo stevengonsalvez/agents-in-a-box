@@ -1021,6 +1021,21 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     // ATC Claude session owns — so the two writers never clobber each other.
     let mut hb_state = read_heartbeat_state(&paths);
 
+    // WHO OWNS THE ERR RETRY LEDGER, decided by the PRESENCE of `--exhausted`
+    // (an empty value still counts as present — "the daemon is up and nothing is
+    // spent" is a real answer, distinct from "no daemon").
+    //
+    // Daemon up: it reads the durable `atc_retry` ledger before this beat and
+    // hands us the spent sessions. We render the cap from that set and count
+    // NOTHING locally, so the two ledgers are never both live in one beat.
+    // Daemon down: nobody else is counting, so we fall back to our own
+    // `heartbeat-state.json` tally — an unattended ATC still stops auto-continuing
+    // a permanently-broken session.
+    let daemon_exhausted: Option<std::collections::HashSet<String>> =
+        matches.get_one::<String>("exhausted").map(|raw| {
+            raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+        });
+
     // Idle-pause: when the fleet has been quiet past the threshold, downgrade to
     // a cheap idle ping so ATC spends no tokens. `last_active_ms` is the last
     // time the fleet had something needing attention.
@@ -1057,8 +1072,25 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
             meta.idle_pause_min
         )
     } else {
-        let mut b =
-            build_heartbeat_enforcing_cap(&rows, now_ms, DEFAULT_ERR_RETRY_CAP, &mut hb_state);
+        let mut b = match &daemon_exhausted {
+            // Daemon-owned: seed a SCRATCH tally at the cap for the sessions it
+            // reported spent, render from that, and throw it away. The durable
+            // count stays in `atc_retry` where the daemon can escalate off it.
+            // Cost of the scratch: a session mid-budget renders plain rather than
+            // carrying the "final auto-continue" hint, because we deliberately do
+            // not ship the exact counts over the CLI boundary. The hard stop is
+            // unaffected — it comes from the set.
+            Some(ids) => {
+                let mut scratch = HeartbeatState::default();
+                for id in ids {
+                    scratch.continue_counts.insert(id.clone(), DEFAULT_ERR_RETRY_CAP);
+                }
+                build_heartbeat_enforcing_cap(&rows, now_ms, DEFAULT_ERR_RETRY_CAP, &mut scratch)
+            }
+            None => {
+                build_heartbeat_enforcing_cap(&rows, now_ms, DEFAULT_ERR_RETRY_CAP, &mut hb_state)
+            }
+        };
         if !completions.is_empty() {
             // Prepend the event-driven completions so ATC handles the freshly
             // finished children before the polled roster. (Summaries are fenced
@@ -1122,10 +1154,28 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     };
     write_heartbeat_state(&paths, &hb_state);
 
+    // The ERR roster this beat saw, for whoever owns the retry ledger. The daemon
+    // reads it back to advance `atc_retry` and to escalate the spent ones, which
+    // is what lets it delegate the whole scan to this one process instead of
+    // running a second, weaker one of its own.
+    let err_sessions: Vec<serde_json::Value> = rows
+        .iter()
+        .filter_map(|r| match &r.context {
+            crate::fleet::read::NeedsContext::Err(e) => Some(json!({
+                "session_id": r.session.id,
+                "cwd": r.session.cwd,
+                "pattern": e.pattern,
+            })),
+            _ => None,
+        })
+        .collect();
+
     let summary = json!({
         "action": "heartbeat",
         "name": name,
         "needs_count": rows.len(),
+        "err_sessions": err_sessions,
+        "ledger_owner": if daemon_exhausted.is_some() { "daemon" } else { "local" },
         "completions": completions.len(),
         "session_live": session_live,
         "idle_paused": effective_paused,
