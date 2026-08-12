@@ -3356,7 +3356,16 @@ async fn handle_codex_session_ensure(
                 }
             }
             match manager.thread_resume(&thread_id).await {
-                Ok(_) => Some(thread_id),
+                Ok(_) => {
+                    sqlx::query(
+                        "UPDATE interactive_codex_thread SET resumable = 1 WHERE session_id = ?",
+                    )
+                    .bind(&params.session_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|error| internal(&format!("mark Codex thread resumable: {error}")))?;
+                    Some(thread_id)
+                }
                 Err(error) if resumable == 0 && error.to_string().contains("no rollout found") => {
                     let watermark = codex_event_watermark(pool).await?;
                     sqlx::query(
@@ -3436,11 +3445,21 @@ async fn reserve_pending_codex_thread(
     // one pending row globally, so wait for its launch to claim before taking
     // the next cursor. This private app-server endpoint has one Ainb owner.
     for _ in 0..100 {
+        // A client can die between this reservation and tmux launch. A short
+        // lease preserves the global correlation guard without wedging every
+        // later Interactive launch forever.
+        sqlx::query(
+            "DELETE FROM interactive_codex_thread \
+             WHERE thread_id IS NULL AND reserved_at < unixepoch() - 15",
+        )
+        .execute(pool)
+        .await
+        .map_err(|error| internal(&format!("expire pending Codex launch: {error}")))?;
         let watermark = codex_event_watermark(pool).await?;
         let inserted = sqlx::query(
             "INSERT INTO interactive_codex_thread \
-             (session_id, thread_id, cwd, model, skip_permissions, event_watermark) \
-             VALUES (?, NULL, ?, ?, ?, ?)",
+             (session_id, thread_id, cwd, model, skip_permissions, event_watermark, reserved_at) \
+             VALUES (?, NULL, ?, ?, ?, ?, unixepoch())",
         )
         .bind(&params.session_id)
         .bind(cwd)
@@ -3471,7 +3490,7 @@ async fn claim_pending_codex_thread(
         "SELECT raw_payload FROM fleet_provider_event \
          WHERE provider = 'codex' AND source = 'codex_app_server' \
            AND event_type = 'thread/started' AND ingest_order > ? \
-         ORDER BY ingest_order ASC LIMIT 32",
+         ORDER BY ingest_order ASC",
     )
     .bind(watermark)
     .fetch_all(pool)
@@ -3507,6 +3526,7 @@ fn codex_started_thread_id(payload: &str, cwd: &str) -> Option<String> {
         .display()
         .to_string();
     (event_cwd == cwd
+        && thread.get("source")?.as_str() == Some("vscode")
         && thread.get("threadSource")?.as_str() == Some("user")
         && thread.get("forkedFromId").is_some_and(serde_json::Value::is_null))
     .then(|| thread.get("id")?.as_str().map(str::to_owned))
@@ -12927,6 +12947,7 @@ mod tests {
             "params": { "thread": {
                 "id": "thread-1",
                 "cwd": cwd,
+                "source": "vscode",
                 "threadSource": "user",
                 "forkedFromId": null
             } }
@@ -12938,6 +12959,8 @@ mod tests {
             Some("thread-1".to_string())
         );
         assert_eq!(codex_started_thread_id(&payload, "/wrong-cwd"), None);
+        let non_tui = payload.replace("\"source\":\"vscode\"", "\"source\":\"appServer\"");
+        assert_eq!(codex_started_thread_id(&non_tui, &cwd), None);
         let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
         assert_eq!(codex_started_thread_id(&fork, &cwd), None);
     }
