@@ -797,6 +797,252 @@ pub fn status(paths: &Paths) -> Result<Vec<StatusRow>> {
     Ok(rows)
 }
 
+/// One installed agent's hook wiring state.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookAgentHealth {
+    /// Agent name (`claude`, `codex`, or `copilot`).
+    pub agent: String,
+    /// Whether the persistent install record lists this agent.
+    pub installed: bool,
+    /// Whether the agent's on-disk wiring still points at the canonical hook.
+    /// Claude's marketplace registration is performed by its CLI and has no
+    /// stable local config file to inspect, so its recorded installation is the
+    /// available local proof.
+    pub wiring_ready: bool,
+    /// Short explanation suitable for a status surface.
+    pub detail: String,
+}
+
+/// One actionable hook-health problem.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookHealthIssue {
+    /// Component with the problem, for example `hook script` or `Codex`.
+    pub component: String,
+    /// Plain-language description of what was detected.
+    pub message: String,
+    /// Exact safe repair command.
+    pub repair: String,
+}
+
+/// Complete local health report for the shared `ainb-hooks` runtime.
+///
+/// This deliberately checks the files that make a hook executable, rather
+/// than trusting a historical install record alone. It does not spawn agent
+/// CLIs: callers may run it repeatedly from a TUI background collector.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookHealth {
+    /// Plugin version embedded in the running `ainb` binary.
+    pub bundled_version: String,
+    /// Version recorded when hooks were last installed, if any.
+    pub installed_version: Option<String>,
+    /// Whether installed hooks are at least as new as this binary's hooks.
+    pub version_current: bool,
+    /// Canonical extracted hook script location.
+    pub script_path: PathBuf,
+    /// Whether the canonical hook script exists and is executable.
+    pub script_ready: bool,
+    /// Actual `ainb` executable named by the extracted hook binary pointer.
+    pub hook_binary: Option<PathBuf>,
+    /// Whether the hook binary pointer resolves to an executable file.
+    pub hook_binary_ready: bool,
+    /// Per-agent installation and wiring state.
+    pub agents: Vec<HookAgentHealth>,
+    /// Whether notifyd's delivery socket accepted a connection now.
+    pub notify_socket_live: bool,
+    /// Whether approval broker's socket accepted a connection now.
+    pub approve_socket_live: bool,
+    /// Most-recent persisted hook event, when one exists.
+    pub last_event: Option<String>,
+    /// Problems that need action. Idle sockets are reported above, not as a
+    /// failure: notifyd intentionally starts lazily on the first hook event.
+    pub issues: Vec<HookHealthIssue>,
+}
+
+/// Inspect local hook wiring without changing it.
+#[must_use]
+pub fn hook_health(paths: &Paths) -> HookHealth {
+    let bundled_version = embedded_plugin_version();
+    let record = InstallRecord::load(paths);
+    let (record, record_error) = match record {
+        Ok(record) => (record, None),
+        Err(error) => (InstallRecord::default(), Some(error.to_string())),
+    };
+    let script_path = canonical_hook_script(paths);
+    let script_ready = is_executable(&script_path);
+    let hook_binary = std::fs::read_to_string(canonical_hook_bin(paths)).ok().and_then(|text| {
+        let target = text.trim();
+        (!target.is_empty()).then(|| PathBuf::from(target))
+    });
+    let hook_binary_ready = hook_binary.as_deref().is_some_and(is_executable);
+    let installed_any = !record.agents.is_empty();
+    let version_current = record
+        .plugin_version
+        .as_deref()
+        .is_some_and(|installed| parse_semver(installed) >= parse_semver(&bundled_version));
+
+    let agents = Agent::ALL
+        .iter()
+        .map(|agent| agent_health(*agent, &record, &script_path))
+        .collect::<Vec<_>>();
+
+    let mut issues = Vec::new();
+    if let Some(error) = record_error {
+        issues.push(HookHealthIssue {
+            component: "install record".to_string(),
+            message: format!("cannot read install.json: {error}"),
+            repair: "ainb fleet runtime install".to_string(),
+        });
+    } else if !installed_any {
+        issues.push(HookHealthIssue {
+            component: "hooks".to_string(),
+            message: "not installed for any agent".to_string(),
+            repair: "ainb fleet runtime install".to_string(),
+        });
+    } else {
+        if !version_current {
+            let installed = record.plugin_version.as_deref().unwrap_or("unknown");
+            issues.push(HookHealthIssue {
+                component: "version".to_string(),
+                message: format!("installed {installed}; ainb bundles {bundled_version}"),
+                repair: "ainb fleet runtime install".to_string(),
+            });
+        }
+        if !script_ready {
+            issues.push(HookHealthIssue {
+                component: "hook script".to_string(),
+                message: format!("{} is missing or not executable", script_path.display()),
+                repair: "ainb fleet runtime install".to_string(),
+            });
+        }
+        if !hook_binary_ready {
+            issues.push(HookHealthIssue {
+                component: "hook binary".to_string(),
+                message: hook_binary.as_ref().map_or_else(
+                    || "ainb-bin pointer is missing or empty".to_string(),
+                    |target| format!("{} is missing or not executable", target.display()),
+                ),
+                repair: "ainb fleet runtime install".to_string(),
+            });
+        }
+        for agent in agents.iter().filter(|agent| agent.installed && !agent.wiring_ready) {
+            issues.push(HookHealthIssue {
+                component: agent.agent.clone(),
+                message: agent.detail.clone(),
+                repair: "ainb fleet runtime install".to_string(),
+            });
+        }
+    }
+
+    HookHealth {
+        bundled_version,
+        installed_version: record.plugin_version,
+        version_current,
+        script_path,
+        script_ready,
+        hook_binary,
+        hook_binary_ready,
+        agents,
+        notify_socket_live: socket_live(&paths.socket),
+        approve_socket_live: socket_live(&paths.approve_socket),
+        last_event: latest_event(paths),
+        issues,
+    }
+}
+
+fn agent_health(agent: Agent, record: &InstallRecord, script: &Path) -> HookAgentHealth {
+    let installed = record.agents.contains(&agent);
+    let (wiring_ready, detail) = match agent {
+        // Claude owns marketplace state. Its CLI confirms registration during
+        // install, but does not expose a stable config file that this fast,
+        // local-only probe could safely inspect every two seconds.
+        Agent::Claude => (
+            installed,
+            if installed {
+                "marketplace install recorded".to_string()
+            } else {
+                "not installed".to_string()
+            },
+        ),
+        Agent::Codex => {
+            config_references_script(record.codex_hooks_json.as_deref(), script, "hooks.json")
+        }
+        Agent::Copilot => {
+            config_references_script(record.copilot_hooks_json.as_deref(), script, "drop-in")
+        }
+        Agent::Unknown => (false, "unknown agent".to_string()),
+    };
+    HookAgentHealth {
+        agent: agent.name().to_string(),
+        installed,
+        wiring_ready,
+        detail,
+    }
+}
+
+fn config_references_script(
+    config: Option<&Path>,
+    script: &Path,
+    config_name: &str,
+) -> (bool, String) {
+    let Some(config) = config else {
+        return (false, format!("{config_name} path is not recorded"));
+    };
+    let Ok(text) = std::fs::read_to_string(config) else {
+        return (
+            false,
+            format!("{} is missing or unreadable", config.display()),
+        );
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&strip_line_comments(&text)) else {
+        return (false, format!("{} is not valid JSON", config.display()));
+    };
+    let expected = script.to_string_lossy();
+    if json_has_hook_command(&value, &expected) {
+        (true, format!("{} points at shared hook", config.display()))
+    } else {
+        (
+            false,
+            format!("{} does not point at shared hook", config.display()),
+        )
+    }
+}
+
+fn json_has_hook_command(value: &serde_json::Value, expected: &str) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|command| command.contains(expected))
+                || object.values().any(|value| json_has_hook_command(value, expected))
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_has_hook_command(value, expected))
+        }
+        _ => false,
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+fn socket_live(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+fn latest_event(paths: &Paths) -> Option<String> {
+    paths.db.exists().then_some(())?;
+    crate::store::Store::open(&paths.db)
+        .ok()?
+        .latest()
+        .ok()?
+        .map(|row| format!("{} ({})", row.raw_event, row.agent))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,6 +1471,27 @@ mod tests {
             assert!(!r.installed);
             assert!(!r.socket_ok);
         }
+    }
+
+    #[test]
+    fn hook_health_checks_version_script_binary_and_agent_wiring() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        install_under_home(&p, dir.path(), &[Agent::Codex]).unwrap();
+
+        let health = hook_health(&p);
+        assert!(health.version_current);
+        assert!(health.script_ready);
+        assert!(health.hook_binary_ready);
+        let codex = health.agents.iter().find(|agent| agent.agent == "codex").unwrap();
+        assert!(codex.installed);
+        assert!(codex.wiring_ready, "{}", codex.detail);
+        assert!(health.issues.is_empty(), "{:?}", health.issues);
+
+        std::fs::remove_file(canonical_hook_bin(&p)).unwrap();
+        let broken = hook_health(&p);
+        assert!(!broken.hook_binary_ready);
+        assert!(broken.issues.iter().any(|issue| issue.component == "hook binary"));
     }
 
     #[test]

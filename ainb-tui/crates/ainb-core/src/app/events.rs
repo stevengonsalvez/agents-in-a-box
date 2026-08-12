@@ -3062,7 +3062,11 @@ impl EventHandler {
             KeyCode::Char('N') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N'))),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
             KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
-            KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
+            // Lowercase `s` belongs to the structured interview queue. Keep
+            // it reserved even if a concurrent snapshot just closed that
+            // queue: a stale key must never turn a submitted answer into Stop.
+            // Destructive stop remains available on uppercase `S`.
+            KeyCode::Char('S') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
             KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c'))),
             KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
@@ -8972,6 +8976,14 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
+        ));
+        assert!(
+            route(&mut state, KeyCode::Char('s')).is_none(),
+            "lowercase s is reserved for structured-interview submit"
+        );
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('S')),
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop))
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('!')),

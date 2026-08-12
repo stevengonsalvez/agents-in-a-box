@@ -19,6 +19,7 @@ use ratatui::{
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonState, DaemonStatus};
+use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -45,6 +46,9 @@ pub struct Snapshot {
     pub rows: Vec<DaemonStatus>,
     /// The clock the cached rows' relative-time columns are measured against.
     pub collected_at_ms: i64,
+    /// Most-recent hook wiring health. Collected beside daemon state, never in
+    /// the render path.
+    pub hook_health: Option<HookHealth>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -98,6 +102,7 @@ impl DaemonsState {
         Snapshot {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
+            hook_health: guard.hook_health.clone(),
         }
     }
 }
@@ -105,11 +110,16 @@ impl DaemonsState {
 /// Run one collect and publish it into `shared`. Shared by the background thread
 /// and the test seam so the publish/merge logic is exercised without a thread.
 fn collect_into(shared: &Mutex<Snapshot>) {
+    // Hook health only opens local files and attempts local Unix sockets. It
+    // still belongs here, not in render: hooks may live on a slow volume and a
+    // stale socket can block briefly while connecting.
+    let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
             guard.collected_at_ms = now_ms();
+            guard.hook_health = hook_health;
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
@@ -165,8 +175,128 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    render_table(frame, chunks[0], &snapshot);
+    // Keep the daemon table usable in short terminals. A normal 24+ row
+    // terminal gets the full Hooks section; compact terminals retain the
+    // original daemon-only table and `ainb doctor` remains the detailed view.
+    if chunks[0].height >= 18 {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(7)])
+            .split(chunks[0]);
+        render_table(frame, sections[0], &snapshot);
+        render_hook_section(frame, sections[1], snapshot.hook_health.as_ref());
+    } else {
+        render_table(frame, chunks[0], &snapshot);
+    }
     render_footer(frame, chunks[1]);
+}
+
+fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth>) {
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                "Hooks",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ainb-hooks", Style::default().fg(MUTED_GRAY)),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBDUED_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = match health {
+        None => vec![Line::from(Span::styled(
+            "collecting hook health…",
+            Style::default().fg(MUTED_GRAY),
+        ))],
+        Some(health) => {
+            let installed = health.installed_version.as_deref().unwrap_or("not installed");
+            let version_style = if health.version_current {
+                Style::default().fg(HEALTHY_GREEN)
+            } else {
+                Style::default().fg(GOLD)
+            };
+            let agent_line = health
+                .agents
+                .iter()
+                .map(|agent| {
+                    format!(
+                        "{} {}",
+                        agent.agent,
+                        if agent.wiring_ready { "✓" } else { "✗" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("   ");
+            let issue = health.issues.first().map_or_else(
+                || "✓ wiring healthy".to_string(),
+                |issue| {
+                    format!(
+                        "! {}: {} — {}",
+                        issue.component, issue.message, issue.repair
+                    )
+                },
+            );
+            vec![
+                Line::from(vec![
+                    Span::styled("version ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled(
+                        format!("{installed} → {}", health.bundled_version),
+                        version_style,
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "script {}  ·  ainb binary {}",
+                        if health.script_ready { "✓" } else { "✗" },
+                        if health.hook_binary_ready {
+                            "✓"
+                        } else {
+                            "✗"
+                        },
+                    ),
+                    Style::default().fg(if health.script_ready && health.hook_binary_ready {
+                        HEALTHY_GREEN
+                    } else {
+                        STOPPED_RED
+                    }),
+                )),
+                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
+                Line::from(Span::styled(
+                    format!(
+                        "notifyd {}  ·  approval broker {}",
+                        if health.notify_socket_live {
+                            "running"
+                        } else {
+                            "idle"
+                        },
+                        if health.approve_socket_live {
+                            "running"
+                        } else {
+                            "idle"
+                        },
+                    ),
+                    Style::default().fg(MUTED_GRAY),
+                )),
+                Line::from(Span::styled(
+                    issue,
+                    Style::default().fg(if health.issues.is_empty() {
+                        HEALTHY_GREEN
+                    } else {
+                        GOLD
+                    }),
+                )),
+            ]
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
+        inner,
+    );
 }
 
 fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
@@ -258,7 +388,9 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::fleet::daemons::probe::DaemonKind;
+    use ainb_plugin_notifyd::{HookAgentHealth, HookHealth, HookHealthIssue};
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     fn status(
         kind: DaemonKind,
@@ -297,6 +429,58 @@ mod tests {
         let shared = Arc::new(Mutex::new(Snapshot {
             rows,
             collected_at_ms: now_ms(),
+            hook_health: None,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+        }
+    }
+
+    fn hook_health() -> HookHealth {
+        HookHealth {
+            bundled_version: "0.4.5".to_string(),
+            installed_version: Some("0.4.4".to_string()),
+            version_current: false,
+            script_path: PathBuf::from("/tmp/notify.sh"),
+            script_ready: true,
+            hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_ready: true,
+            agents: vec![
+                HookAgentHealth {
+                    agent: "claude".to_string(),
+                    installed: true,
+                    wiring_ready: true,
+                    detail: "marketplace install recorded".to_string(),
+                },
+                HookAgentHealth {
+                    agent: "codex".to_string(),
+                    installed: true,
+                    wiring_ready: true,
+                    detail: "hooks.json points at shared hook".to_string(),
+                },
+                HookAgentHealth {
+                    agent: "copilot".to_string(),
+                    installed: false,
+                    wiring_ready: false,
+                    detail: "not installed".to_string(),
+                },
+            ],
+            notify_socket_live: true,
+            approve_socket_live: false,
+            last_event: None,
+            issues: vec![HookHealthIssue {
+                component: "version".to_string(),
+                message: "installed 0.4.4; ainb bundles 0.4.5".to_string(),
+                repair: "ainb fleet runtime install".to_string(),
+            }],
+        }
+    }
+
+    fn seeded_state_with_hook(rows: Vec<DaemonStatus>, hook_health: HookHealth) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: Some(hook_health),
         }));
         DaemonsState {
             shared: Some(shared),
@@ -377,6 +561,30 @@ mod tests {
             !out.contains("ATC"),
             "render must not collect beyond the seed"
         );
+    }
+
+    #[test]
+    fn renders_hook_version_state_and_repair_command_on_tall_screen() {
+        let mut state = seeded_state_with_hook(
+            vec![status(
+                DaemonKind::Notifyd,
+                DaemonState::Running,
+                true,
+                Some("socket+db"),
+            )],
+            hook_health(),
+        );
+        let out = render_to_string(&mut state, 120, 24);
+        assert!(out.contains("Hooks"), "hook section missing: {out}");
+        assert!(
+            out.contains("0.4.4 → 0.4.5"),
+            "version state missing: {out}"
+        );
+        assert!(
+            out.contains("ainb fleet runtime install"),
+            "repair missing: {out}"
+        );
+        assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
     }
 
     #[test]

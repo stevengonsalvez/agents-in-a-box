@@ -151,6 +151,12 @@ AINB_HOOK_BIN="${AINB_BIN:-}"
 if [ -z "${AINB_HOOK_BIN}" ] && [ -r "${AINB_DIR}/hooks/ainb-bin" ]; then
   IFS= read -r AINB_HOOK_BIN < "${AINB_DIR}/hooks/ainb-bin" || true
 fi
+# A dev build can disappear after `cargo clean` or its worktree is removed.
+# Do not let that stale installer record disable durable Fleet events forever:
+# fall through to the executable available on the hook's PATH.
+if [ -n "${AINB_HOOK_BIN}" ] && [ ! -x "${AINB_HOOK_BIN}" ]; then
+  AINB_HOOK_BIN=""
+fi
 if [ -z "${AINB_HOOK_BIN}" ]; then
   AINB_HOOK_BIN="$(command -v ainb 2>/dev/null || true)"
 fi

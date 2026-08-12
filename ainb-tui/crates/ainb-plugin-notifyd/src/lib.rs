@@ -43,9 +43,9 @@ pub use broker::{BrokerState, Decision, DecisionKind, PendingInfo};
 pub use envelope::{Envelope, EnvelopeError};
 pub use fallback::FallbackFile;
 pub use install::{
-    Agent, ClaudeRegister, InstallPrompt, InstallRecord, InstallReport, StatusRow, dismiss_prompt,
-    embedded_plugin_version, install as install_for, install_under_home, prompt_state, status,
-    uninstall,
+    Agent, ClaudeRegister, HookAgentHealth, HookHealth, HookHealthIssue, InstallPrompt,
+    InstallRecord, InstallReport, StatusRow, dismiss_prompt, embedded_plugin_version, hook_health,
+    install as install_for, install_under_home, prompt_state, status, uninstall,
 };
 pub use listener::{RunConfig, run_daemon};
 pub use osnotify::{AlertKind, classify_attention};

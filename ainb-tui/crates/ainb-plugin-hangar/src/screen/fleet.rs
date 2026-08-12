@@ -946,17 +946,32 @@ impl FleetPaneState {
         let before = queue.answers.len();
         let mut resumed = false;
         let mut superseded = false;
-        queue.answers.retain(|answer| {
+        let mut retained = Vec::with_capacity(before);
+        for mut answer in std::mem::take(&mut queue.answers) {
             let Some(row) = self.roster.iter().find(|row| row.session_key == answer.session_key)
             else {
-                return false;
+                continue;
             };
-            let same_request = row.version == answer.expected_version
-                && row.current_request_fingerprint.as_deref()
-                    == Some(answer.request_fingerprint.as_str());
-            if same_request {
-                return true;
+
+            // Fleet can re-observe an unchanged Claude AskUserQuestion with a
+            // new provider fingerprint/version. That is transport churn, not a
+            // different human question. Preserve already-picked options and
+            // refresh exact action routing from the authoritative row.
+            if let Some(latest) = answer_state_from_row(row) {
+                if latest.questions == answer.questions {
+                    answer.expected_version = latest.expected_version;
+                    answer.request_fingerprint = latest.request_fingerprint;
+                    answer.request_identity = latest.request_identity;
+                    retained.push(answer);
+                    continue;
+                }
+            } else if row.attention_state.eq_ignore_ascii_case("ASK") {
+                // Enrichment can temporarily omit the request body. Keep the
+                // draft until the next snapshot supplies its exact route.
+                retained.push(answer);
+                continue;
             }
+
             if answer.delivery == AnswerDelivery::AwaitingSessionResume
                 && !row.attention_state.eq_ignore_ascii_case("ASK")
             {
@@ -964,8 +979,8 @@ impl FleetPaneState {
             } else {
                 superseded = true;
             }
-            false
-        });
+        }
+        queue.answers = retained;
         if queue.answers.is_empty() {
             self.mode = FleetMode::Browse;
             self.feedback = Some(if resumed {
@@ -3177,7 +3192,7 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
         actions.push("i Interrupt");
     }
     if session.capabilities.contains("stop") {
-        actions.push("s Stop");
+        actions.push("S Stop");
     }
     // Uppercase, always. Restart is bound to `R`; the conditional suppression
     // that used to live here existed only to stop two meanings of `r` being
@@ -4724,6 +4739,9 @@ mod tests {
         );
 
         row.current_request_fingerprint = Some("after".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Proceed with release?", "options": ["Yes"]}]
+        }));
         row.version += 1;
         let closed = apply(&delivered, FleetEvent::Snapshot(vec![row])).state;
         assert!(matches!(closed.mode, FleetMode::Browse));
@@ -4823,6 +4841,9 @@ mod tests {
 
         row.version += 1;
         row.current_request_fingerprint = Some("after".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Proceed with release?", "options": ["Yes"]}]
+        }));
         state.set_sessions(vec![row]);
         assert!(matches!(state.mode, FleetMode::Browse));
         assert_eq!(
@@ -5718,6 +5739,44 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn interview_queue_survives_unrelated_fleet_version_refreshes() {
+        let mut row = session("claude:version-refresh", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("stable-interview".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{
+                "id": "surface", "question": "Surface?", "multiSelect": true, "options": ["Fleet"]
+            }]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+
+        // A re-observation can rotate opaque provider routing while leaving
+        // the actual AskUserQuestion unchanged. Preserve selections and submit
+        // against the new exact route/version.
+        row.version = 2;
+        row.current_request_fingerprint = Some("refreshed-interview".into());
+        state.set_sessions(vec![row]);
+        assert!(state.is_modal_open(), "snapshot closed unchanged interview queue");
+
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Char('s')));
+        let Some(FleetIntent::Execute {
+            expected_version,
+            action: FleetAction::StructuredAnswer {
+                request_fingerprint,
+                ..
+            },
+            ..
+        }) = submitted.intent
+        else {
+            panic!("fresh structured answer intent expected");
+        };
+        assert_eq!(expected_version, 2);
+        assert_eq!(request_fingerprint, "refreshed-interview");
     }
 
     #[test]
