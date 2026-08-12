@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.6] - 2026-08-12
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- explain Codex remote launch failures
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- pass remote Codex launch settings
+- provide cwd on Codex session restart
+- recover abandoned Codex launches
+- represent pending Codex threads
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- serialize pending Codex launches
+- start fresh Codex CLI threads
+- store claimed Codex thread
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+
+
 ## [1.20.5] - 2026-08-12
 ### Added
 - Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
