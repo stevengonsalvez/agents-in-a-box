@@ -513,8 +513,6 @@ fn remote_codex_command(
 ) -> String {
     let mut parts = vec![
         "codex".to_string(),
-        "--disable".to_string(),
-        "apps".to_string(),
         "--remote".to_string(),
         remote.endpoint.clone(),
         "-C".to_string(),
@@ -793,7 +791,7 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
+            "codex --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
         );
         assert!(!command.contains("--last"));
     }
@@ -811,7 +809,7 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+            "codex --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
         );
     }
 
