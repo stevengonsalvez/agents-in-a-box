@@ -37,7 +37,7 @@
 
 use ainb::interactive::session_manager::InteractiveSessionManager;
 use ainb::models::session::SessionAgentType;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -180,6 +180,7 @@ async fn launched_command(
     let mgr = InteractiveSessionManager::new().expect("manager");
     mgr.start_cli_in_tmux(
         name,
+        Path::new("/tmp"),
         true, // skip_permissions (yolo)
         model.map(str::to_string),
         agent,

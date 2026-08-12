@@ -3302,9 +3302,9 @@ async fn handle_fleet_start(
     to_value(&result)
 }
 
-/// Allocate or resume an Interactive Codex thread through the one daemon-owned
-/// app-server. Interactive owns tmux and durable session metadata, so this is
-/// deliberately narrower than `fleet/start`.
+/// Reserve or resume one Interactive Codex thread through the daemon-owned
+/// app-server. A fresh terminal makes its own thread because Codex does not
+/// materialize an empty server-created thread for a second connection to resume.
 async fn handle_codex_session_ensure(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -3318,19 +3318,35 @@ async fn handle_codex_session_ensure(
     if params.session_id.trim().is_empty() || params.cwd.trim().is_empty() {
         return Err(invalid_params("session_id and cwd must not be empty"));
     }
-    let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+    let manager = match crate::fleet_provider::codex_manager::wait_for_active_handle(
         std::time::Duration::from_secs(15),
     )
     .await
-    .ok_or_else(|| internal("Ainb Codex runtime is unavailable"))?;
-    let existing: Option<Option<String>> =
-        sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
-            .bind(&params.session_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
+    {
+        Some(manager) => manager,
+        None => {
+            let detail = crate::fleet_provider::codex_manager::transport_health()
+                .await
+                .last_failure
+                .unwrap_or_else(|| "still starting".to_string());
+            return Err(internal(&format!(
+                "Ainb Codex remote control unavailable: {detail}"
+            )));
+        }
+    };
+    let cwd = std::fs::canonicalize(&params.cwd)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&params.cwd))
+        .display()
+        .to_string();
+    let existing: Option<(Option<String>, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT thread_id, resumable, event_watermark FROM interactive_codex_thread WHERE session_id = ?",
+    )
+    .bind(&params.session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
     let thread_id = match existing {
-        Some(Some(thread_id)) => {
+        Some((Some(thread_id), resumable, _)) => {
             if let Some(requested) = params.thread_id.as_deref().filter(|id| !id.trim().is_empty())
             {
                 if requested != thread_id {
@@ -3339,71 +3355,73 @@ async fn handle_codex_session_ensure(
                     ));
                 }
             }
-            manager
-                .thread_resume(&thread_id)
-                .await
-                .map_err(|error| internal(&format!("resume Codex thread: {error}")))?;
-            thread_id
+            match manager.thread_resume(&thread_id).await {
+                Ok(_) => {
+                    sqlx::query(
+                        "UPDATE interactive_codex_thread SET resumable = 1 WHERE session_id = ?",
+                    )
+                    .bind(&params.session_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|error| internal(&format!("mark Codex thread resumable: {error}")))?;
+                    Some(thread_id)
+                }
+                Err(error) if resumable == 0 && error.to_string().contains("no rollout found") => {
+                    let watermark = codex_event_watermark(pool).await?;
+                    sqlx::query(
+                        "UPDATE interactive_codex_thread \
+                         SET thread_id = NULL, resumable = 0, event_watermark = ? \
+                         WHERE session_id = ?",
+                    )
+                    .bind(watermark)
+                    .bind(&params.session_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|error| internal(&format!("reset empty Codex thread: {error}")))?;
+                    None
+                }
+                Err(error) => return Err(internal(&format!("resume Codex thread: {error}"))),
+            }
         }
-        Some(None) => {
-            return Err(internal(
-                "previous Interactive Codex allocation is incomplete; refusing duplicate thread",
-            ));
+        Some((None, _, watermark)) => {
+            claim_pending_codex_thread(
+                pool,
+                &params.session_id,
+                &cwd,
+                watermark.unwrap_or_default(),
+            )
+            .await?
         }
         None => match params.thread_id.as_deref().filter(|id| !id.trim().is_empty()) {
             Some(thread_id) => {
-                manager
-                    .thread_resume(thread_id)
-                    .await
-                    .map_err(|error| internal(&format!("resume Codex thread: {error}")))?;
+                match manager.thread_resume(thread_id).await {
+                    Ok(_) => {}
+                    Err(error) if error.to_string().contains("no rollout found") => {
+                        reserve_pending_codex_thread(pool, &params, &cwd).await?;
+                        return to_value(&CodexSessionEnsureResult {
+                            thread_id: None,
+                            endpoint: format!("unix://{}", manager.socket_path().display()),
+                        });
+                    }
+                    Err(error) => return Err(internal(&format!("resume Codex thread: {error}"))),
+                }
                 sqlx::query(
                     "INSERT INTO interactive_codex_thread \
-                     (session_id, thread_id, cwd, model, skip_permissions) VALUES (?, ?, ?, ?, ?)",
+                     (session_id, thread_id, cwd, model, skip_permissions, resumable) VALUES (?, ?, ?, ?, ?, 1)",
                 )
                 .bind(&params.session_id)
                 .bind(thread_id)
-                .bind(&params.cwd)
+                .bind(&cwd)
                 .bind(&params.model)
                 .bind(params.skip_permissions)
                 .execute(pool)
                 .await
                 .map_err(|error| internal(&format!("persist Interactive Codex thread: {error}")))?;
-                thread_id.to_string()
+                Some(thread_id.to_string())
             }
             None => {
-                let inserted = sqlx::query(
-                    "INSERT OR IGNORE INTO interactive_codex_thread \
-                     (session_id, thread_id, cwd, model, skip_permissions) VALUES (?, NULL, ?, ?, ?)",
-                )
-                .bind(&params.session_id)
-                .bind(&params.cwd)
-                .bind(&params.model)
-                .bind(params.skip_permissions)
-                .execute(pool)
-                .await
-                .map_err(|error| internal(&format!("reserve Interactive Codex thread: {error}")))?;
-                if inserted.rows_affected() == 0 {
-                    return Err(internal(
-                        "concurrent Interactive Codex allocation is in progress; retry shortly",
-                    ));
-                }
-                let thread_id = manager
-                    .thread_start_interactive(
-                        std::path::Path::new(&params.cwd),
-                        params.model.as_deref(),
-                        params.skip_permissions,
-                    )
-                    .await
-                    .map_err(|error| internal(&format!("start Codex thread: {error}")))?;
-                sqlx::query(
-                    "UPDATE interactive_codex_thread SET thread_id = ? WHERE session_id = ?",
-                )
-                .bind(&thread_id)
-                .bind(&params.session_id)
-                .execute(pool)
-                .await
-                .map_err(|error| internal(&format!("persist Interactive Codex thread: {error}")))?;
-                thread_id
+                reserve_pending_codex_thread(pool, &params, &cwd).await?;
+                None
             }
         },
     };
@@ -3411,6 +3429,122 @@ async fn handle_codex_session_ensure(
         thread_id,
         endpoint: format!("unix://{}", manager.socket_path().display()),
     })
+}
+
+async fn codex_event_watermark(pool: &SqlitePool) -> Result<i64, RpcError> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(ingest_order), 0) FROM fleet_provider_event")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| internal(&format!("read Codex event cursor: {error}")))
+}
+
+async fn reserve_pending_codex_thread(
+    pool: &SqlitePool,
+    params: &ainb_hangar_proto::fleet::CodexSessionEnsureParams,
+    cwd: &str,
+) -> Result<(), RpcError> {
+    // `thread/started` has no client correlation field. The migration admits
+    // one pending row globally, so wait for its launch to claim before taking
+    // the next cursor. This private app-server endpoint has one Ainb owner.
+    for _ in 0..100 {
+        // A client can die between this reservation and tmux launch. A short
+        // lease preserves the global correlation guard without wedging every
+        // later Interactive launch forever.
+        sqlx::query(
+            "DELETE FROM interactive_codex_thread \
+             WHERE thread_id IS NULL AND reserved_at < unixepoch() - 15",
+        )
+        .execute(pool)
+        .await
+        .map_err(|error| internal(&format!("expire pending Codex launch: {error}")))?;
+        let watermark = codex_event_watermark(pool).await?;
+        let inserted = sqlx::query(
+            "INSERT INTO interactive_codex_thread \
+             (session_id, thread_id, cwd, model, skip_permissions, event_watermark, reserved_at) \
+             VALUES (?, NULL, ?, ?, ?, ?, unixepoch())",
+        )
+        .bind(&params.session_id)
+        .bind(cwd)
+        .bind(&params.model)
+        .bind(params.skip_permissions)
+        .bind(watermark)
+        .execute(pool)
+        .await;
+        match inserted {
+            Ok(result) if result.rows_affected() == 1 => return Ok(()),
+            Ok(_) => {
+                return Err(internal(
+                    "reserve Interactive Codex thread affected no rows",
+                ));
+            }
+            Err(sqlx::Error::Database(error))
+                if error.message().contains("UNIQUE constraint failed") =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                return Err(internal(&format!(
+                    "reserve Interactive Codex thread: {error}"
+                )));
+            }
+        }
+    }
+    Err(internal(
+        "another Ainb Codex session is still starting; retry shortly",
+    ))
+}
+
+async fn claim_pending_codex_thread(
+    pool: &SqlitePool,
+    session_id: &str,
+    cwd: &str,
+    watermark: i64,
+) -> Result<Option<String>, RpcError> {
+    let payloads: Vec<String> = sqlx::query_scalar(
+        "SELECT raw_payload FROM fleet_provider_event \
+         WHERE provider = 'codex' AND source = 'codex_app_server' \
+           AND event_type = 'thread/started' AND ingest_order > ? \
+         ORDER BY ingest_order ASC",
+    )
+    .bind(watermark)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| internal(&format!("read pending Codex thread: {error}")))?;
+    for payload in payloads {
+        let Some(thread_id) = codex_started_thread_id(&payload, cwd) else {
+            continue;
+        };
+        let claimed = sqlx::query(
+            "UPDATE interactive_codex_thread SET thread_id = ? \
+             WHERE session_id = ? AND thread_id IS NULL",
+        )
+        .bind(&thread_id)
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| internal(&format!("claim Interactive Codex thread: {error}")))?;
+        if claimed.rows_affected() == 1 {
+            return Ok(Some(thread_id));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
+fn codex_started_thread_id(payload: &str, cwd: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let thread = payload.pointer("/params/thread")?;
+    let event_cwd = thread.get("cwd")?.as_str()?;
+    let event_cwd = std::fs::canonicalize(event_cwd)
+        .unwrap_or_else(|_| std::path::PathBuf::from(event_cwd))
+        .display()
+        .to_string();
+    (event_cwd == cwd
+        && thread.get("source")?.as_str() == Some("vscode")
+        && thread.get("threadSource")?.as_str() == Some("user")
+        && thread.get("forkedFromId").is_some_and(serde_json::Value::is_null))
+    .then(|| thread.get("id")?.as_str().map(str::to_owned))
+    .flatten()
 }
 
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
@@ -12818,6 +12952,32 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_started_thread_claim_requires_fresh_tui_thread_in_exact_cwd() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        let payload = serde_json::json!({
+            "method": "thread/started",
+            "params": { "thread": {
+                "id": "thread-1",
+                "cwd": cwd,
+                "source": "vscode",
+                "threadSource": "user",
+                "forkedFromId": null
+            } }
+        })
+        .to_string();
+
+        assert_eq!(
+            codex_started_thread_id(&payload, &cwd),
+            Some("thread-1".to_string())
+        );
+        assert_eq!(codex_started_thread_id(&payload, "/wrong-cwd"), None);
+        let non_tui = payload.replace("\"source\":\"vscode\"", "\"source\":\"appServer\"");
+        assert_eq!(codex_started_thread_id(&non_tui, &cwd), None);
+        let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
+        assert_eq!(codex_started_thread_id(&fork, &cwd), None);
+    }
     use ainb_hangar_store::Store;
 
     static APPROVE_SOCKET_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

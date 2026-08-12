@@ -17,7 +17,8 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, ensure_codex_remote_thread,
+    ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
+    ensure_codex_remote_thread,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -123,7 +124,14 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let claude_cmd = codex_remote
         .as_ref()
-        .map(remote_codex_command)
+        .map(|remote| {
+            remote_codex_command(
+                remote,
+                &work_dir,
+                model.as_deref(),
+                args.dangerously_skip_permissions,
+            )
+        })
         .unwrap_or_else(|| build_agent_command(&args));
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
@@ -155,6 +163,20 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
+
+    let codex_remote = match codex_remote {
+        Some(remote) if remote.thread_id.is_none() => Some(
+            claim_codex_remote_thread(
+                session_id,
+                &work_dir,
+                model.as_deref(),
+                args.dangerously_skip_permissions,
+                false,
+            )
+            .await?,
+        ),
+        remote => remote,
+    };
 
     // Step 8: send the initial prompt (if any) once the input box is ready.
     // A fixed sleep loses keystrokes into Claude Code's not-yet-ready splash.
@@ -191,7 +213,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         model: model.clone(),
         model_source: ModelSource::Raw,
         codex_model: None,
-        codex_thread_id: codex_remote.map(|remote| remote.thread_id),
+        codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
@@ -483,18 +505,33 @@ fn build_agent_command(args: &RunArgs) -> String {
         .join(" ")
 }
 
-fn remote_codex_command(remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult) -> String {
-    [
-        "codex",
-        "--remote",
-        &remote.endpoint,
-        "resume",
-        &remote.thread_id,
-    ]
-    .into_iter()
-    .map(|part| shell_escape::escape(part.into()).into_owned())
-    .collect::<Vec<_>>()
-    .join(" ")
+fn remote_codex_command(
+    remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+    cwd: &std::path::Path,
+    model: Option<&str>,
+    skip_permissions: bool,
+) -> String {
+    let mut parts = vec![
+        "codex".to_string(),
+        "--remote".to_string(),
+        remote.endpoint.clone(),
+        "-C".to_string(),
+        cwd.display().to_string(),
+    ];
+    if let Some(model) = model.filter(|model| !model.is_empty() && *model != "default") {
+        parts.extend(["--model".to_string(), model.to_string()]);
+    }
+    if skip_permissions {
+        parts.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    if let Some(thread_id) = remote.thread_id.as_ref() {
+        parts.extend(["resume".to_string(), thread_id.clone()]);
+    }
+    parts
+        .iter()
+        .map(|part| shell_escape::escape(part.into()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
@@ -743,15 +780,37 @@ mod tests {
 
     #[test]
     fn remote_codex_command_resumes_exact_thread() {
-        let command = remote_codex_command(&ainb_hangar_proto::fleet::CodexSessionEnsureResult {
-            endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
-            thread_id: "thread-123".to_string(),
-        });
+        let command = remote_codex_command(
+            &ainb_hangar_proto::fleet::CodexSessionEnsureResult {
+                endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
+                thread_id: Some("thread-123".to_string()),
+            },
+            std::path::Path::new("/tmp/worktree"),
+            Some("gpt-5.6-luna"),
+            true,
+        );
         assert_eq!(
             command,
-            "codex --remote 'unix:///tmp/codex-app-server.sock' resume thread-123"
+            "codex --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
         );
         assert!(!command.contains("--last"));
+    }
+
+    #[test]
+    fn remote_codex_command_starts_fresh_thread() {
+        let command = remote_codex_command(
+            &ainb_hangar_proto::fleet::CodexSessionEnsureResult {
+                endpoint: "unix:///tmp/codex-app-server.sock".to_string(),
+                thread_id: None,
+            },
+            std::path::Path::new("/tmp/worktree"),
+            None,
+            false,
+        );
+        assert_eq!(
+            command,
+            "codex --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+        );
     }
 
     #[test]
