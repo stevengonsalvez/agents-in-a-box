@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.7] - 2026-08-12
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- start fresh Codex CLI threads
+- store claimed Codex thread
+
+### Documentation
+- **explainer**: a real adapter has now run, and I13 caught it
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+
 ## [1.20.5] - 2026-08-12
 ### Added
 - Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
