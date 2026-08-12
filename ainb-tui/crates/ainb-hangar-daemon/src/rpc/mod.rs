@@ -4931,6 +4931,7 @@ async fn execute_claude_structured(
     if request.get("fleet_delivery").and_then(serde_json::Value::as_str) == Some("mirrored") {
         return execute_claude_mirrored_picker(
             pool,
+            events,
             session,
             expected_version,
             request_fingerprint,
@@ -5018,6 +5019,7 @@ async fn execute_claude_structured(
 /// equivalent verification coverage.
 async fn execute_claude_mirrored_picker(
     pool: &SqlitePool,
+    events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
     expected_version: i64,
     request_fingerprint: &str,
@@ -5047,6 +5049,16 @@ async fn execute_claude_mirrored_picker(
         .await;
         if status != ActionReceiptStatus::Delivered {
             let detail = detail.unwrap_or_else(|| "mirrored Claude picker step failed".to_string());
+            if index == 0 && detail == "Claude native picker is no longer active" {
+                return reconcile_claude_structured(
+                    pool,
+                    events,
+                    session,
+                    request_fingerprint,
+                    expected_version,
+                )
+                .await;
+            }
             let detail = if index == 0 {
                 detail
             } else {
@@ -5366,9 +5378,6 @@ async fn execute_claude_structured_release(
     Option<String>,
 ) {
     use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    use ainb_hangar_store::repo::fleet::{
-        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-    };
 
     let Some(mut request) =
         (match crate::fleet::current_request_wire(pool, &session.session_key).await {
@@ -5426,6 +5435,24 @@ async fn execute_claude_structured_release(
         "fleet_delivery".to_string(),
         serde_json::Value::String("native_claude".to_string()),
     );
+    complete_claude_structured_release(pool, events, session, request_fingerprint, &request).await
+}
+
+async fn complete_claude_structured_release(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    request: &serde_json::Value,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
     let event = NewFleetEvent {
         event_id: format!(
             "fleet-native-picker:{}:{request_fingerprint}",
@@ -5489,15 +5516,9 @@ async fn reconcile_claude_structured(
     Option<String>,
 ) {
     use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    use ainb_hangar_store::repo::fleet::{
-        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-    };
 
     let native_picker = match crate::fleet::current_request_wire(pool, &session.session_key).await {
-        Ok(Some(request)) => request
-            .get("fleet_delivery")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|route| route == "native_claude"),
+        Ok(Some(request)) => fleet_delivery_uses_native_picker(&request),
         Ok(None) => false,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
@@ -5527,8 +5548,8 @@ async fn reconcile_claude_structured(
     }
     // Generic transcript text cannot prove which interview it belongs to. A
     // normal Fleet-held interview therefore stays visible until Claude emits
-    // its authoritative tool lifecycle event. Only the explicit native route
-    // owns a uniquely identifiable terminal widget to reconcile here.
+    // its authoritative tool lifecycle event. Native and mirrored routes own
+    // the same uniquely identifiable terminal widget to reconcile here.
     if !native_picker {
         return (
             ActionReceiptStatus::Unknown,
@@ -5552,6 +5573,25 @@ async fn reconcile_claude_structured(
             Some("Claude interview liveness is unresolved; Fleet card retained".to_string()),
         );
     }
+
+    clear_closed_claude_picker_card(pool, events, session, request_fingerprint, expected_version)
+        .await
+}
+
+async fn clear_closed_claude_picker_card(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    expected_version: i64,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
 
     let event = NewFleetEvent {
         event_id: format!(
@@ -5581,11 +5621,7 @@ async fn reconcile_claude_structured(
             }
             (
                 ActionReceiptStatus::Delivered,
-                Some(if native_picker_closed {
-                    "Claude native picker completed, cleared Fleet card".to_string()
-                } else {
-                    "Claude interview ended, cleared stale Fleet card".to_string()
-                }),
+                Some("Claude native picker completed, cleared Fleet card".to_string()),
             )
         }
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
@@ -5593,10 +5629,18 @@ async fn reconcile_claude_structured(
 }
 
 /// Claude's own AskUserQuestion widget always exposes this fixed interaction
-/// footer while it owns terminal input. Native-route reconciliation only clears
-/// a card after that footer disappears, never while the picker remains active.
+/// footer while it owns terminal input. Native-picker reconciliation only
+/// clears a card after that footer disappears, never while the picker remains
+/// active.
 fn claude_native_picker_is_visible(pane: &str) -> bool {
     pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
+}
+
+fn fleet_delivery_uses_native_picker(request: &serde_json::Value) -> bool {
+    matches!(
+        request.get("fleet_delivery").and_then(serde_json::Value::as_str),
+        Some("native_claude" | "mirrored")
+    )
 }
 
 // Observed in Claude Code 2.1.226, exercised by the mirrored-picker live test.
@@ -12873,6 +12917,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn mirrored_claude_picker_routes_are_reconciled_when_native_picker_closes() {
+        assert!(fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "native_claude"
+        })));
+        assert!(fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "mirrored"
+        })));
+        assert!(!fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "fleet"
+        })));
+    }
+
     #[tokio::test]
     async fn fleet_reproject_uses_daemon_broker_for_live_revision() {
         use ainb_hangar_proto::fleet::{
@@ -12988,6 +13045,62 @@ mod tests {
             session.current_request_fingerprint.as_deref(),
             Some("fingerprint-1")
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_closed_mirrored_claude_picker_clears_fleet_card() {
+        use ainb_hangar_proto::fleet::ActionReceiptStatus;
+        use ainb_hangar_store::repo::fleet::{
+            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        let created = FleetRepo::apply_event(
+            store.pool(),
+            &NewFleetEvent {
+                event_id: "ask".into(),
+                session_key: "claude:session-1".into(),
+                observed_at: 1,
+                authority: ObservationAuthority::Authoritative,
+                event_type: "AskUserQuestion".into(),
+                payload: serde_json::json!({
+                    "fleet_delivery": "mirrored",
+                    "questions": [{"question": "Where?"}],
+                })
+                .to_string(),
+                patch: FleetSessionPatch {
+                    provider: Some("claude".into()),
+                    provider_session_id: Some("session-1".into()),
+                    lifecycle_state: Some("IDLE".into()),
+                    attention_state: Some("ASK".into()),
+                    current_request_fingerprint: Some(Some("fingerprint-1".into())),
+                    ..FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, detail) = clear_closed_claude_picker_card(
+            store.pool(),
+            &sink(),
+            &created.session,
+            "fingerprint-1",
+            created.session_version,
+        )
+        .await;
+
+        assert_eq!(status, ActionReceiptStatus::Delivered);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Claude native picker completed, cleared Fleet card")
+        );
+        let session =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(session.attention_state, "NONE");
+        assert_eq!(session.current_request_fingerprint, None);
     }
 
     #[tokio::test]
