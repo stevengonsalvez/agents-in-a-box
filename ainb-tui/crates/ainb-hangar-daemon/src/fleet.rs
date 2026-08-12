@@ -675,13 +675,11 @@ pub async fn ingest_codex_inbound(
     .await?;
     if method == "turn/started" {
         if let Some(thread_id) = envelope.raw.get("params").and_then(codex_thread_id) {
-            sqlx::query(
-                "UPDATE interactive_codex_thread SET resumable = 1 WHERE thread_id = ?",
-            )
-            .bind(thread_id)
-            .execute(pool)
-            .await
-            .map_err(FleetProviderEventError::from)?;
+            sqlx::query("UPDATE interactive_codex_thread SET resumable = 1 WHERE thread_id = ?")
+                .bind(thread_id)
+                .execute(pool)
+                .await
+                .map_err(FleetProviderEventError::from)?;
         }
     }
     reduce_codex_source_event(pool, events, &event_id, envelope, capabilities, observed_at).await
