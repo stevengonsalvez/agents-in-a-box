@@ -1228,13 +1228,6 @@ fn legacy_proxy_daemon_pairs(ps_output: &str, live_socket: &Path) -> Vec<(u32, u
         .collect()
 }
 
-fn legacy_proxy_daemon_pids(ps_output: &str, live_socket: &Path) -> Vec<u32> {
-    legacy_proxy_daemon_pairs(ps_output, live_socket)
-        .into_iter()
-        .map(|(pid, _)| pid)
-        .collect()
-}
-
 /// Confirm a selected daemon remains the same process before signalling it.
 ///
 /// A PID is reusable after the first process exits, so the start fingerprint is
@@ -2506,7 +2499,7 @@ mod tests {
             socket = socket.display(),
             other = other.display(),
         );
-        assert_eq!(legacy_proxy_daemon_pids(&dump, &socket), vec![810]);
+        assert_eq!(legacy_proxy_daemon_pairs(&dump, &socket), vec![(810, 811)]);
     }
 
     #[test]
@@ -2521,7 +2514,7 @@ mod tests {
               821   820 /opt/codex/bin/codex app-server proxy --sock /tmp/foreign.sock\n",
             socket = socket.display(),
         );
-        assert!(legacy_proxy_daemon_pids(&dump, &socket).is_empty());
+        assert!(legacy_proxy_daemon_pairs(&dump, &socket).is_empty());
     }
 
     /// Quoting the markers is not being them. Every line below contains both
