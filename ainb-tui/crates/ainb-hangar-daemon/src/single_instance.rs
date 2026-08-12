@@ -234,8 +234,26 @@ pub fn process_argv(pid: i32) -> Option<String> {
 /// Executable path of `pid`, without its command-line arguments.
 ///
 /// This is the stable, compact identity rendered in the Daemons overlay.
+///
+/// `/proc` is consulted before `ps` because the two platforms mean different
+/// things by `comm`. On macOS `ps -o comm=` prints the executable PATH, which is
+/// what the overlay wants. On Linux it prints the kernel's process NAME, capped
+/// at `TASK_COMM_LEN` — 16 bytes including the NUL, so 15 characters. Our own
+/// binary is longer than that, and the overlay rendered the truncation:
+///
+/// ```text
+/// ps -o comm=      ->  ainb_hangar_dae
+/// /proc/<pid>/exe  ->  /home/runner/work/.../ainb_hangar_daemon-<hash>
+/// ```
+///
+/// `read_link` fails on macOS (no `/proc`) and for a pid owned by another user
+/// without `CAP_SYS_PTRACE`, both of which fall through to the `ps` path that
+/// has always served them.
 #[must_use]
 pub fn process_binary(pid: i32) -> Option<String> {
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        return Some(exe.to_string_lossy().into_owned());
+    }
     process_ps_field(pid, "comm")
 }
 
