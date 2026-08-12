@@ -161,7 +161,7 @@ pub fn app_server_command(codex_binary: &OsStr, socket: &Path) -> CommandSpec {
         program: codex_binary.to_os_string(),
         args: vec![
             "--disable".into(),
-            "enable_mcp_apps".into(),
+            "apps".into(),
             "app-server".into(),
             "--remote-control".into(),
             "--listen".into(),
@@ -868,7 +868,7 @@ mod tests {
             app_server_command(OsStr::new("codex"), socket).args,
             vec![
                 OsString::from("--disable"),
-                OsString::from("enable_mcp_apps"),
+                OsString::from("apps"),
                 OsString::from("app-server"),
                 OsString::from("--remote-control"),
                 OsString::from("--listen"),
