@@ -70,7 +70,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use ainb_fleet_core::read::jsonl_tail::ask_data_from_tool_input;
-use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, classify};
+use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, WaitContext, classify};
 use ainb_fleet_core::read::{ModelInfo, TranscriptDialect, last_model_info};
 use ainb_fleet_core::types::{Session, SessionSource};
 use ainb_hangar_proto::events::HangarEvent;
@@ -497,27 +497,39 @@ impl AttentionIngest {
         // interview and the `attention` table held zero ASK rows, ever. The hook
         // payload carries the full `tool_input` at open time, so it is the only
         // producer that can see the question while it still needs an answer.
-        let context = match ask_context_from_hook_payload(&line.agent, semantic_event, &payload) {
-            Some(ask) => ask,
-            // Every other signal (Stop/Notification/an ask observed after the
-            // fact, and every non-Claude producer) still classifies from the
-            // transcript exactly as before.
-            None => {
-                // Classify off the async runtime: `classify` reads the JSONL
-                // transcript + does blocking fs I/O, so it must not run inline on
-                // a tokio worker.
-                let session = session_from(&line);
-                let Some(row) = tokio::task::spawn_blocking(move || {
-                    classify(ClassifyInput::from_env(session, None, now_ms))
-                })
-                .await
-                .ok()
-                .flatten() else {
-                    return LineOutcome::Processed;
-                };
-                row.context
-            }
-        };
+        // A context read straight off the announcing hook line, rather than
+        // re-derived from the transcript. The distinction is load-bearing at the
+        // stale-ASK gate below, so it travels with the context.
+        let (context, from_hook_payload) =
+            match ask_context_from_hook_payload(&line.agent, semantic_event, &payload) {
+                Some(ask) => (ask, true),
+                None => match permission_context_from_hook_payload(
+                    &line.agent,
+                    semantic_event,
+                    &line.matcher,
+                    &payload,
+                ) {
+                    Some(wait) => (wait, true),
+                    // Every other signal (Stop/Notification/an ask observed
+                    // after the fact) still classifies from the transcript
+                    // exactly as before.
+                    None => {
+                        // Classify off the async runtime: `classify` reads the JSONL
+                        // transcript + does blocking fs I/O, so it must not run inline on
+                        // a tokio worker.
+                        let session = session_from(&line);
+                        let Some(row) = tokio::task::spawn_blocking(move || {
+                            classify(ClassifyInput::from_env(session, None, now_ms))
+                        })
+                        .await
+                        .ok()
+                        .flatten() else {
+                            return LineOutcome::Processed;
+                        };
+                        (row.context, false)
+                    }
+                },
+            };
 
         let kind = kind_of(&context);
 
@@ -540,7 +552,15 @@ impl AttentionIngest {
         // own projection (written from this same hook line a few lines above)
         // is the authority on whether the request is still live, so while it says
         // one is, this line yields no attention decision at all.
-        if kind != AttentionKind::AskUserQuestion {
+        //
+        // A context built from the hook payload is exempt. The reasoning above
+        // is entirely about a TRANSCRIPT reading being untrustworthy while a
+        // request is live; a payload-derived context IS the announcement of
+        // that live request, and it arrives on the same line that just wrote
+        // the projection this gate consults. Without the exemption the gate
+        // reads the state the caller itself produced and discards it — which is
+        // precisely how a Codex approval reached the roster but never the notch.
+        if !from_hook_payload && kind != AttentionKind::AskUserQuestion {
             match FleetRepo::provider_session_holds_open_request(&self.pool, &line.session_id).await
             {
                 Ok(true) => return LineOutcome::Processed,
@@ -818,6 +838,62 @@ fn ask_context_from_hook_payload(
         return None;
     }
     ask_data_from_tool_input(payload.get("tool_input")?).map(NeedsContext::Ask)
+}
+
+/// The open approval a NON-Claude hook line announces, read off the payload,
+/// or `None` when the line does not announce one.
+///
+/// Codex raises `PermissionRequest` before running a tool and blocks. The
+/// transcript classifier cannot see it: `classify` reads CLAUDE-shaped JSONL
+/// (`{"type":"assistant", …}`) while a Codex session writes a rollout
+/// (`session_meta` / `response_item` / `event_msg` records), so every parser it
+/// tries matches nothing and it concludes the session needs nothing. Measured
+/// on a live host: two `PermissionRequest` events with intact payloads, zero
+/// attention rows, and a session that looked merely idle while it was blocked.
+///
+/// Deliberately `Waiting`, not `Approval`, on two independent grounds:
+///
+/// - An `approval` card renders answer affordances ("h/l option · enter/1-9
+///   answer"). A hook-route Codex session is `DEGRADED` (see #653) — Hangar can
+///   observe it but cannot act on it — so those keys would advertise a delivery
+///   route that does not exist.
+/// - Only `ask_user_question` / `waiting` / `error` are swept by
+///   [`AttentionRepo::close_unclaimed_open`]; `approval` is excluded because its
+///   producers own their lifecycles. A hook-raised `approval` would therefore
+///   never close. As `waiting` the card follows the projection this same line
+///   writes: open while `attention_state` is `APPROVAL`, swept once the next
+///   hook returns it to `NONE`.
+///
+/// Claude is excluded because its permission lines are already accounted for:
+/// they either re-announce a live picker (handled by the Ask path and by
+/// `duplicate_claude_structured_permission` in the reducer) or resolve through
+/// the structured broker.
+fn permission_context_from_hook_payload(
+    agent: &str,
+    semantic_event: &str,
+    matcher: &str,
+    envelope: &serde_json::Value,
+) -> Option<NeedsContext> {
+    if agent == "claude" || semantic_event != "PermissionRequest" {
+        return None;
+    }
+    let hook = envelope.get("payload").unwrap_or(envelope);
+    let tool = [matcher]
+        .into_iter()
+        .chain(
+            ["tool_name", "tool"]
+                .iter()
+                .filter_map(|field| hook.get(*field).and_then(serde_json::Value::as_str)),
+        )
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    Some(NeedsContext::Wait(WaitContext {
+        marker: "needs input:".to_string(),
+        text: tool.map_or_else(
+            || format!("{agent} is waiting for approval"),
+            |tool| format!("{agent} is waiting for approval to run {tool}"),
+        ),
+    }))
 }
 
 /// The stable identity of the request an ASK row is about, or `None` for kinds
@@ -1454,6 +1530,88 @@ mod tests {
         let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
         assert_eq!(open.len(), 1, "and it must not be joined by a Waiting card");
         assert_eq!(open[0].kind, AttentionKind::AskUserQuestion);
+    }
+
+    /// A Codex `PermissionRequest`, shaped like the ones measured on a live host:
+    /// a real payload, a `matcher` naming the tool, and a `transcript_path`
+    /// pointing at a Codex ROLLOUT rather than a Claude transcript.
+    fn codex_permission_hook_line(session: &str, cwd: &str, event_id: &str, tool: &str) -> String {
+        format!(
+            r#"{{"event_id":"{event_id}","ts":1786222389057,"session_id":"{session}","cwd":"{cwd}","transcript_path":"/nonexistent/.codex/sessions/2026/07/26/rollout-{session}.jsonl","agent":"codex","event_type":"PermissionRequest","matcher":"{tool}","parent":null,"payload":{{"session_id":"{session}","cwd":"{cwd}","hook_event_name":"PermissionRequest","tool_name":"{tool}"}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn a_codex_permission_request_raises_a_card_the_claude_classifier_cannot_see() {
+        // THE defect (#654): Codex blocks on an approval and the operator is never
+        // told. The event is stored, `is_qualifying` passes, and then `classify`
+        // returns None because it reads Claude-shaped JSONL while Codex writes a
+        // rollout — so no attention row is ever minted and a blocked session is
+        // indistinguishable from an idle one. Measured live: two such events, zero
+        // rows.
+        //
+        // The `transcript_path` here points at a file that does not exist, so this
+        // passes ONLY if the hook payload raises the card.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                "{}\n",
+                codex_permission_hook_line("codex-sid-1", "/tmp/codex-work", "evt-perm", "Bash")
+            ),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        assert_eq!(
+            ingest.ingest_once(1_700_000_000_000).await,
+            1,
+            "the permission request must raise exactly one card"
+        );
+
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1);
+        // `Waiting`, not `Approval`: a hook-route Codex session is DEGRADED, so an
+        // approval card's answer keys would advertise a route that cannot deliver.
+        // It is also the kind the reconcile sweep can close (`approval` is exempt),
+        // so the card follows the session instead of sticking open forever.
+        assert_eq!(open[0].kind, AttentionKind::Waiting);
+        assert!(
+            open[0].payload.contains("Bash"),
+            "the card must name the tool being approved, got {:?}",
+            open[0].payload
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claude_permission_request_is_left_to_the_existing_paths() {
+        // The complement, and the regression this fix could plausibly cause.
+        // Claude's permission lines are already accounted for — they re-announce a
+        // live picker, which the Ask path and the reducer's
+        // `duplicate_claude_structured_permission` both deliberately decline to
+        // re-raise. Minting a Waiting card off one would resurrect a card the
+        // release had just closed, the exact bug that gate exists to prevent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let line =
+            codex_permission_hook_line("claude-sid-1", "/tmp/claude-work", "evt-cperm", "Bash")
+                .replace(r#""agent":"codex""#, r#""agent":"claude""#);
+        std::fs::write(&events_jsonl, format!("{line}\n")).unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_000_000).await;
+
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert!(
+            open.is_empty(),
+            "a Claude permission line must not mint a Waiting card, got {:?}",
+            open.iter().map(|r| r.kind).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
