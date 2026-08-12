@@ -134,9 +134,7 @@ impl Store {
             .read_only(true)
             .connect()
             .await?;
-        sqlx::query_scalar::<_, i64>("SELECT 1")
-            .fetch_one(&mut conn)
-            .await?;
+        sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&mut conn).await?;
         use sqlx::Connection as _;
         conn.close().await?;
         Ok(())

@@ -7878,7 +7878,11 @@ fn daemon_version_skew(running: Option<&str>, mine: &str) -> Option<String> {
 fn daemon_upgrade_required(running: Option<&str>, mine: &str) -> bool {
     fn parse(version: &str) -> Option<[u64; 3]> {
         let mut parts = version.split('.').map(str::parse::<u64>);
-        let parsed = [parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?];
+        let parsed = [
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        ];
         parts.next().is_none().then_some(parsed)
     }
 
