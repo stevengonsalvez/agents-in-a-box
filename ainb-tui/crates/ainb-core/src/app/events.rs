@@ -6279,6 +6279,18 @@ impl EventHandler {
             }
             AppEvent::FleetPanelCanonicalKey(key) => {
                 Self::reduce_fleet_event(state, FleetEvent::Key(key));
+                // Every modal on this panel opens by routing a canonical key
+                // into the shared reducer, so "the key did nothing" and "the
+                // reducer never saw it" look identical from the outside. One
+                // line at the seam tells them apart, which black-box probing
+                // could not: run with `RUST_LOG=ainb=debug` and read the JSONL
+                // under `~/.agents-in-a-box/logs/`.
+                tracing::debug!(
+                    target: "ainb::app::events",
+                    ?key,
+                    modal_open = state.fleet_panel_state.canonical_modal_open(),
+                    "fleet canonical key reduced"
+                );
             }
             AppEvent::FleetPanelAnswerCardClick {
                 column,
@@ -8964,6 +8976,79 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('!')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill))
+        ));
+    }
+
+    /// #667: `N` on the Fleet panel is advertised in the help bar
+    /// (`N channel`) but was reported dead in a real tmux run — no form, no
+    /// feedback. Every layer looked correct on inspection (router arm,
+    /// shared reducer, renderer match), so this pins the mechanism at the
+    /// host boundary: routing THROUGH `process_event` into a real render
+    /// pass, not just checking which `AppEvent` the router returns.
+    ///
+    /// It also pins down the second reported symptom (subsequent keys, and
+    /// "chat needs two Escapes") as the SAME modal-capture behaviour, not a
+    /// separate bug: once `N` opens the channel-create form, the panel is
+    /// modal and every key — including the lens digits — routes into the
+    /// canonical reducer until a single Esc closes it.
+    #[test]
+    fn fleet_panel_shift_n_opens_and_renders_channel_create_modal() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        // Router arm: `N` must resolve to the canonical forward, matching
+        // the plugin's `FleetKey::Char('N')` arm (fleet.rs:1351).
+        let n = route(&mut state, KeyCode::Char('N'));
+        assert!(
+            matches!(
+                n,
+                Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))
+            ),
+            "`N` must route to FleetPanelCanonicalKey(Char('N')); got {n:?}"
+        );
+        EventHandler::process_event(n.unwrap(), &mut state);
+        assert!(
+            state.fleet_panel_state.canonical_modal_open(),
+            "`N` opened nothing at the host layer"
+        );
+
+        // Render pass: the modal must actually paint, not just flip a mode
+        // flag no renderer reaches.
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::components::fleet_panel::render(f, f.area(), &mut state.fleet_panel_state)
+            })
+            .unwrap();
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains("New channel"),
+            "channel-create modal did not render; got:\n{rendered}"
+        );
+
+        // Modal capture: while it is open, a lens digit must NOT fall
+        // through to FleetPanelSetFilter — it belongs to the canonical
+        // reducer, same as every other open Fleet mode.
+        let five = route(&mut state, KeyCode::Char('5'));
+        assert!(
+            matches!(five, Some(AppEvent::FleetPanelCanonicalKey(_))),
+            "with the channel-create modal open, '5' must route into the \
+             canonical reducer, not FleetPanelSetFilter; got {five:?}"
+        );
+
+        // One Esc closes it and routing returns to normal — pins that this
+        // form needs exactly one Esc, unlike the chat surface's reported two.
+        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
+        assert!(!state.fleet_panel_state.canonical_modal_open());
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('5')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
         ));
     }
 
