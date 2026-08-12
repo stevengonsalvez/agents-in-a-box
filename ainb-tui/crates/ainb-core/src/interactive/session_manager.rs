@@ -589,6 +589,7 @@ impl InteractiveSessionManager {
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
+                    &worktree_info.path,
                     skip_permissions,
                     model.clone(),
                     agent_type,
@@ -633,9 +634,7 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
-            codex_thread_id: codex_remote
-                .as_ref()
-                .and_then(|remote| remote.thread_id.clone()),
+            codex_thread_id: codex_remote.as_ref().and_then(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -792,6 +791,7 @@ impl InteractiveSessionManager {
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
+                    &existing_worktree_path,
                     skip_permissions,
                     model.clone(),
                     agent_type,
@@ -837,9 +837,7 @@ impl InteractiveSessionManager {
             model: model.clone(),
             headroom_enabled,
             rtk_enabled,
-            codex_thread_id: codex_remote
-                .as_ref()
-                .and_then(|remote| remote.thread_id.clone()),
+            codex_thread_id: codex_remote.as_ref().and_then(|remote| remote.thread_id.clone()),
         };
 
         self.active_sessions.insert(session_id, session.clone());
@@ -1812,6 +1810,7 @@ impl InteractiveSessionManager {
     pub async fn start_cli_in_tmux(
         &self,
         session_name: &str,
+        working_dir: &std::path::Path,
         skip_permissions: bool,
         model: Option<String>,
         agent_type: SessionAgentType,
@@ -1889,7 +1888,15 @@ impl InteractiveSessionManager {
                 provider.command().to_string(),
                 "--remote".to_string(),
                 remote.endpoint.clone(),
+                "-C".to_string(),
+                working_dir.display().to_string(),
             ];
+            if let Some(model) = model.as_deref().filter(|model| !is_default_model(model)) {
+                command.extend(["--model".to_string(), model.to_string()]);
+            }
+            if skip_permissions {
+                command.push(provider.skip_permissions_flag().to_string());
+            }
             if let Some(thread_id) = remote.thread_id.as_ref() {
                 command.extend(["resume".to_string(), thread_id.clone()]);
             }
