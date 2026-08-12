@@ -12685,7 +12685,13 @@ mod tests {
 
         let tmux_session = format!("ainb-reconcile-{}", SystemClock.now_ms());
         let tmux = tokio::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &tmux_session, "printf 'picker closed'; sleep 30"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &tmux_session,
+                "printf 'picker closed'; sleep 30",
+            ])
             .status()
             .await
             .unwrap();
