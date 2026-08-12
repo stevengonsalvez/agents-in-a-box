@@ -8557,7 +8557,7 @@ fn start_or_upgrade_daemon(announce: bool) -> Result<()> {
         restart_daemon(announce)
     } else {
         start_daemon_if_stopped(announce)
-    }
+    };
     result
 }
 
