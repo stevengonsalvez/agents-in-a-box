@@ -2679,7 +2679,18 @@ fn build_atc_command() -> Command {
             Command::new("heartbeat")
                 .hide(true)
                 .about("Internal: build + send one [HEARTBEAT] nudge (called by the OS timer)")
-                .arg(clap::Arg::new("name").required(true)),
+                .arg(clap::Arg::new("name").required(true))
+                .arg(
+                    clap::Arg::new("exhausted")
+                        .long("exhausted")
+                        .default_missing_value("")
+                        .num_args(0..=1)
+                        .help(
+                            "Internal: session ids that have spent their ERR continue budget, comma-separated. \
+                             PRESENCE of the flag (even empty) means the daemon owns the retry ledger, so this \
+                             beat renders the cap from the given set and does not count continues locally",
+                        ),
+                ),
         )
         .subcommand(
             Command::new("hook")
