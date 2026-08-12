@@ -3383,13 +3383,15 @@ async fn handle_codex_session_ensure(
                 Err(error) => return Err(internal(&format!("resume Codex thread: {error}"))),
             }
         }
-        Some((None, _, watermark)) => claim_pending_codex_thread(
-            pool,
-            &params.session_id,
-            &cwd,
-            watermark.unwrap_or_default(),
-        )
-        .await?,
+        Some((None, _, watermark)) => {
+            claim_pending_codex_thread(
+                pool,
+                &params.session_id,
+                &cwd,
+                watermark.unwrap_or_default(),
+            )
+            .await?
+        }
         None => match params.thread_id.as_deref().filter(|id| !id.trim().is_empty()) {
             Some(thread_id) => {
                 match manager.thread_resume(thread_id).await {
@@ -3470,14 +3472,26 @@ async fn reserve_pending_codex_thread(
         .await;
         match inserted {
             Ok(result) if result.rows_affected() == 1 => return Ok(()),
-            Ok(_) => return Err(internal("reserve Interactive Codex thread affected no rows")),
-            Err(sqlx::Error::Database(error)) if error.message().contains("UNIQUE constraint failed") => {
+            Ok(_) => {
+                return Err(internal(
+                    "reserve Interactive Codex thread affected no rows",
+                ));
+            }
+            Err(sqlx::Error::Database(error))
+                if error.message().contains("UNIQUE constraint failed") =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            Err(error) => return Err(internal(&format!("reserve Interactive Codex thread: {error}"))),
+            Err(error) => {
+                return Err(internal(&format!(
+                    "reserve Interactive Codex thread: {error}"
+                )));
+            }
         }
     }
-    Err(internal("another Ainb Codex session is still starting; retry shortly"))
+    Err(internal(
+        "another Ainb Codex session is still starting; retry shortly",
+    ))
 }
 
 async fn claim_pending_codex_thread(
