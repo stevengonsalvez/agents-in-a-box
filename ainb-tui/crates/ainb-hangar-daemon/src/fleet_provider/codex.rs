@@ -189,7 +189,12 @@ pub fn managed_tui_command(
     socket: &Path,
     additional_args: impl IntoIterator<Item = OsString>,
 ) -> CommandSpec {
-    let mut args = vec!["--remote".into(), unix_endpoint(socket).into()];
+    let mut args = vec![
+        "--disable".into(),
+        "apps".into(),
+        "--remote".into(),
+        unix_endpoint(socket).into(),
+    ];
     args.extend(additional_args);
     CommandSpec {
         program: codex_binary.to_os_string(),
@@ -892,6 +897,8 @@ mod tests {
             )
             .args,
             vec![
+                OsString::from("--disable"),
+                OsString::from("apps"),
                 OsString::from("--remote"),
                 OsString::from("unix:///tmp/fleet codex.sock"),
                 OsString::from("--model"),
