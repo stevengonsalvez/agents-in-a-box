@@ -114,6 +114,34 @@ impl Store {
         Self::open_in(&dir).await
     }
 
+    /// Check whether the existing default database accepts a read-only query.
+    ///
+    /// Unlike [`Self::open_default`], this never creates a database and never
+    /// applies migrations. Status callers use it while another daemon may own
+    /// the database, so migration ownership stays with daemon startup.
+    pub async fn ping_default_read_only() -> anyhow::Result<()> {
+        let dir = Self::default_dir()?;
+        Self::ping_in_read_only(&dir).await
+    }
+
+    async fn ping_in_read_only(dir: &Path) -> anyhow::Result<()> {
+        use sqlx::ConnectOptions as _;
+
+        let db_path = dir.join(DB_FILE_NAME);
+        let mut conn = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(false)
+            .read_only(true)
+            .connect()
+            .await?;
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&mut conn)
+            .await?;
+        use sqlx::Connection as _;
+        conn.close().await?;
+        Ok(())
+    }
+
     /// Borrow the underlying `SQLite` connection pool.
     #[must_use]
     pub const fn pool(&self) -> &SqlitePool {
@@ -384,6 +412,19 @@ mod tests {
             msg.contains("FOREIGN KEY constraint failed"),
             "expected an FK violation, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_ping_never_creates_or_migrates_a_database() {
+        let missing = tempfile::tempdir().unwrap();
+        let missing_db = missing.path().join(DB_FILE_NAME);
+        assert!(Store::ping_in_read_only(missing.path()).await.is_err());
+        assert!(!missing_db.exists());
+
+        let ready = tempfile::tempdir().unwrap();
+        let store = Store::open_in(ready.path()).await.unwrap();
+        Store::ping_in_read_only(ready.path()).await.unwrap();
+        drop(store);
     }
 
     /// A version query that fails for any reason OTHER than "the table is not

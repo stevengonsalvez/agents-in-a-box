@@ -7849,10 +7849,8 @@ fn daemon_pid_path() -> Result<std::path::PathBuf> {
 /// Path to the file recording the version of the binary that started the
 /// running daemon, written beside the pid file at launch.
 ///
-/// A running daemon is never auto-restarted, so after `brew upgrade` (or any
-/// rebuild) the OLD daemon keeps serving while the CLI/TUI is new. This file
-/// lets `status` name the running daemon's version and flag the skew — without
-/// a socket dial (the CLI opens the store directly and never RPCs the daemon).
+/// This lets startup hand off to a newer installed daemon after `brew upgrade`,
+/// without letting an older debug binary downgrade a newer owner.
 fn daemon_version_path() -> Result<std::path::PathBuf> {
     let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
     Ok(home.join("hangar").join("daemon.version"))
@@ -7868,6 +7866,25 @@ fn daemon_version_skew(running: Option<&str>, mine: &str) -> Option<String> {
     match running {
         Some(v) if !v.is_empty() && v != mine => Some(v.to_string()),
         _ => None,
+    }
+}
+
+/// True only when a recorded release version is older than this binary.
+///
+/// Version files contain Cargo package versions, so a three-component numeric
+/// comparison is sufficient and avoids adding a dependency to the launcher.
+/// Unknown, malformed, prerelease, and equal versions deliberately keep the
+/// existing owner: autostart may upgrade, never guess or downgrade.
+fn daemon_upgrade_required(running: Option<&str>, mine: &str) -> bool {
+    fn parse(version: &str) -> Option<[u64; 3]> {
+        let mut parts = version.split('.').map(str::parse::<u64>);
+        let parsed = [parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?];
+        parts.next().is_none().then_some(parsed)
+    }
+
+    match (running.and_then(parse), parse(mine)) {
+        (Some(running), Some(mine)) => running < mine,
+        _ => false,
     }
 }
 
@@ -8434,10 +8451,10 @@ async fn run_daemon_status() -> Result<()> {
         }
     }
 
-    // The database-reachability line stays as a secondary signal: a stopped
-    // daemon with a migrated db is still a healthy, bootable install.
-    match Store::open_default().await {
-        Ok(_) => println!("  database: reachable (migrations applied)"),
+    // Status must not mutate the database. In particular, a newer CLI must not
+    // migrate under an older daemon that still owns the runtime socket.
+    match Store::ping_default_read_only().await {
+        Ok(_) => println!("  database: reachable (read-only check)"),
         Err(e) => println!("  database: unreachable: {e}"),
     }
     Ok(())
@@ -8515,7 +8532,18 @@ fn run_daemon_start() -> Result<()> {
 /// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
 /// `mcp_pool`'s `ensure_daemon` warn-and-continue.
 pub fn ensure_hangar_daemon() {
-    if let Err(e) = start_daemon_if_stopped(false) {
+    let running = daemon_version_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|version| version.trim().to_string());
+    let result = if running_daemon_pid().ok().flatten().is_some()
+        && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION"))
+    {
+        restart_daemon(false)
+    } else {
+        start_daemon_if_stopped(false)
+    };
+    if let Err(e) = result {
         tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
     }
 }
@@ -8864,14 +8892,9 @@ fn stop_decision(pid_path: &std::path::Path, socket: &std::path::Path) -> StopDe
 ///
 /// Waits (bounded) for the process to actually exit, then records the exit
 /// breadcrumb on its behalf: see [`record_daemon_stop_breadcrumb`].
-fn run_daemon_stop() -> Result<()> {
+fn stop_daemon(announce: bool) -> Result<()> {
     let pid_path = daemon_pid_path()?;
     let socket = daemon_socket_path()?;
-    // Drop the version record too — a stopped daemon has no running version, and
-    // a lingering file would make `status` compare against a dead daemon.
-    if let Ok(vpath) = daemon_version_path() {
-        std::fs::remove_file(&vpath).ok();
-    }
     match stop_decision(&pid_path, &socket) {
         StopDecision::Signal(owned) => {
             use nix::sys::signal::{Signal, kill};
@@ -8883,17 +8906,22 @@ fn run_daemon_stop() -> Result<()> {
             record_daemon_stop_breadcrumb(pid, died);
             if died {
                 std::fs::remove_file(&pid_path).ok();
-                println!("hangar daemon: stopped (signalled pid {pid})");
+                clear_daemon_version_record();
+                if announce {
+                    println!("hangar daemon: stopped (signalled pid {pid})");
+                }
             } else {
                 // Keep the pid file: it still names a live daemon. Dropping it
                 // here (as this did unconditionally) would let the next `start`
                 // spawn a SECOND daemon onto the same SQLite file: new write
                 // contention, which is the last thing this daemon needs.
-                println!(
-                    "hangar daemon: SIGTERM sent to pid {pid}, still alive after {}s \
-                     (pid file kept; re-run stop or `kill -9 {pid}`)",
-                    DAEMON_STOP_GRACE.as_secs()
-                );
+                if announce {
+                    println!(
+                        "hangar daemon: SIGTERM sent to pid {pid}, still alive after {}s \
+                         (pid file kept; re-run stop or `kill -9 {pid}`)",
+                        DAEMON_STOP_GRACE.as_secs()
+                    );
+                }
             }
         }
         StopDecision::Unproven(pid) => {
@@ -8902,21 +8930,43 @@ fn run_daemon_stop() -> Result<()> {
             // belongs to somebody else entirely. Keep the pid file: it is the only
             // record of what was claimed, and a `start` must not race a daemon that
             // may still be coming up.
-            println!(
-                "hangar daemon: refusing to signal pid {pid} — it does not hold {} \
-                 (not this home's daemon, or the socket is not bound yet)",
-                socket.display()
-            );
+            if announce {
+                println!(
+                    "hangar daemon: refusing to signal pid {pid} - it does not hold {} \
+                     (not this home's daemon, or the socket is not bound yet)",
+                    socket.display()
+                );
+            }
         }
         StopDecision::Stale(pid) => {
             std::fs::remove_file(&pid_path).ok();
-            println!("hangar daemon: not running (cleaned up stale pid {pid})");
+            clear_daemon_version_record();
+            if announce {
+                println!("hangar daemon: not running (cleaned up stale pid {pid})");
+            }
         }
         StopDecision::NotRecorded => {
-            println!("hangar daemon: not running");
+            clear_daemon_version_record();
+            if announce {
+                println!("hangar daemon: not running");
+            }
         }
     }
     Ok(())
+}
+
+/// Remove the version record only after ownership is known to be gone.
+///
+/// A failed upgrade handoff leaves the incumbent alive, so retaining its
+/// version is what lets the next `ensure_hangar_daemon` retry that handoff.
+fn clear_daemon_version_record() {
+    if let Ok(path) = daemon_version_path() {
+        std::fs::remove_file(path).ok();
+    }
+}
+
+fn run_daemon_stop() -> Result<()> {
+    stop_daemon(true)
 }
 
 /// `hangar daemon restart`: `stop` (if running) then `start`.
@@ -8928,8 +8978,16 @@ fn run_daemon_stop() -> Result<()> {
 /// else autostarted it. Report the stop problem and start anyway: if the old
 /// daemon is somehow still up, `start` is a no-op that says so.
 pub(crate) fn run_daemon_restart() -> Result<()> {
-    if let Err(e) = run_daemon_stop() {
-        println!("hangar daemon: stop reported a problem, starting anyway: {e}");
+    restart_daemon(true)
+}
+
+fn restart_daemon(announce: bool) -> Result<()> {
+    if let Err(e) = stop_daemon(announce) {
+        if announce {
+            println!("hangar daemon: stop reported a problem, starting anyway: {e}");
+        } else {
+            tracing::warn!(error = %e, "hangar daemon stop reported a problem during upgrade handoff");
+        }
     }
     // A stop that could not confirm the exit leaves a daemon mid-shutdown, still
     // holding its lock and its socket. Starting into that reads as "already
@@ -8940,15 +8998,19 @@ pub(crate) fn run_daemon_restart() -> Result<()> {
     });
     if !vacated {
         if let Ok(Some(pid)) = running_daemon_pid() {
-            println!(
-                "hangar daemon: pid {pid} still owns this home after {}s; not starting a \
-                 second one (re-run stop, or `kill -9 {pid}`)",
-                RESTART_VACATE_BUDGET.as_secs()
-            );
+            if announce {
+                println!(
+                    "hangar daemon: pid {pid} still owns this home after {}s; not starting a \
+                     second one (re-run stop, or `kill -9 {pid}`)",
+                    RESTART_VACATE_BUDGET.as_secs()
+                );
+            } else {
+                tracing::warn!(pid, "hangar daemon did not vacate during upgrade handoff");
+            }
             return Ok(());
         }
     }
-    run_daemon_start()
+    start_daemon_if_stopped(announce)
 }
 
 /// Spawn the daemon once more and report the pid that ends up owning the home.
@@ -10666,6 +10728,15 @@ mod tests {
         assert_eq!(daemon_version_skew(Some("1.16.0"), "1.16.0"), None);
         assert_eq!(daemon_version_skew(None, "1.16.0"), None);
         assert_eq!(daemon_version_skew(Some(""), "1.16.0"), None);
+    }
+
+    #[test]
+    fn daemon_upgrade_required_only_for_a_strictly_newer_release() {
+        assert!(daemon_upgrade_required(Some("1.20.0"), "1.20.2"));
+        assert!(!daemon_upgrade_required(Some("1.20.2"), "1.20.2"));
+        assert!(!daemon_upgrade_required(Some("1.20.3"), "1.20.2"));
+        assert!(!daemon_upgrade_required(Some("debug"), "1.20.2"));
+        assert!(!daemon_upgrade_required(None, "1.20.2"));
     }
 
     /// The freshness predicate: a sibling at least as new as `ainb` is fresh; an
