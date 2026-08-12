@@ -160,6 +160,9 @@ fn daemon_start_status_stop_round_trip() {
         wait_until(Duration::from_secs(10), || pid_alive(pid)),
         "the started daemon pid {pid} must be alive"
     );
+    let binary = std::fs::read_to_string(home.join("hangar").join("daemon.binary"))
+        .expect("daemon start recorded its binary path");
+    assert_eq!(binary.trim(), daemon.display().to_string());
 
     // The socket binds shortly after boot; status reports running.
     let socket = home.join("hangar.sock");

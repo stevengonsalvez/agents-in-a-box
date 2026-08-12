@@ -7856,6 +7856,12 @@ fn daemon_version_path() -> Result<std::path::PathBuf> {
     Ok(home.join("hangar").join("daemon.version"))
 }
 
+/// Path to the exact executable that successfully claimed this Hangar home.
+fn daemon_binary_path() -> Result<std::path::PathBuf> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(home.join("hangar").join("daemon.binary"))
+}
+
 /// Compare the recorded running-daemon version to `mine`, returning
 /// `Some(running)` when they disagree (the skew to warn about), else `None`.
 ///
@@ -7923,6 +7929,43 @@ fn running_daemon_version(pid: Option<u32>) -> Option<String> {
                 .and_then(ainb_hangar_daemon::single_instance::process_argv)
                 .and_then(|args| homebrew_daemon_version(&args))
         })
+}
+
+/// Runtime identity of the daemon that owns this Hangar home.
+///
+/// The Daemons overlay uses this exact probe rather than inferring ownership
+/// from a reachable socket. That keeps its displayed pid, launch path, version,
+/// and upgrade warning consistent with `ainb hangar daemon status`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DaemonRuntimeStatus {
+    pub pid: Option<u32>,
+    pub command: Option<String>,
+    pub version: Option<String>,
+    /// A released daemon older than this binary is still serving this home.
+    pub old: bool,
+}
+
+/// Return the authoritative recorded owner and its launch identity.
+pub(crate) fn daemon_runtime_status() -> DaemonRuntimeStatus {
+    let pid = running_daemon_pid().ok().flatten();
+    let command = daemon_binary_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            pid.and_then(|pid| i32::try_from(pid).ok())
+                .and_then(ainb_hangar_daemon::single_instance::process_binary)
+        });
+    let version = running_daemon_version(pid);
+    let old =
+        pid.is_some() && daemon_upgrade_required(version.as_deref(), env!("CARGO_PKG_VERSION"));
+    DaemonRuntimeStatus {
+        pid,
+        command,
+        version,
+        old,
+    }
 }
 
 /// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
@@ -8753,6 +8796,9 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
         if let Ok(vpath) = daemon_version_path() {
             std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
         }
+        if let Ok(bpath) = daemon_binary_path() {
+            std::fs::write(&bpath, format!("{}\n", bin.display())).ok();
+        }
     }
 
     if announce {
@@ -8999,12 +9045,15 @@ fn stop_daemon(announce: bool) -> Result<()> {
     Ok(())
 }
 
-/// Remove the version record only after ownership is known to be gone.
+/// Remove launch identity records only after ownership is known to be gone.
 ///
 /// A failed upgrade handoff leaves the incumbent alive, so retaining its
 /// version is what lets the next `ensure_hangar_daemon` retry that handoff.
 fn clear_daemon_version_record() {
     if let Ok(path) = daemon_version_path() {
+        std::fs::remove_file(path).ok();
+    }
+    if let Ok(path) = daemon_binary_path() {
         std::fs::remove_file(path).ok();
     }
 }
