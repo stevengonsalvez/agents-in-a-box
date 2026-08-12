@@ -9312,15 +9312,17 @@ impl AppState {
             };
 
             let mut codex_remote = if metadata.agent_type == SessionAgentType::Codex {
-                Some(crate::interactive::session_manager::ensure_codex_remote_thread(
-                    metadata.session_id,
-                    &metadata.worktree_path,
-                    model.as_deref(),
-                    skip_permissions,
-                    metadata.headroom_enabled,
-                    metadata.codex_thread_id.clone(),
+                Some(
+                    crate::interactive::session_manager::ensure_codex_remote_thread(
+                        metadata.session_id,
+                        &metadata.worktree_path,
+                        model.as_deref(),
+                        skip_permissions,
+                        metadata.headroom_enabled,
+                        metadata.codex_thread_id.clone(),
+                    )
+                    .await?,
                 )
-                .await?)
             } else {
                 None
             };
@@ -9329,6 +9331,7 @@ impl AppState {
             manager
                 .start_cli_in_tmux(
                     &metadata.tmux_session_name,
+                    &metadata.worktree_path,
                     skip_permissions,
                     model.clone(),
                     metadata.agent_type,
@@ -9339,10 +9342,7 @@ impl AppState {
                 )
                 .await?;
 
-            if codex_remote
-                .as_ref()
-                .is_some_and(|remote| remote.thread_id.is_none())
-            {
+            if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
                 codex_remote = Some(
                     crate::interactive::session_manager::claim_codex_remote_thread(
                         metadata.session_id,
@@ -9354,9 +9354,8 @@ impl AppState {
                     .await?,
                 );
             }
-            if let Some(thread_id) = codex_remote
-                .as_ref()
-                .and_then(|remote| remote.thread_id.as_deref())
+            if let Some(thread_id) =
+                codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
             {
                 crate::interactive::session_manager::persist_codex_thread_id(
                     metadata.session_id,
@@ -10990,15 +10989,17 @@ impl AppState {
         };
         let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
         let mut codex_remote = if agent_type == SessionAgentType::Codex {
-            Some(crate::interactive::session_manager::ensure_codex_remote_thread(
-                session_id,
-                std::path::Path::new(&workspace_path),
-                model.as_deref(),
-                skip_permissions,
-                headroom_enabled,
-                metadata.and_then(|m| m.codex_thread_id.clone()),
+            Some(
+                crate::interactive::session_manager::ensure_codex_remote_thread(
+                    session_id,
+                    std::path::Path::new(&workspace_path),
+                    model.as_deref(),
+                    skip_permissions,
+                    headroom_enabled,
+                    metadata.and_then(|m| m.codex_thread_id.clone()),
+                )
+                .await?,
             )
-            .await?)
         } else {
             None
         };
@@ -11013,6 +11014,7 @@ impl AppState {
         InteractiveSessionManager::new()?
             .start_cli_in_tmux(
                 &tmux_session_name,
+                std::path::Path::new(&workspace_path),
                 skip_permissions,
                 model.clone(),
                 agent_type,
@@ -11023,10 +11025,7 @@ impl AppState {
             )
             .await?;
 
-        if codex_remote
-            .as_ref()
-            .is_some_and(|remote| remote.thread_id.is_none())
-        {
+        if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
             codex_remote = Some(
                 crate::interactive::session_manager::claim_codex_remote_thread(
                     session_id,
@@ -11038,9 +11037,8 @@ impl AppState {
                 .await?,
             );
         }
-        if let Some(thread_id) = codex_remote
-            .as_ref()
-            .and_then(|remote| remote.thread_id.as_deref())
+        if let Some(thread_id) =
+            codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
         {
             crate::interactive::session_manager::persist_codex_thread_id(
                 session_id,
