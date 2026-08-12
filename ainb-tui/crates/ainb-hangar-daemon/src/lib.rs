@@ -701,6 +701,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         {
             let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
             let socket = dir.join("codex-app-server.sock");
+            // Older Ainb daemons used `codex app-server proxy` against this same
+            // path. A pre-lock daemon can survive an upgrade and keep sending
+            // stdin JSON-RPC into the native WebSocket listener. Recover only
+            // the exact orphaned parent-child legacy topology for this home.
+            let legacy_reaped =
+                crate::fleet_provider::codex_manager::reap_legacy_codex_proxy_daemons(&socket)
+                    .await;
+            if legacy_reaped > 0 {
+                tracing::warn!(legacy_reaped, "reaped obsolete codex proxy daemon at boot");
+            }
             // Reap any app-server orphaned by a SIGKILLed/OOM-reaped prior daemon (or a
             // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
             // SIGKILL, so this boot-time sweep is the only backstop that survives it.
