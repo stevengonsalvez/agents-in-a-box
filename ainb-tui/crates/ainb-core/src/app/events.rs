@@ -6279,6 +6279,18 @@ impl EventHandler {
             }
             AppEvent::FleetPanelCanonicalKey(key) => {
                 Self::reduce_fleet_event(state, FleetEvent::Key(key));
+                // Every modal on this panel opens by routing a canonical key
+                // into the shared reducer, so "the key did nothing" and "the
+                // reducer never saw it" look identical from the outside. One
+                // line at the seam tells them apart, which black-box probing
+                // could not: run with `RUST_LOG=ainb=debug` and read the JSONL
+                // under `~/.agents-in-a-box/logs/`.
+                tracing::debug!(
+                    target: "ainb::app::events",
+                    ?key,
+                    modal_open = state.fleet_panel_state.canonical_modal_open(),
+                    "fleet canonical key reduced"
+                );
             }
             AppEvent::FleetPanelAnswerCardClick {
                 column,
@@ -8992,7 +9004,10 @@ mod panel_back_tests {
         // the plugin's `FleetKey::Char('N')` arm (fleet.rs:1351).
         let n = route(&mut state, KeyCode::Char('N'));
         assert!(
-            matches!(n, Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))),
+            matches!(
+                n,
+                Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))
+            ),
             "`N` must route to FleetPanelCanonicalKey(Char('N')); got {n:?}"
         );
         EventHandler::process_event(n.unwrap(), &mut state);
