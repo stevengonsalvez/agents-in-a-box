@@ -3318,7 +3318,7 @@ async fn handle_codex_session_ensure(
     if params.session_id.trim().is_empty() || params.cwd.trim().is_empty() {
         return Err(invalid_params("session_id and cwd must not be empty"));
     }
-    let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+    let manager = match crate::fleet_provider::codex_manager::wait_for_active_handle(
         std::time::Duration::from_secs(15),
     )
     .await
@@ -3377,6 +3377,7 @@ async fn handle_codex_session_ensure(
         Some((None, _, watermark)) => claim_pending_codex_thread(
             pool,
             &params.session_id,
+            &cwd,
             watermark.unwrap_or_default(),
         )
         .await?,
@@ -3463,6 +3464,7 @@ async fn reserve_pending_codex_thread(
 async fn claim_pending_codex_thread(
     pool: &SqlitePool,
     session_id: &str,
+    cwd: &str,
     watermark: i64,
 ) -> Result<Option<String>, RpcError> {
     let payloads: Vec<String> = sqlx::query_scalar(
@@ -3476,7 +3478,7 @@ async fn claim_pending_codex_thread(
     .await
     .map_err(|error| internal(&format!("read pending Codex thread: {error}")))?;
     for payload in payloads {
-        let Some(thread_id) = codex_started_thread_id(&payload) else {
+        let Some(thread_id) = codex_started_thread_id(&payload, cwd) else {
             continue;
         };
         let claimed = sqlx::query(
@@ -3496,10 +3498,19 @@ async fn claim_pending_codex_thread(
     Ok(None)
 }
 
-fn codex_started_thread_id(payload: &str) -> Option<String> {
+fn codex_started_thread_id(payload: &str, cwd: &str) -> Option<String> {
     let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
     let thread = payload.pointer("/params/thread")?;
-    thread.get("id")?.as_str().map(str::to_owned)
+    let event_cwd = thread.get("cwd")?.as_str()?;
+    let event_cwd = std::fs::canonicalize(event_cwd)
+        .unwrap_or_else(|_| std::path::PathBuf::from(event_cwd))
+        .display()
+        .to_string();
+    (event_cwd == cwd
+        && thread.get("threadSource")?.as_str() == Some("user")
+        && thread.get("forkedFromId").is_some_and(serde_json::Value::is_null))
+    .then(|| thread.get("id")?.as_str().map(str::to_owned))
+    .flatten()
 }
 
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
@@ -12909,18 +12920,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_started_thread_claim_reads_thread_id() {
+    fn codex_started_thread_claim_requires_fresh_tui_thread_in_exact_cwd() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
         let payload = serde_json::json!({
             "method": "thread/started",
-            "params": { "thread": { "id": "thread-1", "cwd": "/app-server-cwd" } }
+            "params": { "thread": {
+                "id": "thread-1",
+                "cwd": cwd,
+                "threadSource": "user",
+                "forkedFromId": null
+            } }
         })
         .to_string();
 
         assert_eq!(
-            codex_started_thread_id(&payload),
+            codex_started_thread_id(&payload, &cwd),
             Some("thread-1".to_string())
         );
-        assert_eq!(codex_started_thread_id("{}"), None);
+        assert_eq!(codex_started_thread_id(&payload, "/wrong-cwd"), None);
+        let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
+        assert_eq!(codex_started_thread_id(&fork, &cwd), None);
     }
     use ainb_hangar_store::Store;
 
