@@ -184,16 +184,11 @@ fn our_command_line() -> Option<String> {
 /// timeout degrades to the `None` branch, which respects the holder.
 const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The full argv of `pid` as one line, or `None` when `ps` cannot answer in
-/// time.
-///
-/// Exported so the CLI can apply the same identity rule to the same lock file —
-/// the two halves disagreeing about who owns a home is how a recycled pid ends
-/// up being reported as a running daemon, and `SIGTERM`ed by `stop`.
-#[must_use]
-pub fn process_argv(pid: i32) -> Option<String> {
+/// Read one `ps -o` field for `pid`, with a bounded wait.
+fn process_ps_field(pid: i32, field: &str) -> Option<String> {
+    let field = format!("{field}=");
     let mut child = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
+        .args(["-p", &pid.to_string(), "-o", &field])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -223,6 +218,25 @@ pub fn process_argv(pid: i32) -> Option<String> {
     std::io::Read::read_to_string(&mut stdout, &mut args).ok()?;
     let args = args.trim();
     (!args.is_empty()).then(|| args.to_string())
+}
+
+/// The full argv of `pid` as one line, or `None` when `ps` cannot answer in
+/// time.
+///
+/// Exported so the CLI can apply the same identity rule to the same lock file —
+/// the two halves disagreeing about who owns a home is how a recycled pid ends
+/// up being reported as a running daemon, and `SIGTERM`ed by `stop`.
+#[must_use]
+pub fn process_argv(pid: i32) -> Option<String> {
+    process_ps_field(pid, "args")
+}
+
+/// Executable path of `pid`, without its command-line arguments.
+///
+/// This is the stable, compact identity rendered in the Daemons overlay.
+#[must_use]
+pub fn process_binary(pid: i32) -> Option<String> {
+    process_ps_field(pid, "comm")
 }
 
 /// How often the watchdog re-checks that this daemon still owns its home.
@@ -340,6 +354,13 @@ pub fn is_hangar_daemon_args(args: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_binary_reports_current_executable_path() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let path = process_binary(pid).expect("ps should report this test binary");
+        assert!(std::path::Path::new(&path).is_absolute(), "got {path}");
+    }
 
     #[test]
     fn sidecar_and_self_exec_argv_are_recognised() {
