@@ -7875,21 +7875,54 @@ fn daemon_version_skew(running: Option<&str>, mine: &str) -> Option<String> {
 /// comparison is sufficient and avoids adding a dependency to the launcher.
 /// Unknown, malformed, prerelease, and equal versions deliberately keep the
 /// existing owner: autostart may upgrade, never guess or downgrade.
-fn daemon_upgrade_required(running: Option<&str>, mine: &str) -> bool {
-    fn parse(version: &str) -> Option<[u64; 3]> {
-        let mut parts = version.split('.').map(str::parse::<u64>);
-        let parsed = [
-            parts.next()?.ok()?,
-            parts.next()?.ok()?,
-            parts.next()?.ok()?,
-        ];
-        parts.next().is_none().then_some(parsed)
-    }
+fn release_version_parts(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.').map(str::parse::<u64>);
+    let parsed = [
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    ];
+    parts.next().is_none().then_some(parsed)
+}
 
-    match (running.and_then(parse), parse(mine)) {
+fn daemon_upgrade_required(running: Option<&str>, mine: &str) -> bool {
+    match (
+        running.and_then(release_version_parts),
+        release_version_parts(mine),
+    ) {
         (Some(running), Some(mine)) => running < mine,
         _ => false,
     }
+}
+
+/// Infer a release version only from Homebrew's immutable Cellar path.
+///
+/// This bridges installs where the old daemon predates `daemon.version`. Other
+/// launch paths stay unknown, so a development or manually-installed owner is
+/// never replaced merely because its version cannot be proven.
+fn homebrew_daemon_version(command: &str) -> Option<String> {
+    let marker = "/Cellar/ainb/";
+    command
+        .split_whitespace()
+        .find_map(|word| word.split_once(marker).map(|(_, tail)| tail))
+        .and_then(|tail| tail.split('/').next())
+        .filter(|version| release_version_parts(version).is_some())
+        .map(str::to_string)
+}
+
+/// Resolve a live owner's version from its launch record, or from Homebrew's
+/// immutable Cellar path during the one-time upgrade from pre-record releases.
+fn running_daemon_version(pid: Option<u32>) -> Option<String> {
+    daemon_version_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+        .or_else(|| {
+            pid.and_then(|pid| i32::try_from(pid).ok())
+                .and_then(ainb_hangar_daemon::single_instance::process_argv)
+                .and_then(|args| homebrew_daemon_version(&args))
+        })
 }
 
 /// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
@@ -8547,11 +8580,9 @@ pub fn ensure_hangar_daemon() {
 /// Unknown, equal, prerelease, and newer owners are deliberately left alone:
 /// autostart may upgrade a released daemon but must not guess or downgrade.
 fn start_or_upgrade_daemon(announce: bool) -> Result<()> {
-    let running = daemon_version_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|version| version.trim().to_string());
-    let result = if running_daemon_pid().ok().flatten().is_some()
+    let pid = running_daemon_pid().ok().flatten();
+    let running = running_daemon_version(pid);
+    let result = if pid.is_some()
         && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION"))
     {
         restart_daemon(announce)
@@ -10750,6 +10781,26 @@ mod tests {
         assert!(!daemon_upgrade_required(Some("1.20.3"), "1.20.2"));
         assert!(!daemon_upgrade_required(Some("debug"), "1.20.2"));
         assert!(!daemon_upgrade_required(None, "1.20.2"));
+    }
+
+    #[test]
+    fn homebrew_daemon_version_accepts_only_a_cellar_release_path() {
+        assert_eq!(
+            homebrew_daemon_version(
+                "/opt/homebrew/Cellar/ainb/1.20.0/libexec/ainb hangar daemon run"
+            ),
+            Some("1.20.0".to_string())
+        );
+        assert_eq!(
+            homebrew_daemon_version("/opt/homebrew/bin/ainb hangar daemon run"),
+            None
+        );
+        assert_eq!(
+            homebrew_daemon_version(
+                "/opt/homebrew/Cellar/ainb/debug/libexec/ainb hangar daemon run"
+            ),
+            None
+        );
     }
 
     /// The freshness predicate: a sibling at least as new as `ainb` is fresh; an
