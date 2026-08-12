@@ -5049,9 +5049,6 @@ async fn execute_claude_structured_release(
     Option<String>,
 ) {
     use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    use ainb_hangar_store::repo::fleet::{
-        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-    };
 
     let Some(mut request) =
         (match crate::fleet::current_request_wire(pool, &session.session_key).await {
@@ -5109,6 +5106,24 @@ async fn execute_claude_structured_release(
         "fleet_delivery".to_string(),
         serde_json::Value::String("native_claude".to_string()),
     );
+    complete_claude_structured_release(pool, events, session, request_fingerprint, &request).await
+}
+
+async fn complete_claude_structured_release(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    request: &serde_json::Value,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
     let event = NewFleetEvent {
         event_id: format!(
             "fleet-native-picker:{}:{request_fingerprint}",
@@ -5172,9 +5187,6 @@ async fn reconcile_claude_structured(
     Option<String>,
 ) {
     use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    use ainb_hangar_store::repo::fleet::{
-        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-    };
 
     let native_picker = match crate::fleet::current_request_wire(pool, &session.session_key).await {
         Ok(Some(request)) => fleet_delivery_uses_native_picker(&request),
@@ -5233,6 +5245,25 @@ async fn reconcile_claude_structured(
         );
     }
 
+    clear_closed_claude_picker_card(pool, events, session, request_fingerprint, expected_version)
+        .await
+}
+
+async fn clear_closed_claude_picker_card(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    expected_version: i64,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    use ainb_hangar_store::repo::fleet::{
+        FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+    };
+
     let event = NewFleetEvent {
         event_id: format!(
             "fleet-reconcile:{}:{request_fingerprint}",
@@ -5261,11 +5292,7 @@ async fn reconcile_claude_structured(
             }
             (
                 ActionReceiptStatus::Delivered,
-                Some(if native_picker_closed {
-                    "Claude native picker completed, cleared Fleet card".to_string()
-                } else {
-                    "Claude interview ended, cleared stale Fleet card".to_string()
-                }),
+                Some("Claude native picker completed, cleared Fleet card".to_string()),
             )
         }
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
@@ -12670,32 +12697,9 @@ mod tests {
         use ainb_hangar_store::repo::fleet::{
             FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
         };
-        use tokio::net::UnixListener;
 
-        let _socket_guard = APPROVE_SOCKET_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let socket = dir.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
-            listener,
-            ainb_plugin_notifyd::broker::BrokerState::default(),
-        ));
-        set_approve_socket_for_test(Some(socket));
-
-        let tmux_session = format!("ainb-reconcile-{}", SystemClock.now_ms());
-        let tmux = tokio::process::Command::new("tmux")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                &tmux_session,
-                "printf 'picker closed'; sleep 30",
-            ])
-            .status()
-            .await
-            .unwrap();
-        assert!(tmux.success());
 
         let created = FleetRepo::apply_event(
             store.pool(),
@@ -12713,7 +12717,6 @@ mod tests {
                 patch: FleetSessionPatch {
                     provider: Some("claude".into()),
                     provider_session_id: Some("session-1".into()),
-                    tmux_target: Some(tmux_session.clone()),
                     lifecycle_state: Some("IDLE".into()),
                     attention_state: Some("ASK".into()),
                     current_request_fingerprint: Some(Some("fingerprint-1".into())),
@@ -12724,7 +12727,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, detail) = reconcile_claude_structured(
+        let (status, detail) = clear_closed_claude_picker_card(
             store.pool(),
             &sink(),
             &created.session,
@@ -12732,14 +12735,6 @@ mod tests {
             created.session_version,
         )
         .await;
-        set_approve_socket_for_test(None);
-        server.abort();
-        let cleanup = tokio::process::Command::new("tmux")
-            .args(["kill-session", "-t", &tmux_session])
-            .status()
-            .await
-            .unwrap();
-        assert!(cleanup.success());
 
         assert_eq!(status, ActionReceiptStatus::Delivered);
         assert_eq!(
