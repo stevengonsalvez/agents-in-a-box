@@ -4739,6 +4739,9 @@ mod tests {
         );
 
         row.current_request_fingerprint = Some("after".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Proceed with release?", "options": ["Yes"]}]
+        }));
         row.version += 1;
         let closed = apply(&delivered, FleetEvent::Snapshot(vec![row])).state;
         assert!(matches!(closed.mode, FleetMode::Browse));
@@ -4838,6 +4841,9 @@ mod tests {
 
         row.version += 1;
         row.current_request_fingerprint = Some("after".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Proceed with release?", "options": ["Yes"]}]
+        }));
         state.set_sessions(vec![row]);
         assert!(matches!(state.mode, FleetMode::Browse));
         assert_eq!(
