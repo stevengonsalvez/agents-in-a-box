@@ -1,9 +1,9 @@
 //! Codex app-server control adapter.
 //!
-//! Codex app-server speaks JSON-RPC over stdio, WebSocket, or WebSocket over a
-//! Unix socket. Fleet uses `codex app-server proxy --sock PATH` as its stdio
-//! bridge to the shared Unix endpoint. This keeps framing inside Codex while
-//! preserving exact JSON-RPC request IDs for structured responses.
+//! Codex app-server speaks JSON-RPC over stdio or WebSocket, including WebSocket
+//! over a Unix socket. Hangar connects its shared Unix listener directly with a
+//! WebSocket. `codex app-server proxy --sock PATH` targets the separate managed
+//! daemon control socket, not an arbitrary listener.
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -160,6 +160,8 @@ pub fn app_server_command(codex_binary: &OsStr, socket: &Path) -> CommandSpec {
     CommandSpec {
         program: codex_binary.to_os_string(),
         args: vec![
+            "--disable".into(),
+            "apps".into(),
             "app-server".into(),
             "--remote-control".into(),
             "--listen".into(),
@@ -168,7 +170,7 @@ pub fn app_server_command(codex_binary: &OsStr, socket: &Path) -> CommandSpec {
     }
 }
 
-/// Build stdio proxy command for shared app-server Unix endpoint.
+/// Build stdio proxy command for Codex's managed daemon control socket.
 pub fn proxy_command(codex_binary: &OsStr, socket: &Path) -> CommandSpec {
     CommandSpec {
         program: codex_binary.to_os_string(),
@@ -187,7 +189,12 @@ pub fn managed_tui_command(
     socket: &Path,
     additional_args: impl IntoIterator<Item = OsString>,
 ) -> CommandSpec {
-    let mut args = vec!["--remote".into(), unix_endpoint(socket).into()];
+    let mut args = vec![
+        "--disable".into(),
+        "apps".into(),
+        "--remote".into(),
+        unix_endpoint(socket).into(),
+    ];
     args.extend(additional_args);
     CommandSpec {
         program: codex_binary.to_os_string(),
@@ -865,6 +872,8 @@ mod tests {
         assert_eq!(
             app_server_command(OsStr::new("codex"), socket).args,
             vec![
+                OsString::from("--disable"),
+                OsString::from("apps"),
                 OsString::from("app-server"),
                 OsString::from("--remote-control"),
                 OsString::from("--listen"),
@@ -888,6 +897,8 @@ mod tests {
             )
             .args,
             vec![
+                OsString::from("--disable"),
+                OsString::from("apps"),
                 OsString::from("--remote"),
                 OsString::from("unix:///tmp/fleet codex.sock"),
                 OsString::from("--model"),

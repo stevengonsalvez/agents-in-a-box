@@ -65,7 +65,7 @@
 //! those repos apply are still required, because an FK proves only that a parent
 //! row exists, never which workspace owns it.
 
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, migrate::Migrate};
 
 mod store;
 pub use store::Store;
@@ -116,8 +116,93 @@ pub mod test_support;
 /// Returns an error if a migration fails to apply (for example a checksum
 /// mismatch on a previously applied migration, or malformed SQL).
 pub async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    let migrator = sqlx::migrate!("./migrations");
+    reconcile_superseded_codex_launch_migrations(pool, &migrator).await?;
+    migrator.run(pool).await?;
     Ok(())
+}
+
+/// Migration 0087 landed after 0089/0090 and duplicated their two columns.
+/// It never needs to run: 0088 drops its transient index, while 0089/0090 own
+/// the durable columns. Record the matching checksum before SQLx executes it.
+async fn reconcile_superseded_codex_launch_migrations(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    (&mut *connection).ensure_migrations_table().await?;
+    let applied: std::collections::HashSet<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
+    let columns: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('interactive_codex_thread')")
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
+
+    let mut superseded = Vec::new();
+    if !applied.contains(&87) {
+        superseded.push(87);
+    }
+    if columns.contains("resumable") && !applied.contains(&89) {
+        superseded.push(89);
+    }
+    if columns.contains("event_watermark") && !applied.contains(&90) {
+        superseded.push(90);
+    }
+    for version in superseded {
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == version)
+            .ok_or_else(|| anyhow::anyhow!("missing embedded migration {version}"))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) VALUES (?, ?, TRUE, ?, -1)",
+        )
+        .bind(migration.version)
+        .bind(&*migration.description)
+        .bind(&*migration.checksum)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn superseded_codex_launch_migrations_bootstrap_and_recover() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        apply_migrations(&pool).await.unwrap();
+
+        for version in [87_i64, 89, 90] {
+            let present: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?",
+            )
+            .bind(version)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(present, 1, "migration {version} was not recorded");
+        }
+
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (87, 89, 90)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_migrations(&pool).await.unwrap();
+    }
 }
 
 /// Probe whether the LIVE database has drifted away from the schema this
