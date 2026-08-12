@@ -260,6 +260,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Same disk pressure the `cache-targets: false` below already answers, one
+      # step earlier: it is now the BUILD that runs out, not the post-job archive.
+      # `--all-features` across the workspace, plus the nested `cargo build` that
+      # `real_plugin_axes` runs per in-tree plugin, outgrew what a stock runner
+      # leaves free — surfacing as `failed to build archive …: No space left on
+      # device` while linking ainb-plugin-hangar, which the harness could only
+      # report as `exit status: 101`. It read as a broken contract, and this job's
+      # policy is never to rerun one to green, so it had to be told apart from a
+      # real one: the same run passed at 10:30 and failed at 10:33 on comparable
+      # trees, which is borderline-disk behaviour rather than a frozen guarantee
+      # breaking. The preinstalled Android / .NET / GHC toolchains are tens of GB
+      # and nothing in this job uses them.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
