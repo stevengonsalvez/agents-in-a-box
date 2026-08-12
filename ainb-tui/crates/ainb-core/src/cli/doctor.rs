@@ -1,30 +1,180 @@
-// ABOUTME: `ainb doctor` — classified dependency health check for the reflect /
-// statusline toolchain. Thin wrapper over `crate::cli::deps`; prints what's
-// installed, what needs it, and the exact commands to fix anything missing.
+// ABOUTME: `ainb doctor` — one health report for skills, dependencies, hooks,
+// and daemons. Preserves skill-manager checks while adding runtime diagnostics.
 
 use anyhow::Result;
+use serde::Serialize;
 
 use super::OutputFormat;
 use crate::cli::deps::{self, RealEnv};
 
-/// Classified dependency check for the reflect / statusline toolchain.
-///
-/// Takes no positional/flag args of its own; the global `--format` flag
-/// selects text vs json output.
+#[derive(Serialize)]
+struct DoctorReport<'a> {
+    skill_doctor: String,
+    skill_doctor_error: Option<String>,
+    dependencies: &'a [deps::DepReport],
+    hooks: Option<ainb_plugin_notifyd::HookHealth>,
+    hooks_error: Option<String>,
+    daemons: Vec<crate::fleet::daemons::DaemonStatus>,
+    daemons_error: Option<String>,
+}
+
+/// Full machine health check. `--offline` skips skill-source network probes.
 #[derive(clap::Args)]
-pub struct DoctorArgs {}
+pub struct DoctorArgs {
+    /// Skip skill-source reachability checks. Runtime checks stay local.
+    #[arg(long)]
+    pub offline: bool,
+}
 
 /// Entry point for `ainb doctor`.
 #[allow(clippy::unused_async)]
-pub async fn execute(_args: DoctorArgs, format: OutputFormat) -> Result<()> {
-    let reports = deps::detect(&RealEnv);
+pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
+    let dependencies = deps::detect(&RealEnv);
+    let (hooks, hooks_error) = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => (Some(ainb_plugin_notifyd::hook_health(&paths)), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let (daemons, daemons_error) = match crate::fleet::daemons::collect() {
+        Ok(rows) => (rows, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&reports)?);
+            let (skill_doctor, skill_doctor_error) = run_skill_doctor(args.offline);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&DoctorReport {
+                    skill_doctor,
+                    skill_doctor_error: skill_doctor_error.clone(),
+                    dependencies: &dependencies,
+                    hooks,
+                    hooks_error,
+                    daemons,
+                    daemons_error,
+                })?
+            );
+            if let Some(error) = skill_doctor_error {
+                return Err(anyhow::anyhow!(error));
+            }
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            deps::print_text(&reports);
+            deps::print_text(&dependencies);
+            print_runtime_text(
+                hooks.as_ref(),
+                hooks_error.as_deref(),
+                &daemons,
+                daemons_error.as_deref(),
+            );
+            // The skill check can traverse several tool homes. Render the
+            // runtime result first so a slow skill scan never hides a dead
+            // hook or daemon from the user.
+            let (skill_doctor, skill_doctor_error) = run_skill_doctor(args.offline);
+            println!("\nSKILL HEALTH");
+            println!("------------");
+            print!("{skill_doctor}");
+            if let Some(error) = skill_doctor_error {
+                return Err(anyhow::anyhow!(error));
+            }
         }
     }
     Ok(())
+}
+
+fn run_skill_doctor(offline: bool) -> (String, Option<String>) {
+    let home = ainb_skill_core::paths::default_ainb_home();
+    let mut output = Vec::new();
+    let result = ainb_cli::doctor::dispatch(&home, ainb_cli::DoctorArgs { offline }, &mut output);
+    (
+        String::from_utf8_lossy(&output).into_owned(),
+        result.err().map(|error| error.to_string()),
+    )
+}
+
+fn print_runtime_text(
+    hooks: Option<&ainb_plugin_notifyd::HookHealth>,
+    hooks_error: Option<&str>,
+    daemons: &[crate::fleet::daemons::DaemonStatus],
+    daemons_error: Option<&str>,
+) {
+    println!("\nRUNTIME HEALTH");
+    println!("--------------");
+    match hooks {
+        Some(hooks) => {
+            let installed = hooks.installed_version.as_deref().unwrap_or("not installed");
+            println!(
+                "hooks (ainb-hooks): installed {installed} | bundled {} | {}",
+                hooks.bundled_version,
+                if hooks.version_current {
+                    "current"
+                } else {
+                    "update needed"
+                }
+            );
+            println!(
+                "  script: {}",
+                if hooks.script_ready {
+                    "ready"
+                } else {
+                    "BROKEN"
+                }
+            );
+            println!(
+                "  hook binary: {}",
+                if hooks.hook_binary_ready {
+                    "ready"
+                } else {
+                    "BROKEN"
+                }
+            );
+            println!(
+                "  notifyd: {} | approval broker: {}",
+                if hooks.notify_socket_live {
+                    "running"
+                } else {
+                    "idle (starts on hook)"
+                },
+                if hooks.approve_socket_live {
+                    "running"
+                } else {
+                    "idle"
+                }
+            );
+            for agent in &hooks.agents {
+                println!(
+                    "  {}: {} — {}",
+                    agent.agent,
+                    if agent.wiring_ready {
+                        "wired"
+                    } else {
+                        "NOT WIRED"
+                    },
+                    agent.detail
+                );
+            }
+            if let Some(event) = &hooks.last_event {
+                println!("  last event: {event}");
+            }
+            for issue in &hooks.issues {
+                println!("  ! {}: {}", issue.component, issue.message);
+                println!("    fix: {}", issue.repair);
+            }
+        }
+        None => println!(
+            "hooks: cannot inspect — {}",
+            hooks_error.unwrap_or("unknown error")
+        ),
+    }
+    match daemons_error {
+        Some(error) => println!("\ndaemons: cannot inspect — {error}"),
+        None => {
+            println!("\ndaemons:");
+            print!(
+                "{}",
+                crate::cli::fleet::daemons::render_text(
+                    daemons,
+                    crate::fleet::daemons::heartbeat::now_ms()
+                )
+            );
+        }
+    }
 }
