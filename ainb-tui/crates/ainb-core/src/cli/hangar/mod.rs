@@ -8521,12 +8521,13 @@ async fn run_daemon_run() -> Result<()> {
 /// `hangar daemon start`: spawn the daemon as a detached background child and
 /// record its EXACT pid.
 ///
-/// Idempotent: if the recorded pid is already alive, this is a no-op with a
-/// notice (never a second daemon). The child is spawned with the same
+/// Idempotent: if the recorded pid is already alive, this is a no-op unless a
+/// newer release owns this command. In that case it hands off to the newer
+/// daemon, never spawning a second one. The child is spawned with the same
 /// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
 /// stderr go to the daemon's own rolling log, not this terminal.
 fn run_daemon_start() -> Result<()> {
-    start_daemon_if_stopped(true)
+    start_or_upgrade_daemon(true)
 }
 
 /// Best-effort autostart of the Hangar daemon before the TUI connects.
@@ -8536,6 +8537,16 @@ fn run_daemon_start() -> Result<()> {
 /// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
 /// `mcp_pool`'s `ensure_daemon` warn-and-continue.
 pub fn ensure_hangar_daemon() {
+    if let Err(e) = start_or_upgrade_daemon(false) {
+        tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+    }
+}
+
+/// Start a missing daemon, or hand off an older recorded release to this one.
+///
+/// Unknown, equal, prerelease, and newer owners are deliberately left alone:
+/// autostart may upgrade a released daemon but must not guess or downgrade.
+fn start_or_upgrade_daemon(announce: bool) -> Result<()> {
     let running = daemon_version_path()
         .ok()
         .and_then(|path| std::fs::read_to_string(path).ok())
@@ -8543,12 +8554,9 @@ pub fn ensure_hangar_daemon() {
     let result = if running_daemon_pid().ok().flatten().is_some()
         && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION"))
     {
-        restart_daemon(false)
+        restart_daemon(announce)
     } else {
-        start_daemon_if_stopped(false)
-    };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+        start_daemon_if_stopped(announce)
     }
 }
 
