@@ -8558,6 +8558,7 @@ fn start_or_upgrade_daemon(announce: bool) -> Result<()> {
     } else {
         start_daemon_if_stopped(announce)
     }
+    result
 }
 
 /// File name of the captured daemon stderr, inside the daemon's log dir.
