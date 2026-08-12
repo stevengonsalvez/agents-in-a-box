@@ -4602,6 +4602,7 @@ async fn execute_claude_structured(
     if request.get("fleet_delivery").and_then(serde_json::Value::as_str) == Some("mirrored") {
         return execute_claude_mirrored_picker(
             pool,
+            events,
             session,
             expected_version,
             request_fingerprint,
@@ -4689,6 +4690,7 @@ async fn execute_claude_structured(
 /// equivalent verification coverage.
 async fn execute_claude_mirrored_picker(
     pool: &SqlitePool,
+    events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
     expected_version: i64,
     request_fingerprint: &str,
@@ -4718,6 +4720,16 @@ async fn execute_claude_mirrored_picker(
         .await;
         if status != ActionReceiptStatus::Delivered {
             let detail = detail.unwrap_or_else(|| "mirrored Claude picker step failed".to_string());
+            if index == 0 && detail == "Claude native picker is no longer active" {
+                return reconcile_claude_structured(
+                    pool,
+                    events,
+                    session,
+                    request_fingerprint,
+                    expected_version,
+                )
+                .await;
+            }
             let detail = if index == 0 {
                 detail
             } else {
@@ -5165,10 +5177,7 @@ async fn reconcile_claude_structured(
     };
 
     let native_picker = match crate::fleet::current_request_wire(pool, &session.session_key).await {
-        Ok(Some(request)) => request
-            .get("fleet_delivery")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|route| route == "native_claude"),
+        Ok(Some(request)) => fleet_delivery_uses_native_picker(&request),
         Ok(None) => false,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
@@ -5198,8 +5207,8 @@ async fn reconcile_claude_structured(
     }
     // Generic transcript text cannot prove which interview it belongs to. A
     // normal Fleet-held interview therefore stays visible until Claude emits
-    // its authoritative tool lifecycle event. Only the explicit native route
-    // owns a uniquely identifiable terminal widget to reconcile here.
+    // its authoritative tool lifecycle event. Native and mirrored routes own
+    // the same uniquely identifiable terminal widget to reconcile here.
     if !native_picker {
         return (
             ActionReceiptStatus::Unknown,
@@ -5264,10 +5273,18 @@ async fn reconcile_claude_structured(
 }
 
 /// Claude's own AskUserQuestion widget always exposes this fixed interaction
-/// footer while it owns terminal input. Native-route reconciliation only clears
-/// a card after that footer disappears, never while the picker remains active.
+/// footer while it owns terminal input. Native-picker reconciliation only
+/// clears a card after that footer disappears, never while the picker remains
+/// active.
 fn claude_native_picker_is_visible(pane: &str) -> bool {
     pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
+}
+
+fn fleet_delivery_uses_native_picker(request: &serde_json::Value) -> bool {
+    matches!(
+        request.get("fleet_delivery").and_then(serde_json::Value::as_str),
+        Some("native_claude" | "mirrored")
+    )
 }
 
 // Observed in Claude Code 2.1.226, exercised by the mirrored-picker live test.
@@ -12515,6 +12532,19 @@ mod tests {
         assert!(!claude_native_picker_is_visible(
             "User answered Claude's questions: Release proof? → East"
         ));
+    }
+
+    #[test]
+    fn mirrored_claude_picker_routes_are_reconciled_when_native_picker_closes() {
+        assert!(fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "native_claude"
+        })));
+        assert!(fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "mirrored"
+        })));
+        assert!(!fleet_delivery_uses_native_picker(&serde_json::json!({
+            "fleet_delivery": "fleet"
+        })));
     }
 
     #[tokio::test]
