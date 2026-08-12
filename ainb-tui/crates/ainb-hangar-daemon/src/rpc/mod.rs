@@ -12665,6 +12665,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_closed_mirrored_claude_picker_clears_fleet_card() {
+        use ainb_hangar_proto::fleet::ActionReceiptStatus;
+        use ainb_hangar_store::repo::fleet::{
+            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
+        };
+        use tokio::net::UnixListener;
+
+        let _socket_guard = APPROVE_SOCKET_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            ainb_plugin_notifyd::broker::BrokerState::default(),
+        ));
+        set_approve_socket_for_test(Some(socket));
+
+        let tmux_session = format!("ainb-reconcile-{}", SystemClock.now_ms());
+        let tmux = tokio::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &tmux_session, "printf 'picker closed'; sleep 30"])
+            .status()
+            .await
+            .unwrap();
+        assert!(tmux.success());
+
+        let created = FleetRepo::apply_event(
+            store.pool(),
+            &NewFleetEvent {
+                event_id: "ask".into(),
+                session_key: "claude:session-1".into(),
+                observed_at: 1,
+                authority: ObservationAuthority::Authoritative,
+                event_type: "AskUserQuestion".into(),
+                payload: serde_json::json!({
+                    "fleet_delivery": "mirrored",
+                    "questions": [{"question": "Where?"}],
+                })
+                .to_string(),
+                patch: FleetSessionPatch {
+                    provider: Some("claude".into()),
+                    provider_session_id: Some("session-1".into()),
+                    tmux_target: Some(tmux_session.clone()),
+                    lifecycle_state: Some("IDLE".into()),
+                    attention_state: Some("ASK".into()),
+                    current_request_fingerprint: Some(Some("fingerprint-1".into())),
+                    ..FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, detail) = reconcile_claude_structured(
+            store.pool(),
+            &sink(),
+            &created.session,
+            "fingerprint-1",
+            created.session_version,
+        )
+        .await;
+        set_approve_socket_for_test(None);
+        server.abort();
+        let cleanup = tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_session])
+            .status()
+            .await
+            .unwrap();
+        assert!(cleanup.success());
+
+        assert_eq!(status, ActionReceiptStatus::Delivered);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Claude native picker completed, cleared Fleet card")
+        );
+        let session =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(session.attention_state, "NONE");
+        assert_eq!(session.current_request_fingerprint, None);
+    }
+
+    #[tokio::test]
     async fn abandoned_action_and_start_receipts_become_unknown() {
         use ainb_hangar_proto::fleet::{
             ActionReceiptStatus, ControlAction, FleetActionParams, FleetProvider, FleetStartParams,
