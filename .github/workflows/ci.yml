@@ -267,6 +267,8 @@ jobs:
           # Contract suite builds every feature. Archiving its target tree exhausts
           # GitHub-hosted runner disk during rust-cache's post-job metadata pass.
           cache-targets: false
+          # Registry restore is useful; saving invokes the failing post-job pass.
+          save-if: false
       - uses: taiki-e/install-action@nextest
       - run: >
           cargo nextest run --workspace --all-features --no-fail-fast
