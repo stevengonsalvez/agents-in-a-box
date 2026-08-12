@@ -1191,6 +1191,59 @@ fn codex_orphans_to_reap(ps_output: &str, adoption_credible: impl Fn(&str) -> bo
         .collect()
 }
 
+/// An obsolete pre-lock Hangar daemon that still drives a legacy stdio proxy.
+///
+/// This is deliberately narrower than the app-server orphan reaper. The old
+/// daemon must be orphaned, recognisably Hangar, and have a direct child proxy
+/// for this exact home socket before Ainb is allowed to stop it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyProxyDaemon {
+    pid: u32,
+    process_start_fingerprint: String,
+}
+
+/// Select orphaned legacy Hangar daemon pids whose direct proxy child targets
+/// `live_socket`.
+///
+/// A proxy on its own is not authority to signal anything. The parent-child
+/// relationship confines this compatibility recovery to the obsolete Ainb
+/// topology that predated the native WebSocket manager.
+fn legacy_proxy_daemon_pids(ps_output: &str, live_socket: &Path) -> Vec<u32> {
+    let expected_socket = live_socket.to_string_lossy();
+    let rows = ps_output.lines().filter_map(parse_ps_row).collect::<Vec<_>>();
+    rows.iter()
+        .filter(|parent| {
+            parent.ppid == 1 && crate::single_instance::is_hangar_daemon_args(parent.args)
+        })
+        .filter(|parent| {
+            rows.iter().any(|child| {
+                child.ppid == parent.pid
+                    && is_codex_app_server(child.args)
+                    && codex_proxy_socket(child.args)
+                        .is_some_and(|socket| socket == expected_socket)
+            })
+        })
+        .map(|parent| parent.pid)
+        .collect()
+}
+
+/// Confirm a selected daemon remains the same process before signalling it.
+///
+/// A PID is reusable after the first process exits, so the start fingerprint is
+/// required before both TERM and KILL. The fresh process-table check also proves
+/// the legacy parent-child topology still targets this exact home.
+async fn legacy_proxy_daemon_is_current(
+    candidate: &LegacyProxyDaemon,
+    live_socket: &Path,
+) -> bool {
+    process_identity(candidate.pid)
+        .await
+        .is_some_and(|identity| identity.process_start_fingerprint == candidate.process_start_fingerprint)
+        && ps_process_table()
+            .await
+            .is_some_and(|ps_output| legacy_proxy_daemon_pids(&ps_output, live_socket).contains(&candidate.pid))
+}
+
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
 /// shared socket, then return who to signal.
 ///
@@ -1454,6 +1507,65 @@ async fn terminate_orphans(
         tracing::error!(pid, "orphaned codex app-server survived SIGKILL");
     }
     outcome
+}
+
+/// Stop obsolete orphaned Hangar daemons that still run the legacy Codex proxy
+/// against this home's native WebSocket socket.
+///
+/// This runs only during boot. Current Hangar never launches the proxy, so a
+/// periodic process-table scan would add cost without improving recovery. The
+/// parent is revalidated by start fingerprint and direct-child topology before
+/// each signal, preventing PID reuse or an argv change from widening authority.
+pub async fn reap_legacy_codex_proxy_daemons(live_socket: &Path) -> usize {
+    let Some(ps_output) = ps_process_table().await else {
+        return 0;
+    };
+    let mut reaped = 0;
+    for pid in legacy_proxy_daemon_pids(&ps_output, live_socket) {
+        let Some(identity) = process_identity(pid).await else {
+            continue;
+        };
+        let candidate = LegacyProxyDaemon {
+            pid,
+            process_start_fingerprint: identity.process_start_fingerprint,
+        };
+        if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        match nix_signal(pid, Some(Signal::SIGTERM)) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(pid, error = %error, "failed to stop legacy codex proxy daemon");
+                continue;
+            }
+        }
+        if wait_for_exit(&[pid], ReapTiming::PRODUCTION.term_grace, ReapTiming::PRODUCTION.poll, &nix_signal)
+            .await
+            .is_empty()
+        {
+            reaped += 1;
+            continue;
+        }
+        if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        match nix_signal(pid, Some(Signal::SIGKILL)) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(pid, error = %error, "failed to kill legacy codex proxy daemon");
+                continue;
+            }
+        }
+        if wait_for_exit(&[pid], ReapTiming::PRODUCTION.kill_confirm, ReapTiming::PRODUCTION.poll, &nix_signal)
+            .await
+            .is_empty()
+        {
+            reaped += 1;
+        } else {
+            tracing::error!(pid, "legacy codex proxy daemon survived SIGKILL");
+        }
+    }
+    reaped
 }
 
 /// Reap codex app-server processes orphaned by a prior daemon or plugin broker.
@@ -2288,6 +2400,41 @@ mod tests {
         // The desktop app has neither `bin/codex` nor ppid==1.
         let desktop = "  900     1 /Applications/ChatGPT.app/Contents/Resources/codex --foo\n";
         assert!(codex_orphans_to_reap(desktop, |_| true).is_empty());
+    }
+
+    #[test]
+    fn legacy_proxy_recovery_targets_only_its_orphaned_hangar_parent() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = home.path().join("codex-app-server.sock");
+        let other = home.path().join("other.sock");
+        let dump = format!(
+            "  PID  PPID ARGS\n\
+              810     1 /tmp/ainb-hangar-daemon\n\
+              811   810 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              820     1 /tmp/ainb-hangar-daemon\n\
+              821   820 /opt/codex/bin/codex app-server proxy --sock {other}\n\
+              830     1 /tmp/not-ainb\n\
+              831   830 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              840     1 /opt/codex/bin/codex app-server proxy --sock {socket}\n",
+            socket = socket.display(),
+            other = other.display(),
+        );
+        assert_eq!(legacy_proxy_daemon_pids(&dump, &socket), vec![810]);
+    }
+
+    #[test]
+    fn legacy_proxy_recovery_requires_direct_child_and_exact_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = home.path().join("codex-app-server.sock");
+        let dump = format!(
+            "  PID  PPID ARGS\n\
+              810     1 /tmp/ainb-hangar-daemon\n\
+              811  9999 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              820     1 /tmp/ainb-hangar-daemon\n\
+              821   820 /opt/codex/bin/codex app-server proxy --sock /tmp/foreign.sock\n",
+            socket = socket.display(),
+        );
+        assert!(legacy_proxy_daemon_pids(&dump, &socket).is_empty());
     }
 
     /// Quoting the markers is not being them. Every line below contains both
