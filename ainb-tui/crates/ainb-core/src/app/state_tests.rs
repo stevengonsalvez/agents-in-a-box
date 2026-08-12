@@ -442,6 +442,7 @@ mod tests {
 
         let tmux_name = format!("ainb-idle-restart-{}", uuid::Uuid::new_v4());
         let _tmux = ExactTmuxSession(tmux_name.clone());
+        let working_dir = std::env::current_dir().expect("current directory");
         assert!(
             Command::new("tmux")
                 .args(["new-session", "-d", "-s", &tmux_name])
@@ -486,6 +487,7 @@ mod tests {
             .expect("session manager")
             .start_cli_in_tmux(
                 &tmux_name,
+                &working_dir,
                 true,
                 Some("gpt-5.6-luna".to_string()),
                 SessionAgentType::Codex,
