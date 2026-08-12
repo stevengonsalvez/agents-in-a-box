@@ -1342,8 +1342,9 @@ pub struct CodexSessionEnsureParams {
 /// Result for `codex/session_ensure`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexSessionEnsureResult {
-    /// Exact Codex thread identity.
-    pub thread_id: String,
+    /// Exact Codex thread identity, absent until the fresh remote TUI creates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     /// Canonical Unix endpoint consumed by the Interactive tmux client.
     pub endpoint: String,
 }
