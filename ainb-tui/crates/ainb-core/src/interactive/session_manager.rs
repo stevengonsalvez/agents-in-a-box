@@ -143,7 +143,13 @@ pub(crate) async fn ensure_codex_remote_thread(
             skip_permissions,
         })
         .await
-        .map_err(|error| anyhow::anyhow!("prepare shared Codex thread: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Codex remote session unavailable. Verify Codex is signed in and retry. \
+                 If it persists, restart Ainb with `ainb hangar daemon stop` then \
+                 `ainb hangar daemon start`. Details: {error}"
+            )
+        })
 }
 
 /// Wait briefly for the freshly started remote terminal to publish its exact
