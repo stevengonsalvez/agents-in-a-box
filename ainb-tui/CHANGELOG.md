@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.5] - 2026-08-12
+### Added
+- Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
+- **daemons**: show hangar runtime identity
+- **hangar**: record daemon executable identity
+
+### Other
+- Merge pull request #671 from stevengonsalvez/chore/release-v1.20.4
+
+
 ## [1.20.4] - 2026-08-12
 ### Added
 - Merge pull request #662 from stevengonsalvez/fix/tui-tripwire-hangar-home
