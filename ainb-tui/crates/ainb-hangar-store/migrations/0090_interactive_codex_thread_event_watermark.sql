@@ -1,3 +1,10 @@
 -- Cursor prevents a pending launch claiming a thread that predated it.
-ALTER TABLE interactive_codex_thread
-    ADD COLUMN event_watermark INTEGER;
+--
+-- INTENTIONAL NO-OP, same collision as 0089. This migration originally ran
+--     ALTER TABLE interactive_codex_thread ADD COLUMN event_watermark ...
+-- and 0087 already adds that column too, so it would fail with
+-- `duplicate column name: event_watermark` the moment 89 stopped failing first.
+--
+-- Safe to edit for the same reason as 0089: the chain has never reached this
+-- version on any database, so no recorded checksum exists to conflict with.
+-- See 0089 for the full reasoning.

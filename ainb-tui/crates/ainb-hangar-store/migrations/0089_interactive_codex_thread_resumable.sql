@@ -1,3 +1,19 @@
 -- A thread becomes resumable only after its first turn persisted a rollout.
-ALTER TABLE interactive_codex_thread
-    ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0;
+--
+-- INTENTIONAL NO-OP. This migration originally ran
+--     ALTER TABLE interactive_codex_thread ADD COLUMN resumable ...
+-- but 0087 already adds that exact column, so the statement could only ever
+-- fail with `duplicate column name: resumable` and abort the whole chain at
+-- version 89. The two landed a day apart from branches that did not see each
+-- other (0087 "serialize pending Codex launches", 0089 "migrate Codex thread
+-- resumability").
+--
+-- Editing an applied migration is normally forbidden — sqlx checksums the full
+-- file text and refuses to boot against a database that recorded a different
+-- one. It is safe HERE precisely because the statement always failed: applying
+-- 89 requires 87 to have run first, 87 is what creates the column, so no
+-- database anywhere holds a `_sqlx_migrations` row for this version. There is
+-- no checksum in the wild to conflict with.
+--
+-- The file is kept rather than deleted so the ordinals stay dense and every
+-- later migration keeps its number.

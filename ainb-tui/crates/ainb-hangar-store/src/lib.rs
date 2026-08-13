@@ -122,9 +122,31 @@ pub async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Migration 0087 landed after 0089/0090 and duplicated their two columns.
-/// It never needs to run: 0088 drops its transient index, while 0089/0090 own
-/// the durable columns. Record the matching checksum before SQLx executes it.
+/// Reconcile the 0087-versus-0089/0090 column collision before SQLx runs.
+///
+/// 0089 and 0090 landed at 10:27 and 10:29; 0087 landed at 15:46 the SAME day
+/// with a LOWER number. Both sides add `resumable` and `event_watermark` to
+/// `interactive_codex_thread`, and SQLx runs in version order, so there is no
+/// ordering in which both can execute — one of them always dies on
+/// `duplicate column name`. Which one depends on when a database was created,
+/// which is why this cannot be fixed by editing files alone:
+///
+/// ```text
+///   fresh db          87 runs, creates the columns    -> 89/90 would collide
+///   db from 10:29-15:46   89/90 ran, columns exist    -> 87 would collide
+/// ```
+///
+/// So the columns are owned by whichever side got there first on THAT database,
+/// and the loser is recorded as applied without executing. 0089/0090 are inert
+/// files (see their headers); 0087 still does real work for a fresh database
+/// and must NOT be skipped there.
+///
+/// The `columns.contains(...)` guard on 87 is the whole correctness condition.
+/// Skipping 87 unconditionally is the obvious-looking simplification and it is
+/// wrong: on a fresh database this runs before ANY migration, so the table does
+/// not exist yet and no columns are reported — recording 87 as applied then
+/// means nothing ever adds `resumable`, and every later read fails with
+/// `no such column: resumable`. That was live on main.
 async fn reconcile_superseded_codex_launch_migrations(
     pool: &SqlitePool,
     migrator: &sqlx::migrate::Migrator,
@@ -145,7 +167,8 @@ async fn reconcile_superseded_codex_launch_migrations(
             .collect();
 
     let mut superseded = Vec::new();
-    if !applied.contains(&87) {
+    // Only when the columns are ALREADY there, i.e. 89/90 won this database.
+    if columns.contains("resumable") && !applied.contains(&87) {
         superseded.push(87);
     }
     if columns.contains("resumable") && !applied.contains(&89) {
@@ -155,10 +178,7 @@ async fn reconcile_superseded_codex_launch_migrations(
         superseded.push(90);
     }
     for version in superseded {
-        let migration = migrator
-            .iter()
-            .find(|migration| migration.version == version)
-            .ok_or_else(|| anyhow::anyhow!("missing embedded migration {version}"))?;
+        let migration = embedded(migrator, version)?;
         sqlx::query(
             "INSERT OR IGNORE INTO _sqlx_migrations \
              (version, description, success, checksum, execution_time) VALUES (?, ?, TRUE, ?, -1)",
@@ -169,7 +189,37 @@ async fn reconcile_superseded_codex_launch_migrations(
         .execute(&mut *connection)
         .await?;
     }
+
+    // A database from the 10:29-15:46 window RAN 0089/0090 and recorded the
+    // checksum of the text they had then. That text is gone — the files are
+    // inert now — so SQLx would refuse to boot on a checksum mismatch, which
+    // is exactly the corruption guard doing its job on a change we made on
+    // purpose. Restamp those two rows to the current text. Safe because the
+    // effect the old text had (the two columns) is present and verified above;
+    // only the recorded spelling of an already-satisfied migration changes.
+    for version in [89_i64, 90] {
+        if !applied.contains(&version) {
+            continue;
+        }
+        let migration = embedded(migrator, version)?;
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(&*migration.checksum)
+            .bind(version)
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(())
+}
+
+/// One embedded migration by version, or an error naming the missing one.
+fn embedded(
+    migrator: &sqlx::migrate::Migrator,
+    version: i64,
+) -> anyhow::Result<&sqlx::migrate::Migration> {
+    migrator
+        .iter()
+        .find(|migration| migration.version == version)
+        .ok_or_else(|| anyhow::anyhow!("missing embedded migration {version}"))
 }
 
 #[cfg(test)]
@@ -177,14 +227,45 @@ mod migration_tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    #[tokio::test]
-    async fn superseded_codex_launch_migrations_bootstrap_and_recover() {
-        let pool = SqlitePoolOptions::new()
+    async fn memory_pool() -> SqlitePool {
+        SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn columns_of(pool: &SqlitePool, table: &str) -> std::collections::HashSet<String> {
+        sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// The property that matters, and the one a recorded-versions check cannot
+    /// see: after migrating, the COLUMNS are actually there.
+    ///
+    /// Asserting only that 87/89/90 appear in `_sqlx_migrations` passes even
+    /// when every one of them was recorded without executing — which is exactly
+    /// how a build that produced a table with no `resumable` column reached main
+    /// with a green store suite. The daemon then failed at runtime with
+    /// `no such column: resumable`.
+    #[tokio::test]
+    async fn a_fresh_database_really_gets_the_codex_thread_columns() {
+        let pool = memory_pool().await;
         apply_migrations(&pool).await.unwrap();
+
+        let columns = columns_of(&pool, "interactive_codex_thread").await;
+        assert!(
+            columns.contains("resumable"),
+            "resumable missing; got {columns:?}"
+        );
+        assert!(
+            columns.contains("event_watermark"),
+            "event_watermark missing; got {columns:?}"
+        );
 
         for version in [87_i64, 89, 90] {
             let present: i64 =
@@ -196,11 +277,53 @@ mod migration_tests {
             assert_eq!(present, 1, "migration {version} was not recorded");
         }
 
+        // Re-running is a no-op, including the checksum restamp.
+        apply_migrations(&pool).await.unwrap();
+        assert!(columns_of(&pool, "interactive_codex_thread").await.contains("resumable"));
+    }
+
+    /// The other side of the collision: a database created in the 10:29-15:46
+    /// window on 2026-08-12 RAN 0089/0090 under their original text and never
+    /// ran 0087. It carries checksums for SQL that no longer exists, so without
+    /// the restamp SQLx refuses to boot on a checksum mismatch — a real upgrade
+    /// breaking for anyone who ran a daemon that afternoon.
+    #[tokio::test]
+    async fn a_database_that_ran_the_original_0089_still_upgrades() {
+        let pool = memory_pool().await;
+        // Migrate to 88, then hand-apply what the ORIGINAL 0089/0090 did and
+        // record them under a checksum that cannot match the current files.
+        apply_migrations(&pool).await.unwrap();
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (87, 89, 90)")
             .execute(&pool)
             .await
             .unwrap();
-        apply_migrations(&pool).await.unwrap();
+        for version in [89_i64, 90] {
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (?, 'legacy', TRUE, ?, -1)",
+            )
+            .bind(version)
+            .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        apply_migrations(&pool)
+            .await
+            .expect("a database carrying the original 0089/0090 must still upgrade");
+
+        let columns = columns_of(&pool, "interactive_codex_thread").await;
+        assert!(columns.contains("resumable"), "got {columns:?}");
+        // 0087 must have been recorded, not executed: executing it would have
+        // died on `duplicate column name: resumable`.
+        let present: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 87")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(present, 1, "0087 must be reconciled, not run");
     }
 }
 
