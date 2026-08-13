@@ -1233,37 +1233,29 @@ fn legacy_proxy_daemon_pairs(ps_output: &str, live_socket: &Path) -> Vec<(u32, u
 /// A PID is reusable after the first process exits, so the start fingerprint is
 /// required before both TERM and KILL. The fresh process-table check also proves
 /// the legacy parent-child topology still targets this exact home.
-async fn legacy_proxy_daemon_is_current(
-    candidate: &LegacyProxyDaemon,
-    live_socket: &Path,
-) -> bool {
-    process_identity(candidate.pid)
-        .await
-        .is_some_and(|identity| identity.process_start_fingerprint == candidate.process_start_fingerprint)
-        && process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
-            identity.process_start_fingerprint == candidate.proxy_start_fingerprint
-        })
-        && ps_process_table()
-            .await
-            .is_some_and(|ps_output| {
-                legacy_proxy_daemon_pairs(&ps_output, live_socket)
-                    .contains(&(candidate.pid, candidate.proxy_pid))
-            })
+async fn legacy_proxy_daemon_is_current(candidate: &LegacyProxyDaemon, live_socket: &Path) -> bool {
+    process_identity(candidate.pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.process_start_fingerprint
+    }) && process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.proxy_start_fingerprint
+    }) && ps_process_table().await.is_some_and(|ps_output| {
+        legacy_proxy_daemon_pairs(&ps_output, live_socket)
+            .contains(&(candidate.pid, candidate.proxy_pid))
+    })
 }
 
 /// Confirm the proxy child remains the exact same process after its parent exits.
 async fn legacy_proxy_child_is_current(candidate: &LegacyProxyDaemon, live_socket: &Path) -> bool {
-    process_identity(candidate.proxy_pid)
-        .await
-        .is_some_and(|identity| identity.process_start_fingerprint == candidate.proxy_start_fingerprint)
-        && ps_process_table().await.is_some_and(|ps_output| {
-            ps_output.lines().filter_map(parse_ps_row).any(|row| {
-                row.pid == candidate.proxy_pid
-                    && is_codex_app_server(row.args)
-                    && codex_proxy_socket(row.args)
-                        .is_some_and(|socket| socket == live_socket.to_string_lossy())
-            })
+    process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.proxy_start_fingerprint
+    }) && ps_process_table().await.is_some_and(|ps_output| {
+        ps_output.lines().filter_map(parse_ps_row).any(|row| {
+            row.pid == candidate.proxy_pid
+                && is_codex_app_server(row.args)
+                && codex_proxy_socket(row.args)
+                    .is_some_and(|socket| socket == live_socket.to_string_lossy())
         })
+    })
 }
 
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our

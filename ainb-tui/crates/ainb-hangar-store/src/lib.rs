@@ -187,13 +187,12 @@ mod migration_tests {
         apply_migrations(&pool).await.unwrap();
 
         for version in [87_i64, 89, 90] {
-            let present: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?",
-            )
-            .bind(version)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let present: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
+                    .bind(version)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(present, 1, "migration {version} was not recorded");
         }
 

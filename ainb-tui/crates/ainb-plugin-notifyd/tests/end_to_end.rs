@@ -175,7 +175,11 @@ fn atc_hook_falls_back_to_path_when_installed_binary_is_missing() {
     let capture = dir.path().join("captured-bin");
     fs::create_dir_all(&hooks).unwrap();
     fs::create_dir(&path_dir).unwrap();
-    fs::write(hooks.join("ainb-bin"), format!("{}\\n", missing_bin.display())).unwrap();
+    fs::write(
+        hooks.join("ainb-bin"),
+        format!("{}\\n", missing_bin.display()),
+    )
+    .unwrap();
     fs::write(
         &path_bin,
         "#!/usr/bin/env bash\nprintf 'path %s\\n' \"$*\" >> \"$AINB_HOOK_CAPTURE\"\n",
