@@ -799,7 +799,9 @@ mod tests {
         AtcInstanceRepo::record_continue(store.pool(), "main", "s1", 100).await.unwrap();
         AtcInstanceRepo::mark_escalated(store.pool(), "main", "s2", 200).await.unwrap();
         // A sibling instance's ledger must never leak into this one.
-        AtcInstanceRepo::record_continue(store.pool(), "other", "s9", 100).await.unwrap();
+        AtcInstanceRepo::record_continue(store.pool(), "other", "s9", 100)
+            .await
+            .unwrap();
 
         let rows = AtcInstanceRepo::retry_list(store.pool(), "main").await.unwrap();
         assert_eq!(
