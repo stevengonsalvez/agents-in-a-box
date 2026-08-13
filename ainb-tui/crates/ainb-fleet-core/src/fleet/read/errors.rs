@@ -89,11 +89,16 @@ mod tests {
 
     #[test]
     fn multibyte_context_does_not_panic() {
-        // 40 and 100 box-drawing chars = 120 and 300 bytes, so both the -80 and
-        // the +200 context offsets land inside a 3-byte '─'. Pre-fix this panicked
-        // with "byte index N is not a char boundary" and killed the fleet daemon.
+        // Byte layout, chosen so BOTH snapping loops are exercised:
+        //   0..120    40 '─' (3 bytes each)
+        //   120..144  "API Error: fetch failed!" (24 ASCII bytes; match is 120..129)
+        //   144..444  100 '─'
+        // start = 120 - 80  = 40  -> 40 % 3 == 1 within the leading run  -> mid-codepoint
+        // end   = 129 + 200 = 329 -> (329 - 144) % 3 == 2 in the trailing run -> mid-codepoint
+        // The trailing '!' is load-bearing: drop it and both offsets land on
+        // multiples of 3, so the `end` loop never runs and the test goes blind.
         let text = format!(
-            "{}API Error: fetch failed{}",
+            "{}API Error: fetch failed!{}",
             "─".repeat(40),
             "─".repeat(100)
         );
