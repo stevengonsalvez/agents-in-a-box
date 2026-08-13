@@ -701,7 +701,7 @@ impl Screen for InboxScreen {
     }
 }
 
-/// Daemons screen — read-only runtime health of every long-running ainb daemon
+/// Daemons screen — runtime health and repair controls for every long-running ainb daemon
 /// (phone bridge / notifyd / ATC / fleet daemon). Renders from
 /// `fleet::daemons::collect` via the shared component, refreshing live on the
 /// render tick. State lives on `AppState::daemons_state` so the cached snapshot

@@ -1003,7 +1003,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 }
 
 // ============================================================================
-// Daemons overlay (MCP pool + Headroom proxy — read-only status)
+// Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions)
 // ============================================================================
 
 /// Fetched snapshot delivered through the daemons overlay channel.
@@ -2881,7 +2881,7 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
-    // Daemons status overlay (MCP pool + Headroom proxy, read-only).
+    // Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions).
     pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,

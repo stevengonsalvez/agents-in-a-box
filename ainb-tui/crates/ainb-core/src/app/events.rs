@@ -52,7 +52,7 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    // Daemons overlay (MCP pool + Headroom, read-only)
+    // Daemons runtime snapshot (MCP pool + Headroom + repair actions)
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
@@ -1606,7 +1606,7 @@ impl EventHandler {
             return Self::handle_inbox_keys(key_event, state);
         }
 
-        // Daemons observability screen (read-only). Esc/q must pop back to the
+        // Daemons runtime-health screen. Esc/q must pop back to the
         // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
         // the generic fallthrough below treats this non-plugin screen as
         // GoToHomeScreen, which ignored the saved origin (L2).
@@ -8725,7 +8725,7 @@ mod panel_back_tests {
         );
     }
 
-    /// L2 regression: the Daemons screen is read-only and NOT a plugin screen,
+    /// L2 regression: the Daemons screen is not a plugin screen,
     /// so before the fix its Esc fell through the generic handler to
     /// `GoToHomeScreen` — discarding the `previous_screen` that `GoToDaemons`
     /// saved. Drive the real Esc key through the dispatcher and assert it routes
