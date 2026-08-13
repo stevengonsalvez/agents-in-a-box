@@ -1,10 +1,9 @@
 // ABOUTME: Daemons screen component — live runtime health of the four ainb daemons.
 //
-// Renders a read-only table from `fleet::daemons::collect` (the SAME aggregator
-// behind `ainb fleet daemons`), refreshing on the render tick so a daemon that
-// starts/stops/crashes flips live. No controls in v1 — health only, matching the
-// rest of the app's read-only screens (Inbox/Stats). Follows the ainb-tui style
-// guide: rounded borders, gold title, cornflower-blue panel, green for healthy.
+// Renders fleet daemons, system services, and hook health in one table-driven
+// screen. Runtime actions run asynchronously; the screen never performs I/O in
+// render. Follows the ainb-tui style guide: rounded borders, gold title,
+// cornflower-blue panel, green for healthy.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +15,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
 };
 
+use crate::app::state::DaemonsOverlayState;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonState, DaemonStatus};
@@ -147,7 +147,12 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut DaemonsState,
+    runtime: Option<&DaemonsOverlayState>,
+) {
     let snapshot = state.snapshot();
 
     let outer = Block::default()
@@ -175,10 +180,22 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    // Keep the daemon table usable in short terminals. A normal 24+ row
-    // terminal gets the full Hooks section; compact terminals retain the
-    // original daemon-only table and `ainb doctor` remains the detailed view.
-    if chunks[0].height >= 18 {
+    // A normal 24-row terminal gets all three tables: fleet daemons, system
+    // services, and hooks. Compact terminals retain fleet + hooks; `ainb
+    // doctor` remains the complete text fallback.
+    if chunks[0].height >= 21 {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(7),
+                Constraint::Length(6),
+                Constraint::Length(7),
+            ])
+            .split(chunks[0]);
+        render_table(frame, sections[0], &snapshot);
+        render_system_services(frame, sections[1], runtime);
+        render_hook_section(frame, sections[2], snapshot.hook_health.as_ref());
+    } else if chunks[0].height >= 18 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(7)])
@@ -189,6 +206,90 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
         render_table(frame, chunks[0], &snapshot);
     }
     render_footer(frame, chunks[1]);
+}
+
+fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                "System services",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  r refresh · M MCP · P Headroom · R notifyd · S Hangar",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBDUED_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let header = Row::new(["SERVICE", "STATE", "DETAIL", "ACTION"])
+        .style(Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD));
+    let rows = match runtime {
+        None => vec![Row::new(["collecting…", "", "", ""])],
+        Some(runtime) if runtime.loading => vec![Row::new(["collecting…", "", "", ""])],
+        Some(runtime) => {
+            let status = |up| if up { "● up" } else { "○ down" };
+            let headroom_detail = format!(
+                ":{}  {}",
+                runtime.headroom.port,
+                runtime
+                    .headroom
+                    .pid
+                    .map(|pid| format!("pid {pid}"))
+                    .unwrap_or_else(|| "not running".to_string())
+            );
+            vec![
+                Row::new([
+                    "MCP pool",
+                    status(runtime.mcp_alive),
+                    "shared tool servers",
+                    "M start",
+                ]),
+                Row::new(vec![
+                    Cell::from("Headroom"),
+                    Cell::from(status(runtime.headroom.running)),
+                    Cell::from(headroom_detail),
+                    Cell::from("P start"),
+                ]),
+                Row::new([
+                    "Hangar",
+                    status(runtime.hangar_running),
+                    runtime.hangar_reason.as_str(),
+                    "S start",
+                ]),
+                Row::new(vec![
+                    Cell::from("notifyd"),
+                    Cell::from(status(!runtime.notifyd.is_empty())),
+                    Cell::from(format!("{} process(es)", runtime.notifyd.len())),
+                    Cell::from("R force restart"),
+                ]),
+                Row::new([
+                    "approval broker",
+                    status(runtime.approve_running),
+                    runtime.approve_reason.as_str(),
+                    "repaired by R",
+                ]),
+            ]
+        }
+    };
+    let widths = [
+        Constraint::Length(18),
+        Constraint::Length(12),
+        Constraint::Min(22),
+        Constraint::Length(24),
+    ];
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(header)
+            .style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
+        inner,
+    );
 }
 
 fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth>) {
@@ -492,7 +593,7 @@ mod tests {
     fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state, None)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
@@ -575,6 +676,10 @@ mod tests {
             hook_health(),
         );
         let out = render_to_string(&mut state, 120, 24);
+        assert!(
+            out.contains("System services"),
+            "system section missing: {out}"
+        );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
         assert!(
             out.contains("0.4.4 → 0.4.5"),

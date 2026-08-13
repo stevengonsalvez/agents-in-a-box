@@ -59,6 +59,8 @@ pub enum AppEvent {
     /// Restart the notifyd daemon (single resume/repair) from the overlay.
     DaemonsOverlayRestartNotifyd,
     DaemonsOverlayStartHangar,
+    DaemonsStartMcp,
+    DaemonsStartHeadroom,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -1411,9 +1413,9 @@ impl EventHandler {
             };
         }
 
-        // Daemons overlay captures all keys while open: r refresh, R restart
-        // notifyd resume/repair, Hangar start, esc/q/d close.
-        if state.daemons_overlay.is_some() {
+        // Legacy popup captures keys only outside the unified Daemons screen.
+        // The screen itself owns r/R/S so controls remain visible beside data.
+        if state.daemons_overlay.is_some() && state.current_screen != screen_ids::DAEMONS {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
@@ -2957,8 +2959,8 @@ impl EventHandler {
         }
     }
 
-    /// Daemons observability screen key dispatcher. The screen is read-only
-    /// (no list navigation), so the only binding is back:
+    /// Daemons screen key dispatcher. Runtime actions reuse the same
+    /// background workers that previously lived in the system overlay:
     ///
     ///   - q / Esc   back to the screen it was opened from (home if none)
     ///
@@ -2967,6 +2969,11 @@ impl EventHandler {
     fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
+            KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+            KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
+            KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
+            KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
             _ => None,
         }
     }
@@ -3105,9 +3112,8 @@ impl EventHandler {
         // unused across every screen handler.
         match key_event.code {
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
-            // `h` for health opens the Agent Deck daemon-health screen. Plain
-            // `d` remains the system daemon overlay from main.
-            KeyCode::Char('h') => return Some(AppEvent::GoToDaemons),
+            // One daemon surface: health, hook status, and repair controls.
+            KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
             KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
@@ -3131,8 +3137,6 @@ impl EventHandler {
             // overlay. `m` is taken by the learnings/Memory browser, so the
             // pool tile + global keybind use `p` instead.
             KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
-            // `d` for "daemons" — opens the MCP pool + Headroom status overlay.
-            KeyCode::Char('d') => return Some(AppEvent::DaemonsOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -3599,10 +3603,16 @@ impl EventHandler {
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
+                let leaving_daemons = state.current_screen == screen_ids::DAEMONS;
                 let target =
                     state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
                 state.current_screen = target;
+                // The unified screen owns this runtime snapshot. Drop it on
+                // exit so no obsolete popup appears over the destination.
+                if leaving_daemons {
+                    state.close_daemons_overlay();
+                }
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -3658,6 +3668,8 @@ impl EventHandler {
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
+            AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
+            AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
@@ -4887,9 +4899,6 @@ impl EventHandler {
                         // Opens the overlay on top of the current screen (not a
                         // screen switch) and fires the first lazy fetch.
                         state.toggle_mcp_overlay();
-                    }
-                    SidebarItem::DaemonOverlay => {
-                        state.toggle_daemons_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -6206,6 +6215,16 @@ impl EventHandler {
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
                 state.daemons_state.arm();
+                // MCP, Headroom, Hangar, and notifyd are collected by the
+                // existing non-blocking runtime probe and rendered on this
+                // screen as one system-services table.
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    if state.daemons_overlay.is_none() {
+                        state.toggle_daemons_overlay();
+                    } else {
+                        state.spawn_daemons_fetch();
+                    }
+                }
             }
             AppEvent::GoToFleetPanel => {
                 tracing::info!("Navigating to Fleet panel");
@@ -8736,6 +8755,10 @@ mod panel_back_tests {
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
+        assert!(
+            state.daemons_overlay.is_none(),
+            "leaving Daemons must not leave the old popup behind"
+        );
     }
 
     /// `q` on the Daemons screen behaves identically to Esc.
@@ -8751,21 +8774,22 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
-    /// While the Daemons `d` overlay is open, `R` maps to the notifyd restart
-    /// (single resume/repair) event, and `r` still maps to refresh — the two
-    /// case-paired verbs live on the same surface.
+    /// Daemons repair keys stay next to the table that reports their state.
     #[test]
-    fn daemons_overlay_restart_key_routing() {
+    fn daemons_repair_key_routing() {
         use crossterm::event::{KeyCode, KeyEvent};
 
-        // Opening the overlay fires the first lazy fetch (tokio::spawn), so the
-        // test needs a live reactor.
+        // Opening the unified screen fires the first lazy fetch, so this test
+        // needs a live reactor.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
 
         let mut state = AppState::default();
-        state.toggle_daemons_overlay();
-        assert!(state.daemons_overlay.is_some(), "overlay must be open");
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+        assert!(
+            state.daemons_overlay.is_some(),
+            "runtime probe must be armed"
+        );
 
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
@@ -8776,6 +8800,14 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::DaemonsOverlayRefresh)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('M')),
+            Some(AppEvent::DaemonsStartMcp)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('P')),
+            Some(AppEvent::DaemonsStartHeadroom)
         ));
     }
 

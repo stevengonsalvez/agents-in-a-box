@@ -714,7 +714,8 @@ impl Screen for DaemonsScreen {
         ids::DAEMONS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+        let runtime = state.daemons_overlay.as_ref();
+        crate::components::daemons::render(frame, area, &mut state.daemons_state, runtime);
     }
 }
 

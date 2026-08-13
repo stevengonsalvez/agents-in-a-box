@@ -5136,6 +5136,31 @@ impl AppState {
         });
     }
 
+    /// Start the shared MCP pool off the UI thread. The following refresh
+    /// shows the result; this is deliberately idempotent when already alive.
+    pub fn spawn_mcp_start(&mut self) {
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::ensure_daemon)
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("MCP start task panicked: {e}")));
+            match result {
+                Ok(()) => tracing::info!("MCP pool started from Daemons screen"),
+                Err(error) => tracing::warn!(%error, "MCP pool start from Daemons screen failed"),
+            }
+        });
+    }
+
+    /// Start the Headroom proxy off the UI thread. Headroom remains optional;
+    /// the action reports only through the refreshed runtime status and logs.
+    pub fn spawn_headroom_start(&mut self) {
+        tokio::spawn(async move {
+            match crate::headroom::ensure_proxy_running().await {
+                Ok(()) => tracing::info!("Headroom started from Daemons screen"),
+                Err(error) => tracing::warn!(%error, "Headroom start from Daemons screen failed"),
+            }
+        });
+    }
+
     /// Drain a completed daemons fetch. Called from the 250ms app tick.
     pub fn check_daemons_overlay(&mut self) {
         let Some(o) = self.daemons_overlay.as_mut() else {
