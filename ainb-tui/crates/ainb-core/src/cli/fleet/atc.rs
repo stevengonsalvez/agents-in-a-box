@@ -999,7 +999,34 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     // `current_state` (non-Claude agents, transient errors). So the heartbeat's
     // coarse session state is now `current_state`-backed without any direct
     // SQLite access here — and the exactly-once inbox drain below is UNCHANGED.
-    let rows = fetch_needs().await.unwrap_or_default();
+    // Whether the scan actually WORKED, kept separate from its result. A failed
+    // `fleet needs` degrades to an empty roster here, which is byte-identical to a
+    // healthy quiet fleet — and whoever owns the retry ledger would read that as
+    // "every session recovered" and hand each one a fresh budget. The summary
+    // carries this so the failure is visible across the process boundary instead
+    // of being laundered into a cheerful empty list.
+    let scan = fetch_needs().await;
+    let roster_valid = scan.is_ok();
+    if let Err(e) = &scan {
+        tracing::warn!(error = %e, "atc heartbeat: fleet scan failed; roster reported as unusable");
+    }
+    let rows = scan.unwrap_or_default();
+
+    // The ERR roster is taken BEFORE the ATC-channel filter below. Channel rules
+    // decide who gets NUDGED; they must not decide who gets ESCALATED. A rule that
+    // routes a session's cards away from ATC would otherwise also silence its
+    // phone push, which is the opposite of what suppressing a nudge means.
+    let err_sessions: Vec<serde_json::Value> = rows
+        .iter()
+        .filter_map(|r| match &r.context {
+            crate::fleet::read::NeedsContext::Err(e) => Some(json!({
+                "session_id": r.session.id,
+                "cwd": r.session.cwd,
+                "pattern": e.pattern,
+            })),
+            _ => None,
+        })
+        .collect();
     // ATC channel gate (agents-in-a-box-cdd): drop needs rows the notify rules kept
     // off the Atc channel, so a board-only `waiting` (or a kind routed away from
     // ATC) stops nudging the ATC brain. Fail-open when the daemon inbox is
@@ -1033,7 +1060,11 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     // a permanently-broken session.
     let daemon_exhausted: Option<std::collections::HashSet<String>> =
         matches.get_one::<String>("exhausted").map(|raw| {
-            raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
         });
 
     // Idle-pause: when the fleet has been quiet past the threshold, downgrade to
@@ -1154,27 +1185,15 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     };
     write_heartbeat_state(&paths, &hb_state);
 
-    // The ERR roster this beat saw, for whoever owns the retry ledger. The daemon
-    // reads it back to advance `atc_retry` and to escalate the spent ones, which
-    // is what lets it delegate the whole scan to this one process instead of
-    // running a second, weaker one of its own.
-    let err_sessions: Vec<serde_json::Value> = rows
-        .iter()
-        .filter_map(|r| match &r.context {
-            crate::fleet::read::NeedsContext::Err(e) => Some(json!({
-                "session_id": r.session.id,
-                "cwd": r.session.cwd,
-                "pattern": e.pattern,
-            })),
-            _ => None,
-        })
-        .collect();
-
     let summary = json!({
         "action": "heartbeat",
         "name": name,
         "needs_count": rows.len(),
+        // The ERR roster this beat saw, for whoever owns the retry ledger, plus
+        // the two facts that say whether it is safe to act on: did the scan work,
+        // and did the nudge land.
         "err_sessions": err_sessions,
+        "roster_valid": roster_valid,
         "ledger_owner": if daemon_exhausted.is_some() { "daemon" } else { "local" },
         "completions": completions.len(),
         "session_live": session_live,
