@@ -650,6 +650,102 @@ mod tests {
         assert!(ledger.escalated);
     }
 
+    /// Write an executable stub that stands in for the real `ainb` binary: it
+    /// appends its argv to `argv_log` and prints `summary` as the beat's JSON.
+    /// `run_cli_heartbeat` resolves the binary through `AINB_BIN`, which is the
+    /// seam that makes the delegation testable without a real fleet.
+    fn ainb_stub(
+        dir: &std::path::Path,
+        argv_log: &std::path::Path,
+        summary: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = dir.join("ainb-stub.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncat <<'ATCJSON'\n{summary}\nATCJSON\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        stub
+    }
+
+    /// The delegated beat is the whole point of the daemon path now, so this
+    /// covers the contract end to end: the spent set goes OUT on the command
+    /// line, the ERR roster comes BACK as JSON, the ledger advances from it, and
+    /// a session missing from that roster has recovered and is reset.
+    ///
+    /// `AINB_BIN` is process-global. No other test in this binary reads it, and
+    /// only this test writes it, so there is nothing to race with.
+    #[tokio::test]
+    async fn delegated_beat_advances_the_ledger_and_resets_recovered_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_instance(&store, "main").await;
+        let (_b, sink) = broker();
+
+        // "spent" is already at the cap, so the beat must be told about it.
+        // "recovered" carries budget but will NOT appear in the beat's roster.
+        for _ in 0..3 {
+            AtcInstanceRepo::record_continue(store.pool(), "main", "spent", NOW).await.unwrap();
+        }
+        AtcInstanceRepo::record_continue(store.pool(), "main", "recovered", NOW).await.unwrap();
+
+        let argv_log = dir.path().join("argv.txt");
+        let stub = ainb_stub(
+            dir.path(),
+            &argv_log,
+            r#"{"action":"heartbeat","err_sessions":[
+                 {"session_id":"spent","cwd":"/w/spent","pattern":"overloaded"},
+                 {"session_id":"fresh","cwd":"/w/fresh","pattern":"rate_limited"}]}"#,
+        );
+        // SAFETY: single-threaded write before any concurrent reader in this test.
+        std::env::set_var("AINB_BIN", &stub);
+
+        let sched = AtcHeartbeatScheduler::new(
+            store.pool().clone(),
+            sink,
+            Arc::new(ainb_hangar_core::clock::SystemClock),
+            CancellationToken::new(),
+        );
+        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+        sched.fire(&inst).await;
+
+        // OUT: the spent session was handed to the beat so it can render
+        // ESCALATE-ONLY, and the flag is present even though only one id is in it.
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(argv.contains("--exhausted spent"), "spent set not handed over: {argv}");
+        assert!(argv.contains("fleet atc heartbeat main"), "wrong verb delegated: {argv}");
+
+        // BACK: "fresh" was erroring under the cap, so it consumed budget.
+        let fresh = AtcInstanceRepo::retry_get(store.pool(), "main", "fresh")
+            .await
+            .unwrap()
+            .expect("fresh session should now have a ledger row");
+        assert_eq!(fresh.continue_count, 1);
+        assert!(!fresh.escalated);
+
+        // "spent" was at the cap, so it escalated rather than continuing again.
+        let spent = AtcInstanceRepo::retry_get(store.pool(), "main", "spent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(spent.escalated, "a session at the cap must escalate, not continue");
+        assert_eq!(spent.continue_count, 3, "escalating must not spend more budget");
+
+        // ABSENT: "recovered" stopped erroring, so its budget is cleared and a
+        // later failure starts fresh. This is the path that never existed before.
+        assert!(
+            AtcInstanceRepo::retry_get(store.pool(), "main", "recovered").await.unwrap().is_none(),
+            "a recovered session must lose its spent budget"
+        );
+
+        std::env::remove_var("AINB_BIN");
+    }
+
     fn retry_row(session: &str, count: i64, escalated: bool) -> AtcRetryRow {
         AtcRetryRow {
             instance_name: "main".into(),
