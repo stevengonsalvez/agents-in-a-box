@@ -181,14 +181,14 @@ pub fn render(
         .split(inner);
 
     // A normal 24-row terminal gets all three tables: fleet daemons, system
-    // services, and hooks. Compact terminals retain fleet + hooks; `ainb
-    // doctor` remains the complete text fallback.
+    // services, and hooks. The system table omits a redundant column header so
+    // its five rows fit beside the seven-row Fleet and Hooks tables.
     if chunks[0].height >= 21 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(7),
-                Constraint::Length(6),
+                Constraint::Length(7),
                 Constraint::Length(7),
             ])
             .split(chunks[0]);
@@ -216,10 +216,16 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                 "System services",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  r refresh · M MCP · P Headroom · R notifyd · S Hangar",
-                Style::default().fg(MUTED_GRAY),
-            ),
+            Span::styled("  r", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" refresh · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("M", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" MCP · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("P", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Headroom · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" notifyd · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Hangar", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -228,8 +234,6 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let header = Row::new(["SERVICE", "STATE", "DETAIL", "ACTION"])
-        .style(Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD));
     let rows = match runtime {
         None => vec![Row::new(["collecting…", "", "", ""])],
         Some(runtime) if runtime.loading => vec![Row::new(["collecting…", "", "", ""])],
@@ -244,29 +248,46 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                     .map(|pid| format!("pid {pid}"))
                     .unwrap_or_else(|| "not running".to_string())
             );
+            let action_detail = |status: Option<&String>, default: &str| {
+                status.cloned().unwrap_or_else(|| default.to_string())
+            };
             vec![
-                Row::new([
-                    "MCP pool",
-                    status(runtime.mcp_alive),
-                    "shared tool servers",
-                    "M start",
+                Row::new(vec![
+                    Cell::from("MCP pool"),
+                    Cell::from(status(runtime.mcp_alive)),
+                    Cell::from(action_detail(
+                        runtime.mcp_start_status.as_ref(),
+                        "shared tool servers",
+                    )),
+                    Cell::from("M start"),
                 ]),
                 Row::new(vec![
                     Cell::from("Headroom"),
                     Cell::from(status(runtime.headroom.running)),
-                    Cell::from(headroom_detail),
+                    Cell::from(action_detail(
+                        runtime.headroom_start_status.as_ref(),
+                        &headroom_detail,
+                    )),
                     Cell::from("P start"),
                 ]),
-                Row::new([
-                    "Hangar",
-                    status(runtime.hangar_running),
-                    runtime.hangar_reason.as_str(),
-                    "S start",
+                Row::new(vec![
+                    Cell::from("Hangar"),
+                    Cell::from(status(runtime.hangar_running)),
+                    Cell::from(action_detail(
+                        runtime.hangar_start_status.as_ref(),
+                        &runtime.hangar_reason,
+                    )),
+                    Cell::from("S start"),
                 ]),
                 Row::new(vec![
                     Cell::from("notifyd"),
-                    Cell::from(status(!runtime.notifyd.is_empty())),
-                    Cell::from(format!("{} process(es)", runtime.notifyd.len())),
+                    Cell::from(status(
+                        runtime.notifyd.iter().any(|daemon| daemon.class.is_healthy()),
+                    )),
+                    Cell::from(action_detail(
+                        runtime.notifyd_restart_status.as_ref(),
+                        &format!("{} process(es)", runtime.notifyd.len()),
+                    )),
                     Cell::from("R force restart"),
                 ]),
                 Row::new([
@@ -285,9 +306,7 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
         Constraint::Length(24),
     ];
     frame.render_widget(
-        Table::new(rows, widths)
-            .header(header)
-            .style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
+        Table::new(rows, widths).style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
         inner,
     );
 }
@@ -489,6 +508,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::fleet::daemons::probe::DaemonKind;
+    use crate::headroom::ProxyStatus;
     use ainb_plugin_notifyd::{HookAgentHealth, HookHealth, HookHealthIssue};
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -590,12 +610,47 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
-    fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
+    fn render_to_string(
+        state: &mut DaemonsState,
+        runtime: Option<&DaemonsOverlayState>,
+        w: u16,
+        h: u16,
+    ) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, None)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
+    }
+
+    fn system_runtime() -> DaemonsOverlayState {
+        DaemonsOverlayState {
+            mcp_alive: true,
+            headroom: ProxyStatus {
+                running: true,
+                port: 8787,
+                pid: Some(42),
+                tokens_saved: Some(9),
+            },
+            headroom_consumers: Vec::new(),
+            notifyd: Vec::new(),
+            approve_running: true,
+            approve_reason: "serving".to_string(),
+            hangar_running: true,
+            hangar_reason: "running".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
+            loading: false,
+            last_refreshed: None,
+            fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
+            hangar_start_rx: None,
+            hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
+        }
     }
 
     #[test]
@@ -625,7 +680,7 @@ mod tests {
             ),
             status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
         ]);
-        let out = render_to_string(&mut state, 120, 12);
+        let out = render_to_string(&mut state, None, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
         assert!(out.contains("HEALTH"), "header missing");
@@ -651,7 +706,7 @@ mod tests {
             true,
             Some("Telegram (@seam)"),
         )]);
-        let out = render_to_string(&mut state, 120, 8);
+        let out = render_to_string(&mut state, None, 120, 8);
         assert!(
             out.contains("Telegram (@seam)"),
             "seeded row missing: {out}"
@@ -675,12 +730,16 @@ mod tests {
             )],
             hook_health(),
         );
-        let out = render_to_string(&mut state, 120, 24);
+        let runtime = system_runtime();
+        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
         assert!(
             out.contains("System services"),
             "system section missing: {out}"
         );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
+        for service in ["MCP pool", "Headroom", "Hangar", "notifyd", "approval broker"] {
+            assert!(out.contains(service), "service row missing: {service}; {out}");
+        }
         assert!(
             out.contains("0.4.4 → 0.4.5"),
             "version state missing: {out}"
@@ -712,7 +771,7 @@ mod tests {
         // sees an empty snapshot (the collector hasn't published yet) and must
         // render an empty table without panicking.
         let mut state = DaemonsState::default();
-        let _ = render_to_string(&mut state, 100, 10);
+        let _ = render_to_string(&mut state, None, 100, 10);
         // The collector handle is now installed (spawned lazily on first render).
         assert!(
             state.shared.is_some(),
