@@ -20,13 +20,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ainb_fleet_core::read::needs::NeedsContext;
-use ainb_fleet_core::send::send;
-use ainb_fleet_core::types::{SendOutcome, Session};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::atc_instance::{
-    ATC_SCHEDULER_CLAIM_RENEW_MS, AtcInstanceRepo, AtcInstanceRow,
+    ATC_SCHEDULER_CLAIM_RENEW_MS, AtcInstanceRepo, AtcInstanceRow, AtcRetryRow,
 };
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
 use sqlx::SqlitePool;
@@ -335,31 +332,49 @@ impl AtcHeartbeatScheduler {
     /// fault is warned and skipped, never a panic.
     async fn fire(&self, inst: &AtcInstanceRow) -> i64 {
         let now = self.clock.now_ms();
-        let rows = probe_fleet_needs(now).await;
 
-        // Enforce the retry cap: exhausted ERR sessions escalate; the rest consume
-        // one unit of continue budget.
-        for r in &rows {
-            if let NeedsContext::Err(err) = &r.context {
-                self.enforce_err_cap(inst, &r.session.id, &r.session.cwd, &err.pattern, now)
-                    .await;
-            }
+        // 1. Read the durable ledger BEFORE the scan and derive the spent set. The
+        //    beat needs it to render `ESCALATE-ONLY`, and only the ledger knows.
+        let ledger = AtcInstanceRepo::retry_list(&self.pool, &inst.name).await.unwrap_or_else(|e| {
+            tracing::warn!(instance = %inst.name, error = %e, "ATC retry ledger unreadable; beating without a cap set");
+            Vec::new()
+        });
+        let exhausted = exhausted_sessions(&ledger, inst.err_retry_cap);
+
+        // 2. Delegate the whole beat to `ainb fleet atc heartbeat`. That verb owns
+        //    the ONE nudge body: hooks-primary needs read, idle-pause, the durable
+        //    completion inbox, untrusted fencing, composer coalescing, and the
+        //    `heartbeat-state.json` stamp the Daemons view reads. Building a second
+        //    body here is what made the daemon-scheduled beat strictly weaker than
+        //    the timer-scheduled one.
+        let Some(report) = run_cli_heartbeat(&inst.name, &exhausted).await else {
+            return now;
+        };
+
+        // 3. Advance the ledger from what the beat actually saw. Escalation stays
+        //    here because it needs the store and the event sink.
+        for err in &report.err_sessions {
+            self.enforce_err_cap(inst, &err.session_id, &err.cwd, &err.pattern, now).await;
         }
-        // Deliver the compact nudge into the ATC session (if it is spawned).
-        if let Some(tmux) = &inst.tmux_session {
-            let body = build_nudge(&rows, now);
-            let target = atc_send_target(&inst.name, &inst.cwd, tmux);
-            match send(&target, &body).await {
-                Ok(SendOutcome::Tmux { .. } | SendOutcome::Broker { .. }) => {}
-                Ok(SendOutcome::Failed { reason }) => {
-                    tracing::warn!(instance = %inst.name, %reason, "ATC heartbeat send failed");
-                }
-                Err(e) => {
-                    tracing::warn!(instance = %inst.name, error = %e, "ATC heartbeat send failed");
+
+        // 4. Recovery is ABSENCE: a ledger row with no matching ERR row this beat
+        //    means the session stopped erroring, so its budget is cleared and a
+        //    later failure starts fresh. Without this an escalated session stays
+        //    escalated forever — `enforce_err_cap` short-circuits on the flag, and
+        //    nothing else ever cleared it.
+        for row in &ledger {
+            if !report.err_sessions.iter().any(|e| e.session_id == row.session_id) {
+                if let Err(e) =
+                    AtcInstanceRepo::reset_retry(&self.pool, &inst.name, &row.session_id).await
+                {
+                    tracing::warn!(
+                        instance = %inst.name,
+                        session = %row.session_id,
+                        error = %e,
+                        "ATC retry reset failed; session keeps its spent budget"
+                    );
                 }
             }
-        } else {
-            tracing::debug!(instance = %inst.name, "ATC heartbeat: no tmux target; nudge not sent");
         }
 
         now
@@ -459,81 +474,93 @@ impl AtcHeartbeatScheduler {
     }
 }
 
-/// Build the verified-send target for an ATC instance's tmux session.
-fn atc_send_target(name: &str, cwd: &str, tmux_session: &str) -> Session {
-    Session {
-        id: format!("atc:{name}"),
-        cwd: cwd.to_string(),
-        pid: None,
-        git_root: None,
-        tmux_session: Some(tmux_session.to_string()),
-        workspace_name: None,
-        worktree_path: None,
-        peer_id: None,
-        bg_job_id: None,
-        transcript_path: None,
-        sources: vec![ainb_fleet_core::types::SessionSource::Ainb],
-        summary: None,
-        last_seen_ms: None,
-    }
+/// The sessions whose auto-`continue` budget is spent, as the beat's renderer
+/// needs them.
+///
+/// A row counts as spent when it is already flagged `escalated` OR its count has
+/// reached the cap. The flag alone is not enough: the row is written at the
+/// moment of escalation, so a crash between `record_continue` and
+/// `mark_escalated` would otherwise hand back a session the beat then invites
+/// another `continue` for.
+#[must_use]
+fn exhausted_sessions(ledger: &[AtcRetryRow], cap: i64) -> Vec<String> {
+    ledger
+        .iter()
+        .filter(|row| row.escalated || matches!(err_action(row.continue_count, cap), ErrAction::Escalate))
+        .map(|row| row.session_id.clone())
+        .collect()
 }
 
-/// Build the compact `[HEARTBEAT]` nudge from the current fleet-needs rows. A
-/// daemon-local, single-line builder (the daemon cannot depend on `ainb-core`'s
-/// richer builder without a crate cycle); the retry-cap accounting now lives in
-/// the store, so this body only summarises the live state.
-fn build_nudge(rows: &[NeedsContextRow], now_ms: i64) -> String {
-    if rows.is_empty() {
-        return format!("[HEARTBEAT {now_ms}] fleet quiet — 0 sessions need attention. Stand by.");
-    }
-    let (mut ask, mut err, mut idle, mut wait) = (0u32, 0u32, 0u32, 0u32);
-    for r in rows {
-        match r.context {
-            NeedsContext::Ask(_) => ask += 1,
-            NeedsContext::Err(_) => err += 1,
-            NeedsContext::Idle(_) => idle += 1,
-            NeedsContext::Wait(_) => wait += 1,
-        }
-    }
-    format!(
-        "[HEARTBEAT {now_ms}] {} session(s) need attention — ERR {err} · ASK {ask} · \
-IDLE {idle} · WAIT {wait}. Apply the ATC playbook (CLAUDE.md).",
-        rows.len()
-    )
+/// One ERR session the beat observed, as reported back by the CLI.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ErrSessionReport {
+    session_id: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    pattern: String,
 }
 
-/// The subset of a `NeedsRow` the daemon heartbeat cares about (id + cwd +
-/// classified context). Alias kept local so the nudge builder + fire path share
-/// one shape.
-type NeedsContextRow = ainb_fleet_core::read::needs::NeedsRow;
+/// The slice of the CLI heartbeat's JSON summary the daemon acts on. Every other
+/// field is ignored, so the CLI can grow its summary without breaking the daemon.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct HeartbeatReport {
+    #[serde(default)]
+    err_sessions: Vec<ErrSessionReport>,
+}
 
-/// Discover + classify the whole fleet for the heartbeat. Best-effort: any fault
-/// yields an empty roster (a quiet heartbeat), never a panic.
-async fn probe_fleet_needs(now_ms: i64) -> Vec<NeedsContextRow> {
-    use ainb_fleet_core::discover::{discover_from_ainb, discover_from_peers, merge_sessions};
-    use ainb_fleet_core::read::needs::{ClassifyInput, classify};
+/// Resolve the `ainb` binary the beat runs as.
+///
+/// The daemon IS `ainb hangar daemon start`, so `current_exe()` is already the
+/// right binary and a rebuild or a `brew upgrade` moves both together. `AINB_BIN`
+/// overrides for tests and for a deliberately pinned install, matching the CLI's
+/// own `atc_bin`.
+fn ainb_bin() -> String {
+    std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_else(|| "ainb".to_string())
+    })
+}
 
-    let ainb: Vec<Session> = discover_from_ainb().await.unwrap_or_default();
-    let peers: Vec<Session> = tokio::task::spawn_blocking(discover_from_peers)
+/// Run one delegated beat and parse what it saw.
+///
+/// Non-fatal end to end, like everything else on this tick: a missing binary, a
+/// non-zero exit (an instance never provisioned on this host), or unparseable
+/// stdout all yield `None`, which leaves the ledger untouched and reschedules
+/// normally. Returning an empty report instead would read as "nothing is
+/// erroring" and wrongly clear every session's budget.
+async fn run_cli_heartbeat(name: &str, exhausted: &[String]) -> Option<HeartbeatReport> {
+    let out = tokio::process::Command::new(ainb_bin())
+        .args([
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "heartbeat",
+            name,
+            // ALWAYS passed, empty set included: its presence is what tells the
+            // beat the daemon owns the ledger and it must not count locally.
+            "--exhausted",
+        ])
+        .arg(exhausted.join(","))
+        .output()
         .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    let merged = merge_sessions(vec![ainb, peers]);
-
-    let mut out = Vec::new();
-    for session in merged {
-        let s = session.clone();
-        if let Some(row) =
-            tokio::task::spawn_blocking(move || classify(ClassifyInput::from_env(s, None, now_ms)))
-                .await
-                .ok()
-                .flatten()
-        {
-            out.push(row);
-        }
+        .map_err(|e| tracing::warn!(instance = %name, error = %e, "ATC heartbeat spawn failed"))
+        .ok()?;
+    if !out.status.success() {
+        tracing::warn!(
+            instance = %name,
+            status = %out.status,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "ATC heartbeat exited non-zero"
+        );
+        return None;
     }
-    out
+    serde_json::from_slice::<HeartbeatReport>(&out.stdout)
+        .map_err(|e| tracing::warn!(instance = %name, error = %e, "ATC heartbeat summary unparseable"))
+        .ok()
 }
 
 #[cfg(test)]
@@ -623,9 +650,56 @@ mod tests {
         assert!(ledger.escalated);
     }
 
+    fn retry_row(session: &str, count: i64, escalated: bool) -> AtcRetryRow {
+        AtcRetryRow {
+            instance_name: "main".into(),
+            session_id: session.into(),
+            continue_count: count,
+            escalated,
+            note: None,
+            updated_at: NOW,
+        }
+    }
+
     #[test]
-    fn nudge_summarises_counts_and_is_quiet_when_empty() {
-        assert!(build_nudge(&[], NOW).contains("fleet quiet"));
+    fn exhausted_set_covers_at_cap_and_already_escalated() {
+        let ledger = vec![
+            retry_row("under", 1, false),
+            retry_row("at-cap", 3, false),
+            retry_row("over-cap", 9, false),
+            // Escalated but the count says otherwise: the crash window between
+            // record_continue and mark_escalated. The flag must still win.
+            retry_row("flagged", 0, true),
+        ];
+        let spent = exhausted_sessions(&ledger, 3);
+        assert_eq!(spent, ["at-cap", "over-cap", "flagged"]);
+    }
+
+    #[test]
+    fn exhausted_set_clamps_a_zero_cap_like_the_beat_does() {
+        // cap 0 would escalate before any continue was ever sent.
+        let ledger = vec![retry_row("fresh", 0, false)];
+        assert!(exhausted_sessions(&ledger, 0).is_empty());
+    }
+
+    #[test]
+    fn report_parses_err_rows_and_tolerates_new_summary_fields() {
+        // The daemon reads a SLICE of the CLI summary, so the CLI can grow fields
+        // without breaking this seam.
+        let raw = br#"{"action":"heartbeat","name":"tower","needs_count":2,
+            "err_sessions":[{"session_id":"s1","cwd":"/w/s1","pattern":"overloaded"}],
+            "delivered":true,"something_new":42}"#;
+        let report: HeartbeatReport = serde_json::from_slice(raw).expect("parse");
+        assert_eq!(report.err_sessions.len(), 1);
+        assert_eq!(report.err_sessions[0].session_id, "s1");
+        assert_eq!(report.err_sessions[0].pattern, "overloaded");
+    }
+
+    #[test]
+    fn report_with_no_err_sessions_is_an_empty_roster_not_a_parse_error() {
+        let report: HeartbeatReport =
+            serde_json::from_slice(br#"{"action":"heartbeat"}"#).expect("parse");
+        assert!(report.err_sessions.is_empty());
     }
 
     #[tokio::test]
