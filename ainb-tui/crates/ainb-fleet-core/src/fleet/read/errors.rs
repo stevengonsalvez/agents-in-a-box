@@ -51,8 +51,17 @@ pub fn detect_error_signals(text: &str, at_ms: i64) -> Vec<Signal> {
     let mut out = Vec::new();
     for p in API_ERROR_PATTERNS.iter() {
         if let Some(m) = p.re.find(text) {
-            let start = m.start().saturating_sub(80);
-            let end = (m.end() + 200).min(text.len());
+            // Pane text is full of box-drawing chars and emoji, so the ±context
+            // offsets land mid-codepoint constantly. Slicing there panics and
+            // takes the whole daemon down, so snap outward to char boundaries.
+            let mut start = m.start().saturating_sub(80);
+            let mut end = (m.end() + 200).min(text.len());
+            while !text.is_char_boundary(start) {
+                start -= 1;
+            }
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
             out.push(Signal::ApiError {
                 at: at_ms,
                 pattern: p.name.to_string(),
@@ -76,6 +85,27 @@ mod tests {
                 |s| matches!(s, Signal::ApiError { pattern, .. } if pattern == "rate_limited")
             )
         );
+    }
+
+    #[test]
+    fn multibyte_context_does_not_panic() {
+        // 40 and 100 box-drawing chars = 120 and 300 bytes, so both the -80 and
+        // the +200 context offsets land inside a 3-byte '─'. Pre-fix this panicked
+        // with "byte index N is not a char boundary" and killed the fleet daemon.
+        let text = format!(
+            "{}API Error: fetch failed{}",
+            "─".repeat(40),
+            "─".repeat(100)
+        );
+        let signals = detect_error_signals(&text, 0);
+        let raw = signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::ApiError { pattern, raw, .. } if pattern == "fetch_failed" => Some(raw),
+                _ => None,
+            })
+            .expect("fetch_failed signal");
+        assert!(raw.contains("API Error"));
     }
 
     #[test]
