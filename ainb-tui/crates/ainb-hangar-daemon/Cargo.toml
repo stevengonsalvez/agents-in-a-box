@@ -190,6 +190,10 @@ ainb-hangar-secrets = { path = "../ainb-hangar-secrets", features = ["test-backe
 assert_cmd = "2"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# `test-util` gives the ATC beat-timeout test a paused clock, so it proves the
+# 90s ceiling in milliseconds instead of actually sleeping for it. Dev-only:
+# dev-dependency features never reach a normal build.
+tokio = { version = "1.36", features = ["test-util"] }
 # The inbound-sync poll-loop tests (P2.4) drive `run_inbound_loop` with a
 # `CancellationToken` directly, so the integration suite needs tokio-util too.
 tokio-util = { workspace = true }
