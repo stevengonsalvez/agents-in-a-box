@@ -216,7 +216,10 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                 "System services",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  r", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  r",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" refresh · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("M", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" MCP · ", Style::default().fg(MUTED_GRAY)),
@@ -737,8 +740,17 @@ mod tests {
             "system section missing: {out}"
         );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
-        for service in ["MCP pool", "Headroom", "Hangar", "notifyd", "approval broker"] {
-            assert!(out.contains(service), "service row missing: {service}; {out}");
+        for service in [
+            "MCP pool",
+            "Headroom",
+            "Hangar",
+            "notifyd",
+            "approval broker",
+        ] {
+            assert!(
+                out.contains(service),
+                "service row missing: {service}; {out}"
+            );
         }
         assert!(
             out.contains("0.4.4 → 0.4.5"),
