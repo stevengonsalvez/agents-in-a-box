@@ -51,8 +51,17 @@ pub fn detect_error_signals(text: &str, at_ms: i64) -> Vec<Signal> {
     let mut out = Vec::new();
     for p in API_ERROR_PATTERNS.iter() {
         if let Some(m) = p.re.find(text) {
-            let start = m.start().saturating_sub(80);
-            let end = (m.end() + 200).min(text.len());
+            // Pane text is full of box-drawing chars and emoji, so the ±context
+            // offsets land mid-codepoint constantly. Slicing there panics and
+            // takes the whole daemon down, so snap outward to char boundaries.
+            let mut start = m.start().saturating_sub(80);
+            let mut end = (m.end() + 200).min(text.len());
+            while !text.is_char_boundary(start) {
+                start -= 1;
+            }
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
             out.push(Signal::ApiError {
                 at: at_ms,
                 pattern: p.name.to_string(),
@@ -76,6 +85,32 @@ mod tests {
                 |s| matches!(s, Signal::ApiError { pattern, .. } if pattern == "rate_limited")
             )
         );
+    }
+
+    #[test]
+    fn multibyte_context_does_not_panic() {
+        // Byte layout, chosen so BOTH snapping loops are exercised:
+        //   0..120    40 '─' (3 bytes each)
+        //   120..144  "API Error: fetch failed!" (24 ASCII bytes; match is 120..129)
+        //   144..444  100 '─'
+        // start = 120 - 80  = 40  -> 40 % 3 == 1 within the leading run  -> mid-codepoint
+        // end   = 129 + 200 = 329 -> (329 - 144) % 3 == 2 in the trailing run -> mid-codepoint
+        // The trailing '!' is load-bearing: drop it and both offsets land on
+        // multiples of 3, so the `end` loop never runs and the test goes blind.
+        let text = format!(
+            "{}API Error: fetch failed!{}",
+            "─".repeat(40),
+            "─".repeat(100)
+        );
+        let signals = detect_error_signals(&text, 0);
+        let raw = signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::ApiError { pattern, raw, .. } if pattern == "fetch_failed" => Some(raw),
+                _ => None,
+            })
+            .expect("fetch_failed signal");
+        assert!(raw.contains("API Error"));
     }
 
     #[test]

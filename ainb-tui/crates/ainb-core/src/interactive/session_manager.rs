@@ -2227,7 +2227,9 @@ mod tests {
     #[test]
     fn shared_remote_codex_failures_show_a_short_next_action() {
         assert_eq!(
-            format_codex_remote_control_failure("Codex app-server WebSocket handshake failed: invalid token"),
+            format_codex_remote_control_failure(
+                "Codex app-server WebSocket handshake failed: invalid token"
+            ),
             "Codex bridge conflict. Restart Ainb, then retry."
         );
         assert_eq!(
@@ -2235,7 +2237,9 @@ mod tests {
             "Codex bridge starting. Retry session in 5 seconds."
         );
         assert_eq!(
-            format_codex_remote_control_failure("installed Codex cannot generate app-server schema"),
+            format_codex_remote_control_failure(
+                "installed Codex cannot generate app-server schema"
+            ),
             "Codex unavailable. Update Codex, then retry."
         );
         assert_eq!(

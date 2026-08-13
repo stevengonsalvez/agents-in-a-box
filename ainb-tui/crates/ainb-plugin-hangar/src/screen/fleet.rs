@@ -5761,15 +5761,19 @@ mod tests {
         row.version = 2;
         row.current_request_fingerprint = Some("refreshed-interview".into());
         state.set_sessions(vec![row]);
-        assert!(state.is_modal_open(), "snapshot closed unchanged interview queue");
+        assert!(
+            state.is_modal_open(),
+            "snapshot closed unchanged interview queue"
+        );
 
         let submitted = apply(&state, FleetEvent::Key(FleetKey::Char('s')));
         let Some(FleetIntent::Execute {
             expected_version,
-            action: FleetAction::StructuredAnswer {
-                request_fingerprint,
-                ..
-            },
+            action:
+                FleetAction::StructuredAnswer {
+                    request_fingerprint,
+                    ..
+                },
             ..
         }) = submitted.intent
         else {

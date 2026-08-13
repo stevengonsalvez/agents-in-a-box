@@ -67,11 +67,30 @@ pub fn detect_signals_from_pane(pane: &str, at_ms: i64) -> Vec<Signal> {
     let mut out = Vec::new();
     // AskUserQuestion UI has a recognisable header band; refine as samples accrue.
     if pane.contains('?') && pane.contains('│') && pane.contains('┌') && pane.contains('└') {
-        let snippet_start = pane.len().saturating_sub(400);
+        // This branch only fires on panes that DO contain box-drawing chars, so a
+        // raw byte offset lands mid-codepoint most of the time. Snap outward.
+        let mut snippet_start = pane.len().saturating_sub(400);
+        while !pane.is_char_boundary(snippet_start) {
+            snippet_start -= 1;
+        }
         out.push(Signal::AskUserQuestion {
             at: at_ms,
             raw: pane[snippet_start..].to_string(),
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_drawn_pane_snippet_does_not_panic() {
+        // 10 ASCII+box bytes of header then 200 '─' = 610 bytes, so len()-400 = 210
+        // lands 200 bytes into the 3-byte run, i.e. mid-codepoint.
+        let pane = format!("┌?│└{}", "─".repeat(200));
+        let signals = detect_signals_from_pane(&pane, 0);
+        assert!(signals.iter().any(|s| matches!(s, Signal::AskUserQuestion { .. })));
+    }
 }
