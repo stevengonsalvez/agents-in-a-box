@@ -35,6 +35,19 @@ use crate::scheduler::{recompute_next_tick, sleep_delay};
 /// The no-work re-poll interval when no ATC instance is schedulable.
 const NO_WORK_REPOLL: Duration = Duration::from_secs(60);
 
+/// How long a session must stay off the ERR roster before its retry ledger row is
+/// cleared. Long enough to outlive the ordinary err → continue → working → err
+/// cycle (so a session failing repeatedly still accumulates toward its cap),
+/// short enough that a genuinely recovered session is not carrying a stale budget
+/// hours later.
+const RETRY_RESET_GRACE_MS: i64 = 30 * 60 * 1000;
+
+/// Wall-clock ceiling on one delegated beat. The beat shells `fleet needs` and
+/// drives tmux, so a wedged tmux server would otherwise park this future forever
+/// INSIDE the single ATC cron loop, renewing its claim and starving every other
+/// instance.
+const BEAT_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// What the heartbeat should do with a session stuck on an ERR, given its durable
 /// continue-count and the instance's cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,23 +360,79 @@ impl AtcHeartbeatScheduler {
         //    `heartbeat-state.json` stamp the Daemons view reads. Building a second
         //    body here is what made the daemon-scheduled beat strictly weaker than
         //    the timer-scheduled one.
-        let Some(report) = run_cli_heartbeat(&inst.name, &exhausted).await else {
+        let Some(report) = run_cli_heartbeat(&ainb_bin(), &inst.name, &exhausted).await else {
             return now;
         };
+        self.apply_report(inst, &ledger, &report, now).await;
+        now
+    }
 
-        // 3. Advance the ledger from what the beat actually saw. Escalation stays
-        //    here because it needs the store and the event sink.
-        for err in &report.err_sessions {
-            self.enforce_err_cap(inst, &err.session_id, &err.cwd, &err.pattern, now).await;
+    /// Fold one beat's report into the durable ledger.
+    ///
+    /// Three gates decide whether the ledger moves at all, and all three fail
+    /// CLOSED — leaving the ledger untouched — because every wrong move here is
+    /// destructive: a bogus advance escalates a healthy session, and a bogus reset
+    /// hands a permanently-broken one a fresh budget and re-pages the human.
+    async fn apply_report(
+        &self,
+        inst: &AtcInstanceRow,
+        ledger: &[AtcRetryRow],
+        report: &HeartbeatReport,
+        now_ms: i64,
+    ) {
+        // GATE 1 — is this even our beat? A binary that does not echo the handoff
+        // back never saw `--exhausted`, so it is still keeping its own local tally
+        // and its roster means something else.
+        if report.ledger_owner != "daemon" {
+            tracing::warn!(
+                instance = %inst.name,
+                owner = %report.ledger_owner,
+                "ATC beat did not take the daemon ledger handoff; leaving the ledger alone"
+            );
+            return;
+        }
+        // GATE 2 — did the scan behind the roster work? A failed `fleet needs`
+        // degrades to an empty roster inside the beat, which would read here as
+        // "the whole fleet recovered".
+        if !report.roster_valid {
+            tracing::warn!(
+                instance = %inst.name,
+                "ATC beat reported an unusable fleet roster; ledger not advanced"
+            );
+            return;
+        }
+        // GATE 3 — did the nudge actually land? The beat coalesces rather than
+        // stacking pastes, and skips a dead session entirely. Spending continue
+        // budget on a nudge ATC never received would escalate a session it was
+        // never once asked to continue.
+        if !report.delivered {
+            tracing::debug!(
+                instance = %inst.name,
+                "ATC nudge not delivered this beat; ledger left as-is"
+            );
+            return;
         }
 
-        // 4. Recovery is ABSENCE: a ledger row with no matching ERR row this beat
-        //    means the session stopped erroring, so its budget is cleared and a
-        //    later failure starts fresh. Without this an escalated session stays
-        //    escalated forever — `enforce_err_cap` short-circuits on the flag, and
-        //    nothing else ever cleared it.
-        for row in &ledger {
-            if !report.err_sessions.iter().any(|e| e.session_id == row.session_id) {
+        // Advance: escalation needs the store and the event sink, so it stays here.
+        for err in &report.err_sessions {
+            self.enforce_err_cap(inst, &err.session_id, &err.cwd, &err.pattern, now_ms)
+                .await;
+        }
+
+        // Recovery is ABSENCE, but only once it has held. A row is cleared when the
+        // session has been off the ERR roster for the whole grace window, measured
+        // from the last time the ledger moved for it.
+        //
+        // Resetting on the FIRST absence would make the cap unreachable: the normal
+        // shape is err, continue, working again on the next beat, so the row would
+        // be deleted before a second failure could ever accumulate against it, and a
+        // session failing every few minutes forever would never escalate. Holding
+        // the row keeps that history, while a genuinely recovered session ages out
+        // and gets its fresh budget.
+        for row in ledger {
+            let absent = !report.err_sessions.iter().any(|e| e.session_id == row.session_id);
+            let held = now_ms.saturating_sub(row.updated_at) >= RETRY_RESET_GRACE_MS;
+            if absent && held {
                 if let Err(e) =
                     AtcInstanceRepo::reset_retry(&self.pool, &inst.name, &row.session_id).await
                 {
@@ -376,8 +445,6 @@ impl AtcHeartbeatScheduler {
                 }
             }
         }
-
-        now
     }
 
     /// Apply the retry-cap decision for ONE ERR session of an instance.
@@ -486,7 +553,9 @@ impl AtcHeartbeatScheduler {
 fn exhausted_sessions(ledger: &[AtcRetryRow], cap: i64) -> Vec<String> {
     ledger
         .iter()
-        .filter(|row| row.escalated || matches!(err_action(row.continue_count, cap), ErrAction::Escalate))
+        .filter(|row| {
+            row.escalated || matches!(err_action(row.continue_count, cap), ErrAction::Escalate)
+        })
         .map(|row| row.session_id.clone())
         .collect()
 }
@@ -507,21 +576,57 @@ struct ErrSessionReport {
 struct HeartbeatReport {
     #[serde(default)]
     err_sessions: Vec<ErrSessionReport>,
+    /// Whether the fleet scan behind `err_sessions` actually succeeded. A failed
+    /// scan degrades to an EMPTY roster inside the beat, which is indistinguishable
+    /// from a healthy quiet fleet — and acting on it would reset the ledger for
+    /// every session that is still broken. Defaults true so a summary that parsed
+    /// at all is trusted; the `ledger_owner` tripwire below catches the version
+    /// where the field does not exist yet.
+    #[serde(default = "yes")]
+    roster_valid: bool,
+    /// Whether the nudge actually reached the ATC session. False when the composer
+    /// still held an unsubmitted nudge (coalesced) or the session was gone.
+    #[serde(default)]
+    delivered: bool,
+    /// Must read `daemon` — it is the beat echoing back that it saw `--exhausted`
+    /// and stood down its own counting. Anything else means the spawned binary is
+    /// not the one this daemon shipped with.
+    #[serde(default)]
+    ledger_owner: String,
+}
+
+/// serde default for [`HeartbeatReport::roster_valid`].
+const fn yes() -> bool {
+    true
 }
 
 /// Resolve the `ainb` binary the beat runs as.
 ///
-/// The daemon IS `ainb hangar daemon start`, so `current_exe()` is already the
-/// right binary and a rebuild or a `brew upgrade` moves both together. `AINB_BIN`
-/// overrides for tests and for a deliberately pinned install, matching the CLI's
-/// own `atc_bin`.
+/// NOT `current_exe()`. The daemon is usually its own binary: `hangar daemon
+/// start` prefers a sibling `ainb-hangar-daemon` whenever one exists and is at
+/// least as new as `ainb` (`resolve_daemon_launch_for`), which is exactly what a
+/// workspace build produces. Self-exec'ing that would spawn a binary whose clap
+/// surface is `--once` + `beads`, it would exit non-zero on the heartbeat argv,
+/// and ATC would go silently dead — strictly worse than the weak nudge this
+/// delegation replaces.
+///
+/// So: `AINB_BIN` override first, then the sibling `ainb` beside this executable
+/// (the layout both the workspace build and the release tarball produce, and the
+/// one that keeps a rebuild or a `brew upgrade` moving both together), then
+/// `ainb` on `$PATH`.
 fn ainb_bin() -> String {
-    std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .unwrap_or_else(|| "ainb".to_string())
-    })
+    if let Some(pinned) = std::env::var("AINB_BIN").ok().filter(|s| !s.is_empty()) {
+        return pinned;
+    }
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("ainb")))
+        .filter(|sibling| sibling.exists())
+        .and_then(|sibling| sibling.to_str().map(str::to_string))
+    {
+        return sibling;
+    }
+    "ainb".to_string()
 }
 
 /// Run one delegated beat and parse what it saw.
@@ -531,8 +636,8 @@ fn ainb_bin() -> String {
 /// stdout all yield `None`, which leaves the ledger untouched and reschedules
 /// normally. Returning an empty report instead would read as "nothing is
 /// erroring" and wrongly clear every session's budget.
-async fn run_cli_heartbeat(name: &str, exhausted: &[String]) -> Option<HeartbeatReport> {
-    let out = tokio::process::Command::new(ainb_bin())
+async fn run_cli_heartbeat(bin: &str, name: &str, exhausted: &[String]) -> Option<HeartbeatReport> {
+    let spawn = tokio::process::Command::new(bin)
         .args([
             "--format",
             "json",
@@ -545,10 +650,22 @@ async fn run_cli_heartbeat(name: &str, exhausted: &[String]) -> Option<Heartbeat
             "--exhausted",
         ])
         .arg(exhausted.join(","))
-        .output()
-        .await
-        .map_err(|e| tracing::warn!(instance = %name, error = %e, "ATC heartbeat spawn failed"))
-        .ok()?;
+        .output();
+    let out = match tokio::time::timeout(BEAT_TIMEOUT, spawn).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            tracing::warn!(instance = %name, error = %e, "ATC heartbeat spawn failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                instance = %name,
+                timeout_s = BEAT_TIMEOUT.as_secs(),
+                "ATC heartbeat timed out; abandoning this tick so other instances still fire"
+            );
+            return None;
+        }
+    };
     if !out.status.success() {
         tracing::warn!(
             instance = %name,
@@ -559,7 +676,9 @@ async fn run_cli_heartbeat(name: &str, exhausted: &[String]) -> Option<Heartbeat
         return None;
     }
     serde_json::from_slice::<HeartbeatReport>(&out.stdout)
-        .map_err(|e| tracing::warn!(instance = %name, error = %e, "ATC heartbeat summary unparseable"))
+        .map_err(
+            |e| tracing::warn!(instance = %name, error = %e, "ATC heartbeat summary unparseable"),
+        )
         .ok()
 }
 
@@ -673,77 +792,226 @@ mod tests {
         stub
     }
 
-    /// The delegated beat is the whole point of the daemon path now, so this
-    /// covers the contract end to end: the spent set goes OUT on the command
-    /// line, the ERR roster comes BACK as JSON, the ledger advances from it, and
-    /// a session missing from that roster has recovered and is reset.
-    ///
-    /// `AINB_BIN` is process-global. No other test in this binary reads it, and
-    /// only this test writes it, so there is nothing to race with.
-    #[tokio::test]
-    async fn delegated_beat_advances_the_ledger_and_resets_recovered_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_in(dir.path()).await.unwrap();
-        seed_instance(&store, "main").await;
+    /// A healthy beat report, as the CLI emits it.
+    fn report(err_sessions: &str) -> String {
+        format!(
+            r#"{{"action":"heartbeat","ledger_owner":"daemon","roster_valid":true,
+                 "delivered":true,"err_sessions":[{err_sessions}]}}"#
+        )
+    }
+
+    async fn scheduler(store: &Store) -> AtcHeartbeatScheduler {
         let (_b, sink) = broker();
-
-        // "spent" is already at the cap, so the beat must be told about it.
-        // "recovered" carries budget but will NOT appear in the beat's roster.
-        for _ in 0..3 {
-            AtcInstanceRepo::record_continue(store.pool(), "main", "spent", NOW).await.unwrap();
-        }
-        AtcInstanceRepo::record_continue(store.pool(), "main", "recovered", NOW).await.unwrap();
-
-        let argv_log = dir.path().join("argv.txt");
-        let stub = ainb_stub(
-            dir.path(),
-            &argv_log,
-            r#"{"action":"heartbeat","err_sessions":[
-                 {"session_id":"spent","cwd":"/w/spent","pattern":"overloaded"},
-                 {"session_id":"fresh","cwd":"/w/fresh","pattern":"rate_limited"}]}"#,
-        );
-        // SAFETY: single-threaded write before any concurrent reader in this test.
-        std::env::set_var("AINB_BIN", &stub);
-
-        let sched = AtcHeartbeatScheduler::new(
+        AtcHeartbeatScheduler::new(
             store.pool().clone(),
             sink,
             Arc::new(ainb_hangar_core::clock::SystemClock),
             CancellationToken::new(),
+        )
+    }
+
+    /// The spent set goes OUT on the command line and the roster comes BACK, which
+    /// is the whole delegation contract. Driven against a stub binary passed
+    /// explicitly, so no environment variable is mutated and nothing races the
+    /// other tests in this binary.
+    #[tokio::test]
+    async fn beat_receives_the_spent_set_and_returns_its_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.txt");
+        let stub = ainb_stub(
+            dir.path(),
+            &argv_log,
+            &report(r#"{"session_id":"s1","cwd":"/w/s1","pattern":"overloaded"}"#),
         );
-        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
-        sched.fire(&inst).await;
 
-        // OUT: the spent session was handed to the beat so it can render
-        // ESCALATE-ONLY, and the flag is present even though only one id is in it.
+        let got = run_cli_heartbeat(stub.to_str().unwrap(), "main", &["spent".to_string()])
+            .await
+            .expect("stub beat should parse");
+
         let argv = std::fs::read_to_string(&argv_log).unwrap();
-        assert!(argv.contains("--exhausted spent"), "spent set not handed over: {argv}");
-        assert!(argv.contains("fleet atc heartbeat main"), "wrong verb delegated: {argv}");
+        assert!(
+            argv.contains("fleet atc heartbeat main"),
+            "wrong verb delegated: {argv}"
+        );
+        assert!(
+            argv.contains("--exhausted spent"),
+            "spent set not handed over: {argv}"
+        );
+        assert_eq!(got.err_sessions.len(), 1);
+        assert!(got.delivered && got.roster_valid);
+    }
 
-        // BACK: "fresh" was erroring under the cap, so it consumed budget.
+    /// An empty spent set must still pass the flag: its PRESENCE is what tells the
+    /// beat to stand down its own counting.
+    #[tokio::test]
+    async fn beat_is_told_the_daemon_owns_the_ledger_even_with_nothing_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.txt");
+        let stub = ainb_stub(dir.path(), &argv_log, &report(""));
+
+        run_cli_heartbeat(stub.to_str().unwrap(), "main", &[]).await.expect("parse");
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(
+            argv.contains("--exhausted"),
+            "flag dropped when nothing is spent: {argv}"
+        );
+    }
+
+    /// A beat that never returns must not park the cron loop for every instance.
+    #[tokio::test]
+    async fn a_wedged_beat_is_abandoned_rather_than_parking_the_loop() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("hang.sh");
+        std::fs::write(&stub, "#!/bin/sh\nsleep 600\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        tokio::time::pause();
+        let beat =
+            tokio::spawn(
+                async move { run_cli_heartbeat(stub.to_str().unwrap(), "main", &[]).await },
+            );
+        tokio::time::advance(BEAT_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            beat.await.unwrap().is_none(),
+            "a hung beat must yield no report"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_advances_the_ledger_and_escalates_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_instance(&store, "main").await;
+        let sched = scheduler(&store).await;
+        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+
+        for _ in 0..3 {
+            AtcInstanceRepo::record_continue(store.pool(), "main", "spent", NOW)
+                .await
+                .unwrap();
+        }
+        let parsed: HeartbeatReport = serde_json::from_str(&report(
+            r#"{"session_id":"spent","cwd":"/w/s","pattern":"overloaded"},
+               {"session_id":"fresh","cwd":"/w/f","pattern":"rate_limited"}"#,
+        ))
+        .unwrap();
+        sched.apply_report(&inst, &[], &parsed, NOW).await;
+
         let fresh = AtcInstanceRepo::retry_get(store.pool(), "main", "fresh")
             .await
             .unwrap()
-            .expect("fresh session should now have a ledger row");
+            .expect("a newly erroring session gets a row");
         assert_eq!(fresh.continue_count, 1);
         assert!(!fresh.escalated);
 
-        // "spent" was at the cap, so it escalated rather than continuing again.
         let spent = AtcInstanceRepo::retry_get(store.pool(), "main", "spent")
             .await
             .unwrap()
             .unwrap();
-        assert!(spent.escalated, "a session at the cap must escalate, not continue");
-        assert_eq!(spent.continue_count, 3, "escalating must not spend more budget");
-
-        // ABSENT: "recovered" stopped erroring, so its budget is cleared and a
-        // later failure starts fresh. This is the path that never existed before.
         assert!(
-            AtcInstanceRepo::retry_get(store.pool(), "main", "recovered").await.unwrap().is_none(),
-            "a recovered session must lose its spent budget"
+            spent.escalated,
+            "a session at the cap escalates rather than continuing"
+        );
+        assert_eq!(
+            spent.continue_count, 3,
+            "escalating must not spend more budget"
+        );
+    }
+
+    /// Recovery clears the budget, but only after the absence has HELD. Resetting
+    /// on first absence would make the cap unreachable, because the ordinary cycle
+    /// is err → continue → working again on the very next beat.
+    #[tokio::test]
+    async fn recovery_resets_only_after_the_grace_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_instance(&store, "main").await;
+        let sched = scheduler(&store).await;
+        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+
+        AtcInstanceRepo::record_continue(store.pool(), "main", "flaky", NOW)
+            .await
+            .unwrap();
+        let ledger = AtcInstanceRepo::retry_list(store.pool(), "main").await.unwrap();
+        let quiet: HeartbeatReport = serde_json::from_str(&report("")).unwrap();
+
+        // One beat later it is off the roster, but the row must survive so a
+        // repeat failure still counts against the same budget.
+        sched.apply_report(&inst, &ledger, &quiet, NOW + 60_000).await;
+        assert!(
+            AtcInstanceRepo::retry_get(store.pool(), "main", "flaky")
+                .await
+                .unwrap()
+                .is_some(),
+            "budget cleared on first absence — a flapping session would never escalate"
         );
 
-        std::env::remove_var("AINB_BIN");
+        // Still clear once the absence has outlived the grace window.
+        sched.apply_report(&inst, &ledger, &quiet, NOW + RETRY_RESET_GRACE_MS).await;
+        assert!(
+            AtcInstanceRepo::retry_get(store.pool(), "main", "flaky")
+                .await
+                .unwrap()
+                .is_none(),
+            "a genuinely recovered session must get a fresh budget"
+        );
+    }
+
+    /// All three gates fail closed. Each would otherwise corrupt the ledger in a
+    /// way that pages a human or frees a broken session.
+    #[tokio::test]
+    async fn a_degraded_beat_never_moves_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_instance(&store, "main").await;
+        let sched = scheduler(&store).await;
+        let inst = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+
+        AtcInstanceRepo::record_continue(store.pool(), "main", "keep", NOW)
+            .await
+            .unwrap();
+        let ledger = AtcInstanceRepo::retry_list(store.pool(), "main").await.unwrap();
+        let erroring = r#"{"session_id":"new","cwd":"/w/n","pattern":"overloaded"}"#;
+
+        for (label, raw) in [
+            // The scan failed, so the empty roster is not evidence of recovery.
+            (
+                "scan failed",
+                format!(
+                    r#"{{"ledger_owner":"daemon","roster_valid":false,"delivered":true,"err_sessions":[{erroring}]}}"#
+                ),
+            ),
+            // The nudge never landed, so ATC was never asked to continue anything.
+            (
+                "not delivered",
+                format!(
+                    r#"{{"ledger_owner":"daemon","roster_valid":true,"delivered":false,"err_sessions":[{erroring}]}}"#
+                ),
+            ),
+            // A binary that never took the handoff is still counting locally.
+            (
+                "handoff refused",
+                format!(
+                    r#"{{"ledger_owner":"local","roster_valid":true,"delivered":true,"err_sessions":[{erroring}]}}"#
+                ),
+            ),
+        ] {
+            let parsed: HeartbeatReport = serde_json::from_str(&raw).unwrap();
+            sched.apply_report(&inst, &ledger, &parsed, NOW + RETRY_RESET_GRACE_MS).await;
+            assert!(
+                AtcInstanceRepo::retry_get(store.pool(), "main", "new").await.unwrap().is_none(),
+                "{label}: budget spent on a beat that should have been ignored"
+            );
+            assert!(
+                AtcInstanceRepo::retry_get(store.pool(), "main", "keep")
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{label}: ledger reset from a beat that should have been ignored"
+            );
+        }
     }
 
     fn retry_row(session: &str, count: i64, escalated: bool) -> AtcRetryRow {
