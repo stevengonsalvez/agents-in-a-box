@@ -501,7 +501,9 @@ impl CliCommand for DoctorCommand {
                 .after_help(
                     "EXAMPLES:\n  \
                      ainb doctor                      Health-check skills, dependencies, hooks, and daemons\n  \
-                     ainb doctor --offline            Skip source-reachability network checks",
+                     ainb doctor --offline            Skip source-reachability network checks
+  \
+                     ainb doctor --fix-hooks          Repair installed release hooks",
                 ),
         )
     }

@@ -185,24 +185,214 @@ pub fn canonical_hook_script(paths: &Paths) -> PathBuf {
     paths.base.join("hooks").join("notify.sh")
 }
 
-/// Where the installer records the exact `ainb` binary that extracted the
-/// hook. Hook processes do not inherit a developer shell's `AINB_BIN`, so
-/// resolving `ainb` from PATH can silently select an older Homebrew build.
+/// Where the installer records the `ainb` launcher that hooks execute. Hook
+/// processes do not inherit a developer shell's `AINB_BIN`, so resolving
+/// `ainb` from PATH can silently select an older Homebrew build.
 pub fn canonical_hook_bin(paths: &Paths) -> PathBuf {
     paths.base.join("hooks").join("ainb-bin")
 }
 
-/// Record the executable running the installer for later hook invocations.
-pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
-    let bin = std::env::current_exe().context("resolving installing ainb binary")?;
+/// Durable metadata beside [`canonical_hook_bin`].  The shell hook only needs
+/// the one-line pointer, while this record lets health surfaces distinguish a
+/// stable package launcher from an intentional dev build.
+pub fn canonical_hook_bin_metadata(paths: &Paths) -> PathBuf {
+    paths.base.join("hooks").join("ainb-bin.json")
+}
+
+/// How a hook reaches `ainb`.
+///
+/// `Release` deliberately means a package-manager launcher such as
+/// `/opt/homebrew/bin/ainb`, never Homebrew's versioned Cellar binary. `Dev`
+/// is intentionally exact: a removed worktree must be reported, not silently
+/// replaced by an unrelated release binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookBinaryMode {
+    /// Package-manager owned stable launcher, safe across upgrades.
+    Release,
+    /// Explicit local development build, expected to disappear with its tree.
+    Dev,
+    /// Absolute executable outside a recognised package or dev layout.
+    Direct,
+    /// Old one-line pointer without metadata; eligible only for safe migration.
+    Legacy,
+}
+
+impl HookBinaryMode {
+    /// Short user-facing policy label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Dev => "dev",
+            Self::Direct => "direct",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// The executable policy persisted for the hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookBinaryTarget {
+    /// Executable the shell hook invokes.
+    pub path: PathBuf,
+    /// Resolution policy for [`Self::path`].
+    pub mode: HookBinaryMode,
+}
+
+fn is_dev_binary(path: &Path) -> bool {
+    path.components().any(|component| component.as_os_str() == "target")
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn canonical_eq(left: &Path, right: &Path) -> bool {
+    std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+}
+
+/// Return the unversioned Homebrew launcher for a Cellar executable.
+fn homebrew_launcher(exe: &Path) -> Option<PathBuf> {
+    let cellar = exe.ancestors().find(|path| path.file_name().is_some_and(|n| n == "Cellar"))?;
+    let launcher = cellar.parent()?.join("bin").join("ainb");
+    is_executable(&launcher).then_some(launcher)
+}
+
+fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
+    if let Some(launcher) = homebrew_launcher(exe) {
+        return Some(launcher);
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/ainb"),
+        PathBuf::from("/usr/local/bin/ainb"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".cargo/bin/ainb"));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable(candidate) && canonical_eq(candidate, exe))
+}
+
+fn launcher_mode(path: &Path) -> HookBinaryMode {
+    if is_dev_binary(path) {
+        HookBinaryMode::Dev
+    } else if path == Path::new("/opt/homebrew/bin/ainb")
+        || path == Path::new("/usr/local/bin/ainb")
+        || path.parent().is_some_and(|parent| parent.ends_with(".cargo/bin"))
+    {
+        HookBinaryMode::Release
+    } else {
+        HookBinaryMode::Direct
+    }
+}
+
+fn hook_binary_target(exe: PathBuf, explicit: Option<&str>) -> HookBinaryTarget {
+    if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::path::absolute(&path).unwrap_or(path)
+        };
+        // An explicit developer build is meaningful. An explicit Homebrew
+        // Cellar path is only an old package implementation detail, so retain
+        // the user's package choice but record its durable launcher instead.
+        if let Some(launcher) = homebrew_launcher(&path) {
+            return HookBinaryTarget {
+                mode: HookBinaryMode::Release,
+                path: launcher,
+            };
+        }
+        return HookBinaryTarget {
+            mode: launcher_mode(&path),
+            path,
+        };
+    }
+    if let Some(path) = stable_launcher_for(&exe) {
+        return HookBinaryTarget {
+            path,
+            mode: HookBinaryMode::Release,
+        };
+    }
+    HookBinaryTarget {
+        mode: launcher_mode(&exe),
+        path: exe,
+    }
+}
+
+fn write_hook_binary_target(paths: &Paths, target: &HookBinaryTarget) -> Result<PathBuf> {
     let dest = canonical_hook_bin(paths);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    write_atomic(&dest, &format!("{}\n", bin.display()))
+    write_atomic(&dest, &format!("{}\n", target.path.display()))
         .with_context(|| format!("writing {}", dest.display()))?;
+    let metadata = canonical_hook_bin_metadata(paths);
+    write_atomic(&metadata, &serde_json::to_string_pretty(target)?)
+        .with_context(|| format!("writing {}", metadata.display()))?;
     Ok(dest)
+}
+
+/// Record an upgrade-safe executable for later hook invocations.
+///
+/// Homebrew's `current_exe()` lives in `Cellar/<version>`. Writing it here is
+/// the regression this function avoids: use the stable `/opt/homebrew/bin`
+/// launcher instead. A developer can deliberately pin their local build with
+/// `AINB_BIN=/path/to/target/debug/ainb`; that intent is recorded as `dev`.
+pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
+    let bin = std::env::current_exe().context("resolving installing ainb binary")?;
+    let target = hook_binary_target(bin, std::env::var("AINB_BIN").ok().as_deref());
+    write_hook_binary_target(paths, &target)
+}
+
+fn read_hook_binary_target(paths: &Paths) -> Option<HookBinaryTarget> {
+    // `notify.sh` executes this one-line pointer, not the metadata. Read it
+    // first so a stale or manually altered pointer can never be reported as
+    // healthy because the JSON still names an executable release launcher.
+    let raw = std::fs::read_to_string(canonical_hook_bin(paths)).ok().and_then(|text| {
+        let path = PathBuf::from(text.trim());
+        (!path.as_os_str().is_empty()).then_some(path)
+    })?;
+    let metadata = canonical_hook_bin_metadata(paths);
+    if let Ok(text) = std::fs::read_to_string(metadata) {
+        if let Ok(target) = serde_json::from_str::<HookBinaryTarget>(&text) {
+            if target.path == raw {
+                return Some(target);
+            }
+        }
+    }
+    Some(HookBinaryTarget {
+        path: raw,
+        mode: HookBinaryMode::Legacy,
+    })
+}
+
+/// Safely migrate only old Homebrew Cellar pointers. Never replace a missing
+/// dev/direct pointer: that would hide a developer's broken worktree by
+/// unexpectedly switching their hooks to a global binary.
+pub fn auto_repair_hook_binary(paths: &Paths) -> Result<bool> {
+    let Some(target) = read_hook_binary_target(paths) else {
+        return Ok(false);
+    };
+    if target.mode != HookBinaryMode::Legacy {
+        return Ok(false);
+    }
+    let Some(launcher) = homebrew_launcher(&target.path) else {
+        return Ok(false);
+    };
+    write_hook_binary_target(
+        paths,
+        &HookBinaryTarget {
+            path: launcher,
+            mode: HookBinaryMode::Release,
+        },
+    )?;
+    Ok(true)
 }
 
 /// Extract the embedded `notify.sh` to its canonical location with
@@ -347,6 +537,20 @@ pub fn install(paths: &Paths, agents: &[Agent]) -> Result<InstallReport> {
     let record = install_under_home(paths, &home, agents)?;
     let claude = agents.contains(&Agent::Claude).then(register_claude_plugin);
     Ok(InstallReport { record, claude })
+}
+
+/// Rebuild every installed hook surface against this running Ainb binary.
+///
+/// Unlike `fleet runtime install`, this touches hooks only: canonical scripts,
+/// executable resolver, Codex/Copilot wiring, and Claude marketplace plugin.
+/// It refuses an empty record rather than turning a diagnostic command into a
+/// surprise all-agent install.
+pub fn repair_hooks(paths: &Paths) -> Result<InstallReport> {
+    let record = InstallRecord::load(paths)?;
+    if record.agents.is_empty() {
+        bail!("hooks are not installed; run `ainb notifyd install --all`");
+    }
+    install(paths, &record.agents)
 }
 
 /// Install variant that takes an explicit `$HOME` root. Lets tests
@@ -843,6 +1047,9 @@ pub struct HookHealth {
     pub script_ready: bool,
     /// Actual `ainb` executable named by the extracted hook binary pointer.
     pub hook_binary: Option<PathBuf>,
+    /// Whether the hook follows a package-manager launcher, an exact dev
+    /// target, or a pre-1.21 legacy pointer.
+    pub hook_binary_mode: Option<HookBinaryMode>,
     /// Whether the hook binary pointer resolves to an executable file.
     pub hook_binary_ready: bool,
     /// Per-agent installation and wiring state.
@@ -869,11 +1076,14 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
     };
     let script_path = canonical_hook_script(paths);
     let script_ready = is_executable(&script_path);
-    let hook_binary = std::fs::read_to_string(canonical_hook_bin(paths)).ok().and_then(|text| {
-        let target = text.trim();
-        (!target.is_empty()).then(|| PathBuf::from(target))
-    });
-    let hook_binary_ready = hook_binary.as_deref().is_some_and(is_executable);
+    let hook_target = read_hook_binary_target(paths);
+    let hook_binary = hook_target.as_ref().map(|target| target.path.clone());
+    let hook_binary_mode = hook_target.as_ref().map(|target| target.mode);
+    // The metadata is diagnostic only. The shell hook executes the one-line
+    // `ainb-bin` pointer, so a healthy metadata file cannot mask a missing
+    // pointer file.
+    let hook_binary_ready =
+        canonical_hook_bin(paths).is_file() && hook_binary.as_deref().is_some_and(is_executable);
     let installed_any = !record.agents.is_empty();
     let version_current = record
         .plugin_version
@@ -890,13 +1100,13 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
         issues.push(HookHealthIssue {
             component: "install record".to_string(),
             message: format!("cannot read install.json: {error}"),
-            repair: "ainb fleet runtime install".to_string(),
+            repair: "ainb doctor --fix-hooks".to_string(),
         });
     } else if !installed_any {
         issues.push(HookHealthIssue {
             component: "hooks".to_string(),
             message: "not installed for any agent".to_string(),
-            repair: "ainb fleet runtime install".to_string(),
+            repair: "ainb notifyd install --all".to_string(),
         });
     } else {
         if !version_current {
@@ -904,31 +1114,45 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
             issues.push(HookHealthIssue {
                 component: "version".to_string(),
                 message: format!("installed {installed}; ainb bundles {bundled_version}"),
-                repair: "ainb fleet runtime install".to_string(),
+                repair: "ainb doctor --fix-hooks".to_string(),
             });
         }
         if !script_ready {
             issues.push(HookHealthIssue {
                 component: "hook script".to_string(),
                 message: format!("{} is missing or not executable", script_path.display()),
-                repair: "ainb fleet runtime install".to_string(),
+                repair: "ainb doctor --fix-hooks".to_string(),
             });
         }
         if !hook_binary_ready {
+            let repair = match hook_binary_mode {
+                Some(HookBinaryMode::Dev) => {
+                    "restore dev build, then press I in Daemons or run `AINB_BIN=/path/to/target/debug/ainb ainb notifyd install --all`"
+                        .to_string()
+                }
+                _ => "ainb doctor --fix-hooks".to_string(),
+            };
             issues.push(HookHealthIssue {
                 component: "hook binary".to_string(),
                 message: hook_binary.as_ref().map_or_else(
                     || "ainb-bin pointer is missing or empty".to_string(),
                     |target| format!("{} is missing or not executable", target.display()),
                 ),
-                repair: "ainb fleet runtime install".to_string(),
+                repair,
+            });
+        }
+        if hook_binary_mode == Some(HookBinaryMode::Legacy) {
+            issues.push(HookHealthIssue {
+                component: "hook binary".to_string(),
+                message: "legacy binary pointer; migrate to stable launcher".to_string(),
+                repair: "ainb doctor --fix-hooks".to_string(),
             });
         }
         for agent in agents.iter().filter(|agent| agent.installed && !agent.wiring_ready) {
             issues.push(HookHealthIssue {
                 component: agent.agent.clone(),
                 message: agent.detail.clone(),
-                repair: "ainb fleet runtime install".to_string(),
+                repair: "ainb doctor --fix-hooks".to_string(),
             });
         }
     }
@@ -940,6 +1164,7 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
         script_path,
         script_ready,
         hook_binary,
+        hook_binary_mode,
         hook_binary_ready,
         agents,
         notify_socket_live: socket_live(&paths.socket),
@@ -1021,13 +1246,6 @@ fn json_has_hook_command(value: &serde_json::Value, expected: &str) -> bool {
         }
         _ => false,
     }
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-        && std::fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
 }
 
 fn socket_live(path: &Path) -> bool {
@@ -1138,13 +1356,98 @@ mod tests {
     }
 
     #[test]
-    fn extract_hook_bin_records_installing_binary() {
+    fn extract_hook_bin_records_mode_and_executable_target() {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
         let dest = extract_hook_bin(&p).unwrap();
+        let target = read_hook_binary_target(&p).expect("pointer metadata");
         assert_eq!(
             std::fs::read_to_string(dest).unwrap().trim(),
-            std::env::current_exe().unwrap().display().to_string()
+            target.path.display().to_string()
+        );
+        assert!(target.path.is_absolute());
+        assert_ne!(target.mode, HookBinaryMode::Legacy);
+    }
+
+    #[test]
+    fn homebrew_cellar_binary_uses_stable_bin_launcher() {
+        let dir = fake_home();
+        let root = dir.path().join("homebrew");
+        let cellar_bin = root.join("Cellar/ainb/1.20.8/libexec/ainb");
+        let launcher = root.join("bin/ainb");
+        std::fs::create_dir_all(cellar_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&cellar_bin, "#!/bin/sh\n").unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        for path in [&cellar_bin, &launcher] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let target = hook_binary_target(cellar_bin, None);
+        assert_eq!(target.mode, HookBinaryMode::Release);
+        assert_eq!(target.path, launcher);
+    }
+
+    #[test]
+    fn explicit_dev_binary_stays_exact_but_explicit_cellar_is_normalised() {
+        let dir = fake_home();
+        let dev = dir.path().join("checkout/target/debug/ainb");
+        let dev_target = hook_binary_target(
+            PathBuf::from("/unused/ainb"),
+            Some(dev.to_str().expect("UTF-8 temporary path")),
+        );
+        assert_eq!(dev_target.mode, HookBinaryMode::Dev);
+        assert_eq!(dev_target.path, dev);
+
+        let root = dir.path().join("homebrew");
+        let cellar = root.join("Cellar/ainb/1.21.0/libexec/ainb");
+        let launcher = root.join("bin/ainb");
+        std::fs::create_dir_all(cellar.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&cellar, "#!/bin/sh\\n").unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\\n").unwrap();
+        for path in [&cellar, &launcher] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        let cellar_target = hook_binary_target(
+            PathBuf::from("/unused/ainb"),
+            Some(cellar.to_str().expect("UTF-8 temporary path")),
+        );
+        assert_eq!(cellar_target.mode, HookBinaryMode::Release);
+        assert_eq!(cellar_target.path, launcher);
+    }
+
+    #[test]
+    fn legacy_cellar_pointer_migrates_but_missing_dev_pointer_does_not() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let root = dir.path().join("homebrew");
+        let old = root.join("Cellar/ainb/1.20.8/libexec/ainb");
+        let launcher = root.join("bin/ainb");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, permissions).unwrap();
+        std::fs::create_dir_all(canonical_hook_bin(&p).parent().unwrap()).unwrap();
+        std::fs::write(canonical_hook_bin(&p), format!("{}\n", old.display())).unwrap();
+
+        assert!(auto_repair_hook_binary(&p).unwrap());
+        let migrated = read_hook_binary_target(&p).unwrap();
+        assert_eq!(migrated.mode, HookBinaryMode::Release);
+        assert_eq!(migrated.path, launcher);
+
+        let dev = dir.path().join("project/target/debug/ainb");
+        std::fs::write(canonical_hook_bin(&p), format!("{}\n", dev.display())).unwrap();
+        std::fs::remove_file(canonical_hook_bin_metadata(&p)).unwrap();
+        assert!(!auto_repair_hook_binary(&p).unwrap());
+        assert_eq!(
+            read_hook_binary_target(&p).unwrap().mode,
+            HookBinaryMode::Legacy
         );
     }
 
@@ -1488,8 +1791,11 @@ mod tests {
         assert!(codex.wiring_ready, "{}", codex.detail);
         assert!(health.issues.is_empty(), "{:?}", health.issues);
 
-        std::fs::remove_file(canonical_hook_bin(&p)).unwrap();
+        let altered = dir.path().join("manually-altered-ainb");
+        std::fs::write(canonical_hook_bin(&p), format!("{}\n", altered.display())).unwrap();
         let broken = hook_health(&p);
+        assert_eq!(broken.hook_binary.as_deref(), Some(altered.as_path()));
+        assert_eq!(broken.hook_binary_mode, Some(HookBinaryMode::Legacy));
         assert!(!broken.hook_binary_ready);
         assert!(broken.issues.iter().any(|issue| issue.component == "hook binary"));
     }

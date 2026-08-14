@@ -58,6 +58,7 @@ pub enum AppEvent {
     DaemonsOverlayRefresh,
     /// Restart the notifyd daemon (single resume/repair) from the overlay.
     DaemonsOverlayRestartNotifyd,
+    DaemonsRepairHooks,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
     DaemonsStartHeadroom,
@@ -1422,6 +1423,7 @@ impl EventHandler {
                 }
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
                 KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+                KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
                 KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
                 _ => None,
             };
@@ -2971,6 +2973,7 @@ impl EventHandler {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
             KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+            KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
             KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
             KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
             KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
@@ -3667,6 +3670,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
+            AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
             AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
             AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
@@ -8796,6 +8800,10 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::DaemonsOverlayRestartNotifyd)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('I')),
+            Some(AppEvent::DaemonsRepairHooks)
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),

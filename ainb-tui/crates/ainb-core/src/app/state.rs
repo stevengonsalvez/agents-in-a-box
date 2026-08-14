@@ -1047,6 +1047,11 @@ pub struct DaemonsOverlayState {
     pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Last restart outcome line (transient, shown until the next refresh).
     pub notifyd_restart_status: Option<String>,
+    /// Receiver for a targeted hook reinstall. Kept separate from notifyd
+    /// restart: repairing a binary pointer must not imply daemon lifecycle.
+    pub hooks_repair_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Last hook repair outcome, rendered in the Hooks section.
+    pub hooks_repair_status: Option<String>,
     pub hangar_start_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub hangar_start_status: Option<String>,
     /// MCP start result, shown in the unified Daemons table.
@@ -5025,6 +5030,8 @@ impl AppState {
             fetch_rx: None,
             notifyd_restart_rx: None,
             notifyd_restart_status: None,
+            hooks_repair_rx: None,
+            hooks_repair_status: None,
             hangar_running: false,
             hangar_reason: "probing…".to_string(),
             hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
@@ -5120,6 +5127,43 @@ impl AppState {
             })
             .await
             .unwrap_or_else(|e| format!("restart task panicked: {e}"));
+            let _ = tx.send(line);
+        });
+    }
+
+    /// Reinstall only already-installed hooks against this running binary.
+    /// This is the repair action for stale package-manager paths and damaged
+    /// wiring; it deliberately does not start/restart any daemon.
+    pub fn spawn_hooks_repair(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.hooks_repair_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.hooks_repair_rx = Some(rx);
+        o.hooks_repair_status = Some("repairing hooks…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                let result = ainb_plugin_notifyd::Paths::from_home()
+                    .and_then(|paths| ainb_plugin_notifyd::repair_hooks(&paths));
+                match result {
+                    Ok(report) => format!(
+                        "hooks repaired for {}",
+                        report
+                            .record
+                            .agents
+                            .iter()
+                            .map(|agent| agent.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Err(error) => format!("hook repair failed: {error:#}"),
+                }
+            })
+            .await
+            .unwrap_or_else(|error| format!("hook repair task panicked: {error}"));
             let _ = tx.send(line);
         });
     }
@@ -5239,6 +5283,13 @@ impl AppState {
             if let Ok(line) = rx.try_recv() {
                 o.notifyd_restart_rx = None;
                 o.notifyd_restart_status = Some(line);
+                refresh_after_start = true;
+            }
+        }
+        if let Some(rx) = o.hooks_repair_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.hooks_repair_rx = None;
+                o.hooks_repair_status = Some(line);
                 refresh_after_start = true;
             }
         }
@@ -7132,6 +7183,12 @@ impl AppState {
         let Ok(paths) = Paths::from_home() else {
             return;
         };
+        // Pre-1.21 hook installs pinned Homebrew's versioned Cellar binary.
+        // This migration is safe only for that recognisable legacy shape; it
+        // never rewrites an intentional dev target.
+        if let Err(error) = ainb_plugin_notifyd::auto_repair_hook_binary(&paths) {
+            tracing::warn!(error = %error, "could not migrate legacy hook binary pointer");
+        }
         let (title, message, install_label) = match prompt_state(&paths) {
             InstallPrompt::OfferInstall => (
                 "Get notified when a session needs you?".to_string(),
