@@ -765,32 +765,52 @@ async fn prepare_scoped_codex_home(socket_path: &Path) -> Result<PathBuf, Provid
         .ok_or_else(|| {
             ProviderError::Transport("cannot resolve Codex authentication home".into())
         })?;
-    prepare_scoped_codex_home_with_auth(&scoped_home, &source_home.join("auth.json")).await?;
+    prepare_scoped_codex_home_with_source(&scoped_home, &source_home).await?;
     Ok(scoped_home)
 }
 
-async fn prepare_scoped_codex_home_with_auth(
+async fn prepare_scoped_codex_home_with_source(
     scoped_home: &Path,
-    source_auth: &Path,
+    source_home: &Path,
 ) -> Result<(), ProviderError> {
     tokio::fs::create_dir_all(scoped_home).await?;
     #[cfg(unix)]
     tokio::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700)).await?;
 
     let scoped_auth = scoped_home.join("auth.json");
-    match tokio::fs::symlink_metadata(&scoped_auth).await {
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let auth_missing = match tokio::fs::symlink_metadata(&scoped_auth).await {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(error) => return Err(error.into()),
+    };
+    if auth_missing {
+        let source_auth = source_home.join("auth.json");
+        if !source_auth.is_file() {
+            return Err(ProviderError::Transport(format!(
+                "Codex ChatGPT login unavailable at {}",
+                source_auth.display()
+            )));
+        }
+        #[cfg(unix)]
+        tokio::fs::symlink(source_auth, &scoped_auth).await?;
     }
-    if !source_auth.is_file() {
-        return Err(ProviderError::Transport(format!(
-            "Codex ChatGPT login unavailable at {}",
-            source_auth.display()
-        )));
+
+    let source_skills = source_home.join("skills");
+    let scoped_skills = scoped_home.join("skills");
+    let mut entries = match tokio::fs::read_dir(&source_skills).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    tokio::fs::create_dir_all(&scoped_skills).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let scoped_skill = scoped_skills.join(entry.file_name());
+        if tokio::fs::symlink_metadata(&scoped_skill).await.is_ok() {
+            continue;
+        }
+        #[cfg(unix)]
+        tokio::fs::symlink(entry.path(), scoped_skill).await?;
     }
-    #[cfg(unix)]
-    tokio::fs::symlink(source_auth, &scoped_auth).await?;
     Ok(())
 }
 
@@ -2243,13 +2263,20 @@ mod tests {
     use crate::fleet_provider::{QuestionOption, StructuredQuestion};
 
     #[tokio::test]
-    async fn scoped_codex_home_symlinks_existing_auth() {
+    async fn scoped_codex_home_shares_auth_and_user_skills() {
         let root = tempfile::tempdir().unwrap();
-        let source_auth = root.path().join("source-auth.json");
+        let source_home = root.path().join("source");
+        std::fs::create_dir_all(source_home.join("skills/interview")).unwrap();
+        let source_auth = source_home.join("auth.json");
         std::fs::write(&source_auth, "existing ChatGPT credentials").unwrap();
+        std::fs::write(
+            source_home.join("skills/interview/SKILL.md"),
+            "interview skill",
+        )
+        .unwrap();
         let scoped_home = root.path().join("ainb/codex-home");
 
-        prepare_scoped_codex_home_with_auth(&scoped_home, &source_auth).await.unwrap();
+        prepare_scoped_codex_home_with_source(&scoped_home, &source_home).await.unwrap();
 
         let scoped_auth = scoped_home.join("auth.json");
         assert!(std::fs::symlink_metadata(&scoped_auth).unwrap().file_type().is_symlink());
@@ -2258,10 +2285,49 @@ mod tests {
             std::fs::read_to_string(&scoped_auth).unwrap(),
             "existing ChatGPT credentials"
         );
+        let scoped_interview = scoped_home.join("skills/interview");
+        assert!(std::fs::symlink_metadata(&scoped_interview).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&scoped_interview).unwrap(),
+            source_home.join("skills/interview")
+        );
         #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&scoped_home).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_codex_home_preserves_scoped_skill_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let source_home = root.path().join("source");
+        std::fs::create_dir_all(source_home.join("skills/interview")).unwrap();
+        std::fs::write(
+            source_home.join("auth.json"),
+            "existing ChatGPT credentials",
+        )
+        .unwrap();
+        std::fs::write(
+            source_home.join("skills/interview/SKILL.md"),
+            "source skill",
+        )
+        .unwrap();
+        let scoped_home = root.path().join("ainb/codex-home");
+        std::fs::create_dir_all(scoped_home.join("skills/interview")).unwrap();
+        std::fs::write(
+            scoped_home.join("skills/interview/SKILL.md"),
+            "scoped skill",
+        )
+        .unwrap();
+
+        prepare_scoped_codex_home_with_source(&scoped_home, &source_home).await.unwrap();
+
+        let scoped_interview = scoped_home.join("skills/interview");
+        assert!(!std::fs::symlink_metadata(&scoped_interview).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(scoped_interview.join("SKILL.md")).unwrap(),
+            "scoped skill"
         );
     }
 
