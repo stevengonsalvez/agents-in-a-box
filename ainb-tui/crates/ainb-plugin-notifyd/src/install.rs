@@ -351,18 +351,24 @@ pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
 }
 
 fn read_hook_binary_target(paths: &Paths) -> Option<HookBinaryTarget> {
+    // `notify.sh` executes this one-line pointer, not the metadata. Read it
+    // first so a stale or manually altered pointer can never be reported as
+    // healthy because the JSON still names an executable release launcher.
+    let raw = std::fs::read_to_string(canonical_hook_bin(paths)).ok().and_then(|text| {
+        let path = PathBuf::from(text.trim());
+        (!path.as_os_str().is_empty()).then_some(path)
+    })?;
     let metadata = canonical_hook_bin_metadata(paths);
     if let Ok(text) = std::fs::read_to_string(metadata) {
-        if let Ok(target) = serde_json::from_str(&text) {
-            return Some(target);
+        if let Ok(target) = serde_json::from_str::<HookBinaryTarget>(&text) {
+            if target.path == raw {
+                return Some(target);
+            }
         }
     }
-    std::fs::read_to_string(canonical_hook_bin(paths)).ok().and_then(|text| {
-        let path = PathBuf::from(text.trim());
-        (!path.as_os_str().is_empty()).then_some(HookBinaryTarget {
-            path,
-            mode: HookBinaryMode::Legacy,
-        })
+    Some(HookBinaryTarget {
+        path: raw,
+        mode: HookBinaryMode::Legacy,
     })
 }
 
@@ -1785,8 +1791,11 @@ mod tests {
         assert!(codex.wiring_ready, "{}", codex.detail);
         assert!(health.issues.is_empty(), "{:?}", health.issues);
 
-        std::fs::remove_file(canonical_hook_bin(&p)).unwrap();
+        let altered = dir.path().join("manually-altered-ainb");
+        std::fs::write(canonical_hook_bin(&p), format!("{}\n", altered.display())).unwrap();
         let broken = hook_health(&p);
+        assert_eq!(broken.hook_binary.as_deref(), Some(altered.as_path()));
+        assert_eq!(broken.hook_binary_mode, Some(HookBinaryMode::Legacy));
         assert!(!broken.hook_binary_ready);
         assert!(broken.issues.iter().any(|issue| issue.component == "hook binary"));
     }
