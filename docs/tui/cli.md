@@ -669,11 +669,13 @@ Usage: ainb doctor [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --offline          Skip skill-source reachability checks. Runtime checks stay local
+      --fix-hooks        Repair installed notification hooks: stable binary launcher, extracted scripts, and agent wiring. Reports a broken dev target without changing it into a release hook
   -h, --help             Print help
 
 EXAMPLES:
   ainb doctor                      Health-check skills, dependencies, hooks, and daemons
   ainb doctor --offline            Skip source-reachability network checks
+  ainb doctor --fix-hooks          Repair installed release hooks
 ```
 
 ## `ainb reflect`
