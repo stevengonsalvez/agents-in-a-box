@@ -2269,7 +2269,11 @@ mod tests {
         std::fs::create_dir_all(source_home.join("skills/interview")).unwrap();
         let source_auth = source_home.join("auth.json");
         std::fs::write(&source_auth, "existing ChatGPT credentials").unwrap();
-        std::fs::write(source_home.join("skills/interview/SKILL.md"), "interview skill").unwrap();
+        std::fs::write(
+            source_home.join("skills/interview/SKILL.md"),
+            "interview skill",
+        )
+        .unwrap();
         let scoped_home = root.path().join("ainb/codex-home");
 
         prepare_scoped_codex_home_with_source(&scoped_home, &source_home).await.unwrap();
@@ -2283,7 +2287,10 @@ mod tests {
         );
         let scoped_interview = scoped_home.join("skills/interview");
         assert!(std::fs::symlink_metadata(&scoped_interview).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(&scoped_interview).unwrap(), source_home.join("skills/interview"));
+        assert_eq!(
+            std::fs::read_link(&scoped_interview).unwrap(),
+            source_home.join("skills/interview")
+        );
         #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&scoped_home).unwrap().permissions().mode() & 0o777,
@@ -2296,17 +2303,32 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source_home = root.path().join("source");
         std::fs::create_dir_all(source_home.join("skills/interview")).unwrap();
-        std::fs::write(source_home.join("auth.json"), "existing ChatGPT credentials").unwrap();
-        std::fs::write(source_home.join("skills/interview/SKILL.md"), "source skill").unwrap();
+        std::fs::write(
+            source_home.join("auth.json"),
+            "existing ChatGPT credentials",
+        )
+        .unwrap();
+        std::fs::write(
+            source_home.join("skills/interview/SKILL.md"),
+            "source skill",
+        )
+        .unwrap();
         let scoped_home = root.path().join("ainb/codex-home");
         std::fs::create_dir_all(scoped_home.join("skills/interview")).unwrap();
-        std::fs::write(scoped_home.join("skills/interview/SKILL.md"), "scoped skill").unwrap();
+        std::fs::write(
+            scoped_home.join("skills/interview/SKILL.md"),
+            "scoped skill",
+        )
+        .unwrap();
 
         prepare_scoped_codex_home_with_source(&scoped_home, &source_home).await.unwrap();
 
         let scoped_interview = scoped_home.join("skills/interview");
         assert!(!std::fs::symlink_metadata(&scoped_interview).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(scoped_interview.join("SKILL.md")).unwrap(), "scoped skill");
+        assert_eq!(
+            std::fs::read_to_string(scoped_interview.join("SKILL.md")).unwrap(),
+            "scoped skill"
+        );
     }
 
     #[test]
