@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-08-14
+### Added
+- **tui**: unify daemon health and controls
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- Merge pull request #684 from stevengonsalvez/fix/main-ci-drift
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- **store**: neutralise the duplicate event_watermark migration
+- **store**: neutralise the duplicate resumable migration
+- **store**: only skip 0087 when 0089/0090 already won
+- **tui**: report daemon start outcomes
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: regenerate doctor reference
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- **tui**: describe daemon repair controls
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+
 ## [1.20.5] - 2026-08-12
 ### Added
 - Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
