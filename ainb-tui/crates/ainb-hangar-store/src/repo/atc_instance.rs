@@ -517,6 +517,40 @@ impl AtcInstanceRepo {
         Ok(row.as_ref().map(retry_from_sqlite))
     }
 
+    /// Every retry-ledger row for one instance.
+    ///
+    /// The heartbeat needs the WHOLE ledger, not one row at a time, for two
+    /// reasons it cannot serve with [`retry_get`]:
+    ///
+    /// 1. The exhausted set has to be computed BEFORE the fleet is scanned, so it
+    ///    can be handed to the beat builder that renders `ESCALATE-ONLY`. At that
+    ///    point there is no list of session ids to look up yet.
+    /// 2. Recovery is defined by ABSENCE — a session that has stopped erroring
+    ///    simply no longer appears in the scan. Only a full listing can spot the
+    ///    ledger rows with no matching ERR row and clear them, which is what gives
+    ///    a recovered session a fresh continue budget.
+    ///
+    /// Ordered by `session_id` so the derived set is stable across calls (a
+    /// heartbeat body that reorders between ticks reads as a change when it is
+    /// not).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn retry_list(
+        pool: &SqlitePool,
+        instance_name: &str,
+    ) -> Result<Vec<AtcRetryRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT instance_name, session_id, continue_count, escalated, note, updated_at \
+             FROM atc_retry WHERE instance_name = ? ORDER BY session_id",
+        )
+        .bind(instance_name)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.iter().map(retry_from_sqlite).collect())
+    }
+
     /// Record one auto-`continue` for a session: increment `continue_count` and
     /// return the NEW count. Upserts, so a first continue creates the row.
     ///
@@ -748,6 +782,46 @@ mod tests {
         // Recovery clears the ledger so a fresh error gets a fresh budget.
         AtcInstanceRepo::reset_retry(store.pool(), "main", "s1").await.unwrap();
         assert!(AtcInstanceRepo::retry_get(store.pool(), "main", "s1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_list_returns_one_instances_ledger_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1)), 1)
+            .await
+            .unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("other", "* * * * *", Some(1)), 1)
+            .await
+            .unwrap();
+        // Insert out of order to prove the ORDER BY, not insertion luck.
+        AtcInstanceRepo::record_continue(store.pool(), "main", "s2", 100).await.unwrap();
+        AtcInstanceRepo::record_continue(store.pool(), "main", "s1", 100).await.unwrap();
+        AtcInstanceRepo::mark_escalated(store.pool(), "main", "s2", 200).await.unwrap();
+        // A sibling instance's ledger must never leak into this one.
+        AtcInstanceRepo::record_continue(store.pool(), "other", "s9", 100)
+            .await
+            .unwrap();
+
+        let rows = AtcInstanceRepo::retry_list(store.pool(), "main").await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(),
+            ["s1", "s2"],
+            "scoped to the instance and sorted by session id"
+        );
+        assert!(!rows[0].escalated);
+        assert!(rows[1].escalated);
+        assert_eq!(rows[1].continue_count, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_list_is_empty_for_an_instance_with_no_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1)), 1)
+            .await
+            .unwrap();
+        assert!(AtcInstanceRepo::retry_list(store.pool(), "main").await.unwrap().is_empty());
     }
 
     #[tokio::test]
