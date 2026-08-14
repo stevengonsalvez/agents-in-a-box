@@ -1010,6 +1010,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 #[derive(Debug, Clone)]
 pub struct DaemonsFetchResult {
     pub mcp_alive: bool,
+    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
     pub headroom: crate::headroom::ProxyStatus,
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
@@ -1028,6 +1029,7 @@ pub struct DaemonsFetchResult {
 #[derive(Debug)]
 pub struct DaemonsOverlayState {
     pub mcp_alive: bool,
+    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
     pub headroom: crate::headroom::ProxyStatus,
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
@@ -1067,6 +1069,7 @@ pub struct DaemonsOverlayState {
 /// to `ps`) so they run on the blocking thread pool.
 pub(crate) fn daemons_sync_probe() -> (
     bool,
+    crate::mcp_pool::client::DaemonRuntimeStatus,
     Vec<String>,
     Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
     (bool, String),
@@ -1074,6 +1077,7 @@ pub(crate) fn daemons_sync_probe() -> (
     crate::cli::hangar::DaemonRuntimeStatus,
 ) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
+    let mcp_runtime = crate::mcp_pool::client::daemon_runtime_status();
     let headroom_consumers = crate::interactive::SessionStore::load()
         .sessions
         .into_values()
@@ -1101,6 +1105,7 @@ pub(crate) fn daemons_sync_probe() -> (
     let hangar_runtime = crate::cli::hangar::daemon_runtime_status();
     (
         mcp_alive,
+        mcp_runtime,
         headroom_consumers,
         notifyd,
         approve,
@@ -5015,6 +5020,7 @@ impl AppState {
         }
         self.daemons_overlay = Some(DaemonsOverlayState {
             mcp_alive: false,
+            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: crate::headroom::ProxyStatus {
                 running: false,
                 port: crate::headroom::proxy_port(),
@@ -5065,19 +5071,28 @@ impl AppState {
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
             // blocking pool.
-            let (mcp_alive, headroom_consumers, notifyd, approve, hangar, hangar_runtime) =
-                tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    (false, "probe failed".to_string()),
-                    (false, "probe failed".to_string()),
-                    crate::cli::hangar::DaemonRuntimeStatus::default(),
-                ));
+            let (
+                mcp_alive,
+                mcp_runtime,
+                headroom_consumers,
+                notifyd,
+                approve,
+                hangar,
+                hangar_runtime,
+            ) = tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
+                false,
+                crate::mcp_pool::client::DaemonRuntimeStatus::default(),
+                Vec::new(),
+                Vec::new(),
+                (false, "probe failed".to_string()),
+                (false, "probe failed".to_string()),
+                crate::cli::hangar::DaemonRuntimeStatus::default(),
+            ));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
             let result = DaemonsFetchResult {
                 mcp_alive,
+                mcp_runtime,
                 headroom,
                 headroom_consumers,
                 notifyd,
@@ -5177,12 +5192,12 @@ impl AppState {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         o.hangar_start_rx = Some(rx);
-        o.hangar_start_status = Some("starting Hangar daemon…".to_string());
+        o.hangar_start_status = Some("starting / upgrading Hangar daemon…".to_string());
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::start_daemon_if_stopped(false)
-                    .map(|_| "Hangar started".to_string())
-                    .unwrap_or_else(|e| format!("Hangar start failed: {e:#}"))
+                crate::cli::hangar::start_or_upgrade_daemon_from_current()
+                    .map(|_| "Hangar running against current Ainb".to_string())
+                    .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
             })
             .await
             .unwrap_or_else(|e| format!("Hangar start failed: {e}"));
@@ -5190,8 +5205,7 @@ impl AppState {
         });
     }
 
-    /// Start the shared MCP pool off the UI thread and report its result in
-    /// the unified Daemons screen. Idempotent when already alive.
+    /// Restart the shared MCP pool from this Ainb binary. If absent, starts it.
     pub fn spawn_mcp_start(&mut self) {
         let Some(o) = self.daemons_overlay.as_mut() else {
             return;
@@ -5201,14 +5215,14 @@ impl AppState {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         o.mcp_start_rx = Some(rx);
-        o.mcp_start_status = Some("starting MCP pool…".to_string());
+        o.mcp_start_status = Some("restarting MCP pool against current Ainb…".to_string());
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::ensure_daemon)
+            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::restart_daemon)
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("MCP start task panicked: {e}")));
             let line = result
-                .map(|()| "MCP pool started".to_string())
-                .unwrap_or_else(|error| format!("MCP pool start failed: {error:#}"));
+                .map(|()| "MCP pool running against current Ainb".to_string())
+                .unwrap_or_else(|error| format!("MCP pool restart failed: {error:#}"));
             let _ = tx.send(line);
         });
     }
@@ -5244,6 +5258,7 @@ impl AppState {
                 o.fetch_rx = None;
                 o.loading = false;
                 o.mcp_alive = result.mcp_alive;
+                o.mcp_runtime = result.mcp_runtime;
                 o.headroom = result.headroom;
                 o.headroom_consumers = result.headroom_consumers;
                 o.notifyd = result.notifyd;

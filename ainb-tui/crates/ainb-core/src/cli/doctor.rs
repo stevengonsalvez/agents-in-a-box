@@ -16,6 +16,7 @@ struct DoctorReport<'a> {
     hooks_error: Option<String>,
     daemons: Vec<crate::fleet::daemons::DaemonStatus>,
     daemons_error: Option<String>,
+    daemon_repairs: Vec<String>,
 }
 
 /// Full machine health check. `--offline` skips skill-source network probes.
@@ -29,6 +30,10 @@ pub struct DoctorArgs {
     /// it into a release hook.
     #[arg(long)]
     pub fix_hooks: bool,
+    /// Restart Ainb-managed daemon processes proved to be running an older
+    /// Ainb release. Unknown or externally-owned processes are only reported.
+    #[arg(long)]
+    pub fix_daemons: bool,
 }
 
 /// Entry point for `ainb doctor`.
@@ -57,9 +62,20 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
         }
         Err(error) => (None, Some(error.to_string())),
     };
-    let (daemons, daemons_error) = match crate::fleet::daemons::collect() {
+    let (mut daemons, daemons_error) = match crate::fleet::daemons::collect() {
         Ok(rows) => (rows, None),
         Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    let daemon_repairs = if args.fix_daemons {
+        let repairs = repair_stale_daemons(&daemons);
+        // Refresh status after an attempted repair so text and JSON say what is
+        // live now, rather than the pre-restart process.
+        if let Ok(rows) = crate::fleet::daemons::collect() {
+            daemons = rows;
+        }
+        repairs
+    } else {
+        Vec::new()
     };
     match format {
         OutputFormat::Json => {
@@ -74,6 +90,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                     hooks_error,
                     daemons,
                     daemons_error,
+                    daemon_repairs,
                 })?
             );
             if let Some(error) = skill_doctor_error {
@@ -88,6 +105,9 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                 &daemons,
                 daemons_error.as_deref(),
             );
+            for repair in &daemon_repairs {
+                println!("daemon repair: {repair}");
+            }
             // The skill check can traverse several tool homes. Render the
             // runtime result first so a slow skill scan never hides a dead
             // hook or daemon from the user.
@@ -101,6 +121,40 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Restart only owner processes with positive old-version evidence. Bridge,
+/// fleet watcher, and ATC launch policy belongs to user configuration, so
+/// Doctor must never guess their command line or kill them.
+fn repair_stale_daemons(daemons: &[crate::fleet::daemons::DaemonStatus]) -> Vec<String> {
+    let mut outcomes = Vec::new();
+    if daemons.iter().any(|daemon| {
+        daemon.kind == crate::fleet::daemons::DaemonKind::Notifyd
+            && daemon.version_current == Some(false)
+    }) {
+        let outcome = ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3))
+            .map(|_| "notifyd restarted against current Ainb".to_string())
+            .unwrap_or_else(|error| format!("notifyd restart failed: {error:#}"));
+        outcomes.push(outcome);
+    }
+    let mcp = crate::mcp_pool::client::daemon_runtime_status();
+    if mcp.old {
+        let outcome = crate::mcp_pool::client::restart_daemon()
+            .map(|_| "MCP pool restarted against current Ainb".to_string())
+            .unwrap_or_else(|error| format!("MCP pool restart failed: {error:#}"));
+        outcomes.push(outcome);
+    }
+    let hangar = crate::cli::hangar::daemon_runtime_status();
+    if hangar.old {
+        let outcome = crate::cli::hangar::start_or_upgrade_daemon_from_current()
+            .map(|_| "Hangar restarted against current Ainb".to_string())
+            .unwrap_or_else(|error| format!("Hangar restart failed: {error:#}"));
+        outcomes.push(outcome);
+    }
+    if outcomes.is_empty() {
+        outcomes.push("no stale managed Ainb daemon found".to_string());
+    }
+    outcomes
 }
 
 fn run_skill_doctor(offline: bool) -> (String, Option<String>) {

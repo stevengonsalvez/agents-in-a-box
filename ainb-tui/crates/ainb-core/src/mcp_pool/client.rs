@@ -2,6 +2,7 @@
 // status/stop`: liveness probe, auto-spawn (detached), status query.
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
@@ -22,6 +23,37 @@ pub fn daemon_alive() -> bool {
 pub fn daemon_status() -> Result<String> {
     let path = paths::control_socket()?;
     query(&path, "status")
+}
+
+/// Runtime identity from the daemon's own control socket. Unlike a launcher
+/// path this is supplied by the process actually serving pooled tools.
+#[derive(Debug, Clone, Default)]
+pub struct DaemonRuntimeStatus {
+    pub pid: Option<u32>,
+    pub version: Option<String>,
+    pub old: bool,
+}
+
+#[derive(Deserialize)]
+struct StatusReport {
+    pid: u32,
+    version: String,
+}
+
+#[must_use]
+pub fn daemon_runtime_status() -> DaemonRuntimeStatus {
+    let Ok(raw) = daemon_status() else {
+        return DaemonRuntimeStatus::default();
+    };
+    let Ok(report) = serde_json::from_str::<StatusReport>(&raw) else {
+        return DaemonRuntimeStatus::default();
+    };
+    let old = report.version != env!("CARGO_PKG_VERSION");
+    DaemonRuntimeStatus {
+        pid: Some(report.pid),
+        version: Some(report.version),
+        old,
+    }
 }
 
 /// Ask the daemon to shut down (kills pooled children).
@@ -101,4 +133,22 @@ pub fn ensure_daemon() -> Result<()> {
         "mcp daemon did not come up within 3s (see {})",
         paths::daemon_log()?.display()
     )
+}
+
+/// Replace a running pool with this Ainb binary. The control socket performs
+/// graceful child teardown; then normal ensure logic starts the current binary.
+pub fn restart_daemon() -> Result<()> {
+    if daemon_alive() {
+        daemon_stop().context("request MCP daemon shutdown")?;
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if !daemon_alive() {
+                break;
+            }
+        }
+        if daemon_alive() {
+            anyhow::bail!("MCP daemon did not stop within 3s");
+        }
+    }
+    ensure_daemon()
 }

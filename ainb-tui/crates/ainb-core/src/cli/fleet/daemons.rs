@@ -29,11 +29,11 @@ pub async fn execute(_matches: &clap::ArgMatches, format: OutputFormat) -> Resul
 }
 
 /// Fixed widths of the leading (non-HEALTH) columns, in render order:
-/// DAEMON, STATE, PID, UPTIME, LAST ACTIVITY, ERRORS. The HEALTH column is the
+/// DAEMON, STATE, PID, UPTIME, VERSION, LAST ACTIVITY, ERRORS. The HEALTH column is the
 /// free-width remainder. The row format string below MUST keep these widths in
 /// sync — see [`SEPARATOR_WIDTH`], which is derived from them so the `-` rule can
 /// never drift from the header.
-const COLUMN_WIDTHS: [usize; 6] = [14, 9, 8, 10, 12, 7];
+const COLUMN_WIDTHS: [usize; 7] = [14, 9, 8, 10, 17, 12, 7];
 
 /// A nominal display width for the trailing free-form HEALTH column, used only to
 /// size the header underline rule. (The actual HEALTH text is unbounded; this is
@@ -50,8 +50,8 @@ const SEPARATOR_WIDTH: usize = {
         sum += COLUMN_WIDTHS[i];
         i += 1;
     }
-    // 7 columns ⇒ 6 inter-column spaces, + the HEALTH rule width.
-    sum + 6 + HEALTH_RULE_WIDTH
+    // 8 columns ⇒ 7 inter-column spaces, + the HEALTH rule width.
+    sum + 7 + HEALTH_RULE_WIDTH
 };
 
 /// Render the daemon rows as a fixed-width text table. `now_ms` is the clock the
@@ -61,8 +61,8 @@ const SEPARATOR_WIDTH: usize = {
 pub fn render_text(rows: &[DaemonStatus], now_ms: i64) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "{:<14} {:<9} {:<8} {:<10} {:<12} {:<7} {}\n",
-        "DAEMON", "STATE", "PID", "UPTIME", "LAST ACTIVITY", "ERRORS", "HEALTH"
+        "{:<14} {:<9} {:<8} {:<10} {:<17} {:<12} {:<7} {}\n",
+        "DAEMON", "STATE", "PID", "UPTIME", "VERSION", "LAST ACTIVITY", "ERRORS", "HEALTH"
     ));
     out.push_str(&format!("{}\n", "-".repeat(SEPARATOR_WIDTH)));
     for r in rows {
@@ -71,19 +71,31 @@ pub fn render_text(rows: &[DaemonStatus], now_ms: i64) -> String {
         let uptime = r.uptime_ms.map_or_else(|| "-".to_string(), fmt_duration_ms);
         let last_activity =
             r.last_activity_at.map_or_else(|| "-".to_string(), |ts| fmt_ago(now_ms, ts));
+        let version = version_summary(r);
         let health = health_summary(r);
         out.push_str(&format!(
-            "{:<14} {:<9} {:<8} {:<10} {:<12} {:<7} {}\n",
+            "{:<14} {:<9} {:<8} {:<10} {:<17} {:<12} {:<7} {}\n",
             r.kind.display_name(),
             state,
             pid,
             uptime,
+            version,
             last_activity,
             r.error_count,
             health,
         ));
     }
     out
+}
+
+fn version_summary(r: &DaemonStatus) -> String {
+    match (&r.version, r.version_current) {
+        (Some(version), Some(true)) => format!("{version} current"),
+        (Some(version), Some(false)) => {
+            format!("{version} -> {}", env!("CARGO_PKG_VERSION"))
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 /// A glyphed state token for the text table.
@@ -154,6 +166,8 @@ mod tests {
             state,
             pid: Some(4242),
             uptime_ms: Some(125_000),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            version_current: Some(true),
             connected,
             channel: channel.map(str::to_string),
             last_activity_at: Some(0),

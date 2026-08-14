@@ -412,6 +412,7 @@ mod tests {
     ) -> DaemonsOverlayState {
         DaemonsOverlayState {
             mcp_alive: true,
+            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
                 running,
                 port,
@@ -535,6 +536,7 @@ mod tests {
     fn daemons_overlay_renders_loading_state() {
         let state = DaemonsOverlayState {
             mcp_alive: false,
+            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
                 running: false,
                 port: 8787,
