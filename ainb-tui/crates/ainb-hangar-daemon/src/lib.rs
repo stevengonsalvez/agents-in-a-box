@@ -900,10 +900,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
         // Resolving here keeps the registered row, the agents, and the claim loop on
         // ONE id instead of claiming for an id nothing is bound to.
+        //
+        // This is also where this PROCESS claims the runtime (migration 0092): the
+        // registration stamps our instance id and reports whether we displaced a
+        // different one, which is what tells the run loop that the rows still
+        // `dispatched`/`running` for this runtime are a dead process's orphans
+        // rather than our own live work.
         let now =
             ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
-        cfg.runtime_id =
-            Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
+        let boot = crate::runtime_register::resolve_runtime_boot(store.pool(), now).await;
+        cfg.runtime_id = Some(boot.runtime_id);
+        cfg.runtime_arrival = boot.arrival;
         // Boot is done; from here the run loop owns shutdown.
         let _ = running_tx.send(());
         run(store.pool().clone(), cfg, stats, broker.sink(), shutdown).await

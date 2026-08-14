@@ -6,6 +6,7 @@
 //! row per `(workspace_id, daemon_id, provider)` via a unique index, so
 //! re-registering the same tuple is a conflict rather than a duplicate.
 
+use ainb_hangar_core::ids::InstanceId;
 use sqlx::SqlitePool;
 
 /// A registered provider runtime (one daemon advertising one provider).
@@ -125,6 +126,31 @@ impl AgentRuntimeRepo {
         .bind(workspace_id)
         .fetch_all(pool)
         .await
+    }
+
+    /// The daemon process instance that currently owns `id`, or `None` when the
+    /// row carries no owner (pre-migration-0092, or materialised by a non-daemon
+    /// caller) or does not exist.
+    ///
+    /// Deliberately a narrow scalar read rather than a field on [`AgentRuntime`]:
+    /// ownership is consumed only by the registration decision
+    /// ([`crate::bootstrap::register_runtime_instance`]) and by the tests that
+    /// pin it — the roster, the presence sweep, and the wire snapshots have no
+    /// use for it, so it stays off the row type they all share.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn instance_id(
+        pool: &SqlitePool,
+        id: &str,
+    ) -> Result<Option<InstanceId>, sqlx::Error> {
+        let stored: Option<Option<String>> =
+            sqlx::query_scalar("SELECT instance_id FROM agent_runtime WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        Ok(stored.flatten().and_then(|s| InstanceId::from_str(s).ok()))
     }
 
     /// Refresh one runtime's heartbeat: stamp `last_seen_at = now_ms` and return

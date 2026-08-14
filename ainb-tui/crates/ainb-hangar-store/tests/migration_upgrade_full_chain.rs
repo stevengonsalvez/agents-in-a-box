@@ -713,6 +713,23 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0045 task.squad_id defaults NULL"
     );
 
+    // 0092 agent_runtime.instance_id defaults NULL on a pre-existing registration:
+    // no daemon PROCESS has claimed that row, which the boot path reads as
+    // "unknown owner ⇒ assume restart" (the safe default — an upgraded home
+    // requeues its orphans on the first boot rather than trusting a runtime it
+    // has never seen an instance id for).
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT instance_id FROM agent_runtime WHERE id = ?"
+        )
+        .bind("rt-1")
+        .fetch_one(pool)
+        .await
+        .expect("agent_runtime 0092 instance_id column"),
+        None,
+        "0092 agent_runtime.instance_id defaults NULL (no process owns a legacy row)"
+    );
+
     // 0032 workspace.default_agent defaults NULL on prior rows.
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT default_agent FROM workspace WHERE id = ?")

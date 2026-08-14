@@ -51,6 +51,7 @@ use std::time::Duration;
 
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_proto::events::PresenceState;
+use ainb_hangar_store::bootstrap::RuntimeArrival;
 use ainb_hangar_store::repo::agent_runtime::{AgentRuntimeRepo, PresenceSweep};
 use sqlx::SqlitePool;
 
@@ -423,6 +424,40 @@ pub async fn reclaim_orphaned_on_startup(
         );
     }
     Ok(reclaimed)
+}
+
+/// [`reclaim_orphaned_on_startup`], but only when the boot registration says a
+/// DIFFERENT process instance owned this runtime (migration 0092).
+///
+/// "This daemon just booted" is a weaker signal than it looks: the same process
+/// can register a runtime more than once, and a reclaim on a
+/// [`RuntimeArrival::Reconnect`] would requeue tasks that are still executing
+/// under a live process — the exact corruption the unconditional reclaim risks
+/// once anything re-registers. Keying off the arrival makes the reconcile follow
+/// the ownership change that actually orphans work, rather than the boot that
+/// usually accompanies it.
+///
+/// Returns the number of rows reclaimed (`0` on a reconnect, without touching
+/// the database).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the reclaim statement fails.
+pub async fn reclaim_orphans_on_restart(
+    pool: &SqlitePool,
+    runtime_id: &str,
+    arrival: &RuntimeArrival,
+) -> Result<u64, sqlx::Error> {
+    if !arrival.is_restart() {
+        tracing::info!(
+            kind = "startup",
+            outcome = "skipped",
+            runtime_id,
+            "same instance reconnected; its in-flight tasks are live, not orphans"
+        );
+        return Ok(0);
+    }
+    reclaim_orphaned_on_startup(pool, runtime_id).await
 }
 
 /// Fail up to `batch_size` rows in `from_status` whose `age_column` is older

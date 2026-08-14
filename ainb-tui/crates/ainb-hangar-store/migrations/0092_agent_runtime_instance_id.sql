@@ -1,0 +1,37 @@
+-- Hangar v1 schema, migration 0092: which daemon PROCESS currently owns a
+-- runtime registration.
+--
+-- `agent_runtime` is keyed on (workspace_id, daemon_id, provider) and every boot
+-- upserts THAT row, refreshing `status`/`last_seen_at`. So the row could not
+-- distinguish "the same daemon is still alive" from "the daemon died and came
+-- back with every child process dead" — both look like an online runtime with a
+-- fresh heartbeat. The second case orphans work: tasks the dead process owned
+-- stay `running`/`dispatched` with nothing executing them.
+--
+-- `instance_id` is a ULID minted ONCE per daemon process and presented at
+-- registration. Comparing the presented value with the stored one turns that
+-- ambiguity into a decision: a DIFFERENT value means a new process took the
+-- runtime over (a RESTART — the previous instance's in-flight tasks are orphans
+-- and get requeued), an IDENTICAL value means the same live process
+-- re-registered (a RECONNECT — its work is still running and must not be
+-- touched).
+--
+-- NULLABLE, with no backfill and no default. NULL means NO PROCESS HAS CLAIMED
+-- THIS ROW: every row that predates this migration, plus rows written by the
+-- non-daemon callers (`ainb hangar agent create`, the `hangar/agent_create` RPC)
+-- which materialise the runtime FK without owning a process. NULL is therefore
+-- read as "unknown owner ⇒ assume RESTART", the safe default: requeuing a task
+-- whose executor is gone is recoverable, leaving one stranded until the 2.5h
+-- running TTL is not.
+--
+-- Deliberately NOT a lease. This column answers "who owns it now", not "is that
+-- owner still alive" — heartbeat leases / grace windows are a separate concern
+-- and stay out of this migration.
+--
+-- Growth: one nullable TEXT column on a table with one row per
+-- (workspace, daemon, provider) — single digits on a real home. `ALTER TABLE ADD
+-- COLUMN` with no default is a metadata-only change (no table rewrite), and no
+-- index is added: the value is read on the row the unique tuple already selects
+-- and is never itself a predicate.
+
+ALTER TABLE agent_runtime ADD COLUMN instance_id TEXT;

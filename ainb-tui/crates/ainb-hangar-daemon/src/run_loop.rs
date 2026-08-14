@@ -45,6 +45,7 @@ use std::time::Duration;
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::task::state::TaskState;
+use ainb_hangar_store::bootstrap::RuntimeArrival;
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::service::claim::{ClaimTaskService, ClaimedTask};
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
@@ -62,7 +63,7 @@ use crate::health_stats::HealthStats;
 use crate::progress_comment;
 use crate::runner::{Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_runtime_presence,
+    SweeperConfig, reclaim_orphans_on_restart, sweep_expired_queued, sweep_runtime_presence,
     sweep_stale_dispatched, sweep_stale_running,
 };
 
@@ -131,6 +132,17 @@ const HANGAR_PARENT_SESSION: &str = "hangar-daemon";
 pub struct DaemonConfig {
     /// Runtime id this daemon claims tasks for, or `None` (claim disabled).
     pub runtime_id: Option<String>,
+    /// What this process's boot registration displaced (migration 0092) — the
+    /// signal the startup orphan reclaim keys off.
+    ///
+    /// [`Self::from_env`] cannot know it (nothing has touched the database yet),
+    /// so it defaults to `Restart` with no named predecessor: an unknown owner is
+    /// read as "the previous executor is gone", which is the recoverable
+    /// assumption and preserves the pre-0092 unconditional-reclaim behaviour for
+    /// any caller that drives [`run`] without registering. [`crate::boot`]
+    /// overwrites it with the verdict
+    /// [`crate::runtime_register::resolve_runtime_boot`] actually returned.
+    pub runtime_arrival: RuntimeArrival,
     /// Path to the `claude` provider binary.
     pub claude_path: PathBuf,
     /// Path to the `codex` provider binary (e38.16).
@@ -232,6 +244,10 @@ impl DaemonConfig {
 
         Self {
             runtime_id,
+            // Unknown until the boot registration runs; see the field docs.
+            runtime_arrival: RuntimeArrival::Restart {
+                previous_instance_id: None,
+            },
             claude_path,
             codex_path,
             copilot_path,
@@ -478,14 +494,19 @@ pub async fn run(
         return Ok(());
     };
 
-    // e38.25 crash recovery: this daemon just booted, so any task still frozen
-    // `dispatched`/`running` for its runtime is an orphan from a previous
-    // (crashed/restarted) instance — the process that owned those runs is gone.
-    // Reclaim them to `queued` once, up front, so the work is re-dispatched
-    // immediately rather than stranded until the multi-hour running TTL. Scoped
-    // to this runtime so a sibling daemon's live runs are never touched. A
-    // reclaim fault is non-fatal — the time-based sweepers still backstop it.
-    match reclaim_orphaned_on_startup(&pool, &runtime_id).await {
+    // e38.25 crash recovery: a task still frozen `dispatched`/`running` for this
+    // runtime is an orphan from a previous instance — the process that owned
+    // those runs is gone. Reclaim them to `queued` once, up front, so the work is
+    // re-dispatched immediately rather than stranded until the multi-hour running
+    // TTL. Scoped to this runtime so a sibling daemon's live runs are never
+    // touched. A reclaim fault is non-fatal — the time-based sweepers still
+    // backstop it.
+    //
+    // Gated on the boot registration's verdict (migration 0092) rather than on
+    // "we are in boot": if this process merely RE-registered a runtime it already
+    // owned, those in-flight rows belong to its own live runs and requeuing them
+    // would double-dispatch work that never stopped.
+    match reclaim_orphans_on_restart(&pool, &runtime_id, &cfg.runtime_arrival).await {
         Ok(n) if n > 0 => tracing::info!(reclaimed = n, "startup crash-recovery reclaim"),
         Ok(_) => {}
         Err(e) => tracing::error!(error = %e, "startup crash-recovery reclaim failed"),
