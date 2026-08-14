@@ -182,7 +182,7 @@ pub fn render(
 
     // A normal 24-row terminal gets all three tables: fleet daemons, system
     // services, and hooks. The system table omits a redundant column header so
-    // its five rows fit beside the seven-row Fleet and Hooks tables.
+    // its five rows fit beside the Fleet table and compact Hooks section.
     if chunks[0].height >= 21 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
@@ -194,14 +194,14 @@ pub fn render(
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot);
         render_system_services(frame, sections[1], runtime);
-        render_hook_section(frame, sections[2], snapshot.hook_health.as_ref());
+        render_hook_section(frame, sections[2], snapshot.hook_health.as_ref(), runtime);
     } else if chunks[0].height >= 18 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(7)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot);
-        render_hook_section(frame, sections[1], snapshot.hook_health.as_ref());
+        render_hook_section(frame, sections[1], snapshot.hook_health.as_ref(), runtime);
     } else {
         render_table(frame, chunks[0], &snapshot);
     }
@@ -314,7 +314,12 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
     );
 }
 
-fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth>) {
+fn render_hook_section(
+    frame: &mut Frame,
+    area: Rect,
+    health: Option<&HookHealth>,
+    runtime: Option<&DaemonsOverlayState>,
+) {
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
@@ -323,6 +328,11 @@ fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ainb-hooks", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "  I",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" repair", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -355,15 +365,21 @@ fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth
                 })
                 .collect::<Vec<_>>()
                 .join("   ");
-            let issue = health.issues.first().map_or_else(
-                || "✓ wiring healthy".to_string(),
-                |issue| {
-                    format!(
-                        "! {}: {} — {}",
-                        issue.component, issue.message, issue.repair
-                    )
-                },
-            );
+            let issue =
+                runtime.and_then(|runtime| runtime.hooks_repair_status.as_deref()).map_or_else(
+                    || {
+                        health.issues.first().map_or_else(
+                            || "✓ wiring healthy".to_string(),
+                            |issue| {
+                                format!(
+                                    "! {}: {} — {}",
+                                    issue.component, issue.message, issue.repair
+                                )
+                            },
+                        )
+                    },
+                    |status| format!("I {status}"),
+                );
             vec![
                 Line::from(vec![
                     Span::styled("version ", Style::default().fg(MUTED_GRAY)),
@@ -374,13 +390,18 @@ fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "script {}  ·  ainb binary {}",
+                        "script {}  ·  ainb binary {} ({}){}",
                         if health.script_ready { "✓" } else { "✗" },
                         if health.hook_binary_ready {
                             "✓"
                         } else {
                             "✗"
                         },
+                        health.hook_binary_mode.map(|mode| mode.label()).unwrap_or("unknown"),
+                        health
+                            .hook_binary
+                            .as_ref()
+                            .map_or_else(String::new, |target| format!(" · {}", target.display()),),
                     ),
                     Style::default().fg(if health.script_ready && health.hook_binary_ready {
                         HEALTHY_GREEN
@@ -512,7 +533,7 @@ mod tests {
     use super::*;
     use crate::fleet::daemons::probe::DaemonKind;
     use crate::headroom::ProxyStatus;
-    use ainb_plugin_notifyd::{HookAgentHealth, HookHealth, HookHealthIssue};
+    use ainb_plugin_notifyd::{HookAgentHealth, HookBinaryMode, HookHealth, HookHealthIssue};
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
 
@@ -568,6 +589,7 @@ mod tests {
             script_path: PathBuf::from("/tmp/notify.sh"),
             script_ready: true,
             hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_mode: Some(HookBinaryMode::Release),
             hook_binary_ready: true,
             agents: vec![
                 HookAgentHealth {
@@ -595,7 +617,7 @@ mod tests {
             issues: vec![HookHealthIssue {
                 component: "version".to_string(),
                 message: "installed 0.4.4; ainb bundles 0.4.5".to_string(),
-                repair: "ainb fleet runtime install".to_string(),
+                repair: "ainb doctor --fix-hooks".to_string(),
             }],
         }
     }
@@ -647,6 +669,8 @@ mod tests {
             fetch_rx: None,
             notifyd_restart_rx: None,
             notifyd_restart_status: None,
+            hooks_repair_rx: None,
+            hooks_repair_status: None,
             hangar_start_rx: None,
             hangar_start_status: None,
             mcp_start_rx: None,
@@ -740,6 +764,15 @@ mod tests {
             "system section missing: {out}"
         );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
+        assert!(
+            out.contains("I repair"),
+            "hook repair action missing: {out}"
+        );
+        assert!(out.contains("release"), "hook mode missing: {out}");
+        assert!(
+            out.contains("/usr/local/bin/ainb"),
+            "hook target missing: {out}"
+        );
         for service in [
             "MCP pool",
             "Headroom",
@@ -757,10 +790,22 @@ mod tests {
             "version state missing: {out}"
         );
         assert!(
-            out.contains("ainb fleet runtime install"),
+            out.contains("ainb doctor --fix-hooks"),
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+    }
+
+    #[test]
+    fn renders_hook_repair_progress_from_runtime_state() {
+        let mut state = seeded_state_with_hook(Vec::new(), hook_health());
+        let mut runtime = system_runtime();
+        runtime.hooks_repair_status = Some("hooks repaired for claude, codex".to_string());
+        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        assert!(
+            out.contains("I hooks repaired for claude, codex"),
+            "hook repair status missing: {out}"
+        );
     }
 
     #[test]

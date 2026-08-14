@@ -1,7 +1,7 @@
 // ABOUTME: `ainb doctor` — one health report for skills, dependencies, hooks,
 // and daemons. Preserves skill-manager checks while adding runtime diagnostics.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::OutputFormat;
@@ -24,6 +24,11 @@ pub struct DoctorArgs {
     /// Skip skill-source reachability checks. Runtime checks stay local.
     #[arg(long)]
     pub offline: bool,
+    /// Repair installed notification hooks: stable binary launcher, extracted
+    /// scripts, and agent wiring. Reports a broken dev target without changing
+    /// it into a release hook.
+    #[arg(long)]
+    pub fix_hooks: bool,
 }
 
 /// Entry point for `ainb doctor`.
@@ -31,7 +36,25 @@ pub struct DoctorArgs {
 pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     let dependencies = deps::detect(&RealEnv);
     let (hooks, hooks_error) = match ainb_plugin_notifyd::Paths::from_home() {
-        Ok(paths) => (Some(ainb_plugin_notifyd::hook_health(&paths)), None),
+        Ok(paths) => {
+            if args.fix_hooks {
+                if let Err(error) = ainb_plugin_notifyd::auto_repair_hook_binary(&paths) {
+                    return Err(error).context("repairing legacy hook binary pointer");
+                }
+                let health = ainb_plugin_notifyd::hook_health(&paths);
+                // A dev target is intentionally exact. `doctor --fix-hooks`
+                // may migrate a recognisable old Cellar pointer, but it must
+                // never silently replace a vanished worktree binary with the
+                // global Ainb that happened to run Doctor.
+                let dev_target =
+                    health.hook_binary_mode == Some(ainb_plugin_notifyd::HookBinaryMode::Dev);
+                if !health.issues.is_empty() && !dev_target {
+                    ainb_plugin_notifyd::repair_hooks(&paths)
+                        .context("repairing installed hooks")?;
+                }
+            }
+            (Some(ainb_plugin_notifyd::hook_health(&paths)), None)
+        }
         Err(error) => (None, Some(error.to_string())),
     };
     let (daemons, daemons_error) = match crate::fleet::daemons::collect() {
@@ -119,13 +142,19 @@ fn print_runtime_text(
                 }
             );
             println!(
-                "  hook binary: {}",
+                "  hook binary: {}{}",
                 if hooks.hook_binary_ready {
                     "ready"
                 } else {
                     "BROKEN"
-                }
+                },
+                hooks
+                    .hook_binary_mode
+                    .map_or_else(String::new, |mode| format!(" ({})", mode.label()))
             );
+            if let Some(target) = &hooks.hook_binary {
+                println!("    target: {}", target.display());
+            }
             println!(
                 "  notifyd: {} | approval broker: {}",
                 if hooks.notify_socket_live {
