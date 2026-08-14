@@ -61,10 +61,10 @@ Three layers, none of which depend on an exit path running:
    because both share the `bin/codex … app-server` shape. Dead Source-A and
    Source-B servers have no live proxy targeting their socket, so both get
    reaped.
-3. **Cap that fails loud.** `spawn()` refuses to start a server once
-   `AINB_CODEX_MAX_SERVERS` (default 8, floor 1) live `codex app-server`
-   processes already exist, turning a silent 900-process pileup into a visible
-   error at spawn ~9.
+3. **Scoped ownership.** Ainb only adopts or reuses its exact configured socket.
+   Other Codex clients and IDEs remain external diagnostics and never gate Ainb
+   startup. The reaper and exact-socket race check, not a machine-wide process
+   count, bound Ainb's own lifecycle.
 
 ### Why the daemon owns cleanup (no Claude Code hook)
 
@@ -100,7 +100,7 @@ rationale. We retain them.
 ## How to run / test
 
 ```bash
-# Rust: reaper + cap + race fix
+# Rust: reaper + race fix
 cargo test -p ainb-hangar-daemon
 cargo fmt --check
 

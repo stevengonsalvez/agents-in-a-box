@@ -550,11 +550,24 @@
       where it can be driven deterministically, which is not the same claim as a message actually
       reaching a live process.</p>
 
-    <p><b>No real ACP adapter has ever run in CI or in any recording on this page.</b> Every ACP run,
+    <p><b>No real ACP adapter runs in CI or in any recording on this page.</b> Every ACP run here,
       part 1's j2 through j4 and part 2's j6 and j7, uses the <code>fake_acp_adapter</code> fixture.
-      The real-adapter tests exist and skip until an adapter is installed; the adapters were measured
-      by hand against the real thing when their protocol behaviour was pinned, but that measurement
-      is not itself in this page's proof.</p>
+      The real-adapter tests exist and skip until an adapter is installed.</p>
+
+    <p><b>Both real adapters have now been run by hand, once, and the result was worth having.</b>
+      <code>@zed-industries/claude-agent-acp</code> and <code>@zed-industries/codex-acp</code> were
+      installed and driven through a live daemon on 2026-08-12. Neither produced an agent reply on
+      that host: <code>codex-acp</code> could not reach its models API from the sandbox, and
+      <code>claude-agent-acp</code> was refused before it was ever prompted, with
+      <span class="assert">refusing to prompt a session whose permission mode is unproven &middot;
+      permission mode "default" was not established (observed Some("bypassPermissions"))</span>.</p>
+
+    <p>That refusal is invariant I13 firing against reality rather than a fixture, and it is the
+      exact hazard part 1's spike wrote down: an ambient <code>bypassPermissions</code> silently
+      disabling the whole permission surface. The daemon saw the adapter claim a mode it had not
+      pinned and declined to prompt it. The turn was not lost either, the pool requeued it under the
+      I6 rule, and both sessions converged with no open turn. So the SAFETY path is now proven
+      against real adapters; the HAPPY path still is not.</p>
 
     <p><b>The guardrail's operator-named-sessions state is not wired to a live turn yet.</b>
       <code>fleet/copilot_gate</code> currently builds an empty <code>Guardrail</code> for every

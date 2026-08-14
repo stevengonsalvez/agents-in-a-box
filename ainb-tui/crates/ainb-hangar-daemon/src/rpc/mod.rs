@@ -4355,6 +4355,11 @@ mod fleet_launch_tests {
                 "/repo",
                 "--",
                 "codex",
+                // Fleet-managed Codex launches run with apps disabled
+                // (`managed_tui_command`). The flags sit ahead of `--remote`
+                // because they are global, not subcommand, options.
+                "--disable",
+                "apps",
                 "--remote",
                 "unix:///tmp/codex.sock",
                 "resume",
@@ -5762,12 +5767,17 @@ async fn clear_closed_claude_picker_card(
     }
 }
 
-/// Claude's own AskUserQuestion widget always exposes this fixed interaction
+/// Claude's own AskUserQuestion widget exposes a distinctive interaction
 /// footer while it owns terminal input. Native-picker reconciliation only
 /// clears a card after that footer disappears, never while the picker remains
-/// active.
+/// active. Claude Code changed its navigation hint from arrow glyphs to
+/// `Tab/Arrow keys`; both forms describe the same still-blocking picker.
 fn claude_native_picker_is_visible(pane: &str) -> bool {
-    pane.contains("Enter to select · ↑/↓ to navigate · Esc to cancel")
+    pane.lines().any(|line| {
+        line.contains("Enter to select")
+            && line.contains("Esc to cancel")
+            && (line.contains("↑/↓ to navigate") || line.contains("Tab/Arrow keys to navigate"))
+    })
 }
 
 fn fleet_delivery_uses_native_picker(request: &serde_json::Value) -> bool {
@@ -13071,6 +13081,9 @@ mod tests {
     fn native_claude_picker_footer_controls_reconcile_clearance() {
         assert!(claude_native_picker_is_visible(
             "Release proof?\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+        ));
+        assert!(claude_native_picker_is_visible(
+            "Release proof?\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel"
         ));
         assert!(!claude_native_picker_is_visible(
             "User answered Claude's questions: Release proof? → East"

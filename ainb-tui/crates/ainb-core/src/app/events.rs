@@ -52,13 +52,15 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    // Daemons overlay (MCP pool + Headroom, read-only)
+    // Daemons runtime snapshot (MCP pool + Headroom + repair actions)
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
     /// Restart the notifyd daemon (single resume/repair) from the overlay.
     DaemonsOverlayRestartNotifyd,
     DaemonsOverlayStartHangar,
+    DaemonsStartMcp,
+    DaemonsStartHeadroom,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -1411,9 +1413,9 @@ impl EventHandler {
             };
         }
 
-        // Daemons overlay captures all keys while open: r refresh, R restart
-        // notifyd resume/repair, Hangar start, esc/q/d close.
-        if state.daemons_overlay.is_some() {
+        // Legacy popup captures keys only outside the unified Daemons screen.
+        // The screen itself owns r/R/S so controls remain visible beside data.
+        if state.daemons_overlay.is_some() && state.current_screen != screen_ids::DAEMONS {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
@@ -1604,7 +1606,7 @@ impl EventHandler {
             return Self::handle_inbox_keys(key_event, state);
         }
 
-        // Daemons observability screen (read-only). Esc/q must pop back to the
+        // Daemons runtime-health screen. Esc/q must pop back to the
         // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
         // the generic fallthrough below treats this non-plugin screen as
         // GoToHomeScreen, which ignored the saved origin (L2).
@@ -2957,8 +2959,8 @@ impl EventHandler {
         }
     }
 
-    /// Daemons observability screen key dispatcher. The screen is read-only
-    /// (no list navigation), so the only binding is back:
+    /// Daemons screen key dispatcher. Runtime actions reuse the same
+    /// background workers that previously lived in the system overlay:
     ///
     ///   - q / Esc   back to the screen it was opened from (home if none)
     ///
@@ -2967,6 +2969,11 @@ impl EventHandler {
     fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
+            KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+            KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
+            KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
+            KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
             _ => None,
         }
     }
@@ -3062,7 +3069,11 @@ impl EventHandler {
             KeyCode::Char('N') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N'))),
             KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
             KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
-            KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
+            // Lowercase `s` belongs to the structured interview queue. Keep
+            // it reserved even if a concurrent snapshot just closed that
+            // queue: a stale key must never turn a submitted answer into Stop.
+            // Destructive stop remains available on uppercase `S`.
+            KeyCode::Char('S') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
             KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c'))),
             KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
@@ -3101,9 +3112,8 @@ impl EventHandler {
         // unused across every screen handler.
         match key_event.code {
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
-            // `h` for health opens the Agent Deck daemon-health screen. Plain
-            // `d` remains the system daemon overlay from main.
-            KeyCode::Char('h') => return Some(AppEvent::GoToDaemons),
+            // One daemon surface: health, hook status, and repair controls.
+            KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
             KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
@@ -3127,8 +3137,6 @@ impl EventHandler {
             // overlay. `m` is taken by the learnings/Memory browser, so the
             // pool tile + global keybind use `p` instead.
             KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
-            // `d` for "daemons" — opens the MCP pool + Headroom status overlay.
-            KeyCode::Char('d') => return Some(AppEvent::DaemonsOverlayOpen),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -3595,10 +3603,16 @@ impl EventHandler {
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
+                let leaving_daemons = state.current_screen == screen_ids::DAEMONS;
                 let target =
                     state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
                 state.current_screen = target;
+                // The unified screen owns this runtime snapshot. Drop it on
+                // exit so no obsolete popup appears over the destination.
+                if leaving_daemons {
+                    state.close_daemons_overlay();
+                }
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -3654,6 +3668,8 @@ impl EventHandler {
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
+            AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
+            AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
@@ -4883,9 +4899,6 @@ impl EventHandler {
                         // Opens the overlay on top of the current screen (not a
                         // screen switch) and fires the first lazy fetch.
                         state.toggle_mcp_overlay();
-                    }
-                    SidebarItem::DaemonOverlay => {
-                        state.toggle_daemons_overlay();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -6202,6 +6215,16 @@ impl EventHandler {
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
                 state.daemons_state.arm();
+                // MCP, Headroom, Hangar, and notifyd are collected by the
+                // existing non-blocking runtime probe and rendered on this
+                // screen as one system-services table.
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    if state.daemons_overlay.is_none() {
+                        state.toggle_daemons_overlay();
+                    } else {
+                        state.spawn_daemons_fetch();
+                    }
+                }
             }
             AppEvent::GoToFleetPanel => {
                 tracing::info!("Navigating to Fleet panel");
@@ -6279,6 +6302,18 @@ impl EventHandler {
             }
             AppEvent::FleetPanelCanonicalKey(key) => {
                 Self::reduce_fleet_event(state, FleetEvent::Key(key));
+                // Every modal on this panel opens by routing a canonical key
+                // into the shared reducer, so "the key did nothing" and "the
+                // reducer never saw it" look identical from the outside. One
+                // line at the seam tells them apart, which black-box probing
+                // could not: run with `RUST_LOG=ainb=debug` and read the JSONL
+                // under `~/.agents-in-a-box/logs/`.
+                tracing::debug!(
+                    target: "ainb::app::events",
+                    ?key,
+                    modal_open = state.fleet_panel_state.canonical_modal_open(),
+                    "fleet canonical key reduced"
+                );
             }
             AppEvent::FleetPanelAnswerCardClick {
                 column,
@@ -8690,7 +8725,7 @@ mod panel_back_tests {
         );
     }
 
-    /// L2 regression: the Daemons screen is read-only and NOT a plugin screen,
+    /// L2 regression: the Daemons screen is not a plugin screen,
     /// so before the fix its Esc fell through the generic handler to
     /// `GoToHomeScreen` — discarding the `previous_screen` that `GoToDaemons`
     /// saved. Drive the real Esc key through the dispatcher and assert it routes
@@ -8720,6 +8755,10 @@ mod panel_back_tests {
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
+        assert!(
+            state.daemons_overlay.is_none(),
+            "leaving Daemons must not leave the old popup behind"
+        );
     }
 
     /// `q` on the Daemons screen behaves identically to Esc.
@@ -8735,21 +8774,22 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
-    /// While the Daemons `d` overlay is open, `R` maps to the notifyd restart
-    /// (single resume/repair) event, and `r` still maps to refresh — the two
-    /// case-paired verbs live on the same surface.
+    /// Daemons repair keys stay next to the table that reports their state.
     #[test]
-    fn daemons_overlay_restart_key_routing() {
+    fn daemons_repair_key_routing() {
         use crossterm::event::{KeyCode, KeyEvent};
 
-        // Opening the overlay fires the first lazy fetch (tokio::spawn), so the
-        // test needs a live reactor.
+        // Opening the unified screen fires the first lazy fetch, so this test
+        // needs a live reactor.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
 
         let mut state = AppState::default();
-        state.toggle_daemons_overlay();
-        assert!(state.daemons_overlay.is_some(), "overlay must be open");
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+        assert!(
+            state.daemons_overlay.is_some(),
+            "runtime probe must be armed"
+        );
 
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
@@ -8760,6 +8800,14 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::DaemonsOverlayRefresh)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('M')),
+            Some(AppEvent::DaemonsStartMcp)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('P')),
+            Some(AppEvent::DaemonsStartHeadroom)
         ));
     }
 
@@ -8961,9 +9009,90 @@ mod panel_back_tests {
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
         ));
+        assert!(
+            route(&mut state, KeyCode::Char('s')).is_none(),
+            "lowercase s is reserved for structured-interview submit"
+        );
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('S')),
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop))
+        ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('!')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill))
+        ));
+    }
+
+    /// #667: `N` on the Fleet panel is advertised in the help bar
+    /// (`N channel`) but was reported dead in a real tmux run — no form, no
+    /// feedback. Every layer looked correct on inspection (router arm,
+    /// shared reducer, renderer match), so this pins the mechanism at the
+    /// host boundary: routing THROUGH `process_event` into a real render
+    /// pass, not just checking which `AppEvent` the router returns.
+    ///
+    /// It also pins down the second reported symptom (subsequent keys, and
+    /// "chat needs two Escapes") as the SAME modal-capture behaviour, not a
+    /// separate bug: once `N` opens the channel-create form, the panel is
+    /// modal and every key — including the lens digits — routes into the
+    /// canonical reducer until a single Esc closes it.
+    #[test]
+    fn fleet_panel_shift_n_opens_and_renders_channel_create_modal() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        // Router arm: `N` must resolve to the canonical forward, matching
+        // the plugin's `FleetKey::Char('N')` arm (fleet.rs:1351).
+        let n = route(&mut state, KeyCode::Char('N'));
+        assert!(
+            matches!(
+                n,
+                Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))
+            ),
+            "`N` must route to FleetPanelCanonicalKey(Char('N')); got {n:?}"
+        );
+        EventHandler::process_event(n.unwrap(), &mut state);
+        assert!(
+            state.fleet_panel_state.canonical_modal_open(),
+            "`N` opened nothing at the host layer"
+        );
+
+        // Render pass: the modal must actually paint, not just flip a mode
+        // flag no renderer reaches.
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::components::fleet_panel::render(f, f.area(), &mut state.fleet_panel_state)
+            })
+            .unwrap();
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains("New channel"),
+            "channel-create modal did not render; got:\n{rendered}"
+        );
+
+        // Modal capture: while it is open, a lens digit must NOT fall
+        // through to FleetPanelSetFilter — it belongs to the canonical
+        // reducer, same as every other open Fleet mode.
+        let five = route(&mut state, KeyCode::Char('5'));
+        assert!(
+            matches!(five, Some(AppEvent::FleetPanelCanonicalKey(_))),
+            "with the channel-create modal open, '5' must route into the \
+             canonical reducer, not FleetPanelSetFilter; got {five:?}"
+        );
+
+        // One Esc closes it and routing returns to normal — pins that this
+        // form needs exactly one Esc, unlike the chat surface's reported two.
+        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
+        assert!(!state.fleet_panel_state.canonical_modal_open());
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('5')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
         ));
     }
 

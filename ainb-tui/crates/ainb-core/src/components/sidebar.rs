@@ -31,25 +31,24 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    Config,        // Settings & presets
-    Sessions,      // Session manager
-    Inbox,         // ainb-hooks notification inbox
-    Daemons,       // Agent Deck runtime-health screen
-    Fleet,         // Fleet control panel (current_state needs + actions)
-    Recovery,      // Recover orphaned sessions
-    Mcp,           // Shared MCP pool overlay
-    DaemonOverlay, // MCP pool + Headroom proxy status (read-only)
-    Logs,          // Log history viewer
-    Stats,         // Analytics & usage
-    Witr,          // Process causality (witr plugin)
-    Abtop,         // top-for-agents — live agent monitor (abtop plugin)
-    Skills,        // Browse per-agent skills
-    SkillManager,  // Skill / unit manager (spec §10.1)
-    Hangar,        // Autopilot control plane (hangar-tui plugin)
-    Memory,        // Knowledge-base browser (learnings plugin)
-    Changelog,     // Version history
-    Setup,         // Setup wizard & factory reset
-    Help,          // Docs & guides
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Inbox,        // ainb-hooks notification inbox
+    Daemons,      // Unified runtime-health and repair screen
+    Fleet,        // Fleet control panel (current_state needs + actions)
+    Recovery,     // Recover orphaned sessions
+    Mcp,          // Shared MCP pool overlay
+    Logs,         // Log history viewer
+    Stats,        // Analytics & usage
+    Witr,         // Process causality (witr plugin)
+    Abtop,        // top-for-agents — live agent monitor (abtop plugin)
+    Skills,       // Browse per-agent skills
+    SkillManager, // Skill / unit manager (spec §10.1)
+    Hangar,       // Autopilot control plane (hangar-tui plugin)
+    Memory,       // Knowledge-base browser (learnings plugin)
+    Changelog,    // Version history
+    Setup,        // Setup wizard & factory reset
+    Help,         // Docs & guides
 }
 
 impl SidebarItem {
@@ -59,11 +58,10 @@ impl SidebarItem {
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
-            Self::Daemons => "🩺",
+            Self::Daemons => "⚙",
             Self::Fleet => "🛫",
             Self::Recovery => "🔄",
             Self::Mcp => "🧬",
-            Self::DaemonOverlay => "⚙",
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Witr => "🌳",
@@ -84,11 +82,10 @@ impl SidebarItem {
             Self::Config => "Config",
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
-            Self::Daemons => "Daemon Health",
+            Self::Daemons => "Daemons",
             Self::Fleet => "Fleet",
             Self::Recovery => "Recovery",
             Self::Mcp => "MCP",
-            Self::DaemonOverlay => "System Daemons",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Witr => "Witr",
@@ -109,11 +106,10 @@ impl SidebarItem {
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
-            Self::Daemons => "Fleet Runtime Health",
+            Self::Daemons => "Runtime health & repair",
             Self::Fleet => "Who Needs You",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
-            Self::DaemonOverlay => "MCP · Headroom · notifyd",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Witr => "Process Causality",
@@ -141,11 +137,10 @@ impl SidebarItem {
             Self::Stats => "i",
             Self::Inbox => "b",
             Self::Fleet => "f",
-            Self::Daemons => "h",
+            Self::Daemons => "d",
             Self::Witr => "w",
             Self::Abtop => "t",
             Self::Mcp => "p",
-            Self::DaemonOverlay => "d",
             Self::Logs => "l",
             Self::Recovery => "r",
             Self::Hangar => "g",
@@ -173,7 +168,6 @@ impl SidebarItem {
             Self::Witr,
             Self::Abtop,
             Self::Mcp,
-            Self::DaemonOverlay,
             Self::Logs,
             Self::Recovery,
             Self::Hangar,
@@ -662,15 +656,18 @@ mod tests {
             .position(|i| *i == SidebarItem::Daemons)
             .expect("SidebarItem::Daemons missing from all()");
         assert!(pos > 0, "Daemons shouldn't be first sidebar item");
-        assert_eq!(SidebarItem::Daemons.icon(), "🩺");
-        assert_eq!(SidebarItem::Daemons.label(), "Daemon Health");
-        assert_eq!(SidebarItem::Daemons.shortcut(), "h");
-        assert_eq!(SidebarItem::Daemons.description(), "Fleet Runtime Health");
+        assert_eq!(SidebarItem::Daemons.icon(), "⚙");
+        assert_eq!(SidebarItem::Daemons.label(), "Daemons");
+        assert_eq!(SidebarItem::Daemons.shortcut(), "d");
+        assert_eq!(
+            SidebarItem::Daemons.description(),
+            "Runtime health & repair"
+        );
         let collisions = all
             .iter()
-            .filter(|i| **i != SidebarItem::Daemons && i.shortcut() == "h")
+            .filter(|i| **i != SidebarItem::Daemons && i.shortcut() == "d")
             .count();
-        assert_eq!(collisions, 0, "sidebar shortcut 'h' collides");
+        assert_eq!(collisions, 0, "sidebar shortcut 'd' collides");
     }
 
     #[test]
@@ -694,29 +691,6 @@ mod tests {
         let collisions =
             all.iter().filter(|i| **i != SidebarItem::Memory && i.shortcut() == "m").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'm' collides");
-    }
-
-    #[test]
-    fn daemon_overlay_tile_registered_with_non_colliding_shortcut() {
-        let all = SidebarItem::all();
-        let pos = all
-            .iter()
-            .position(|i| *i == SidebarItem::DaemonOverlay)
-            .expect("SidebarItem::DaemonOverlay missing from all()");
-        assert!(pos > 0, "DaemonOverlay shouldn't be first sidebar item");
-        assert_eq!(SidebarItem::DaemonOverlay.icon(), "⚙");
-        assert_eq!(SidebarItem::DaemonOverlay.label(), "System Daemons");
-        assert_eq!(SidebarItem::DaemonOverlay.shortcut(), "d");
-        assert_eq!(
-            SidebarItem::DaemonOverlay.description(),
-            "MCP · Headroom · notifyd"
-        );
-        // 'd' must not collide with any other sidebar shortcut.
-        let collisions = all
-            .iter()
-            .filter(|i| **i != SidebarItem::DaemonOverlay && i.shortcut() == "d")
-            .count();
-        assert_eq!(collisions, 0, "sidebar shortcut 'd' collides");
     }
 
     #[test]

@@ -8814,6 +8814,8 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
 /// How long `stop` waits for the signalled daemon to actually exit before
 /// giving up on confirming it.
 const DAEMON_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// Last-resort bound after a verified daemon ignores graceful shutdown.
+const DAEMON_STOP_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Block until `pid` is gone or `grace` elapses; `true` iff it exited.
 ///
@@ -8844,7 +8846,7 @@ fn wait_for_pid_exit(pid: u32, grace: std::time::Duration) -> bool {
 ///
 /// When the process did NOT die, the heartbeat is left alone (it is still the
 /// truth) and the reason records the unconfirmed kill.
-fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
+fn record_daemon_stop_breadcrumb(pid: u32, died: bool, signal: &str) {
     let Ok(home) = ainb_hangar_daemon::hangar_dir() else {
         return;
     };
@@ -8852,7 +8854,7 @@ fn record_daemon_stop_breadcrumb(pid: u32, died: bool) {
         ainb_hangar_daemon::observability::record_external_exit(
             &home,
             pid,
-            "stopped by `ainb hangar daemon stop` (SIGTERM, exit confirmed)",
+            &format!("stopped by `ainb hangar daemon stop` ({signal}, exit confirmed)"),
         );
     } else {
         tracing::warn!(pid, "daemon survived SIGTERM; leaving heartbeat in place");
@@ -8992,8 +8994,18 @@ fn stop_daemon(announce: bool) -> Result<()> {
             let pid = owned.0;
             kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
                 .with_context(|| format!("send SIGTERM to pid {pid}"))?;
-            let died = wait_for_pid_exit(pid, DAEMON_STOP_GRACE);
-            record_daemon_stop_breadcrumb(pid, died);
+            let mut died = wait_for_pid_exit(pid, DAEMON_STOP_GRACE);
+            let mut signal = "SIGTERM";
+            if !died {
+                // `OwnedPid` proves this is OUR daemon holding OUR socket. A
+                // wedged signal handler must not turn repeated starts into an
+                // orphaned-daemon pile, so escalation remains exact-pid only.
+                kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
+                    .with_context(|| format!("send SIGKILL to unresponsive pid {pid}"))?;
+                died = wait_for_pid_exit(pid, DAEMON_STOP_KILL_GRACE);
+                signal = "SIGKILL after SIGTERM grace";
+            }
+            record_daemon_stop_breadcrumb(pid, died, signal);
             if died {
                 std::fs::remove_file(&pid_path).ok();
                 clear_daemon_version_record();

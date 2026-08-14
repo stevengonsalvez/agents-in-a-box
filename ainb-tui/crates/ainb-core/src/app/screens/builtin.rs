@@ -701,7 +701,7 @@ impl Screen for InboxScreen {
     }
 }
 
-/// Daemons screen — read-only runtime health of every long-running ainb daemon
+/// Daemons screen — runtime health and repair controls for every long-running ainb daemon
 /// (phone bridge / notifyd / ATC / fleet daemon). Renders from
 /// `fleet::daemons::collect` via the shared component, refreshing live on the
 /// render tick. State lives on `AppState::daemons_state` so the cached snapshot
@@ -714,7 +714,8 @@ impl Screen for DaemonsScreen {
         ids::DAEMONS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+        let runtime = state.daemons_overlay.as_ref();
+        crate::components::daemons::render(frame, area, &mut state.daemons_state, runtime);
     }
 }
 

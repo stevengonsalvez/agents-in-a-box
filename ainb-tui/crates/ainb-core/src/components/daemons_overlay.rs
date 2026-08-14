@@ -432,6 +432,10 @@ mod tests {
             hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
         }
     }
 
@@ -549,6 +553,10 @@ mod tests {
             hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
         };
         let backend = TestBackend::new(120, 30);
         let mut term = Terminal::new(backend).unwrap();

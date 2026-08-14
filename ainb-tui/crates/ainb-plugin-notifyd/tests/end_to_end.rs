@@ -162,6 +162,59 @@ fn atc_hook_prefers_ainb_bin_over_path() {
     assert!(!calls.contains("path "), "calls: {calls}");
 }
 
+#[test]
+fn atc_hook_falls_back_to_path_when_installed_binary_is_missing() {
+    let script = hook_script();
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let ainb_home = home.join(".agents-in-a-box");
+    let hooks = ainb_home.join("hooks");
+    let missing_bin = dir.path().join("removed-worktree/target/debug/ainb");
+    let path_dir = dir.path().join("path-bin");
+    let path_bin = path_dir.join("ainb");
+    let capture = dir.path().join("captured-bin");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::create_dir(&path_dir).unwrap();
+    fs::write(
+        hooks.join("ainb-bin"),
+        format!("{}\\n", missing_bin.display()),
+    )
+    .unwrap();
+    fs::write(
+        &path_bin,
+        "#!/usr/bin/env bash\nprintf 'path %s\\n' \"$*\" >> \"$AINB_HOOK_CAPTURE\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&path_bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path_bin, permissions).unwrap();
+
+    let original_path = std::env::var("PATH").unwrap();
+    let out = Command::new("bash")
+        .arg(&script)
+        .env("HOME", &home)
+        .env("AINB_HANGAR_HOME", &ainb_home)
+        .env("AINB_AGENT", "claude")
+        .env("AINB_MANAGED", "atc")
+        .env("AINB_HOOK_CAPTURE", &capture)
+        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
+        .env("PATH", format!("{}:{original_path}", path_dir.display()))
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(
+                br#"{"hook_event_name":"Stop","session_id":"sess-stale-bin","cwd":"/tmp"}"#,
+            )?;
+            child.wait()
+        })
+        .expect("running hook");
+
+    assert!(out.success(), "hook failed: {out}");
+    let calls = fs::read_to_string(capture).unwrap();
+    assert!(calls.contains("path fleet atc hook"), "calls: {calls}");
+}
+
 #[tokio::test]
 async fn hook_script_into_real_daemon_persists_supported_agents() {
     // Skip if the bash script is missing — useful when running from

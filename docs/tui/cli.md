@@ -658,20 +658,21 @@ EXAMPLES:
 
 ## `ainb doctor`
 
-Health-check the manifest, lockfile, deployed files, and configured sources. Exits non-zero when any problem is found
+Health-check skills, dependencies, hooks, and daemons
 
 ```console
 $ ainb doctor --help
-Health-check the manifest, lockfile, deployed files, and configured sources. Exits non-zero when any problem is found
+Health-check skills, dependencies, hooks, and daemons
 
 Usage: ainb doctor [OPTIONS]
 
 Options:
-      --offline  Skip the source-reachability check (avoid hitting the network / re-running fetchers)
-  -h, --help     Print help
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --offline          Skip skill-source reachability checks. Runtime checks stay local
+  -h, --help             Print help
 
 EXAMPLES:
-  ainb doctor                      Health-check skill manifest/lockfile/deployed files
+  ainb doctor                      Health-check skills, dependencies, hooks, and daemons
   ainb doctor --offline            Skip source-reachability network checks
 ```
 

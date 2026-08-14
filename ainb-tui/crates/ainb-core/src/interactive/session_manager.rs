@@ -144,12 +144,29 @@ pub(crate) async fn ensure_codex_remote_thread(
         })
         .await
         .map_err(|error| {
-            anyhow::anyhow!(
-                "Codex remote session unavailable. Verify Codex is signed in and retry. \
-                 If it persists, restart Ainb with `ainb hangar daemon stop` then \
-                 `ainb hangar daemon start`. Details: {error}"
-            )
+            let message = format_codex_remote_control_failure(&error.to_string());
+            warn!(error = %error, "{message}");
+            anyhow::Error::msg(error.to_string()).context(message)
         })
+}
+
+/// Short actionable TUI message for a shared Codex bridge failure.
+///
+/// The detailed transport error remains in daemon and client logs. Showing it in
+/// the three-line notification hid the user action behind nested RPC context.
+fn format_codex_remote_control_failure(cause: &str) -> &'static str {
+    if cause.contains("WebSocket handshake")
+        || cause.contains("Handshake not finished")
+        || cause.contains("invalid token")
+    {
+        "Codex bridge conflict. Restart Ainb, then retry."
+    } else if cause.contains("timed out") || cause.contains("still starting") {
+        "Codex bridge starting. Retry session in 5 seconds."
+    } else if cause.contains("not found") || cause.contains("cannot generate app-server schema") {
+        "Codex unavailable. Update Codex, then retry."
+    } else {
+        "Codex remote control unavailable. Check Hangar logs, then retry."
+    }
 }
 
 /// Wait briefly for the freshly started remote terminal to publish its exact
@@ -1892,6 +1909,8 @@ impl InteractiveSessionManager {
             }
             let mut command = vec![
                 provider.command().to_string(),
+                "--disable".to_string(),
+                "apps".to_string(),
                 "--remote".to_string(),
                 remote.endpoint.clone(),
                 "-C".to_string(),
@@ -2204,6 +2223,30 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_remote_codex_failures_show_a_short_next_action() {
+        assert_eq!(
+            format_codex_remote_control_failure(
+                "Codex app-server WebSocket handshake failed: invalid token"
+            ),
+            "Codex bridge conflict. Restart Ainb, then retry."
+        );
+        assert_eq!(
+            format_codex_remote_control_failure("Codex manager command timed out"),
+            "Codex bridge starting. Retry session in 5 seconds."
+        );
+        assert_eq!(
+            format_codex_remote_control_failure(
+                "installed Codex cannot generate app-server schema"
+            ),
+            "Codex unavailable. Update Codex, then retry."
+        );
+        assert_eq!(
+            format_codex_remote_control_failure("daemon RPC rejected request"),
+            "Codex remote control unavailable. Check Hangar logs, then retry."
+        );
+    }
 
     #[tokio::test]
     async fn shared_remote_codex_rejects_headroom_before_daemon_startup() {

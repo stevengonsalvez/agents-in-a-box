@@ -1,10 +1,9 @@
 // ABOUTME: Daemons screen component — live runtime health of the four ainb daemons.
 //
-// Renders a read-only table from `fleet::daemons::collect` (the SAME aggregator
-// behind `ainb fleet daemons`), refreshing on the render tick so a daemon that
-// starts/stops/crashes flips live. No controls in v1 — health only, matching the
-// rest of the app's read-only screens (Inbox/Stats). Follows the ainb-tui style
-// guide: rounded borders, gold title, cornflower-blue panel, green for healthy.
+// Renders fleet daemons, system services, and hook health in one table-driven
+// screen. Runtime actions run asynchronously; the screen never performs I/O in
+// render. Follows the ainb-tui style guide: rounded borders, gold title,
+// cornflower-blue panel, green for healthy.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,9 +15,11 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
 };
 
+use crate::app::state::DaemonsOverlayState;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonState, DaemonStatus};
+use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -45,6 +46,9 @@ pub struct Snapshot {
     pub rows: Vec<DaemonStatus>,
     /// The clock the cached rows' relative-time columns are measured against.
     pub collected_at_ms: i64,
+    /// Most-recent hook wiring health. Collected beside daemon state, never in
+    /// the render path.
+    pub hook_health: Option<HookHealth>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -98,6 +102,7 @@ impl DaemonsState {
         Snapshot {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
+            hook_health: guard.hook_health.clone(),
         }
     }
 }
@@ -105,11 +110,16 @@ impl DaemonsState {
 /// Run one collect and publish it into `shared`. Shared by the background thread
 /// and the test seam so the publish/merge logic is exercised without a thread.
 fn collect_into(shared: &Mutex<Snapshot>) {
+    // Hook health only opens local files and attempts local Unix sockets. It
+    // still belongs here, not in render: hooks may live on a slow volume and a
+    // stale socket can block briefly while connecting.
+    let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
             guard.collected_at_ms = now_ms();
+            guard.hook_health = hook_health;
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
@@ -137,7 +147,12 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut DaemonsState,
+    runtime: Option<&DaemonsOverlayState>,
+) {
     let snapshot = state.snapshot();
 
     let outer = Block::default()
@@ -165,8 +180,246 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    render_table(frame, chunks[0], &snapshot);
+    // A normal 24-row terminal gets all three tables: fleet daemons, system
+    // services, and hooks. The system table omits a redundant column header so
+    // its five rows fit beside the seven-row Fleet and Hooks tables.
+    if chunks[0].height >= 21 {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(7),
+                Constraint::Length(7),
+                Constraint::Length(7),
+            ])
+            .split(chunks[0]);
+        render_table(frame, sections[0], &snapshot);
+        render_system_services(frame, sections[1], runtime);
+        render_hook_section(frame, sections[2], snapshot.hook_health.as_ref());
+    } else if chunks[0].height >= 18 {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(7)])
+            .split(chunks[0]);
+        render_table(frame, sections[0], &snapshot);
+        render_hook_section(frame, sections[1], snapshot.hook_health.as_ref());
+    } else {
+        render_table(frame, chunks[0], &snapshot);
+    }
     render_footer(frame, chunks[1]);
+}
+
+fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                "System services",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  r",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" refresh · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("M", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" MCP · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("P", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Headroom · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" notifyd · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" Hangar", Style::default().fg(MUTED_GRAY)),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBDUED_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = match runtime {
+        None => vec![Row::new(["collecting…", "", "", ""])],
+        Some(runtime) if runtime.loading => vec![Row::new(["collecting…", "", "", ""])],
+        Some(runtime) => {
+            let status = |up| if up { "● up" } else { "○ down" };
+            let headroom_detail = format!(
+                ":{}  {}",
+                runtime.headroom.port,
+                runtime
+                    .headroom
+                    .pid
+                    .map(|pid| format!("pid {pid}"))
+                    .unwrap_or_else(|| "not running".to_string())
+            );
+            let action_detail = |status: Option<&String>, default: &str| {
+                status.cloned().unwrap_or_else(|| default.to_string())
+            };
+            vec![
+                Row::new(vec![
+                    Cell::from("MCP pool"),
+                    Cell::from(status(runtime.mcp_alive)),
+                    Cell::from(action_detail(
+                        runtime.mcp_start_status.as_ref(),
+                        "shared tool servers",
+                    )),
+                    Cell::from("M start"),
+                ]),
+                Row::new(vec![
+                    Cell::from("Headroom"),
+                    Cell::from(status(runtime.headroom.running)),
+                    Cell::from(action_detail(
+                        runtime.headroom_start_status.as_ref(),
+                        &headroom_detail,
+                    )),
+                    Cell::from("P start"),
+                ]),
+                Row::new(vec![
+                    Cell::from("Hangar"),
+                    Cell::from(status(runtime.hangar_running)),
+                    Cell::from(action_detail(
+                        runtime.hangar_start_status.as_ref(),
+                        &runtime.hangar_reason,
+                    )),
+                    Cell::from("S start"),
+                ]),
+                Row::new(vec![
+                    Cell::from("notifyd"),
+                    Cell::from(status(
+                        runtime.notifyd.iter().any(|daemon| daemon.class.is_healthy()),
+                    )),
+                    Cell::from(action_detail(
+                        runtime.notifyd_restart_status.as_ref(),
+                        &format!("{} process(es)", runtime.notifyd.len()),
+                    )),
+                    Cell::from("R force restart"),
+                ]),
+                Row::new([
+                    "approval broker",
+                    status(runtime.approve_running),
+                    runtime.approve_reason.as_str(),
+                    "repaired by R",
+                ]),
+            ]
+        }
+    };
+    let widths = [
+        Constraint::Length(18),
+        Constraint::Length(12),
+        Constraint::Min(22),
+        Constraint::Length(24),
+    ];
+    frame.render_widget(
+        Table::new(rows, widths).style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
+        inner,
+    );
+}
+
+fn render_hook_section(frame: &mut Frame, area: Rect, health: Option<&HookHealth>) {
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                "Hooks",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ainb-hooks", Style::default().fg(MUTED_GRAY)),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBDUED_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = match health {
+        None => vec![Line::from(Span::styled(
+            "collecting hook health…",
+            Style::default().fg(MUTED_GRAY),
+        ))],
+        Some(health) => {
+            let installed = health.installed_version.as_deref().unwrap_or("not installed");
+            let version_style = if health.version_current {
+                Style::default().fg(HEALTHY_GREEN)
+            } else {
+                Style::default().fg(GOLD)
+            };
+            let agent_line = health
+                .agents
+                .iter()
+                .map(|agent| {
+                    format!(
+                        "{} {}",
+                        agent.agent,
+                        if agent.wiring_ready { "✓" } else { "✗" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("   ");
+            let issue = health.issues.first().map_or_else(
+                || "✓ wiring healthy".to_string(),
+                |issue| {
+                    format!(
+                        "! {}: {} — {}",
+                        issue.component, issue.message, issue.repair
+                    )
+                },
+            );
+            vec![
+                Line::from(vec![
+                    Span::styled("version ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled(
+                        format!("{installed} → {}", health.bundled_version),
+                        version_style,
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "script {}  ·  ainb binary {}",
+                        if health.script_ready { "✓" } else { "✗" },
+                        if health.hook_binary_ready {
+                            "✓"
+                        } else {
+                            "✗"
+                        },
+                    ),
+                    Style::default().fg(if health.script_ready && health.hook_binary_ready {
+                        HEALTHY_GREEN
+                    } else {
+                        STOPPED_RED
+                    }),
+                )),
+                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
+                Line::from(Span::styled(
+                    format!(
+                        "notifyd {}  ·  approval broker {}",
+                        if health.notify_socket_live {
+                            "running"
+                        } else {
+                            "idle"
+                        },
+                        if health.approve_socket_live {
+                            "running"
+                        } else {
+                            "idle"
+                        },
+                    ),
+                    Style::default().fg(MUTED_GRAY),
+                )),
+                Line::from(Span::styled(
+                    issue,
+                    Style::default().fg(if health.issues.is_empty() {
+                        HEALTHY_GREEN
+                    } else {
+                        GOLD
+                    }),
+                )),
+            ]
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
+        inner,
+    );
 }
 
 fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
@@ -258,7 +511,10 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::fleet::daemons::probe::DaemonKind;
+    use crate::headroom::ProxyStatus;
+    use ainb_plugin_notifyd::{HookAgentHealth, HookHealth, HookHealthIssue};
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     fn status(
         kind: DaemonKind,
@@ -297,6 +553,58 @@ mod tests {
         let shared = Arc::new(Mutex::new(Snapshot {
             rows,
             collected_at_ms: now_ms(),
+            hook_health: None,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+        }
+    }
+
+    fn hook_health() -> HookHealth {
+        HookHealth {
+            bundled_version: "0.4.5".to_string(),
+            installed_version: Some("0.4.4".to_string()),
+            version_current: false,
+            script_path: PathBuf::from("/tmp/notify.sh"),
+            script_ready: true,
+            hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_ready: true,
+            agents: vec![
+                HookAgentHealth {
+                    agent: "claude".to_string(),
+                    installed: true,
+                    wiring_ready: true,
+                    detail: "marketplace install recorded".to_string(),
+                },
+                HookAgentHealth {
+                    agent: "codex".to_string(),
+                    installed: true,
+                    wiring_ready: true,
+                    detail: "hooks.json points at shared hook".to_string(),
+                },
+                HookAgentHealth {
+                    agent: "copilot".to_string(),
+                    installed: false,
+                    wiring_ready: false,
+                    detail: "not installed".to_string(),
+                },
+            ],
+            notify_socket_live: true,
+            approve_socket_live: false,
+            last_event: None,
+            issues: vec![HookHealthIssue {
+                component: "version".to_string(),
+                message: "installed 0.4.4; ainb bundles 0.4.5".to_string(),
+                repair: "ainb fleet runtime install".to_string(),
+            }],
+        }
+    }
+
+    fn seeded_state_with_hook(rows: Vec<DaemonStatus>, hook_health: HookHealth) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: Some(hook_health),
         }));
         DaemonsState {
             shared: Some(shared),
@@ -305,12 +613,47 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
-    fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
+    fn render_to_string(
+        state: &mut DaemonsState,
+        runtime: Option<&DaemonsOverlayState>,
+        w: u16,
+        h: u16,
+    ) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
+    }
+
+    fn system_runtime() -> DaemonsOverlayState {
+        DaemonsOverlayState {
+            mcp_alive: true,
+            headroom: ProxyStatus {
+                running: true,
+                port: 8787,
+                pid: Some(42),
+                tokens_saved: Some(9),
+            },
+            headroom_consumers: Vec::new(),
+            notifyd: Vec::new(),
+            approve_running: true,
+            approve_reason: "serving".to_string(),
+            hangar_running: true,
+            hangar_reason: "running".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
+            loading: false,
+            last_refreshed: None,
+            fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
+            hangar_start_rx: None,
+            hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
+        }
     }
 
     #[test]
@@ -340,7 +683,7 @@ mod tests {
             ),
             status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
         ]);
-        let out = render_to_string(&mut state, 120, 12);
+        let out = render_to_string(&mut state, None, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
         assert!(out.contains("HEALTH"), "header missing");
@@ -366,7 +709,7 @@ mod tests {
             true,
             Some("Telegram (@seam)"),
         )]);
-        let out = render_to_string(&mut state, 120, 8);
+        let out = render_to_string(&mut state, None, 120, 8);
         assert!(
             out.contains("Telegram (@seam)"),
             "seeded row missing: {out}"
@@ -377,6 +720,47 @@ mod tests {
             !out.contains("ATC"),
             "render must not collect beyond the seed"
         );
+    }
+
+    #[test]
+    fn renders_hook_version_state_and_repair_command_on_tall_screen() {
+        let mut state = seeded_state_with_hook(
+            vec![status(
+                DaemonKind::Notifyd,
+                DaemonState::Running,
+                true,
+                Some("socket+db"),
+            )],
+            hook_health(),
+        );
+        let runtime = system_runtime();
+        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        assert!(
+            out.contains("System services"),
+            "system section missing: {out}"
+        );
+        assert!(out.contains("Hooks"), "hook section missing: {out}");
+        for service in [
+            "MCP pool",
+            "Headroom",
+            "Hangar",
+            "notifyd",
+            "approval broker",
+        ] {
+            assert!(
+                out.contains(service),
+                "service row missing: {service}; {out}"
+            );
+        }
+        assert!(
+            out.contains("0.4.4 → 0.4.5"),
+            "version state missing: {out}"
+        );
+        assert!(
+            out.contains("ainb fleet runtime install"),
+            "repair missing: {out}"
+        );
+        assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
     }
 
     #[test]
@@ -399,7 +783,7 @@ mod tests {
         // sees an empty snapshot (the collector hasn't published yet) and must
         // render an empty table without panicking.
         let mut state = DaemonsState::default();
-        let _ = render_to_string(&mut state, 100, 10);
+        let _ = render_to_string(&mut state, None, 100, 10);
         // The collector handle is now installed (spawned lazily on first render).
         assert!(
             state.shared.is_some(),

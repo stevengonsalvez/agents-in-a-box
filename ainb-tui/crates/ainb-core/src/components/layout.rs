@@ -111,9 +111,11 @@ impl LayoutComponent {
             if let Some(ref overlay) = state.mcp_overlay {
                 crate::components::mcp_overlay::render(frame, frame_size, overlay);
             }
-            // Daemons overlay (read-only; same z-order as MCP overlay).
-            if let Some(ref overlay) = state.daemons_overlay {
-                crate::components::daemons_overlay::render(frame, frame_size, overlay);
+            // Unified Daemons screen renders this probe data in-table.
+            if state.current_screen != crate::app::screens::ids::DAEMONS {
+                if let Some(ref overlay) = state.daemons_overlay {
+                    crate::components::daemons_overlay::render(frame, frame_size, overlay);
+                }
             }
             if state.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
@@ -225,9 +227,10 @@ impl LayoutComponent {
         if let Some(ref overlay) = state.mcp_overlay {
             crate::components::mcp_overlay::render(frame, frame.size(), overlay);
         }
-        // Daemons overlay (read-only; same z-order as MCP overlay).
-        if let Some(ref overlay) = state.daemons_overlay {
-            crate::components::daemons_overlay::render(frame, frame.size(), overlay);
+        if state.current_screen != crate::app::screens::ids::DAEMONS {
+            if let Some(ref overlay) = state.daemons_overlay {
+                crate::components::daemons_overlay::render(frame, frame.size(), overlay);
+            }
         }
 
         // Render confirmation dialog if visible (highest priority overlay)

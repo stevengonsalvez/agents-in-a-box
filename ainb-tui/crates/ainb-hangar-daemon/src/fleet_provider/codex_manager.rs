@@ -122,7 +122,12 @@ impl CodexManagerHandle {
         cwd: &Path,
         model: Option<&str>,
     ) -> Result<String, ProviderError> {
-        let result = self.request("thread/start", json!({ "cwd": cwd, "model": model })).await?;
+        let result = self
+            .request(
+                "thread/start",
+                json!({ "cwd": cwd, "model": model, "ephemeral": false, "threadSource": "user" }),
+            )
+            .await?;
         nested_id(&result, "thread")
     }
 
@@ -316,7 +321,8 @@ fn interactive_thread_start_params(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> Value {
-    let mut params = json!({ "cwd": cwd, "model": model });
+    let mut params =
+        json!({ "cwd": cwd, "model": model, "ephemeral": false, "threadSource": "user" });
     if skip_permissions {
         let object = params.as_object_mut().expect("interactive thread params are an object");
         object.insert("approvalPolicy".into(), json!("never"));
@@ -442,7 +448,7 @@ pub async fn app_server_inventory() -> Vec<CodexAppServerInventoryRow> {
                 },
             }
         })
-        .take(DEFAULT_CODEX_MAX_SERVERS)
+        .take(APP_SERVER_INVENTORY_LIMIT)
         .collect()
 }
 
@@ -646,7 +652,6 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             "installed Codex cannot generate app-server schema".into(),
         ));
     }
-    enforce_codex_server_cap().await?;
     let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
     let mut owns_server = preparation.owns_server;
     let owner_marker_path = socket_owner_marker(&config.socket_path);
@@ -1013,8 +1018,9 @@ fn bound_by_child(child_pid: u32, listeners: Option<&[u32]>) -> bool {
     listeners.is_none_or(|pids| pids.len() == 1 && pids[0] == child_pid)
 }
 
-/// Default max concurrent codex app-server processes before `spawn` refuses more.
-const DEFAULT_CODEX_MAX_SERVERS: usize = 8;
+/// Diagnostic output bound. This never gates spawning: other Codex clients and
+/// IDEs own independent app-servers, while Ainb reuses only its exact socket.
+const APP_SERVER_INVENTORY_LIMIT: usize = 8;
 
 /// One `ps -Ao pid,ppid,args` row, borrowed from the dump.
 struct PsRow<'a> {
@@ -1184,17 +1190,72 @@ fn codex_orphans_to_reap(ps_output: &str, adoption_credible: impl Fn(&str) -> bo
         .collect()
 }
 
-/// Count of live codex app-server SERVERS (any ppid) in a `ps` dump: argv contains
-/// `bin/codex` AND `app-server`, but NOT `app-server proxy`. Used to fail loud
-/// before piling on more. Proxy processes are excluded because each real server is
-/// fronted by a proxy; counting both would trip the cap at half the real server
-/// count (~4 server+proxy pairs against the default cap of 8).
-fn live_codex_app_server_count(ps_output: &str) -> usize {
-    ps_output
-        .lines()
-        .filter_map(parse_ps_row)
-        .filter(|row| is_codex_app_server(row.args) && !row.args.contains("app-server proxy"))
-        .count()
+/// An obsolete pre-lock Hangar daemon that still drives a legacy stdio proxy.
+///
+/// This is deliberately narrower than the app-server orphan reaper. The old
+/// daemon must be orphaned, recognisably Hangar, and have a direct child proxy
+/// for this exact home socket before Ainb is allowed to stop it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyProxyDaemon {
+    pid: u32,
+    process_start_fingerprint: String,
+    proxy_pid: u32,
+    proxy_start_fingerprint: String,
+}
+
+/// Select orphaned legacy Hangar daemon pids whose direct proxy child targets
+/// `live_socket`.
+///
+/// A proxy on its own is not authority to signal anything. The parent-child
+/// relationship confines this compatibility recovery to the obsolete Ainb
+/// topology that predated the native WebSocket manager.
+fn legacy_proxy_daemon_pairs(ps_output: &str, live_socket: &Path) -> Vec<(u32, u32)> {
+    let expected_socket = live_socket.to_string_lossy();
+    let rows = ps_output.lines().filter_map(parse_ps_row).collect::<Vec<_>>();
+    rows.iter()
+        .filter(|parent| {
+            parent.ppid == 1 && crate::single_instance::is_hangar_daemon_args(parent.args)
+        })
+        .flat_map(|parent| {
+            rows.iter().filter_map(|child| {
+                (child.ppid == parent.pid
+                    && is_codex_app_server(child.args)
+                    && codex_proxy_socket(child.args)
+                        .is_some_and(|socket| socket == expected_socket))
+                .then_some((parent.pid, child.pid))
+            })
+        })
+        .collect()
+}
+
+/// Confirm a selected daemon remains the same process before signalling it.
+///
+/// A PID is reusable after the first process exits, so the start fingerprint is
+/// required before both TERM and KILL. The fresh process-table check also proves
+/// the legacy parent-child topology still targets this exact home.
+async fn legacy_proxy_daemon_is_current(candidate: &LegacyProxyDaemon, live_socket: &Path) -> bool {
+    process_identity(candidate.pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.process_start_fingerprint
+    }) && process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.proxy_start_fingerprint
+    }) && ps_process_table().await.is_some_and(|ps_output| {
+        legacy_proxy_daemon_pairs(&ps_output, live_socket)
+            .contains(&(candidate.pid, candidate.proxy_pid))
+    })
+}
+
+/// Confirm the proxy child remains the exact same process after its parent exits.
+async fn legacy_proxy_child_is_current(candidate: &LegacyProxyDaemon, live_socket: &Path) -> bool {
+    process_identity(candidate.proxy_pid).await.is_some_and(|identity| {
+        identity.process_start_fingerprint == candidate.proxy_start_fingerprint
+    }) && ps_process_table().await.is_some_and(|ps_output| {
+        ps_output.lines().filter_map(parse_ps_row).any(|row| {
+            row.pid == candidate.proxy_pid
+                && is_codex_app_server(row.args)
+                && codex_proxy_socket(row.args)
+                    .is_some_and(|socket| socket == live_socket.to_string_lossy())
+        })
+    })
 }
 
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
@@ -1212,24 +1273,6 @@ fn reap_targets(candidates: &[u32], listeners: Option<&[u32]>, self_pid: u32) ->
         .collect()
 }
 
-/// Configured cap on concurrent codex app-server servers (`AINB_CODEX_MAX_SERVERS`,
-/// default `DEFAULT_CODEX_MAX_SERVERS`). A non-numeric override falls back to default.
-/// Clamped to a floor of 1 so `AINB_CODEX_MAX_SERVERS=0` cannot permanently refuse
-/// every spawn (the daemon must always be able to bring up at least one server).
-fn codex_server_cap() -> usize {
-    std::env::var("AINB_CODEX_MAX_SERVERS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_CODEX_MAX_SERVERS)
-        .max(1)
-}
-
-/// Whether the live codex app-server count in a `ps` dump has reached `cap`.
-/// Pure so the boundary (`count >= cap`) is unit-tested without spawning `ps`.
-fn codex_server_cap_reached(ps_output: &str, cap: usize) -> bool {
-    live_codex_app_server_count(ps_output) >= cap
-}
-
 /// Read the full process table via `ps -Ao pid,ppid,args`, or `None` on failure.
 async fn ps_process_table() -> Option<String> {
     let output = Command::new("ps")
@@ -1241,27 +1284,6 @@ async fn ps_process_table() -> Option<String> {
         .ok()
         .filter(|output| output.status.success())?;
     String::from_utf8(output.stdout).ok()
-}
-
-/// Refuse to spawn another shared app-server once the cap is already live.
-///
-/// Turns a silent process pileup (a SIGKILL/OOM leak loop that never runs Drop)
-/// into a loud spawn error the service loop logs and backs off on. Fails open when
-/// `ps` cannot answer: we never wedge boot on a host without a readable process
-/// table.
-async fn enforce_codex_server_cap() -> Result<(), ProviderError> {
-    let cap = codex_server_cap();
-    let Some(ps_output) = ps_process_table().await else {
-        return Ok(());
-    };
-    if codex_server_cap_reached(&ps_output, cap) {
-        let live = live_codex_app_server_count(&ps_output);
-        return Err(ProviderError::Transport(format!(
-            "refusing to spawn Codex app-server: {live} already live, at or above cap {cap} \
-             (raise with AINB_CODEX_MAX_SERVERS)"
-        )));
-    }
-    Ok(())
 }
 
 /// Waits governing one reap sweep's SIGTERM → SIGKILL escalation.
@@ -1499,6 +1521,122 @@ async fn terminate_orphans(
         tracing::error!(pid, "orphaned codex app-server survived SIGKILL");
     }
     outcome
+}
+
+/// Stop obsolete orphaned Hangar daemons that still run the legacy Codex proxy
+/// against this home's native WebSocket socket.
+///
+/// This runs only during boot. Current Hangar never launches the proxy, so a
+/// periodic process-table scan would add cost without improving recovery. The
+/// parent is revalidated by start fingerprint and direct-child topology before
+/// each signal, preventing PID reuse or an argv change from widening authority.
+pub async fn reap_legacy_codex_proxy_daemons(live_socket: &Path) -> usize {
+    let Some(ps_output) = ps_process_table().await else {
+        return 0;
+    };
+    let mut reaped = 0;
+    for (pid, proxy_pid) in legacy_proxy_daemon_pairs(&ps_output, live_socket) {
+        let Some(identity) = process_identity(pid).await else {
+            continue;
+        };
+        let Some(proxy_identity) = process_identity(proxy_pid).await else {
+            continue;
+        };
+        let candidate = LegacyProxyDaemon {
+            pid,
+            process_start_fingerprint: identity.process_start_fingerprint,
+            proxy_pid,
+            proxy_start_fingerprint: proxy_identity.process_start_fingerprint,
+        };
+        if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        match nix_signal(pid, Some(Signal::SIGTERM)) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(pid, error = %error, "failed to stop legacy codex proxy daemon");
+                continue;
+            }
+        }
+        let parent_exited = wait_for_exit(
+            &[pid],
+            ReapTiming::PRODUCTION.term_grace,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty();
+        if parent_exited {
+            reaped += 1;
+        } else {
+            if !legacy_proxy_daemon_is_current(&candidate, live_socket).await {
+                continue;
+            }
+            match nix_signal(pid, Some(Signal::SIGKILL)) {
+                Ok(()) | Err(Errno::ESRCH) => {}
+                Err(error) => {
+                    tracing::warn!(pid, error = %error, "failed to kill legacy codex proxy daemon");
+                    continue;
+                }
+            }
+            if wait_for_exit(
+                &[pid],
+                ReapTiming::PRODUCTION.kill_confirm,
+                ReapTiming::PRODUCTION.poll,
+                &nix_signal,
+            )
+            .await
+            .is_empty()
+            {
+                reaped += 1;
+            } else {
+                tracing::error!(pid, "legacy codex proxy daemon survived SIGKILL");
+                continue;
+            }
+        }
+        if !legacy_proxy_child_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        match nix_signal(proxy_pid, Some(Signal::SIGTERM)) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(proxy_pid, error = %error, "failed to stop legacy codex proxy child");
+                continue;
+            }
+        }
+        if wait_for_exit(
+            &[proxy_pid],
+            ReapTiming::PRODUCTION.term_grace,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty()
+        {
+            continue;
+        }
+        if !legacy_proxy_child_is_current(&candidate, live_socket).await {
+            continue;
+        }
+        if let Err(error) = nix_signal(proxy_pid, Some(Signal::SIGKILL)) {
+            if error != Errno::ESRCH {
+                tracing::warn!(proxy_pid, error = %error, "failed to kill legacy codex proxy child");
+            }
+            continue;
+        }
+        if !wait_for_exit(
+            &[proxy_pid],
+            ReapTiming::PRODUCTION.kill_confirm,
+            ReapTiming::PRODUCTION.poll,
+            &nix_signal,
+        )
+        .await
+        .is_empty()
+        {
+            tracing::error!(proxy_pid, "legacy codex proxy child survived SIGKILL");
+        }
+    }
+    reaped
 }
 
 /// Reap codex app-server processes orphaned by a prior daemon or plugin broker.
@@ -2193,6 +2331,8 @@ mod tests {
 
         let manager = spawn(config).await.expect("initialize managed Codex listener");
         assert!(socket_path.exists());
+        let thread_id = manager.handle.thread_start(dir.path(), None).await.unwrap();
+        manager.handle.thread_resume(&thread_id).await.unwrap();
         manager.handle.shutdown().await.expect("shutdown managed listener");
         manager.wait().await.expect("reap managed listener");
         assert!(!socket_path.exists());
@@ -2334,6 +2474,41 @@ mod tests {
         assert!(codex_orphans_to_reap(desktop, |_| true).is_empty());
     }
 
+    #[test]
+    fn legacy_proxy_recovery_targets_only_its_orphaned_hangar_parent() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = home.path().join("codex-app-server.sock");
+        let other = home.path().join("other.sock");
+        let dump = format!(
+            "  PID  PPID ARGS\n\
+              810     1 /tmp/ainb-hangar-daemon\n\
+              811   810 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              820     1 /tmp/ainb-hangar-daemon\n\
+              821   820 /opt/codex/bin/codex app-server proxy --sock {other}\n\
+              830     1 /tmp/not-ainb\n\
+              831   830 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              840     1 /opt/codex/bin/codex app-server proxy --sock {socket}\n",
+            socket = socket.display(),
+            other = other.display(),
+        );
+        assert_eq!(legacy_proxy_daemon_pairs(&dump, &socket), vec![(810, 811)]);
+    }
+
+    #[test]
+    fn legacy_proxy_recovery_requires_direct_child_and_exact_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = home.path().join("codex-app-server.sock");
+        let dump = format!(
+            "  PID  PPID ARGS\n\
+              810     1 /tmp/ainb-hangar-daemon\n\
+              811  9999 /opt/codex/bin/codex app-server proxy --sock {socket}\n\
+              820     1 /tmp/ainb-hangar-daemon\n\
+              821   820 /opt/codex/bin/codex app-server proxy --sock /tmp/foreign.sock\n",
+            socket = socket.display(),
+        );
+        assert!(legacy_proxy_daemon_pairs(&dump, &socket).is_empty());
+    }
+
     /// Quoting the markers is not being them. Every line below contains both
     /// `bin/codex` and `app-server` and was a SIGTERM/SIGKILL target under the old
     /// substring matcher.
@@ -2352,11 +2527,6 @@ mod tests {
             assert!(
                 codex_orphans_to_reap(line, |_| true).is_empty(),
                 "must not target: {line}"
-            );
-            assert_eq!(
-                live_codex_app_server_count(line),
-                0,
-                "must not count: {line}"
             );
         }
 
@@ -2820,29 +2990,6 @@ mod tests {
         assert_eq!(reap_targets(&candidates, None, 999), vec![501, 777]);
         // Our own pid is never a target.
         assert_eq!(reap_targets(&[501, 777, 999], None, 999), vec![501, 777]);
-    }
-
-    #[test]
-    fn live_count_counts_servers_not_proxies() {
-        // 501 + 777 are real servers = 2. The 1500 `app-server proxy` line is a
-        // consumer, not a server, so it is NOT counted (counting proxies would trip
-        // the cap at half the real server count). Desktop app + header excluded.
-        assert_eq!(live_codex_app_server_count(PS_FIXTURE), 2);
-        // A lone proxy line, regardless of ppid, counts as zero servers.
-        let proxy_only = " 1500     1 /home/u/.nvm/bin/codex app-server proxy --sock /tmp/x.sock\n";
-        assert_eq!(live_codex_app_server_count(proxy_only), 0);
-    }
-
-    #[test]
-    fn cap_reached_at_or_above_boundary() {
-        // Fixture has 2 live SERVERS (proxies excluded).
-        assert!(!codex_server_cap_reached(PS_FIXTURE, 3)); // below the cap
-        assert!(codex_server_cap_reached(PS_FIXTURE, 2)); // at the cap
-        assert!(codex_server_cap_reached(PS_FIXTURE, 1)); // above the cap
-        assert!(!codex_server_cap_reached(
-            PS_FIXTURE,
-            DEFAULT_CODEX_MAX_SERVERS
-        ));
     }
 
     struct FakeCleanup(Arc<AtomicBool>);
@@ -3324,9 +3471,13 @@ mod tests {
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["model"], "gpt-5");
+        assert_eq!(params["ephemeral"], false);
+        assert_eq!(params["threadSource"], "user");
 
         let default_params = interactive_thread_start_params(Path::new("/worktree"), None, false);
         assert!(default_params.get("approvalPolicy").is_none());
         assert!(default_params.get("sandbox").is_none());
+        assert_eq!(default_params["ephemeral"], false);
+        assert_eq!(default_params["threadSource"], "user");
     }
 }

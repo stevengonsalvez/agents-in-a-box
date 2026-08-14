@@ -1003,7 +1003,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 }
 
 // ============================================================================
-// Daemons overlay (MCP pool + Headroom proxy — read-only status)
+// Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions)
 // ============================================================================
 
 /// Fetched snapshot delivered through the daemons overlay channel.
@@ -1049,6 +1049,12 @@ pub struct DaemonsOverlayState {
     pub notifyd_restart_status: Option<String>,
     pub hangar_start_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub hangar_start_status: Option<String>,
+    /// MCP start result, shown in the unified Daemons table.
+    pub mcp_start_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub mcp_start_status: Option<String>,
+    /// Headroom start result, shown in the unified Daemons table.
+    pub headroom_start_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub headroom_start_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -2875,7 +2881,7 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
-    // Daemons status overlay (MCP pool + Headroom proxy, read-only).
+    // Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions).
     pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
@@ -5024,6 +5030,10 @@ impl AppState {
             hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
             hangar_start_rx: None,
             hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -5136,6 +5146,50 @@ impl AppState {
         });
     }
 
+    /// Start the shared MCP pool off the UI thread and report its result in
+    /// the unified Daemons screen. Idempotent when already alive.
+    pub fn spawn_mcp_start(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.mcp_start_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.mcp_start_rx = Some(rx);
+        o.mcp_start_status = Some("starting MCP pool…".to_string());
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::ensure_daemon)
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("MCP start task panicked: {e}")));
+            let line = result
+                .map(|()| "MCP pool started".to_string())
+                .unwrap_or_else(|error| format!("MCP pool start failed: {error:#}"));
+            let _ = tx.send(line);
+        });
+    }
+
+    /// Start the Headroom proxy off the UI thread and report its result in the
+    /// unified Daemons screen. Headroom remains optional.
+    pub fn spawn_headroom_start(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.headroom_start_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.headroom_start_rx = Some(rx);
+        o.headroom_start_status = Some("starting Headroom…".to_string());
+        tokio::spawn(async move {
+            let line = crate::headroom::ensure_proxy_running()
+                .await
+                .map(|()| "Headroom started".to_string())
+                .unwrap_or_else(|error| format!("Headroom start failed: {error:#}"));
+            let _ = tx.send(line);
+        });
+    }
+
     /// Drain a completed daemons fetch. Called from the 250ms app tick.
     pub fn check_daemons_overlay(&mut self) {
         let Some(o) = self.daemons_overlay.as_mut() else {
@@ -5162,6 +5216,20 @@ impl AppState {
             if let Ok(line) = rx.try_recv() {
                 o.hangar_start_rx = None;
                 o.hangar_start_status = Some(line);
+                refresh_after_start = true;
+            }
+        }
+        if let Some(rx) = o.mcp_start_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.mcp_start_rx = None;
+                o.mcp_start_status = Some(line);
+                refresh_after_start = true;
+            }
+        }
+        if let Some(rx) = o.headroom_start_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.headroom_start_rx = None;
+                o.headroom_start_status = Some(line);
                 refresh_after_start = true;
             }
         }

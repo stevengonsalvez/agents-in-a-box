@@ -493,16 +493,14 @@ impl CliCommand for DoctorCommand {
             // `.about()` + `.after_help()` are applied AFTER `augment_args` so
             // they win: the derive macro otherwise overwrites the command
             // description + help with the `DoctorArgs` doc-comment.
-            // `ainb doctor` is intercepted before clap (main.rs
-            // SKILL_MANAGER_CLI_COMMANDS) and runs the skill-manager doctor; this
-            // registry entry only labels the root `--help` list + feeds shell
-            // completions, so its description must match what actually runs. The
-            // reflect/statusline dependency check lives at `ainb reflect check`.
+            // `ainb doctor` is the combined health surface: it runs the
+            // skill-manager checks, dependency checks, hook wiring checks, and
+            // daemon health in one place.
             <crate::cli::doctor::DoctorArgs as clap::Args>::augment_args(Command::new(self.name()))
-                .about("Health-check the skill manifest, lockfile, deployed files + sources")
+                .about("Health-check skills, dependencies, hooks, and daemons")
                 .after_help(
                     "EXAMPLES:\n  \
-                     ainb doctor                      Health-check skill manifest/lockfile/deployed files\n  \
+                     ainb doctor                      Health-check skills, dependencies, hooks, and daemons\n  \
                      ainb doctor --offline            Skip source-reachability network checks",
                 ),
         )
