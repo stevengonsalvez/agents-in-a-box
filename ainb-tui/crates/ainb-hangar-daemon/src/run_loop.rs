@@ -821,6 +821,13 @@ pub fn spawn_gc_sweeper(
 /// event, so it needs no change). The reference publishes
 /// `EventDaemonRegister{stale_sweep}` on its own bus for exactly this reason.
 ///
+/// The pass also RECOVERS work: a runtime that decays all the way to `offline`
+/// has its orphaned `dispatched`/`running` rows reclaimed to `queued` on that
+/// same tick, so a daemon that died and never comes back no longer strands its
+/// tasks until the 2.5h running TTL (see
+/// [`crate::sweeper::reclaim_orphans_for_offline_runtimes`]). A reclaim fault is
+/// swallowed per runtime, so the events below are emitted either way.
+///
 /// `runtime_id` is this daemon's own runtime, beaten first each pass so the
 /// daemon can never sweep itself; `None` for a daemon that advertises none.
 /// A failed pass is logged and the loop continues — presence is observability,

@@ -29,6 +29,15 @@
 //! production uses the reference defaults, tests inject a frozen clock and tight
 //! config so the suite is deterministic (no `tokio::time::sleep`).
 //!
+//! # Orphan reclaim (not time-based)
+//!
+//! Separately from the TTLs, a runtime's whole in-flight set is reclaimed the
+//! moment its owning PROCESS is known to be gone — no TTL wait, because the
+//! evidence is ownership, not age. [`reclaim_orphaned_for_runtime`] does the
+//! work; two thin wrappers name the two pieces of evidence:
+//! [`reclaim_orphans_on_restart`] (a different instance registered the runtime)
+//! and [`reclaim_orphans_for_offline_runtimes`] (the presence sweep aged it out).
+//!
 //! # Idempotency
 //!
 //! Every statement constrains the source `status` in its `WHERE` clause, so a
@@ -52,7 +61,7 @@ use std::time::Duration;
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_proto::events::PresenceState;
 use ainb_hangar_store::bootstrap::RuntimeArrival;
-use ainb_hangar_store::repo::agent_runtime::{AgentRuntimeRepo, PresenceSweep};
+use ainb_hangar_store::repo::agent_runtime::{AgentRuntimeRepo, PresenceSweep, SweptRuntime};
 use sqlx::SqlitePool;
 
 /// How long a `queued` task may wait before it is failed. Reference:
@@ -342,6 +351,10 @@ pub async fn sweep_stale_dispatched(
 /// (the claim-disabled "sweepers only" mode), in which case the pass is purely
 /// the age sweep.
 ///
+/// A runtime that lands in the `offline` band also has its orphaned in-flight
+/// tasks reclaimed to `queued` — see [`reclaim_orphans_for_offline_runtimes`],
+/// which owns the trigger's reasoning and swallows its own faults.
+///
 /// Returns the rows that moved so the caller can fan `AgentPresence` events out
 /// (the reference publishes `EventDaemonRegister{stale_sweep}` for the same
 /// reason: clients must re-read the runtime list).
@@ -349,6 +362,8 @@ pub async fn sweep_stale_dispatched(
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if the heartbeat or either sweep statement fails.
+/// A failed *reclaim* is NOT an error here: it is logged and skipped so the
+/// presence transitions are still reported and still announced.
 pub async fn sweep_runtime_presence(
     pool: &SqlitePool,
     clock: &dyn HangarClock,
@@ -372,35 +387,47 @@ pub async fn sweep_runtime_presence(
             "runtime_presence_swept",
         );
     }
+    // Going offline is itself the verdict that a runtime's in-flight work is
+    // orphaned, so recover it here rather than stranding it until the multi-hour
+    // running TTL. Faults are absorbed per runtime so the caller still gets the
+    // full sweep to fan presence events from.
+    reclaim_orphans_for_offline_runtimes(pool, &sweep.to_offline, own_runtime_id).await;
     Ok(sweep)
 }
 
-/// Reclaim a crashed daemon's orphaned in-flight tasks back to `queued` at
-/// startup (e38.25 crash recovery).
+/// Reclaim one runtime's orphaned in-flight tasks back to `queued` (e38.25 crash
+/// recovery).
 ///
 /// When a daemon dies uncleanly (`kill -9`, OOM, panic) mid-task its claimed
 /// rows are left frozen in `dispatched` or `running` — the FSM step that would
 /// have finalised them never ran. The time-based sweepers eventually move them
 /// (a `running` row only past the 2.5h running TTL; a `dispatched` row past the
-/// 90s reclaim window), but on a fresh boot there is no need to wait: the
-/// process that *was* executing those tasks is, by definition, gone. So at
-/// startup the newly-booted daemon reclaims every non-terminal in-flight row it
-/// owns — scoped to **its own** `runtime_id` so a sibling daemon's live runs in
-/// a multi-runtime deployment are never disturbed — back to `queued`, clearing
+/// 90s reclaim window), but once the owning process is known to be gone there is
+/// no need to wait. So the caller reclaims every non-terminal in-flight row that
+/// runtime owns — scoped to the one `runtime_id` so a sibling daemon's live runs
+/// in a multi-runtime deployment are never disturbed — back to `queued`, clearing
 /// `started_at` / `dispatched_at` so a fresh claim re-dispatches the work. The
 /// `attempt` counter is left **unchanged** (a crash redelivery is not a retry,
 /// mirroring [`reclaim_stale_dispatched`]).
 ///
-/// This is the redelivery the daemon-restart path needs: the orphan leaves its
-/// `running`/`dispatched` limbo immediately on restart rather than stranding the
-/// work for hours. Mirrors the reference's runtime-scoped reclaim-on-boot.
+/// This function is deliberately TRIGGER-NEUTRAL: deciding that the owning
+/// process is gone is the caller's job, and there are two such callers, each a
+/// thin wrapper naming its own evidence — [`reclaim_orphans_on_restart`] (a
+/// different process instance registered this runtime) and
+/// [`reclaim_orphans_for_offline_runtimes`] (the presence sweep aged the runtime
+/// out). Never call it unconditionally: requeuing rows a LIVE process is still
+/// executing double-dispatches that work.
 ///
 /// Returns the number of rows reclaimed.
 ///
 /// # Errors
 ///
-/// Returns a [`sqlx::Error`] if the statement fails.
-pub async fn reclaim_orphaned_on_startup(
+/// Returns a [`sqlx::Error`] if the statement fails. A requeue can legitimately
+/// fail: `queued` is a *pending* status, so returning a `running` row to it can
+/// collide with the one-pending-task-per-(issue, agent) unique index when a
+/// newer task for the same pair is already waiting. Both callers treat that as
+/// non-fatal — the time-based sweepers still backstop the row.
+pub async fn reclaim_orphaned_for_runtime(
     pool: &SqlitePool,
     runtime_id: &str,
 ) -> Result<u64, sqlx::Error> {
@@ -416,17 +443,16 @@ pub async fn reclaim_orphaned_on_startup(
     .rows_affected();
     if reclaimed > 0 {
         tracing::info!(
-            kind = "startup",
             outcome = "reclaimed",
             count = reclaimed,
             runtime_id,
-            "sweeper_startup_reclaim"
+            "sweeper_orphan_reclaim"
         );
     }
     Ok(reclaimed)
 }
 
-/// [`reclaim_orphaned_on_startup`], but only when the boot registration says a
+/// [`reclaim_orphaned_for_runtime`], but only when the boot registration says a
 /// DIFFERENT process instance owned this runtime (migration 0092).
 ///
 /// "This daemon just booted" is a weaker signal than it looks: the same process
@@ -457,7 +483,75 @@ pub async fn reclaim_orphans_on_restart(
         );
         return Ok(0);
     }
-    reclaim_orphaned_on_startup(pool, runtime_id).await
+    reclaim_orphaned_for_runtime(pool, runtime_id).await
+}
+
+/// [`reclaim_orphaned_for_runtime`] for every runtime the presence sweep just
+/// aged out to `offline`.
+///
+/// The restart wrapper above only recovers a dead daemon's work when that daemon
+/// COMES BACK. Nothing brings back a machine that was shut down, so without this
+/// its in-flight rows sit `dispatched`/`running` until the multi-hour
+/// [`RUNNING_TTL`] — hours in which the tasks look alive, block their issue, and
+/// are claimable by nobody. Crossing [`PresenceState::OFFLINE_AFTER_MS`] with no
+/// heartbeat is the second piece of evidence that the owning process is gone, so
+/// the same runtime-scoped reclaim runs on that transition.
+///
+/// Only `to_offline` — never `to_unstable`. Unstable is the GRACE window whose
+/// whole purpose is to let a briefly-stalled daemon (a GC pause, a slow disk, a
+/// laptop lid) keep the run it is still executing; reclaiming there would rob it.
+///
+/// Faults are swallowed per runtime, deliberately: presence is observability, and
+/// one runtime's failed requeue (most plausibly the pending-task unique-index
+/// collision described on [`reclaim_orphaned_for_runtime`]) must not stop the
+/// next runtime's reclaim, nor the caller's `AgentPresence` fan-out. The
+/// time-based sweepers remain the backstop for whatever is skipped. Returns the
+/// total rows reclaimed across all runtimes.
+///
+/// # Residual hazard (read before changing this)
+///
+/// A daemon that is ALIVE but wedged for >10min gets its rows requeued while it
+/// may still be executing them; if it later un-wedges, that work can run twice.
+/// The 10-minute threshold IS the mitigation — it is 20 missed 30s beats.
+///
+/// `agent_runtime.instance_id` (migration 0092) does NOT help here, despite
+/// being the right tool for the restart wrapper: the offline row's `instance_id`
+/// is still the WEDGED process's own id, because nothing else has registered.
+/// A dead daemon and a wedged one are byte-identical in the schema — same
+/// instance, stale `last_seen_at` — so gating on the instance would reject both
+/// or accept both. Closing this properly needs a fencing token (stamp the owning
+/// instance on the task row at dispatch and make the terminal write conditional
+/// on it), which is a schema change and out of scope here.
+pub async fn reclaim_orphans_for_offline_runtimes(
+    pool: &SqlitePool,
+    to_offline: &[SweptRuntime],
+    own_runtime_id: Option<&str>,
+) -> u64 {
+    let mut total = 0;
+    for rt in to_offline {
+        // Defensive: `sweep_runtime_presence` beats for our own runtime before it
+        // sweeps, so our id cannot legitimately appear here. A backwards clock
+        // jump or a process paused past the grace window could in principle
+        // produce it, and self-reclaiming would requeue OUR OWN live runs — the
+        // exact double-dispatch the restart wrapper's reconnect check exists to
+        // prevent. Cheaper to guard than to reason about.
+        if own_runtime_id == Some(rt.id.as_str()) {
+            tracing::warn!(
+                runtime_id = %rt.id,
+                "presence sweep aged out our own runtime; skipping self-reclaim"
+            );
+            continue;
+        }
+        match reclaim_orphaned_for_runtime(pool, &rt.id).await {
+            Ok(n) => total += n,
+            Err(e) => tracing::error!(
+                error = %e,
+                runtime_id = %rt.id,
+                "offline orphan reclaim failed"
+            ),
+        }
+    }
+    total
 }
 
 /// Fail up to `batch_size` rows in `from_status` whose `age_column` is older

@@ -18,13 +18,17 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
 use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::sweeper::{
     DISPATCHED_TTL, QUEUED_TTL, RECLAIM_WINDOW, RUNNING_TTL, SweeperConfig,
-    reclaim_orphaned_on_startup, reclaim_orphans_on_restart, reclaim_stale_dispatched,
-    sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
+    reclaim_orphaned_for_runtime, reclaim_orphans_for_offline_runtimes, reclaim_orphans_on_restart,
+    reclaim_stale_dispatched, sweep_expired_queued, sweep_runtime_presence, sweep_stale_dispatched,
+    sweep_stale_running,
 };
+use ainb_hangar_proto::events::{HangarEvent, PresenceState};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::bootstrap::RuntimeArrival;
+use ainb_hangar_store::repo::agent_runtime::SweptRuntime;
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use sqlx::{Row, SqlitePool};
 
@@ -601,7 +605,7 @@ async fn startup_reclaims_own_running_orphan_to_queued() {
         .await
         .expect("force running");
 
-    let reclaimed = reclaim_orphaned_on_startup(store.pool(), "rt-1").await.expect("reclaim ok");
+    let reclaimed = reclaim_orphaned_for_runtime(store.pool(), "rt-1").await.expect("reclaim ok");
     assert_eq!(reclaimed, 1, "the running orphan is reclaimed");
 
     let (status, reason, attempt, _) = read_task(store.pool(), "r1").await;
@@ -628,7 +632,7 @@ async fn startup_reclaims_own_dispatched_orphan_to_queued() {
     let (_dir, store) = open_seeded().await;
     seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(BASE_MS)).await;
 
-    let reclaimed = reclaim_orphaned_on_startup(store.pool(), "rt-1").await.expect("reclaim ok");
+    let reclaimed = reclaim_orphaned_for_runtime(store.pool(), "rt-1").await.expect("reclaim ok");
     assert_eq!(reclaimed, 1, "the dispatched orphan is reclaimed");
 
     let (status, _, _, dispatched_at) = read_task(store.pool(), "d1").await;
@@ -659,7 +663,7 @@ async fn startup_reclaim_is_runtime_scoped_and_skips_terminal() {
     seed_task_rt2(store.pool(), "sib-run", "running").await;
     seed_task_rt2(store.pool(), "sib-disp", "dispatched").await;
 
-    let reclaimed = reclaim_orphaned_on_startup(store.pool(), "rt-1").await.expect("reclaim ok");
+    let reclaimed = reclaim_orphaned_for_runtime(store.pool(), "rt-1").await.expect("reclaim ok");
     assert_eq!(
         reclaimed, 1,
         "only this runtime's single in-flight orphan is reclaimed"
@@ -734,4 +738,308 @@ async fn reconnect_arrival_leaves_the_live_instances_work_alone() {
     let (dispatched, _, _, dispatched_at) = read_task(store.pool(), "d1").await;
     assert_eq!(dispatched, "dispatched", "the live dispatch is untouched");
     assert_eq!(dispatched_at, Some(BASE_MS), "…with its claim stamp intact");
+}
+
+// ---- presence-driven offline reclaim --------------------------------------
+//
+// The startup reclaim above only fires when the dead daemon comes BACK. These
+// pin the other trigger: the presence sweep declaring a runtime `offline` is
+// itself the signal that its in-flight work is orphaned, so the tasks are
+// recoverable without that daemon ever returning.
+
+/// Stamp a runtime's heartbeat directly so the presence sweep can age it.
+async fn beat(pool: &SqlitePool, runtime_id: &str, at_ms: i64) {
+    sqlx::query("UPDATE agent_runtime SET last_seen_at = ?, status = 'online' WHERE id = ?")
+        .bind(at_ms)
+        .bind(runtime_id)
+        .execute(pool)
+        .await
+        .expect("stamp heartbeat");
+}
+
+/// Insert a task on an explicit runtime/agent/issue in `status`, stamping
+/// `started_at` for a `running` row.
+async fn seed_task_on(
+    pool: &SqlitePool,
+    id: &str,
+    runtime_id: &str,
+    agent_id: &str,
+    issue_id: Option<&str>,
+    status: &str,
+) {
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, started_at) \
+         VALUES (?, 'ws-1', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(runtime_id)
+    .bind(agent_id)
+    .bind(issue_id)
+    .bind(status)
+    .bind(BASE_MS)
+    .bind((status == "running").then_some(BASE_MS))
+    .execute(pool)
+    .await
+    .expect("insert task");
+}
+
+/// A runtime that decays to `offline` has its in-flight rows returned to
+/// `queued` on that same pass — the 2.5h running TTL is no longer the recovery
+/// path for a daemon that simply died.
+#[tokio::test]
+async fn offline_presence_reclaims_that_runtimes_inflight_tasks() {
+    let (_dir, store) = open_seeded().await;
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    seed_task_on(store.pool(), "run-1", "rt-1", "agent-1", None, "running").await;
+    seed_task_on(
+        store.pool(),
+        "disp-1",
+        "rt-1",
+        "agent-1",
+        None,
+        "dispatched",
+    )
+    .await;
+
+    let past_offline = BASE_MS + PresenceState::OFFLINE_AFTER_MS + 1;
+    let sweep = sweep_runtime_presence(store.pool(), &FixedClock(past_offline), None)
+        .await
+        .expect("sweep ok");
+    assert_eq!(
+        sweep.to_offline.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["rt-1"],
+        "the dead runtime went offline on this pass",
+    );
+
+    let (run_status, reason, attempt, _) = read_task(store.pool(), "run-1").await;
+    assert_eq!(run_status, "queued", "the orphaned run is recoverable now");
+    assert_eq!(reason, None, "a presence redelivery is not a failure");
+    assert_eq!(attempt, 1, "attempt unchanged (redelivery, not retry)");
+    let (disp_status, ..) = read_task(store.pool(), "disp-1").await;
+    assert_eq!(disp_status, "queued", "the orphaned dispatch too");
+
+    let started_at: Option<i64> =
+        sqlx::query("SELECT started_at FROM agent_task_queue WHERE id='run-1'")
+            .fetch_one(store.pool())
+            .await
+            .expect("read started_at")
+            .try_get("started_at")
+            .unwrap();
+    assert_eq!(
+        started_at, None,
+        "started_at cleared so a fresh claim re-runs it"
+    );
+}
+
+/// `unstable` is the GRACE window, not a verdict: a runtime that merely missed a
+/// few beats keeps its live work. Reclaiming here would rob a briefly-stalled
+/// daemon of a run that never stopped.
+#[tokio::test]
+async fn unstable_presence_leaves_the_inflight_work_alone() {
+    let (_dir, store) = open_seeded().await;
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    seed_task_on(store.pool(), "run-1", "rt-1", "agent-1", None, "running").await;
+
+    let inside_grace = BASE_MS + PresenceState::UNSTABLE_AFTER_MS + 1;
+    assert!(
+        inside_grace - BASE_MS <= PresenceState::OFFLINE_AFTER_MS,
+        "the fixture must sit strictly inside the grace window",
+    );
+    let sweep = sweep_runtime_presence(store.pool(), &FixedClock(inside_grace), None)
+        .await
+        .expect("sweep ok");
+    assert_eq!(
+        sweep.to_unstable.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["rt-1"],
+        "the runtime went unstable, not offline",
+    );
+    assert!(sweep.to_offline.is_empty(), "still inside the grace window");
+
+    let (status, ..) = read_task(store.pool(), "run-1").await;
+    assert_eq!(status, "running", "an unstable runtime keeps its live run");
+}
+
+/// The reclaim follows the offline verdict per runtime: a sibling still beating
+/// keeps every one of its in-flight rows.
+#[tokio::test]
+async fn offline_reclaim_is_scoped_to_the_runtime_that_went_offline() {
+    let (_dir, store) = open_seeded().await;
+    seed_second_runtime(store.pool()).await;
+    let past_offline = BASE_MS + PresenceState::OFFLINE_AFTER_MS + 1;
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    beat(store.pool(), "rt-2", past_offline).await;
+
+    seed_task_on(store.pool(), "dead-run", "rt-1", "agent-1", None, "running").await;
+    seed_task_on(store.pool(), "live-run", "rt-2", "agent-2", None, "running").await;
+
+    let sweep = sweep_runtime_presence(store.pool(), &FixedClock(past_offline), None)
+        .await
+        .expect("sweep ok");
+    assert_eq!(
+        sweep.to_offline.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["rt-1"],
+        "only the stale runtime went offline",
+    );
+
+    let (dead, ..) = read_task(store.pool(), "dead-run").await;
+    assert_eq!(dead, "queued", "the offline runtime's orphan is reclaimed");
+    let (live, ..) = read_task(store.pool(), "live-run").await;
+    assert_eq!(live, "running", "the beating sibling's run is untouched");
+}
+
+/// A reclaim that FAILS (here: requeuing would collide with the
+/// one-pending-task-per-(issue, agent) unique index) is logged and skipped — the
+/// pass still reclaims the next offline runtime and still reports both
+/// transitions so the presence events are emitted.
+#[tokio::test]
+async fn a_failed_reclaim_does_not_abort_the_presence_pass() {
+    let (_dir, store) = open_seeded().await;
+    seed_second_runtime(store.pool()).await;
+    sqlx::query(
+        "INSERT INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
+         VALUES ('iss-1', 'ws-1', 'I', 'member', 'user-1', ?)",
+    )
+    .bind(BASE_MS)
+    .execute(store.pool())
+    .await
+    .expect("insert issue");
+
+    // rt-1: requeuing `poison` would make a SECOND pending row on (iss-1, agent-1).
+    seed_task_on(
+        store.pool(),
+        "blocker",
+        "rt-1",
+        "agent-1",
+        Some("iss-1"),
+        "queued",
+    )
+    .await;
+    seed_task_on(
+        store.pool(),
+        "poison",
+        "rt-1",
+        "agent-1",
+        Some("iss-1"),
+        "running",
+    )
+    .await;
+    // rt-2: an ordinary orphan that must still be reclaimed.
+    seed_task_on(store.pool(), "sib-run", "rt-2", "agent-2", None, "running").await;
+
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    beat(store.pool(), "rt-2", BASE_MS).await;
+
+    let past_offline = BASE_MS + PresenceState::OFFLINE_AFTER_MS + 1;
+    let sweep = sweep_runtime_presence(store.pool(), &FixedClock(past_offline), None)
+        .await
+        .expect("a reclaim fault never fails the presence pass");
+    let mut offline: Vec<&str> = sweep.to_offline.iter().map(|r| r.id.as_str()).collect();
+    offline.sort_unstable();
+    assert_eq!(
+        offline,
+        vec!["rt-1", "rt-2"],
+        "both transitions are still reported, so both fan out events",
+    );
+
+    let (poison, ..) = read_task(store.pool(), "poison").await;
+    assert_eq!(poison, "running", "the conflicting reclaim was rejected");
+    let (sib, ..) = read_task(store.pool(), "sib-run").await;
+    assert_eq!(
+        sib, "queued",
+        "the fault did not stop the next runtime's reclaim",
+    );
+
+    // The fault is a REAL error the pass swallowed, not an inert no-match: the
+    // same reclaim run directly surfaces the constraint violation.
+    let direct = reclaim_orphaned_for_runtime(store.pool(), "rt-1").await;
+    assert!(
+        direct.is_err(),
+        "requeuing `poison` must violate the pending-task index, got {direct:?}",
+    );
+}
+
+/// The sweeping daemon beats for itself first, so its own runtime cannot reach
+/// the offline band — its live work is never requeued under it.
+#[tokio::test]
+async fn the_sweeping_daemon_never_reclaims_its_own_work() {
+    let (_dir, store) = open_seeded().await;
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    seed_task_on(store.pool(), "own-run", "rt-1", "agent-1", None, "running").await;
+
+    let far_future = BASE_MS + 24 * 60 * 60 * 1_000;
+    let sweep = sweep_runtime_presence(store.pool(), &FixedClock(far_future), Some("rt-1"))
+        .await
+        .expect("sweep ok");
+    assert!(
+        sweep.is_empty(),
+        "our own runtime beat before the sweep saw it"
+    );
+
+    let (status, ..) = read_task(store.pool(), "own-run").await;
+    assert_eq!(status, "running", "our own live run keeps executing");
+}
+
+/// The defensive half of the same rule: handed its OWN runtime in the offline
+/// set — only reachable via a backwards clock jump or a process paused past the
+/// grace window — the reclaim still skips it. The second call proves the skip is
+/// the guard doing work, not an inert loop.
+#[tokio::test]
+async fn the_offline_reclaim_never_touches_our_own_runtime() {
+    let (_dir, store) = open_seeded().await;
+    seed_task_on(store.pool(), "own-run", "rt-1", "agent-1", None, "running").await;
+    let offline = vec![SweptRuntime {
+        id: "rt-1".to_string(),
+        workspace_id: "ws-1".to_string(),
+    }];
+
+    let skipped = reclaim_orphans_for_offline_runtimes(store.pool(), &offline, Some("rt-1")).await;
+    assert_eq!(skipped, 0, "we never requeue our own live work");
+    let (status, ..) = read_task(store.pool(), "own-run").await;
+    assert_eq!(status, "running", "the run is left executing");
+
+    let reclaimed =
+        reclaim_orphans_for_offline_runtimes(store.pool(), &offline, Some("rt-other")).await;
+    assert_eq!(
+        reclaimed, 1,
+        "the identical input reclaims when the runtime is not ours",
+    );
+}
+
+/// End-to-end through the SCHEDULED loop, not the bare function: the daemon's
+/// real presence task ticks, declares the runtime offline, and the orphan is
+/// `queued` by the time the `AgentPresence` event lands. Pins the wiring a
+/// function-level test cannot see.
+#[tokio::test]
+async fn the_presence_loop_reclaims_and_still_announces() {
+    let (_dir, store) = open_seeded().await;
+    beat(store.pool(), "rt-1", BASE_MS).await;
+    seed_task_on(store.pool(), "orphan", "rt-1", "agent-1", None, "running").await;
+
+    let broker = EventBroker::new();
+    let mut rx = broker.subscribe();
+    let handle = ainb_hangar_daemon::run_loop::spawn_runtime_presence(
+        store.pool().clone(),
+        None,
+        std::time::Duration::from_millis(20),
+        std::sync::Arc::new(FixedClock(BASE_MS + PresenceState::OFFLINE_AFTER_MS + 1)),
+        broker.sink(),
+    );
+    let scoped = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("an AgentPresence event within the budget")
+        .expect("event channel open");
+    handle.abort();
+
+    match scoped.event {
+        HangarEvent::AgentPresence { state, .. } => {
+            assert_eq!(state, PresenceState::Offline, "the loop announced offline");
+        }
+        other => panic!("expected AgentPresence, got {other:?}"),
+    }
+    let (status, ..) = read_task(store.pool(), "orphan").await;
+    assert_eq!(
+        status, "queued",
+        "the same tick recovered the dead runtime's work",
+    );
 }
