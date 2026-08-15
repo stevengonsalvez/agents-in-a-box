@@ -220,6 +220,26 @@ fn heartbeat_version(hb: &DaemonHeartbeat) -> (Option<String>, Option<bool>) {
     (version, current)
 }
 
+/// True only for a known released version strictly older than this Ainb
+/// binary. Unknown, prerelease, equal, and newer versions return false: repair
+/// paths are upgrade-only and must never downgrade a live daemon.
+#[must_use]
+pub(crate) fn release_version_is_older(running: &str, current: &str) -> bool {
+    fn parts(version: &str) -> Option<[u64; 3]> {
+        let mut parts = version.split('.').map(str::parse::<u64>);
+        let parsed = [
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        ];
+        parts.next().is_none().then_some(parsed)
+    }
+    match (parts(running), parts(current)) {
+        (Some(running), Some(current)) => running < current,
+        _ => false,
+    }
+}
+
 /// Version evidence for a socket daemon which predates version sidecars.
 /// Homebrew paths carry an immutable release version. Development and Cargo
 /// paths are only called current when they resolve to this exact executable;
@@ -934,6 +954,14 @@ mod tests {
             heartbeat_version(&heartbeat),
             (Some("0.0.0".to_string()), Some(false))
         );
+    }
+
+    #[test]
+    fn release_version_repair_is_upgrade_only() {
+        assert!(release_version_is_older("1.20.4", "1.20.5"));
+        assert!(!release_version_is_older("1.20.5", "1.20.5"));
+        assert!(!release_version_is_older("1.20.6", "1.20.5"));
+        assert!(!release_version_is_older("dev", "1.20.5"));
     }
 
     /// A bridge heartbeat whose outbound worker last reached the attention

@@ -48,7 +48,13 @@ pub fn daemon_runtime_status() -> DaemonRuntimeStatus {
     let Ok(report) = serde_json::from_str::<StatusReport>(&raw) else {
         return DaemonRuntimeStatus::default();
     };
-    let old = report.version != env!("CARGO_PKG_VERSION");
+    // A different version is not necessarily stale: Doctor and the TUI are
+    // sometimes launched from an older Ainb while a newer MCP pool is serving.
+    // Only a known older release is safe to replace.
+    let old = crate::fleet::daemons::probe::release_version_is_older(
+        &report.version,
+        env!("CARGO_PKG_VERSION"),
+    );
     DaemonRuntimeStatus {
         pid: Some(report.pid),
         version: Some(report.version),

@@ -130,7 +130,12 @@ fn repair_stale_daemons(daemons: &[crate::fleet::daemons::DaemonStatus]) -> Vec<
     let mut outcomes = Vec::new();
     if daemons.iter().any(|daemon| {
         daemon.kind == crate::fleet::daemons::DaemonKind::Notifyd
-            && daemon.version_current == Some(false)
+            && daemon.version.as_deref().is_some_and(|version| {
+                crate::fleet::daemons::probe::release_version_is_older(
+                    version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+            })
     }) {
         let outcome = ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3))
             .map(|_| "notifyd restarted against current Ainb".to_string())

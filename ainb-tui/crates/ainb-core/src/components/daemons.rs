@@ -256,16 +256,11 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
             };
             let version = |running: Option<&str>, old: bool| match running {
                 Some(version) if old => format!("{version} → {}", env!("CARGO_PKG_VERSION")),
-                Some(version) => format!("{version} ✓"),
+                Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
+                Some(version) => format!("{version} newer"),
                 None => "version unknown".to_string(),
             };
-            let notify_version = if runtime.notifyd.is_empty() {
-                "not running".to_string()
-            } else if runtime.notifyd.iter().any(|daemon| daemon.binary_drift) {
-                format!("different build → {}", env!("CARGO_PKG_VERSION"))
-            } else {
-                format!("{} ✓", env!("CARGO_PKG_VERSION"))
-            };
+            let notify_version = notifyd_version_label(&runtime.notifyd);
             vec![
                 Row::new(vec![
                     Cell::from("MCP pool"),
@@ -330,6 +325,36 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
         Table::new(rows, widths).style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
         inner,
     );
+}
+
+fn notifyd_version_label(daemons: &[ainb_plugin_notifyd::ClassifiedDaemon]) -> String {
+    let Some(owner) = daemons.iter().find(|daemon| daemon.class.is_healthy()) else {
+        return if daemons.is_empty() {
+            "not running".to_string()
+        } else {
+            "owner unknown".to_string()
+        };
+    };
+    let version = owner
+        .proc
+        .bin
+        .split_once("/Cellar/ainb/")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .filter(|version| !version.is_empty());
+    match version {
+        Some(version)
+            if crate::fleet::daemons::probe::release_version_is_older(
+                version,
+                env!("CARGO_PKG_VERSION"),
+            ) =>
+        {
+            format!("{version} → {}", env!("CARGO_PKG_VERSION"))
+        }
+        Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
+        Some(version) => format!("{version} newer"),
+        None if owner.binary_drift => "different build".to_string(),
+        None => format!("{} ✓", env!("CARGO_PKG_VERSION")),
+    }
 }
 
 fn render_hook_section(
@@ -544,9 +569,20 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
 fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     match (&daemon.version, daemon.version_current) {
         (Some(version), Some(true)) => (format!("{version} ✓"), Style::default().fg(HEALTHY_GREEN)),
+        (Some(version), Some(false))
+            if crate::fleet::daemons::probe::release_version_is_older(
+                version,
+                env!("CARGO_PKG_VERSION"),
+            ) =>
+        {
+            (
+                format!("{version} → {}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(GOLD),
+            )
+        }
         (Some(version), Some(false)) => (
-            format!("{version} → {}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(GOLD),
+            format!("{version} newer"),
+            Style::default().fg(HEALTHY_GREEN),
         ),
         _ => ("unknown".to_string(), Style::default().fg(MUTED_GRAY)),
     }
@@ -612,6 +648,14 @@ mod tests {
             daemon_version_label(&daemon).0,
             format!("0.0.0 → {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn daemon_version_label_does_not_suggest_downgrading_newer_daemon() {
+        let mut daemon = status(DaemonKind::Bridge, DaemonState::Running, true, None);
+        daemon.version = Some("999.0.0".to_string());
+        daemon.version_current = Some(false);
+        assert_eq!(daemon_version_label(&daemon).0, "999.0.0 newer");
     }
 
     /// A `DaemonsState` whose background collector is pre-empted: the shared
