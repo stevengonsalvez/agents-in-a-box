@@ -102,6 +102,11 @@ pub struct DaemonHeartbeat {
     pub started_at: i64,
     /// Epoch ms at which this record was last rewritten (the liveness clock).
     pub last_heartbeat_at: i64,
+    /// Ainb release which started this daemon.  This is written once at
+    /// process start, rather than inferred from a mutable launcher symlink, so
+    /// an upgrade can reliably identify an old long-running process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ainb_version: Option<String>,
     /// Epoch ms of the last real unit of work (a relayed message, a scan that
     /// acted). `None` until the daemon has done anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +177,7 @@ impl DaemonHeartbeat {
             pid: std::process::id(),
             started_at: now,
             last_heartbeat_at: now,
+            ainb_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             last_activity_at: None,
             connected: false,
             channel: None,
@@ -385,6 +391,17 @@ pub fn process_start_ms(pid: u32) -> Option<i64> {
     i64::try_from(secs).ok().map(|s| s * 1000)
 }
 
+/// Best-effort resolved executable of `pid`. Kept beside the identity probe so
+/// daemon health can inspect a process without shelling out from the TUI.
+#[must_use]
+pub fn process_binary(pid: u32) -> Option<PathBuf> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let spid = Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), false);
+    sys.process(spid)?.exe().map(Path::to_path_buf)
+}
+
 /// Cross-check a heartbeat's `pid`/`started_at` against the live process,
 /// returning whether it's the original daemon, a recycled-pid impostor, or
 /// dead. This is the identity guard the bare `kill(pid,0)` liveness check
@@ -437,6 +454,7 @@ mod tests {
         let hb = DaemonHeartbeat::starting();
         assert_eq!(hb.pid, std::process::id());
         assert_eq!(hb.started_at, hb.last_heartbeat_at);
+        assert_eq!(hb.ainb_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert!(hb.last_activity_at.is_none());
         assert!(!hb.connected);
         assert_eq!(hb.error_count, 0);

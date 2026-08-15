@@ -8618,6 +8618,12 @@ pub fn ensure_hangar_daemon() {
     }
 }
 
+/// Start a missing daemon, or hand an older released owner to this Ainb
+/// binary. Used by the Daemons screen's explicit upgrade control.
+pub(crate) fn start_or_upgrade_daemon_from_current() -> Result<()> {
+    start_or_upgrade_daemon(false)
+}
+
 /// Start a missing daemon, or hand off an older recorded release to this one.
 ///
 /// Unknown, equal, prerelease, and newer owners are deliberately left alone:

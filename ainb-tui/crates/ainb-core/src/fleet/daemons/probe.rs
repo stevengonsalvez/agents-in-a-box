@@ -24,7 +24,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity};
+use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity, process_binary};
 
 /// A heartbeat older than this (and whose pid is *still* alive — e.g. a wedged
 /// daemon that stopped ticking) is treated as stale. A dead pid is caught
@@ -138,6 +138,15 @@ pub struct DaemonStatus {
     /// Milliseconds since the daemon started, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uptime_ms: Option<i64>,
+    /// Ainb version which owns this runtime, when it can be established.
+    /// `None` is intentionally honest: an old heartbeat or a scheduled job is
+    /// not evidence that it runs this binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Whether [`Self::version`] equals this invoking Ainb binary.  `None`
+    /// means version unknown / not meaningful for this kind of runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_current: Option<bool>,
     /// Daemon-specific connection health (Telegram online / peer registered /
     /// socket+DB reachable / heartbeat alive).
     #[serde(default)]
@@ -185,6 +194,8 @@ impl DaemonStatus {
             state: DaemonState::Stopped,
             pid: None,
             uptime_ms: None,
+            version: None,
+            version_current: None,
             connected: false,
             channel: None,
             last_activity_at: None,
@@ -198,6 +209,68 @@ impl DaemonStatus {
             reason: reason.into(),
         }
     }
+}
+
+/// Version carried by a self-reporting heartbeat. Old heartbeats did not have
+/// this field; leave them unknown instead of pretending an upgraded observer
+/// upgraded a still-running daemon.
+fn heartbeat_version(hb: &DaemonHeartbeat) -> (Option<String>, Option<bool>) {
+    let version = hb.ainb_version.clone();
+    let current = version.as_deref().map(|running| running == env!("CARGO_PKG_VERSION"));
+    (version, current)
+}
+
+/// True only for a known released version strictly older than this Ainb
+/// binary. Unknown, prerelease, equal, and newer versions return false: repair
+/// paths are upgrade-only and must never downgrade a live daemon.
+#[must_use]
+pub(crate) fn release_version_is_older(running: &str, current: &str) -> bool {
+    fn parts(version: &str) -> Option<[u64; 3]> {
+        let mut parts = version.split('.').map(str::parse::<u64>);
+        let parsed = [
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        ];
+        parts.next().is_none().then_some(parsed)
+    }
+    match (parts(running), parts(current)) {
+        (Some(running), Some(current)) => running < current,
+        _ => false,
+    }
+}
+
+/// Version evidence for a socket daemon which predates version sidecars.
+/// Homebrew paths carry an immutable release version. Development and Cargo
+/// paths are only called current when they resolve to this exact executable;
+/// every other path remains unknown rather than guessed.
+fn process_version(pid: Option<u32>) -> (Option<String>, Option<bool>) {
+    let Some(path) = pid.and_then(process_binary) else {
+        return (None, None);
+    };
+    let raw = path.to_string_lossy();
+    if let Some((_, rest)) = raw.split_once("/Cellar/ainb/") {
+        if let Some(version) = rest.split('/').next().filter(|value| !value.is_empty()) {
+            let version = version.to_string();
+            return (
+                Some(version.clone()),
+                Some(version == env!("CARGO_PKG_VERSION")),
+            );
+        }
+    }
+    let same_binary = std::env::current_exe()
+        .ok()
+        .and_then(|current| {
+            std::fs::canonicalize(current)
+                .ok()
+                .zip(std::fs::canonicalize(&path).ok())
+                .map(|(current, running)| current == running)
+        })
+        .unwrap_or(path == std::env::current_exe().unwrap_or_default());
+    if same_binary {
+        return (Some(env!("CARGO_PKG_VERSION").to_string()), Some(true));
+    }
+    (None, None)
 }
 
 /// The outbound (proactive phone push) verdict for one heartbeat. Separated from
@@ -407,6 +480,7 @@ pub fn classify_heartbeat(
     let age = now_ms.saturating_sub(hb.last_heartbeat_at);
     let uptime_ms = now_ms.saturating_sub(hb.started_at);
     let uptime = Some(uptime_ms);
+    let (version, version_current) = heartbeat_version(&hb);
 
     // A dead OR recycled pid is the strongest possible signal: the process that
     // wrote this heartbeat is gone, so the heartbeat is a tombstone no matter
@@ -427,6 +501,8 @@ pub fn classify_heartbeat(
             state: DaemonState::Stopped,
             pid: Some(hb.pid),
             uptime_ms: None,
+            version,
+            version_current,
             connected: false,
             channel: hb.channel,
             last_activity_at: hb.last_activity_at,
@@ -450,6 +526,8 @@ pub fn classify_heartbeat(
             state: DaemonState::Stopped,
             pid: Some(hb.pid),
             uptime_ms: uptime,
+            version,
+            version_current,
             connected: false,
             channel: hb.channel,
             last_activity_at: hb.last_activity_at,
@@ -484,6 +562,8 @@ pub fn classify_heartbeat(
         state,
         pid: Some(hb.pid),
         uptime_ms: uptime,
+        version,
+        version_current,
         connected: hb.connected,
         channel: hb.channel,
         last_activity_at: hb.last_activity_at,
@@ -521,6 +601,7 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
     let db_path = base.join("notifications.db");
 
     let pid = read_pid_file(&pid_path);
+    let (version, version_current) = process_version(pid);
     let pid_alive = pid.is_some_and(is_pid_alive);
     // L1: a bound, ACCEPTING listener — not merely a socket file on disk. A
     // crashed daemon can leave a stale `notify.sock` behind; `exists()` would
@@ -563,6 +644,8 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         state: DaemonState::Running,
         pid,
         uptime_ms: None, // notifyd's PID file carries no start time
+        version,
+        version_current,
         connected,
         channel: Some("unix socket + sqlite".to_string()),
         last_activity_at: db_mtime_ms(&db_path),
@@ -612,11 +695,15 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
             n => format!("serving, {n} pending requests (see `ainb fleet approve`)"),
         },
     );
+    let notify_pid = read_pid_file(&base.join("notify.pid"));
+    let (version, version_current) = process_version(notify_pid);
     DaemonStatus {
         kind,
         state: DaemonState::Running,
         pid: None, // rides notifyd's process; no pid of its own
         uptime_ms: None,
+        version,
+        version_current,
         connected: true,
         channel: Some("approve socket".to_string()),
         last_activity_at: None,
@@ -743,6 +830,8 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         state: DaemonState::Running,
         pid: None, // timer-driven; no resident pid
         uptime_ms: None,
+        version: None,
+        version_current: None,
         connected: true,
         channel: Some(format!("{name} (every {interval_min}m)")),
         last_activity_at: hbs.last_active_ms,
@@ -837,6 +926,7 @@ mod tests {
             pid,
             started_at: started,
             last_heartbeat_at: last_beat,
+            ainb_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             last_activity_at: Some(last_beat),
             connected,
             channel: Some("Telegram".into()),
@@ -849,6 +939,29 @@ mod tests {
             inbound_live: 0,
             last_inbound_error: None,
         }
+    }
+
+    #[test]
+    fn heartbeat_version_marks_only_this_binary_current() {
+        let mut heartbeat = hb(42, 1, 2, true);
+        heartbeat.ainb_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        assert_eq!(
+            heartbeat_version(&heartbeat),
+            (heartbeat.ainb_version.clone(), Some(true))
+        );
+        heartbeat.ainb_version = Some("0.0.0".to_string());
+        assert_eq!(
+            heartbeat_version(&heartbeat),
+            (Some("0.0.0".to_string()), Some(false))
+        );
+    }
+
+    #[test]
+    fn release_version_repair_is_upgrade_only() {
+        assert!(release_version_is_older("1.20.4", "1.20.5"));
+        assert!(!release_version_is_older("1.20.5", "1.20.5"));
+        assert!(!release_version_is_older("1.20.6", "1.20.5"));
+        assert!(!release_version_is_older("dev", "1.20.5"));
     }
 
     /// A bridge heartbeat whose outbound worker last reached the attention

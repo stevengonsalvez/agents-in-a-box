@@ -222,13 +222,13 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
             ),
             Span::styled(" refresh · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("M", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" MCP · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" restart MCP · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("P", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" Headroom · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" notifyd · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" Hangar", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" start / upgrade Hangar", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -254,15 +254,25 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
             let action_detail = |status: Option<&String>, default: &str| {
                 status.cloned().unwrap_or_else(|| default.to_string())
             };
+            let version = |running: Option<&str>, old: bool| match running {
+                Some(version) if old => format!("{version} → {}", env!("CARGO_PKG_VERSION")),
+                Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
+                Some(version) => format!("{version} newer"),
+                None => "version unknown".to_string(),
+            };
+            let notify_version = notifyd_version_label(&runtime.notifyd);
             vec![
                 Row::new(vec![
                     Cell::from("MCP pool"),
                     Cell::from(status(runtime.mcp_alive)),
                     Cell::from(action_detail(
                         runtime.mcp_start_status.as_ref(),
-                        "shared tool servers",
+                        &version(
+                            runtime.mcp_runtime.version.as_deref(),
+                            runtime.mcp_runtime.old,
+                        ),
                     )),
-                    Cell::from("M start"),
+                    Cell::from("M restart current"),
                 ]),
                 Row::new(vec![
                     Cell::from("Headroom"),
@@ -278,9 +288,12 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                     Cell::from(status(runtime.hangar_running)),
                     Cell::from(action_detail(
                         runtime.hangar_start_status.as_ref(),
-                        &runtime.hangar_reason,
+                        &version(
+                            runtime.hangar_runtime.version.as_deref(),
+                            runtime.hangar_runtime.old,
+                        ),
                     )),
-                    Cell::from("S start"),
+                    Cell::from("S start / upgrade"),
                 ]),
                 Row::new(vec![
                     Cell::from("notifyd"),
@@ -289,15 +302,15 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                     )),
                     Cell::from(action_detail(
                         runtime.notifyd_restart_status.as_ref(),
-                        &format!("{} process(es)", runtime.notifyd.len()),
+                        &notify_version,
                     )),
-                    Cell::from("R force restart"),
+                    Cell::from("R restart current"),
                 ]),
-                Row::new([
-                    "approval broker",
-                    status(runtime.approve_running),
-                    runtime.approve_reason.as_str(),
-                    "repaired by R",
+                Row::new(vec![
+                    Cell::from("approval broker"),
+                    Cell::from(status(runtime.approve_running)),
+                    Cell::from(format!("{notify_version} · {}", runtime.approve_reason)),
+                    Cell::from("repaired by R"),
                 ]),
             ]
         }
@@ -312,6 +325,36 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
         Table::new(rows, widths).style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
         inner,
     );
+}
+
+fn notifyd_version_label(daemons: &[ainb_plugin_notifyd::ClassifiedDaemon]) -> String {
+    let Some(owner) = daemons.iter().find(|daemon| daemon.class.is_healthy()) else {
+        return if daemons.is_empty() {
+            "not running".to_string()
+        } else {
+            "owner unknown".to_string()
+        };
+    };
+    let version = owner
+        .proc
+        .bin
+        .split_once("/Cellar/ainb/")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .filter(|version| !version.is_empty());
+    match version {
+        Some(version)
+            if crate::fleet::daemons::probe::release_version_is_older(
+                version,
+                env!("CARGO_PKG_VERSION"),
+            ) =>
+        {
+            format!("{version} → {}", env!("CARGO_PKG_VERSION"))
+        }
+        Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
+        Some(version) => format!("{version} newer"),
+        None if owner.binary_drift => "different build".to_string(),
+        None => format!("{} ✓", env!("CARGO_PKG_VERSION")),
+    }
 }
 
 fn render_hook_section(
@@ -455,6 +498,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
         Cell::from("STATE"),
         Cell::from("PID"),
         Cell::from("UPTIME"),
+        Cell::from("VERSION"),
         Cell::from("LAST ACTIVITY"),
         Cell::from("ERR"),
         Cell::from("HEALTH"),
@@ -475,6 +519,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
             };
             let pid = d.pid.map_or_else(|| "-".to_string(), |p| p.to_string());
             let uptime = d.uptime_ms.map_or_else(|| "-".to_string(), fmt_duration_ms);
+            let version = daemon_version_label(d);
             let last_activity =
                 d.last_activity_at.map_or_else(|| "-".to_string(), |ts| fmt_ago(now, ts));
             let health = match (&d.channel, d.connected, d.state) {
@@ -489,6 +534,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
                 Cell::from(glyph).style(glyph_style),
                 Cell::from(pid),
                 Cell::from(uptime),
+                Cell::from(version.0).style(version.1),
                 Cell::from(last_activity),
                 Cell::from(d.error_count.to_string()).style(if d.error_count > 0 {
                     Style::default().fg(STOPPED_RED)
@@ -505,6 +551,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(8),
+        Constraint::Length(17),
         Constraint::Length(14),
         Constraint::Length(4),
         Constraint::Min(20),
@@ -515,6 +562,30 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
         .column_spacing(1)
         .style(Style::default().bg(PANEL_BG));
     frame.render_widget(table, area);
+}
+
+/// Short, operator-facing release verdict. Keep expected version in the cell:
+/// a bare red old version forces humans to remember what Ainb they launched.
+fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
+    match (&daemon.version, daemon.version_current) {
+        (Some(version), Some(true)) => (format!("{version} ✓"), Style::default().fg(HEALTHY_GREEN)),
+        (Some(version), Some(false))
+            if crate::fleet::daemons::probe::release_version_is_older(
+                version,
+                env!("CARGO_PKG_VERSION"),
+            ) =>
+        {
+            (
+                format!("{version} → {}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(GOLD),
+            )
+        }
+        (Some(version), Some(false)) => (
+            format!("{version} newer"),
+            Style::default().fg(HEALTHY_GREEN),
+        ),
+        _ => ("unknown".to_string(), Style::default().fg(MUTED_GRAY)),
+    }
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
@@ -548,6 +619,8 @@ mod tests {
             state,
             pid: Some(1234),
             uptime_ms: Some(3_600_000),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            version_current: Some(true),
             connected,
             channel: channel.map(str::to_string),
             last_activity_at: Some(now_ms() - 5_000),
@@ -564,6 +637,25 @@ mod tests {
                 "no heartbeat — not running this session".to_string()
             },
         }
+    }
+
+    #[test]
+    fn daemon_version_label_names_current_target_for_stale_daemon() {
+        let mut daemon = status(DaemonKind::Bridge, DaemonState::Running, true, None);
+        daemon.version = Some("0.0.0".to_string());
+        daemon.version_current = Some(false);
+        assert_eq!(
+            daemon_version_label(&daemon).0,
+            format!("0.0.0 → {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn daemon_version_label_does_not_suggest_downgrading_newer_daemon() {
+        let mut daemon = status(DaemonKind::Bridge, DaemonState::Running, true, None);
+        daemon.version = Some("999.0.0".to_string());
+        daemon.version_current = Some(false);
+        assert_eq!(daemon_version_label(&daemon).0, "999.0.0 newer");
     }
 
     /// A `DaemonsState` whose background collector is pre-empted: the shared
@@ -651,6 +743,7 @@ mod tests {
     fn system_runtime() -> DaemonsOverlayState {
         DaemonsOverlayState {
             mcp_alive: true,
+            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
                 running: true,
                 port: 8787,
