@@ -670,6 +670,7 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --offline          Skip skill-source reachability checks. Runtime checks stay local
       --fix-hooks        Repair installed notification hooks: stable binary launcher, extracted scripts, and agent wiring. Reports a broken dev target without changing it into a release hook
+      --fix-daemons      Restart Ainb-managed daemon processes proved to be running an older Ainb release. Unknown or externally-owned processes are only reported
   -h, --help             Print help
 
 EXAMPLES:
