@@ -4504,7 +4504,7 @@ mod fleet_launch_tests {
                 },
                 MirroredClaudePickerStep::QuestionKey {
                     question: questions[1].clone(),
-                    key: "Enter".to_string()
+                    key: "Tab".to_string()
                 },
                 MirroredClaudePickerStep::Submit { answers },
             ])
@@ -4539,6 +4539,38 @@ mod fleet_launch_tests {
                     key: "Enter".to_string(),
                 },
             ])
+        );
+    }
+
+    #[test]
+    fn mirrored_claude_picker_confirms_multi_select_with_tab_never_enter() {
+        // REGRESSION. `Enter` on a Claude multi-select row is a TOGGLE: measured on
+        // 2.1.233 the confirming Enter un-ticked the option the preceding `Space`
+        // had ticked, so the picker never reached the review screen and the answer
+        // landed half-applied. Only `Tab` advances a multi-select question.
+        let question = serde_json::json!({
+            "id": "checks",
+            "question": "Which checks should run?",
+            "multiSelect": true,
+            "options": [{"label": "Lint"}, {"label": "Test"}],
+        });
+        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+            question_id: "checks".to_string(),
+            selected_options: vec!["Lint".to_string()],
+            text: None,
+        }];
+        let steps = mirrored_claude_picker_steps(&[question], &answers).expect("steps");
+        let keys: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| match step {
+                MirroredClaudePickerStep::QuestionKey { key, .. } => Some(key.as_str()),
+                MirroredClaudePickerStep::Submit { .. } => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["Space", "Tab"], "got {keys:?}");
+        assert!(
+            matches!(steps.last(), Some(MirroredClaudePickerStep::Submit { .. })),
+            "a multi-select question still has to reach the review screen"
         );
     }
 
@@ -5287,9 +5319,19 @@ fn mirrored_claude_picker_steps(
             cursor = selected_index;
         }
         if multi_select {
+            // TAB, NOT ENTER. Claude Code's multi-select rows are checkboxes and
+            // `Enter` on one is a TOGGLE, not a confirm: measured on 2.1.233, the
+            // confirming Enter un-ticked the option the preceding `Space` had just
+            // ticked, the picker stayed on the same question, and the `Submit` step
+            // below then failed its `Review your answers` guard with the answer
+            // half-applied and the picker still owning the pane. `Tab` is what
+            // advances a multi-select question to the next tab (or, on the last
+            // question, to the review screen the `Submit` step expects).
+            //
+            // Single-select keeps `Enter`, which both selects and advances there.
             steps.push(MirroredClaudePickerStep::QuestionKey {
                 question: question.clone(),
-                key: "Enter".to_string(),
+                key: "Tab".to_string(),
             });
         }
     }
