@@ -4318,7 +4318,8 @@ async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
 mod fleet_launch_tests {
     use super::{
         MirroredClaudePickerStep, managed_codex_tmux_args, managed_codex_tmux_name,
-        mirrored_claude_picker_steps, verify_picker_pane,
+        mirrored_claude_picker_steps, normalize_picker_text, verify_claude_picker_question,
+        verify_picker_pane,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
@@ -4572,6 +4573,36 @@ mod fleet_launch_tests {
             matches!(steps.last(), Some(MirroredClaudePickerStep::Submit { .. })),
             "a multi-select question still has to reach the review screen"
         );
+    }
+
+    #[test]
+    fn picker_verification_survives_a_hard_wrapped_option_label() {
+        // REGRESSION. The picker box hard-wraps a run of non-space characters that
+        // is longer than its content width, with NO space at the break. Collapsing
+        // whitespace to a single space therefore INVENTED a separator the label
+        // never had and the exact substring match missed, rejecting the answer
+        // before a single key was sent.
+        let long = "hardwrapmidtokenalphabetagammadeltaepsilonzetaetathetaiotakappa";
+        let (head, tail) = long.split_at(long.len() - 1);
+        let question = serde_json::json!({
+            "question": "Which reflow tolerance should the renderer adopt?",
+            "options": [{"label": "softreflow"}, {"label": long}],
+        });
+        let pane = format!(
+            "Which reflow tolerance should the renderer adopt?\n\n\
+             \u{276f} 1. softreflow\n     soft reflow\n  2. {head}\n     {tail}\n     hard wrap\n\n\
+             Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel\n"
+        );
+        assert_eq!(verify_claude_picker_question(&question, &pane), Ok(()));
+    }
+
+    #[test]
+    fn normalize_picker_text_drops_whitespace_rather_than_collapsing_it() {
+        assert_eq!(
+            normalize_picker_text("abc\n  d"),
+            normalize_picker_text("abcd")
+        );
+        assert_eq!(normalize_picker_text(" \u{2502} a b \u{2502} "), "ab");
     }
 
     #[test]
@@ -6103,6 +6134,24 @@ fn picker_question_evidence(
         .collect()
 }
 
+/// Render pane text and expected question text into one comparable form.
+///
+/// ALL whitespace is DROPPED rather than collapsed to a single space, because a
+/// collapsed space is not recoverable from the pane. Claude Code's picker box
+/// hard-wraps a run of non-space characters longer than the content width, so a
+/// 115-character single-token option label renders as `...phichipsiomeg` on one
+/// row and `a` on the next with NO space between them. Collapsing then INSERTS a
+/// space the label never had, the exact substring match in
+/// [`verify_claude_picker_question`] misses, and the answer is rejected before a
+/// single key is sent (measured: `visible picker option order does not match
+/// current question`, zero keys delivered).
+///
+/// The cost, stated rather than hidden: with separators gone, one option's
+/// suffix concatenated with the next row could in principle match another
+/// option's label. That is a weaker ordering guarantee than the collapsed form
+/// nominally had, but the collapsed form did not actually hold it either (it
+/// mis-parsed the wrapped case outright), and the surrounding checks still pin
+/// the picker to the right question and screen.
 fn normalize_picker_text(value: &str) -> String {
     value
         .chars()
@@ -6133,8 +6182,7 @@ fn normalize_picker_text(value: &str) -> String {
         })
         .collect::<String>()
         .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<String>()
 }
 
 /// Mint an ACP session: the `fleet_session` + `fleet_acp_session` PAIR under one
