@@ -4318,7 +4318,8 @@ async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
 mod fleet_launch_tests {
     use super::{
         MirroredClaudePickerStep, managed_codex_tmux_args, managed_codex_tmux_name,
-        mirrored_claude_picker_steps, verify_picker_pane,
+        mirrored_claude_picker_steps, normalize_picker_text, squeeze_picker_text,
+        verify_claude_picker_question, verify_picker_pane,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
@@ -4504,7 +4505,7 @@ mod fleet_launch_tests {
                 },
                 MirroredClaudePickerStep::QuestionKey {
                     question: questions[1].clone(),
-                    key: "Enter".to_string()
+                    key: "Tab".to_string()
                 },
                 MirroredClaudePickerStep::Submit { answers },
             ])
@@ -4540,6 +4541,89 @@ mod fleet_launch_tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn mirrored_claude_picker_confirms_multi_select_with_tab_never_enter() {
+        // REGRESSION. `Enter` on a Claude multi-select row is a TOGGLE: measured on
+        // 2.1.233 the confirming Enter un-ticked the option the preceding `Space`
+        // had ticked, so the picker never reached the review screen and the answer
+        // landed half-applied. Only `Tab` advances a multi-select question.
+        let question = serde_json::json!({
+            "id": "checks",
+            "question": "Which checks should run?",
+            "multiSelect": true,
+            "options": [{"label": "Lint"}, {"label": "Test"}],
+        });
+        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+            question_id: "checks".to_string(),
+            selected_options: vec!["Lint".to_string()],
+            text: None,
+        }];
+        let steps = mirrored_claude_picker_steps(&[question], &answers).expect("steps");
+        let keys: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| match step {
+                MirroredClaudePickerStep::QuestionKey { key, .. } => Some(key.as_str()),
+                MirroredClaudePickerStep::Submit { .. } => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["Space", "Tab"], "got {keys:?}");
+        assert!(
+            matches!(steps.last(), Some(MirroredClaudePickerStep::Submit { .. })),
+            "a multi-select question still has to reach the review screen"
+        );
+    }
+
+    #[test]
+    fn picker_verification_survives_a_hard_wrapped_option_label() {
+        // REGRESSION. The picker box hard-wraps a run of non-space characters that
+        // is longer than its content width, with NO space at the break. Collapsing
+        // whitespace to a single space therefore INVENTED a separator the label
+        // never had and the exact substring match missed, rejecting the answer
+        // before a single key was sent.
+        let long = "hardwrapmidtokenalphabetagammadeltaepsilonzetaetathetaiotakappa";
+        let (head, tail) = long.split_at(long.len() - 1);
+        let question = serde_json::json!({
+            "question": "Which reflow tolerance should the renderer adopt?",
+            "options": [{"label": "softreflow"}, {"label": long}],
+        });
+        let pane = format!(
+            "Which reflow tolerance should the renderer adopt?\n\n\
+             \u{276f} 1. softreflow\n     soft reflow\n  2. {head}\n     {tail}\n     hard wrap\n\n\
+             Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel\n"
+        );
+        assert_eq!(verify_claude_picker_question(&question, &pane), Ok(()));
+    }
+
+    #[test]
+    fn squeeze_drops_whitespace_while_normalize_keeps_one_space() {
+        // The mirrored route needs a wrap-tolerant form; the `verify_picker_pane`
+        // route needs the single-space separator its offset reconstruction in
+        // `has_later_picker_candidate` and its whitespace-split option-marker
+        // check are both written against. Two contracts, two functions.
+        assert_eq!(squeeze_picker_text("abc\n  d"), squeeze_picker_text("abcd"));
+        assert_eq!(squeeze_picker_text(" \u{2502} a b \u{2502} "), "ab");
+        assert_eq!(normalize_picker_text("abc\n  d"), "abc d");
+        assert_eq!(normalize_picker_text(" \u{2502} a b \u{2502} "), "a b");
+    }
+
+    #[test]
+    fn verified_picker_rejects_a_newer_picker_whose_prompt_has_no_question_mark() {
+        // Guards the separator contract from the other side. Both pre-existing
+        // stale-picker tests use `?`-terminated prompts, so they pass even when
+        // the numbered-option marker check is dead. This one can only pass while
+        // `normalize_picker_text` still emits whitespace-separated tokens for
+        // `is_numbered_picker_token` to find.
+        let pane = "Claude Code\n\
+                    Deploy to which region?\n\
+                    1. Europe\n\
+                    2. United States\n\
+                    Choose release channel\n\
+                    1. Stable\n\
+                    2. Preview";
+        let error = verify_picker_pane("claude", &picker_request(), pane).unwrap_err();
+        assert!(error.contains("newer picker"), "got: {error}");
     }
 
     #[test]
@@ -5287,9 +5371,19 @@ fn mirrored_claude_picker_steps(
             cursor = selected_index;
         }
         if multi_select {
+            // TAB, NOT ENTER. Claude Code's multi-select rows are checkboxes and
+            // `Enter` on one is a TOGGLE, not a confirm: measured on 2.1.233, the
+            // confirming Enter un-ticked the option the preceding `Space` had just
+            // ticked, the picker stayed on the same question, and the `Submit` step
+            // below then failed its `Review your answers` guard with the answer
+            // half-applied and the picker still owning the pane. `Tab` is what
+            // advances a multi-select question to the next tab (or, on the last
+            // question, to the review screen the `Submit` step expects).
+            //
+            // Single-select keeps `Enter`, which both selects and advances there.
             steps.push(MirroredClaudePickerStep::QuestionKey {
                 question: question.clone(),
-                key: "Enter".to_string(),
+                key: "Tab".to_string(),
             });
         }
     }
@@ -5385,11 +5479,11 @@ fn verify_claude_picker_question(question: &serde_json::Value, pane: &str) -> Re
         .get("question")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "mirrored Claude question text is absent".to_string())?;
-    let visible = normalize_picker_text(pane);
+    let visible = squeeze_picker_text(pane);
     let start = visible
-        .rfind(&normalize_picker_text(prompt))
+        .rfind(&squeeze_picker_text(prompt))
         .ok_or_else(|| "visible picker prompt does not match current question".to_string())?;
-    let mut cursor = start + normalize_picker_text(prompt).len();
+    let mut cursor = start + squeeze_picker_text(prompt).len();
     for option in question
         .get("options")
         .and_then(serde_json::Value::as_array)
@@ -5399,7 +5493,7 @@ fn verify_claude_picker_question(question: &serde_json::Value, pane: &str) -> Re
             .get("label")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mirrored Claude option label is absent".to_string())?;
-        let label = normalize_picker_text(label);
+        let label = squeeze_picker_text(label);
         let offset = visible[cursor..].find(&label).ok_or_else(|| {
             "visible picker option order does not match current question".to_string()
         })?;
@@ -5412,15 +5506,15 @@ fn verify_claude_picker_submit(
     answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
     pane: &str,
 ) -> Result<(), String> {
-    let visible = normalize_picker_text(pane);
-    if !visible.contains(&normalize_picker_text(CLAUDE_PICKER_REVIEW_HEADING))
-        || !visible.contains(&normalize_picker_text(CLAUDE_PICKER_SUBMIT_ACTION))
+    let visible = squeeze_picker_text(pane);
+    if !visible.contains(&squeeze_picker_text(CLAUDE_PICKER_REVIEW_HEADING))
+        || !visible.contains(&squeeze_picker_text(CLAUDE_PICKER_SUBMIT_ACTION))
     {
         return Err("Claude native picker is not ready to submit".to_string());
     }
     for answer in answers {
         for selected in &answer.selected_options {
-            if !visible.contains(&normalize_picker_text(selected)) {
+            if !visible.contains(&squeeze_picker_text(selected)) {
                 return Err(
                     "Claude native picker review does not match selected answer".to_string()
                 );
@@ -6061,6 +6155,16 @@ fn picker_question_evidence(
         .collect()
 }
 
+/// Collapse pane text and expected question text to single-space-separated
+/// tokens.
+///
+/// The separator is LOAD-BEARING and must stay a single space:
+/// [`has_later_picker_candidate`] reconstructs per-line byte offsets into a
+/// whole-pane rendering of this function by adding exactly one character
+/// between lines, and [`is_numbered_picker_token`] splits a normalized line on
+/// whitespace to find a `1.` / `2)` option marker. Both silently mis-behave if
+/// this joins with anything else. The wrap-tolerant form the mirrored Claude
+/// picker needs is [`squeeze_picker_text`], deliberately a separate function.
 fn normalize_picker_text(value: &str) -> String {
     value
         .chars()
@@ -6093,6 +6197,31 @@ fn normalize_picker_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// [`normalize_picker_text`] with every separator removed, for the mirrored
+/// Claude picker's substring matching only.
+///
+/// Claude Code's picker box hard-wraps a run of non-space characters longer
+/// than its content width, so a 115-character single-token option label renders
+/// as `...phichipsiomeg` on one row and `a` on the next with NO space between
+/// them. Collapsing to a single space INSERTS a separator the label never had,
+/// the exact substring match in [`verify_claude_picker_question`] misses, and
+/// the answer is rejected before a single key is sent (measured:
+/// `visible picker option order does not match current question`, zero keys
+/// delivered).
+///
+/// Scoped to the mirrored route on purpose. The `verify_picker_pane` route
+/// shares the wrap fragility, but its stale-picker guard reads normalized line
+/// offsets and whitespace-split option markers, so widening this there is a
+/// separate change with its own measurements — not a free rename.
+///
+/// The cost, stated rather than hidden: with separators gone, one option's
+/// suffix concatenated with the next row could in principle match another
+/// option's label. The surrounding checks still pin the picker to the right
+/// question and screen.
+fn squeeze_picker_text(value: &str) -> String {
+    normalize_picker_text(value).split_whitespace().collect()
 }
 
 /// Mint an ACP session: the `fleet_session` + `fleet_acp_session` PAIR under one
