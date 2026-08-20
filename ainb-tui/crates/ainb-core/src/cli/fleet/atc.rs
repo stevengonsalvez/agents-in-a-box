@@ -1440,6 +1440,88 @@ fn extract_permission_context(payload: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Where the saved tmux window name is parked while an interview banner is up.
+fn interview_banner_state() -> Option<std::path::PathBuf> {
+    let pane = std::env::var("TMUX_PANE").ok().filter(|value| !value.is_empty())?;
+    let base = std::env::var_os("AINB_HOME").map(std::path::PathBuf::from).or_else(dirs::home_dir)?;
+    let key = blake3::hash(pane.as_bytes()).to_hex();
+    Some(base.join(".agents-in-a-box").join("fleet").join("interview-banner").join(format!("{key}.txt")))
+}
+
+/// Tell the OPERATOR AT THE TERMINAL that this session is holding on a question.
+///
+/// While the hook blocks, Claude's own UI cannot be reached: hook stdout is read
+/// only at exit, and writing to `/dev/tty` fights the TUI's repaint. tmux is the
+/// one surface that is ours, so the window name carries the flag (persistent,
+/// visible in the status bar for the whole wait) and a status overlay announces
+/// it once.
+///
+/// Silent on every failure. A session outside tmux, or a tmux that refuses the
+/// rename, must still get its interview — an indication is worth nothing if its
+/// absence can block the answer path.
+fn announce_pending_interview(questions: &[serde_json::Value]) {
+    let Ok(pane) = std::env::var("TMUX_PANE") else { return };
+    if pane.is_empty() {
+        return;
+    }
+    let header = questions
+        .first()
+        .and_then(|q| q.get("header").or_else(|| q.get("question")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("question")
+        .chars()
+        .take(24)
+        .collect::<String>();
+
+    // Save the current name so the wait does not permanently rename the window.
+    if let Some(path) = interview_banner_state() {
+        if let Ok(out) = std::process::Command::new("tmux")
+            .args(["display-message", "-p", "-t", &pane, "-F", "#{window_name}"])
+            .output()
+        {
+            if out.status.success() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, String::from_utf8_lossy(&out.stdout).trim());
+            }
+        }
+    }
+    let _ = std::process::Command::new("tmux")
+        .args(["rename-window", "-t", &pane, &format!("[ASK] {header}")])
+        .status();
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            &pane,
+            &format!("Interview waiting: {header} — answer in Fleet, or release to answer here"),
+        ])
+        .status();
+}
+
+/// Restore the window name once the wait is over, however it ended.
+///
+/// Called on EVERY exit from the wait (answered, released, timed out), because a
+/// window left reading `[ASK]` after the question is gone is worse than no
+/// banner: it trains the operator to ignore the flag.
+fn clear_pending_interview_banner() {
+    let Ok(pane) = std::env::var("TMUX_PANE") else { return };
+    if pane.is_empty() {
+        return;
+    }
+    let Some(path) = interview_banner_state() else { return };
+    if let Ok(previous) = std::fs::read_to_string(&path) {
+        let previous = previous.trim();
+        if !previous.is_empty() {
+            let _ = std::process::Command::new("tmux")
+                .args(["rename-window", "-t", &pane, previous])
+                .status();
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 fn extract_structured_tool_input(
     payload: &str,
 ) -> Result<(serde_json::Value, Vec<serde_json::Value>, String)> {
@@ -1654,7 +1736,7 @@ fn hook_core_for_agent(
     //    session ID writes a raw envelope. Broker-mediated structured answers
     //    and approvals remain limited to known Fleet members below.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
-    let append_event = || {
+    let append_event_with = |delivery: Option<&str>| {
         let event_id = uuid::Uuid::new_v4().to_string();
         let raw_payload_stored = persist_raw_hook_payload(home, &event_id, payload).is_ok();
         let mut line = build_event_line_for_agent(
@@ -1669,13 +1751,22 @@ fn hook_core_for_agent(
             our_parent.as_deref(),
             raw_payload_stored,
         );
-        if is_structured_ask {
-            line["fleet_delivery"] = serde_json::Value::String("mirrored".to_string());
+        // The stamp SELECTS THE ANSWER TRANSPORT downstream: `mirrored` routes
+        // Fleet's answer through `execute_claude_mirrored_picker` (synthetic tmux
+        // keys + screen verification), anything else through the exact-JSON
+        // broker branch of `execute_claude_structured`. A blocked ask must NOT be
+        // stamped mirrored, or the daemon would type at a picker that is not on
+        // screen because we are still holding the tool call open.
+        if let Some(delivery) = delivery {
+            line["fleet_delivery"] = serde_json::Value::String(delivery.to_string());
         }
         let _ = append_event_line(home, &line);
     };
-    if !session_id.is_empty() {
-        append_event();
+    // A structured ask defers its event: the branch below decides whether this
+    // hook BLOCKS (answer returns as JSON) or yields to Claude's native picker
+    // (answer must be keyed in), and the card has to say which.
+    if !session_id.is_empty() && !is_structured_ask {
+        append_event_with(None);
     }
 
     // Self-heal the durable child→parent map. `ainb run` seeds only the live
@@ -1730,12 +1821,77 @@ fn hook_core_for_agent(
         }
     }
 
-    // 4. PreToolUse(AskUserQuestion): keep Claude's native picker visible while
-    //    the durable hook event exposes the same request to Fleet. Fleet routes
-    //    a selected answer back through the verified picker transport, so neither
-    //    surface owns a separate answer lifecycle.
+    // 4. PreToolUse(AskUserQuestion): HOLD the tool call open and answer with
+    //    exact JSON.
+    //
+    //    The alternative — return here, let Claude draw its own picker, and have
+    //    Fleet type synthetic arrow keys at it — is what this replaces. Once the
+    //    hook returns, `hookSpecificOutput` is gone and keystrokes are the only
+    //    channel left, which forces the answer's correctness to be re-derived
+    //    from a screenshot of a vendor TUI that has no compatibility contract.
+    //    That re-derivation broke four times in one week (multi-select Enter
+    //    toggling instead of confirming; a mid-token hard wrap with no space to
+    //    match on; the same normalisation silently breaking the sibling route;
+    //    and 2.1.237's two-column layout splicing a side panel through the
+    //    middle of a wrapped label). Holding the call open removes the screen
+    //    from the answer path entirely.
+    //
+    //    Three ways out, and none of them may wedge Claude:
+    //      * the broker cannot be reached / registration fails -> yield to the
+    //        native picker exactly as before, stamped `mirrored` so Fleet's
+    //        answer still has the keystroke transport available.
+    //      * a human at the terminal (or Fleet) explicitly releases -> yield,
+    //        same stamp, and Claude draws its picker untouched.
+    //      * an answer arrives -> emit it as `hookSpecificOutput`, no keys, no
+    //        screen parsing.
+    //
+    //    The await deadline (640s) sits UNDER the hook timeout this event
+    //    registers (660s, see `plumbing::hooks`), so the broker's own fallback
+    //    always answers before Claude hard-kills the hook.
     if is_structured_ask {
-        return Ok(None);
+        let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
+        let Ok((tool_input, questions, fingerprint)) = extract_structured_tool_input(payload)
+        else {
+            // Unparseable payload: record it as a keystroke-answerable card
+            // rather than holding a tool call we cannot describe to anyone.
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        };
+        let registered = ainb_plugin_notifyd::broker::client_register_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+        )
+        .unwrap_or(false);
+        if !registered {
+            // Fleet is an OPTIONAL control surface. A broker outage must never
+            // reject or stall Claude's own tool call.
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
+        append_event_with(None);
+        announce_pending_interview(&questions);
+        let resolution = ainb_plugin_notifyd::broker::client_await_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+            ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
+        );
+        clear_pending_interview_banner();
+        if matches!(
+            resolution,
+            ainb_plugin_notifyd::broker::StructuredResolution::ReleasedToNative
+        ) {
+            // Ownership yielded on purpose. No hook output means Claude renders
+            // its own picker unchanged, and Fleet keeps the keystroke route.
+            return Ok(None);
+        }
+        return Ok(Some(HookEmit::Structured(structured_emit_json(
+            tool_input,
+            &resolution,
+        ))));
     }
 
     // 5. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
