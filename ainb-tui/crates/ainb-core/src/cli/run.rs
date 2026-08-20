@@ -18,7 +18,7 @@ use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
     ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
-    ensure_codex_remote_thread,
+    discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -42,6 +42,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let work_dir: PathBuf;
     let branch_name: String;
+    let worktree_manager: Option<WorktreeManager>;
     let session_id = Uuid::new_v4();
     // Set when the session ends up running directly in the user's checkout.
     // Kept so the warning can be REPEATED in the post-creation summary: with
@@ -52,8 +53,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Step 3: Create worktree if requested
     if args.worktree || args.create_branch.is_some() {
-        let worktree_manager =
-            WorktreeManager::new().context("Failed to initialize worktree manager")?;
+        let manager = WorktreeManager::new().context("Failed to initialize worktree manager")?;
 
         let branch = args
             .create_branch
@@ -62,15 +62,17 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
         info!("Creating worktree for branch: {}", branch);
 
-        let worktree_info = worktree_manager
+        let worktree_info = manager
             .create_worktree(session_id, &repo_path, &branch, None)
             .context("Failed to create worktree")?;
 
         work_dir = worktree_info.path;
         branch_name = branch;
+        worktree_manager = Some(manager);
 
         println!("Created worktree at: {}", work_dir.display());
     } else {
+        worktree_manager = None;
         work_dir = repo_path.clone();
         branch_name =
             crate::git::current_branch_at(&repo_path).unwrap_or_else(|| "main".to_string());
@@ -107,17 +109,24 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Step 6: Allocate the daemon-owned remote thread before tmux starts.
     let codex_remote = if provider == CliProvider::Codex {
-        Some(
-            ensure_codex_remote_thread(
-                session_id,
-                &work_dir,
-                model.as_deref(),
-                args.dangerously_skip_permissions,
-                false,
-                None,
-            )
-            .await?,
+        match ensure_codex_remote_thread(
+            session_id,
+            &work_dir,
+            model.as_deref(),
+            args.dangerously_skip_permissions,
+            false,
+            None,
         )
+        .await
+        {
+            Ok(remote) => Some(remote),
+            Err(error) => {
+                rollback_failed_interactive_launch(session_id, None, worktree_manager.as_ref())
+                    .await;
+                return Err(error)
+                    .context("Codex failed to start; AINB ran failed-session cleanup");
+            }
+        }
     } else {
         None
     };
@@ -159,22 +168,41 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Step 7: Create tmux session
     let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone()).with_env(session_env);
-    tmux.start(&work_dir).await.context("Failed to start tmux session")?;
+    if let Err(error) = tmux.start(&work_dir).await {
+        rollback_failed_interactive_launch(
+            session_id,
+            Some(tmux.name()),
+            worktree_manager.as_ref(),
+        )
+        .await;
+        return Err(error).context("Failed to start tmux session");
+    }
 
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
 
     let codex_remote = match codex_remote {
-        Some(remote) if remote.thread_id.is_none() => Some(
-            claim_codex_remote_thread(
-                session_id,
-                &work_dir,
-                model.as_deref(),
-                args.dangerously_skip_permissions,
-                false,
-            )
-            .await?,
-        ),
+        Some(remote) if remote.thread_id.is_none() => match claim_codex_remote_thread(
+            session_id,
+            &work_dir,
+            model.as_deref(),
+            args.dangerously_skip_permissions,
+            false,
+        )
+        .await
+        {
+            Ok(remote) => Some(remote),
+            Err(error) => {
+                rollback_failed_interactive_launch(
+                    session_id,
+                    Some(&tmux_name),
+                    worktree_manager.as_ref(),
+                )
+                .await;
+                return Err(error)
+                    .context("Codex failed to start; AINB ran failed-session cleanup");
+            }
+        },
         remote => remote,
     };
 
@@ -200,6 +228,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         CliProvider::Copilot => SessionAgentType::Copilot,
     };
 
+    let codex_thread_id = codex_remote.and_then(|remote| remote.thread_id);
     let metadata = SessionMetadata {
         session_id,
         tmux_session_name: tmux_name.clone(),
@@ -213,13 +242,21 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         model: model.clone(),
         model_source: ModelSource::Raw,
         codex_model: None,
-        codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
+        codex_thread_id: codex_thread_id.clone(),
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
     // this write must not lost-update the store.
-    SessionStore::mutate(|store| store.upsert(metadata))
-        .context("Failed to save session metadata")?;
+    if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
+        rollback_failed_interactive_launch(session_id, Some(&tmux_name), worktree_manager.as_ref())
+            .await;
+        if codex_thread_id.is_some() {
+            if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {
+                warn!("Failed to discard claimed Codex thread for {session_id}: {cleanup_error:#}");
+            }
+        }
+        return Err(error).context("Failed to save session metadata");
+    }
 
     info!("Saved session metadata for TUI discovery");
 
@@ -513,6 +550,8 @@ fn remote_codex_command(
 ) -> String {
     let mut parts = vec![
         "codex".to_string(),
+        "-c".to_string(),
+        "check_for_update_on_startup=false".to_string(),
         "--disable".to_string(),
         "apps".to_string(),
         "--remote".to_string(),
@@ -793,7 +832,7 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
+            "codex -c check_for_update_on_startup=false --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
         );
         assert!(!command.contains("--last"));
     }
@@ -811,7 +850,7 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+            "codex -c check_for_update_on_startup=false --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
         );
     }
 

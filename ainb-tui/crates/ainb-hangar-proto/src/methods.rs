@@ -411,6 +411,8 @@ pub const FLEET_START: &str = "fleet/start";
 /// Ensure one Interactive Codex session has an exact thread on Ainb's shared
 /// Codex app-server.
 pub const CODEX_SESSION_ENSURE: &str = "codex/session_ensure";
+/// Discard one failed Interactive Codex launch and archive its remote thread.
+pub const CODEX_SESSION_DISCARD: &str = "codex/session_discard";
 /// Read bounded, payload-free Fleet revision timeline entries.
 pub const FLEET_TIMELINE: &str = "fleet/timeline";
 /// Read a bounded daemon-owned Fleet usage summary.
@@ -1842,6 +1844,9 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_CONFIRM_ANSWER,
     FLEET_ACTIVITY_LIST,
     FLEET_COPILOT_GATE,
+    // Failed Interactive Codex launch cleanup is appended to preserve the
+    // existing wire catalogue order.
+    CODEX_SESSION_DISCARD,
 ];
 
 #[cfg(test)]
@@ -2156,6 +2161,7 @@ mod tests {
             FLEET_CONFIRM_ANSWER,
             FLEET_ACTIVITY_LIST,
             FLEET_COPILOT_GATE,
+            CODEX_SESSION_DISCARD,
         ];
         for m in declared {
             assert!(

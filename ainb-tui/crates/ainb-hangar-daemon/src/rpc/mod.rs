@@ -1260,6 +1260,7 @@ async fn handle(
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::CODEX_SESSION_ENSURE => handle_codex_session_ensure(pool, req).await,
+        methods::CODEX_SESSION_DISCARD => handle_codex_session_discard(pool, req).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
         methods::FLEET_ACP_SESSION_CREATE => {
             handle_fleet_acp_session_create(pool, req, events).await
@@ -3431,6 +3432,78 @@ async fn handle_codex_session_ensure(
     })
 }
 
+/// Remove one failed Interactive Codex launch after archiving any claimed
+/// remote thread.
+async fn handle_codex_session_discard(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::CodexSessionDiscardParams;
+
+    let params: CodexSessionDiscardParams = parse_params(req, "{ session_id }")?;
+    if params.session_id.trim().is_empty() {
+        return Err(invalid_params("session_id must not be empty"));
+    }
+
+    let result =
+        discard_interactive_codex_thread(pool, &params.session_id, |thread_id| async move {
+            let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+                std::time::Duration::from_secs(15),
+            )
+            .await
+            .ok_or_else(|| internal("Ainb Codex remote control unavailable during cleanup"))?;
+            match manager.thread_archive(&thread_id).await {
+                Ok(_) => Ok(true),
+                Err(error) if error.to_string().contains("no rollout found") => Ok(false),
+                Err(error) => Err(internal(&format!("archive failed Codex thread: {error}"))),
+            }
+        })
+        .await?;
+    to_value(&result)
+}
+
+async fn discard_interactive_codex_thread<F, Fut>(
+    pool: &SqlitePool,
+    session_id: &str,
+    archive: F,
+) -> Result<ainb_hangar_proto::fleet::CodexSessionDiscardResult, RpcError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, RpcError>>,
+{
+    use ainb_hangar_proto::fleet::CodexSessionDiscardResult;
+
+    let thread_id: Option<Option<String>> =
+        sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
+
+    let Some(thread_id) = thread_id else {
+        return Ok(CodexSessionDiscardResult {
+            discarded: false,
+            archived: false,
+        });
+    };
+
+    let archived = match thread_id {
+        Some(thread_id) => archive(thread_id).await?,
+        None => false,
+    };
+
+    sqlx::query("DELETE FROM interactive_codex_thread WHERE session_id = ?")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| internal(&format!("discard Interactive Codex thread: {error}")))?;
+
+    Ok(CodexSessionDiscardResult {
+        discarded: true,
+        archived,
+    })
+}
+
 async fn codex_event_watermark(pool: &SqlitePool) -> Result<i64, RpcError> {
     sqlx::query_scalar("SELECT COALESCE(MAX(ingest_order), 0) FROM fleet_provider_event")
         .fetch_one(pool)
@@ -4356,9 +4429,8 @@ mod fleet_launch_tests {
                 "/repo",
                 "--",
                 "codex",
-                // Fleet-managed Codex launches run with apps disabled
-                // (`managed_tui_command`). The flags sit ahead of `--remote`
-                // because they are global, not subcommand, options.
+                "-c",
+                "check_for_update_on_startup=false",
                 "--disable",
                 "apps",
                 "--remote",
@@ -13116,6 +13188,118 @@ mod tests {
         assert_eq!(codex_started_thread_id(&non_tui, &cwd), None);
         let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
         assert_eq!(codex_started_thread_id(&fork, &cwd), None);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_removes_pending_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', NULL, '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = handle_codex_session_discard(
+            store.pool(),
+            &req(
+                methods::CODEX_SESSION_DISCARD,
+                serde_json::json!({ "session_id": "failed-session" }),
+            ),
+        )
+        .await
+        .unwrap();
+        let result: ainb_hangar_proto::fleet::CodexSessionDiscardResult =
+            serde_json::from_value(result).unwrap();
+
+        assert!(result.discarded);
+        assert!(!result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_archives_claimed_thread_before_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', 'thread-1', '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let archive_pool = store.pool().clone();
+        let result = discard_interactive_codex_thread(
+            store.pool(),
+            "failed-session",
+            move |thread_id| async move {
+                assert_eq!(thread_id, "thread-1");
+                let remaining: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM interactive_codex_thread \
+                     WHERE session_id = 'failed-session'",
+                )
+                .fetch_one(&archive_pool)
+                .await
+                .unwrap();
+                assert_eq!(remaining, 1, "row deleted before remote archive");
+                Ok(true)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.discarded);
+        assert!(result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_removes_unmaterialized_claimed_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', 'thread-without-rollout', '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = discard_interactive_codex_thread(
+            store.pool(),
+            "failed-session",
+            |thread_id| async move {
+                assert_eq!(thread_id, "thread-without-rollout");
+                Ok(false)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.discarded);
+        assert!(!result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
     use ainb_hangar_store::Store;
 

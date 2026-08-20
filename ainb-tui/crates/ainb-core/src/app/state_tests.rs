@@ -520,6 +520,8 @@ mod tests {
         let unquoted = pane_command.replace(['\'', '"'], "");
         for fragment in [
             "codex",
+            "-c",
+            "check_for_update_on_startup=false",
             "--remote",
             "unix:///tmp/ainb-idle-restart.sock",
             "resume",

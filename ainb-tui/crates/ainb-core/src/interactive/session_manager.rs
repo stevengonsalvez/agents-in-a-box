@@ -193,11 +193,61 @@ pub(crate) async fn claim_codex_remote_thread(
             return Ok(remote);
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "Codex started but did not publish a remote thread within 10 seconds; keep the pane open and retry"
-            );
+            anyhow::bail!("Codex started but did not publish a remote thread within 10 seconds");
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Archive and forget a remote thread created by a failed fresh launch.
+pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Result<()> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
+    client
+        .codex_session_discard(ainb_hangar_proto::fleet::CodexSessionDiscardParams {
+            session_id: session_id.to_string(),
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("discard failed Codex thread: {error}"))?;
+    Ok(())
+}
+
+/// Roll back resources created before a fresh Interactive session is registered.
+pub(crate) async fn rollback_failed_interactive_launch(
+    session_id: Uuid,
+    exact_tmux_name: Option<&str>,
+    worktree_manager: Option<&WorktreeManager>,
+) {
+    if let Some(tmux_name) = exact_tmux_name {
+        let exact_target = format!("={tmux_name}");
+        match Command::new("tmux").args(["kill-session", "-t", &exact_target]).output().await {
+            Ok(output) if output.status.success() => {
+                info!("Rolled back failed launch tmux session: {tmux_name}");
+            }
+            Ok(output) => warn!(
+                "Failed to roll back tmux session '{}': {}",
+                tmux_name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => warn!("Failed to run tmux cleanup for '{tmux_name}': {error}"),
+        }
+    }
+
+    if let Some(worktree_manager) = worktree_manager {
+        match worktree_manager.remove_worktree(session_id) {
+            Ok(()) => info!("Rolled back failed launch worktree: {session_id}"),
+            Err(crate::git::WorktreeError::NotFound(_)) => {}
+            Err(error) => warn!("Failed to roll back worktree for {session_id}: {error}"),
+        }
+    }
+
+    if let Err(error) = SessionStore::mutate(|store| {
+        if let Some(tmux_name) = exact_tmux_name {
+            store.remove_by_tmux_name(tmux_name);
+        }
+        store.remove_by_session_id(session_id);
+    }) {
+        warn!("Failed to purge failed launch metadata for {session_id}: {error}");
     }
 }
 
@@ -577,17 +627,29 @@ impl InteractiveSessionManager {
         }
 
         let codex_remote = if agent_type == SessionAgentType::Codex {
-            Some(
-                ensure_codex_remote_thread(
-                    session_id,
-                    &worktree_info.path,
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                    None,
-                )
-                .await?,
+            match ensure_codex_remote_thread(
+                session_id,
+                &worktree_info.path,
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                None,
             )
+            .await
+            {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        None,
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error
+                        .context("Codex failed to start; AINB ran failed-session cleanup")
+                        .into());
+                }
+            }
         } else {
             None
         };
@@ -598,7 +660,15 @@ impl InteractiveSessionManager {
 
         // Step 3: Start tmux session
         info!("Starting tmux session: {}", tmux_session_name);
-        self.start_tmux_session(&tmux_session_name, &worktree_info.path).await?;
+        if let Err(error) = self.start_tmux_session(&tmux_session_name, &worktree_info.path).await {
+            rollback_failed_interactive_launch(
+                session_id,
+                Some(&tmux_session_name),
+                Some(&self.worktree_manager),
+            )
+            .await;
+            return Err(error);
+        }
 
         // Step 4: Start CLI in tmux session (for AI agent types)
         match agent_type {
@@ -610,18 +680,28 @@ impl InteractiveSessionManager {
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
                 );
-                self.start_cli_in_tmux(
-                    &tmux_session_name,
-                    &worktree_info.path,
-                    skip_permissions,
-                    model.clone(),
-                    agent_type,
-                    None,
-                    false, // resume_requested — fresh launch
-                    headroom_enabled,
-                    codex_remote.as_ref(),
-                )
-                .await?;
+                if let Err(error) = self
+                    .start_cli_in_tmux(
+                        &tmux_session_name,
+                        &worktree_info.path,
+                        skip_permissions,
+                        model.clone(),
+                        agent_type,
+                        None,
+                        false, // resume_requested: fresh launch
+                        headroom_enabled,
+                        codex_remote.as_ref(),
+                    )
+                    .await
+                {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        Some(&tmux_session_name),
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error);
+                }
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -629,16 +709,28 @@ impl InteractiveSessionManager {
         }
 
         let codex_remote = match codex_remote {
-            Some(remote) if remote.thread_id.is_none() => Some(
-                claim_codex_remote_thread(
-                    session_id,
-                    &worktree_info.path,
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                )
-                .await?,
-            ),
+            Some(remote) if remote.thread_id.is_none() => match claim_codex_remote_thread(
+                session_id,
+                &worktree_info.path,
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+            )
+            .await
+            {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        Some(&tmux_session_name),
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error
+                        .context("Codex failed to start; AINB ran failed-session cleanup")
+                        .into());
+                }
+            },
             remote => remote,
         };
 
@@ -779,17 +871,29 @@ impl InteractiveSessionManager {
         }
 
         let codex_remote = if agent_type == SessionAgentType::Codex {
-            Some(
-                ensure_codex_remote_thread(
-                    session_id,
-                    &existing_worktree_path,
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                    None,
-                )
-                .await?,
+            match ensure_codex_remote_thread(
+                session_id,
+                &existing_worktree_path,
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                None,
             )
+            .await
+            {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        None,
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error
+                        .context("Codex failed to start; AINB ran failed-session cleanup")
+                        .into());
+                }
+            }
         } else {
             None
         };
@@ -800,7 +904,17 @@ impl InteractiveSessionManager {
 
         // Step 2: Start tmux session
         info!("Starting tmux session: {}", tmux_session_name);
-        self.start_tmux_session(&tmux_session_name, &existing_worktree_path).await?;
+        if let Err(error) =
+            self.start_tmux_session(&tmux_session_name, &existing_worktree_path).await
+        {
+            rollback_failed_interactive_launch(
+                session_id,
+                Some(&tmux_session_name),
+                Some(&self.worktree_manager),
+            )
+            .await;
+            return Err(error);
+        }
 
         // Step 3: Start CLI in tmux session (for AI agent types)
         match agent_type {
@@ -812,18 +926,28 @@ impl InteractiveSessionManager {
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
                 );
-                self.start_cli_in_tmux(
-                    &tmux_session_name,
-                    &existing_worktree_path,
-                    skip_permissions,
-                    model.clone(),
-                    agent_type,
-                    None,
-                    false, // resume_requested — fresh launch
-                    headroom_enabled,
-                    codex_remote.as_ref(),
-                )
-                .await?;
+                if let Err(error) = self
+                    .start_cli_in_tmux(
+                        &tmux_session_name,
+                        &existing_worktree_path,
+                        skip_permissions,
+                        model.clone(),
+                        agent_type,
+                        None,
+                        false, // resume_requested: fresh launch
+                        headroom_enabled,
+                        codex_remote.as_ref(),
+                    )
+                    .await
+                {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        Some(&tmux_session_name),
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error);
+                }
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -831,16 +955,28 @@ impl InteractiveSessionManager {
         }
 
         let codex_remote = match codex_remote {
-            Some(remote) if remote.thread_id.is_none() => Some(
-                claim_codex_remote_thread(
-                    session_id,
-                    &existing_worktree_path,
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                )
-                .await?,
-            ),
+            Some(remote) if remote.thread_id.is_none() => match claim_codex_remote_thread(
+                session_id,
+                &existing_worktree_path,
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+            )
+            .await
+            {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    rollback_failed_interactive_launch(
+                        session_id,
+                        Some(&tmux_session_name),
+                        Some(&self.worktree_manager),
+                    )
+                    .await;
+                    return Err(error
+                        .context("Codex failed to start; AINB ran failed-session cleanup")
+                        .into());
+                }
+            },
             remote => remote,
         };
 
@@ -1757,11 +1893,16 @@ impl InteractiveSessionManager {
         has_history: bool,
     ) -> Vec<String> {
         let mut cmd_parts = vec![provider.command().to_string()];
+        if agent_type == SessionAgentType::Codex {
+            cmd_parts.extend([
+                "-c".to_string(),
+                "check_for_update_on_startup=false".to_string(),
+            ]);
+        }
 
-        // Codex resume is a subcommand form — `codex resume --last [opts]` — so
-        // the `resume --last` tokens must come right after the binary, BEFORE
-        // any --model / skip-permissions flags (codex accepts those as options
-        // of the `resume` subcommand). `--last` continues the most recent
+        // Codex resume is a subcommand form. Global config overrides precede
+        // `resume --last`; model and permission flags follow it as resume
+        // subcommand options. `--last` continues the most recent
         // session in the current cwd (worktrees are 1-session-per-dir, so that
         // is "the last session"). Codex owns the cwd filtering.
         let codex_resume = agent_type == SessionAgentType::Codex && resume_requested;
@@ -1909,6 +2050,8 @@ impl InteractiveSessionManager {
             }
             let mut command = vec![
                 provider.command().to_string(),
+                "-c".to_string(),
+                "check_for_update_on_startup=false".to_string(),
                 "--disable".to_string(),
                 "apps".to_string(),
                 "--remote".to_string(),
@@ -2223,6 +2366,141 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_launch_rollback_removes_only_exact_owned_resources() {
+        if !Command::new("tmux")
+            .arg("-V")
+            .output()
+            .await
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().expect("temp home");
+        let prior_home = std::env::var_os("AINB_HOME");
+        std::env::set_var("AINB_HOME", home.path());
+
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => std::env::set_var("AINB_HOME", home),
+                    None => std::env::remove_var("AINB_HOME"),
+                }
+            }
+        }
+        let _restore_home = RestoreHome(prior_home);
+
+        struct ExactTmuxCleanup(Vec<String>);
+        impl Drop for ExactTmuxCleanup {
+            fn drop(&mut self) {
+                for name in &self.0 {
+                    let exact_target = format!("={name}");
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &exact_target])
+                        .output();
+                }
+            }
+        }
+
+        let session_id = Uuid::new_v4();
+        let failed_tmux = format!("ainb-failed-launch-{session_id}");
+        let sibling_tmux = format!("ainb-sibling-launch-{}", Uuid::new_v4());
+        let prefix_tmux = format!("{failed_tmux}-still-running");
+        let _tmux_cleanup = ExactTmuxCleanup(vec![
+            failed_tmux.clone(),
+            sibling_tmux.clone(),
+            prefix_tmux.clone(),
+        ]);
+        for name in [&failed_tmux, &sibling_tmux, &prefix_tmux] {
+            assert!(
+                std::process::Command::new("tmux")
+                    .args(["new-session", "-d", "-s", name])
+                    .status()
+                    .expect("create tmux session")
+                    .success()
+            );
+        }
+
+        let worktree_manager = WorktreeManager::new().expect("worktree manager");
+        let worktree = worktree_manager.base_dir().join("by-name").join("failed-launch");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        let session_link =
+            worktree_manager.base_dir().join("by-session").join(session_id.to_string());
+        std::os::unix::fs::symlink(&worktree, &session_link).expect("link worktree");
+
+        let sibling_id = Uuid::new_v4();
+        let mut store = SessionStore::default();
+        for (id, name, path) in [
+            (session_id, failed_tmux.clone(), worktree.clone()),
+            (sibling_id, sibling_tmux.clone(), PathBuf::from("/keep")),
+        ] {
+            store.upsert(SessionMetadata {
+                session_id: id,
+                tmux_session_name: name,
+                worktree_path: path,
+                workspace_name: "test".to_string(),
+                created_at: Utc::now(),
+                agent_type: SessionAgentType::Codex,
+                headroom_enabled: false,
+                rtk_enabled: false,
+                skip_permissions: Some(false),
+                model: None,
+                model_source: ModelSource::Raw,
+                codex_model: None,
+                codex_thread_id: None,
+            });
+        }
+        store.save().expect("seed store");
+
+        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), Some(&worktree_manager))
+            .await;
+
+        assert!(!worktree.exists());
+        assert!(std::fs::symlink_metadata(&session_link).is_err());
+        assert!(
+            !std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={failed_tmux}")])
+                .output()
+                .expect("check failed tmux")
+                .status
+                .success()
+        );
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={sibling_tmux}")])
+                .output()
+                .expect("check sibling tmux")
+                .status
+                .success()
+        );
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={prefix_tmux}")])
+                .output()
+                .expect("check prefix tmux")
+                .status
+                .success()
+        );
+
+        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), None).await;
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={prefix_tmux}")])
+                .output()
+                .expect("check prefix tmux after missing exact target")
+                .status
+                .success()
+        );
+        let store = SessionStore::load();
+        assert!(store.find_by_tmux_name(&failed_tmux).is_none());
+        assert!(store.find_by_tmux_name(&sibling_tmux).is_some());
+    }
 
     #[test]
     fn shared_remote_codex_failures_show_a_short_next_action() {
@@ -3290,7 +3568,7 @@ mod tests {
 
     #[test]
     fn codex_resume_is_subcommand_before_flags() {
-        // `resume --last` must come right after the binary, before flags.
+        // Global config precedes the resume subcommand; resume flags follow it.
         let p = parts(
             CliProvider::Codex,
             SessionAgentType::Codex,
@@ -3303,6 +3581,8 @@ mod tests {
             p,
             vec![
                 "codex",
+                "-c",
+                "check_for_update_on_startup=false",
                 "resume",
                 "--last",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -3324,6 +3604,8 @@ mod tests {
             p,
             vec![
                 "codex",
+                "-c",
+                "check_for_update_on_startup=false",
                 "resume",
                 "--last",
                 "--model",
@@ -3345,7 +3627,12 @@ mod tests {
         );
         assert_eq!(
             p,
-            vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]
+            vec![
+                "codex",
+                "-c",
+                "check_for_update_on_startup=false",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ]
         );
     }
 
