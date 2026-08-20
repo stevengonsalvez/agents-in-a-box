@@ -1260,6 +1260,7 @@ async fn handle(
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::CODEX_SESSION_ENSURE => handle_codex_session_ensure(pool, req).await,
+        methods::CODEX_SESSION_DISCARD => handle_codex_session_discard(pool, req).await,
         methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
         methods::FLEET_ACP_SESSION_CREATE => {
             handle_fleet_acp_session_create(pool, req, events).await
@@ -3428,6 +3429,57 @@ async fn handle_codex_session_ensure(
     to_value(&CodexSessionEnsureResult {
         thread_id,
         endpoint: format!("unix://{}", manager.socket_path().display()),
+    })
+}
+
+/// Remove one failed Interactive Codex launch after archiving any claimed
+/// remote thread. The row stays recoverable when archival fails.
+async fn handle_codex_session_discard(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{CodexSessionDiscardParams, CodexSessionDiscardResult};
+
+    let params: CodexSessionDiscardParams = parse_params(req, "{ session_id }")?;
+    if params.session_id.trim().is_empty() {
+        return Err(invalid_params("session_id must not be empty"));
+    }
+
+    let thread_id: Option<Option<String>> =
+        sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
+            .bind(&params.session_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
+
+    let Some(thread_id) = thread_id else {
+        return to_value(&CodexSessionDiscardResult {
+            discarded: false,
+            archived: false,
+        });
+    };
+
+    if let Some(thread_id) = thread_id.as_deref() {
+        let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .ok_or_else(|| internal("Ainb Codex remote control unavailable during cleanup"))?;
+        manager
+            .thread_archive(thread_id)
+            .await
+            .map_err(|error| internal(&format!("archive failed Codex thread: {error}")))?;
+    }
+
+    sqlx::query("DELETE FROM interactive_codex_thread WHERE session_id = ?")
+        .bind(&params.session_id)
+        .execute(pool)
+        .await
+        .map_err(|error| internal(&format!("discard Interactive Codex thread: {error}")))?;
+
+    to_value(&CodexSessionDiscardResult {
+        discarded: true,
+        archived: thread_id.is_some(),
     })
 }
 
@@ -13115,6 +13167,41 @@ mod tests {
         assert_eq!(codex_started_thread_id(&non_tui, &cwd), None);
         let fork = payload.replace("\"forkedFromId\":null", "\"forkedFromId\":\"parent\"");
         assert_eq!(codex_started_thread_id(&fork, &cwd), None);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_removes_pending_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', NULL, '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = handle_codex_session_discard(
+            store.pool(),
+            &req(
+                methods::CODEX_SESSION_DISCARD,
+                serde_json::json!({ "session_id": "failed-session" }),
+            ),
+        )
+        .await
+        .unwrap();
+        let result: ainb_hangar_proto::fleet::CodexSessionDiscardResult =
+            serde_json::from_value(result).unwrap();
+
+        assert!(result.discarded);
+        assert!(!result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
     use ainb_hangar_store::Store;
 

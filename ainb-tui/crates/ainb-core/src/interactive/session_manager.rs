@@ -199,6 +199,19 @@ pub(crate) async fn claim_codex_remote_thread(
     }
 }
 
+/// Archive and forget a remote thread created by a failed fresh launch.
+pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Result<()> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
+    client
+        .codex_session_discard(ainb_hangar_proto::fleet::CodexSessionDiscardParams {
+            session_id: session_id.to_string(),
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("discard failed Codex thread: {error}"))?;
+    Ok(())
+}
+
 /// Roll back resources created before a fresh Interactive session is registered.
 pub(crate) async fn rollback_failed_interactive_launch(
     session_id: Uuid,
@@ -206,7 +219,8 @@ pub(crate) async fn rollback_failed_interactive_launch(
     worktree_manager: Option<&WorktreeManager>,
 ) {
     if let Some(tmux_name) = exact_tmux_name {
-        match Command::new("tmux").args(["kill-session", "-t", tmux_name]).output().await {
+        let exact_target = format!("={tmux_name}");
+        match Command::new("tmux").args(["kill-session", "-t", &exact_target]).output().await {
             Ok(output) if output.status.success() => {
                 info!("Rolled back failed launch tmux session: {tmux_name}");
             }
@@ -2386,8 +2400,9 @@ mod tests {
         impl Drop for ExactTmuxCleanup {
             fn drop(&mut self) {
                 for name in &self.0 {
+                    let exact_target = format!("={name}");
                     let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", name])
+                        .args(["kill-session", "-t", &exact_target])
                         .output();
                 }
             }
@@ -2396,8 +2411,13 @@ mod tests {
         let session_id = Uuid::new_v4();
         let failed_tmux = format!("ainb-failed-launch-{session_id}");
         let sibling_tmux = format!("ainb-sibling-launch-{}", Uuid::new_v4());
-        let _tmux_cleanup = ExactTmuxCleanup(vec![failed_tmux.clone(), sibling_tmux.clone()]);
-        for name in [&failed_tmux, &sibling_tmux] {
+        let prefix_tmux = format!("{failed_tmux}-still-running");
+        let _tmux_cleanup = ExactTmuxCleanup(vec![
+            failed_tmux.clone(),
+            sibling_tmux.clone(),
+            prefix_tmux.clone(),
+        ]);
+        for name in [&failed_tmux, &sibling_tmux, &prefix_tmux] {
             assert!(
                 std::process::Command::new("tmux")
                     .args(["new-session", "-d", "-s", name])
@@ -2445,7 +2465,7 @@ mod tests {
         assert!(std::fs::symlink_metadata(&session_link).is_err());
         assert!(
             !std::process::Command::new("tmux")
-                .args(["has-session", "-t", &failed_tmux])
+                .args(["has-session", "-t", &format!("={failed_tmux}")])
                 .output()
                 .expect("check failed tmux")
                 .status
@@ -2453,9 +2473,27 @@ mod tests {
         );
         assert!(
             std::process::Command::new("tmux")
-                .args(["has-session", "-t", &sibling_tmux])
+                .args(["has-session", "-t", &format!("={sibling_tmux}")])
                 .output()
                 .expect("check sibling tmux")
+                .status
+                .success()
+        );
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={prefix_tmux}")])
+                .output()
+                .expect("check prefix tmux")
+                .status
+                .success()
+        );
+
+        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), None).await;
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={prefix_tmux}")])
+                .output()
+                .expect("check prefix tmux after missing exact target")
                 .status
                 .success()
         );

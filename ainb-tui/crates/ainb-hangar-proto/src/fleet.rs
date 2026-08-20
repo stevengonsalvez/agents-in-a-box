@@ -1352,6 +1352,22 @@ pub struct CodexSessionEnsureResult {
     pub endpoint: String,
 }
 
+/// Parameters for `codex/session_discard`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSessionDiscardParams {
+    /// Failed Interactive session identity whose reservation is discarded.
+    pub session_id: String,
+}
+
+/// Result for `codex/session_discard`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSessionDiscardResult {
+    /// Whether a daemon reservation was removed.
+    pub discarded: bool,
+    /// Whether its claimed remote thread was archived.
+    pub archived: bool,
+}
+
 /// Parameters for `fleet/broadcast`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetBroadcastParams {

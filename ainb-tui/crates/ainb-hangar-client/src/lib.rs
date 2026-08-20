@@ -327,6 +327,20 @@ impl DaemonClient {
         })
     }
 
+    /// Discard one failed Interactive Codex launch and archive its remote thread.
+    pub async fn codex_session_discard(
+        &self,
+        params: ainb_hangar_proto::fleet::CodexSessionDiscardParams,
+    ) -> Result<ainb_hangar_proto::fleet::CodexSessionDiscardResult, DaemonError> {
+        let value = serde_json::to_value(params).map_err(|source| {
+            DaemonError::Decode(format!("encoding Codex discard params: {source}"))
+        })?;
+        let result = self.call(ainb_hangar_proto::methods::CODEX_SESSION_DISCARD, value).await?;
+        serde_json::from_value(result).map_err(|source| {
+            DaemonError::Decode(format!("decoding Codex discard result: {source}"))
+        })
+    }
+
     /// Rebuild one stale Claude interview through the live daemon.
     pub async fn fleet_reproject_claude_interview(
         &self,

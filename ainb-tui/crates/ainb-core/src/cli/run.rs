@@ -18,7 +18,7 @@ use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
     ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
-    ensure_codex_remote_thread, rollback_failed_interactive_launch,
+    discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -228,6 +228,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         CliProvider::Copilot => SessionAgentType::Copilot,
     };
 
+    let codex_thread_id = codex_remote.and_then(|remote| remote.thread_id);
     let metadata = SessionMetadata {
         session_id,
         tmux_session_name: tmux_name.clone(),
@@ -241,7 +242,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         model: model.clone(),
         model_source: ModelSource::Raw,
         codex_model: None,
-        codex_thread_id: codex_remote.and_then(|remote| remote.thread_id),
+        codex_thread_id: codex_thread_id.clone(),
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
@@ -249,6 +250,11 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
         rollback_failed_interactive_launch(session_id, Some(&tmux_name), worktree_manager.as_ref())
             .await;
+        if codex_thread_id.is_some() {
+            if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {
+                warn!("Failed to discard claimed Codex thread for {session_id}: {cleanup_error:#}");
+            }
+        }
         return Err(error).context("Failed to save session metadata");
     }
 
