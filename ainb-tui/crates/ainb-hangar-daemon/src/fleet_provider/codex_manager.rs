@@ -735,26 +735,23 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             )));
         }
     };
-    let websocket = match client_async_with_config(
-        "ws://localhost/",
-        socket,
-        Some(codex_websocket_config()),
-    )
-    .await
-    {
-        Ok((websocket, _)) => websocket,
-        Err(error) => {
-            if let Some(server) = server.as_mut() {
-                stop_child(server).await;
+    let websocket =
+        match client_async_with_config("ws://localhost/", socket, Some(codex_websocket_config()))
+            .await
+        {
+            Ok((websocket, _)) => websocket,
+            Err(error) => {
+                if let Some(server) = server.as_mut() {
+                    stop_child(server).await;
+                }
+                if owns_server {
+                    remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
+                }
+                return Err(ProviderError::Transport(format!(
+                    "Codex app-server WebSocket handshake failed: {error}"
+                )));
             }
-            if owns_server {
-                remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
-            }
-            return Err(ProviderError::Transport(format!(
-                "Codex app-server WebSocket handshake failed: {error}"
-            )));
-        }
-    };
+        };
     let cleanup: Box<dyn ProcessCleanup> = Box::new(ServerCleanup {
         server,
         owned_socket_path: owns_server.then(|| config.socket_path.clone()),
@@ -2394,13 +2391,10 @@ mod tests {
         });
 
         let socket = UnixStream::connect(&socket_path).await.unwrap();
-        let (websocket, _) = client_async_with_config(
-            "ws://localhost/",
-            socket,
-            Some(codex_websocket_config()),
-        )
-        .await
-        .unwrap();
+        let (websocket, _) =
+            client_async_with_config("ws://localhost/", socket, Some(codex_websocket_config()))
+                .await
+                .unwrap();
         let mut transport = WebSocketTransport { websocket };
         transport
             .write_message(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
