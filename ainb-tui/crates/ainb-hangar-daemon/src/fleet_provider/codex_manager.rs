@@ -2365,7 +2365,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("app-server.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
-        let payload_size = (16 << 20) + 1;
+        // Match the production frame that exceeded tungstenite's 16 MiB
+        // default, so a lower cap cannot pass this regression silently.
+        let payload_size = 55_822_540;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut websocket = accept_async(stream).await.unwrap();
