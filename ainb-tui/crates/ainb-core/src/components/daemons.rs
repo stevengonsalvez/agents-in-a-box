@@ -205,7 +205,7 @@ pub fn render(
     } else {
         render_table(frame, chunks[0], &snapshot);
     }
-    render_footer(frame, chunks[1]);
+    render_footer(frame, chunks[1], runtime);
 }
 
 fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
@@ -588,14 +588,25 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled("read-only • live", Style::default().fg(MUTED_GRAY)),
+fn render_footer(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
+    let mut spans = vec![
+        Span::styled("live", Style::default().fg(MUTED_GRAY)),
+        Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
+        Span::styled("B", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(" start bridge", Style::default().fg(MUTED_GRAY)),
         Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
         Span::styled("q/Esc", Style::default().fg(CORNFLOWER_BLUE)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
-    ]))
-    .style(Style::default().bg(PANEL_BG));
+    ];
+    // Outcome of the last B press (spawn / refusal), until the next refresh.
+    if let Some(status) = runtime.and_then(|runtime| runtime.bridge_start_status.as_deref()) {
+        spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
+        spans.push(Span::styled(
+            format!("B {status}"),
+            Style::default().fg(GOLD),
+        ));
+    }
+    let footer = Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL_BG));
     frame.render_widget(footer, area);
 }
 
@@ -770,6 +781,8 @@ mod tests {
             mcp_start_status: None,
             headroom_start_rx: None,
             headroom_start_status: None,
+            bridge_start_rx: None,
+            bridge_start_status: None,
         }
     }
 
@@ -887,6 +900,26 @@ mod tests {
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+    }
+
+    #[test]
+    fn footer_names_bridge_start_key_and_last_outcome() {
+        let mut state = seeded_state(Vec::new());
+        let mut runtime = system_runtime();
+        runtime.bridge_start_status = Some("bridge starting (pid 4242)".to_string());
+        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        assert!(
+            out.contains("B start bridge"),
+            "bridge key hint missing: {out}"
+        );
+        assert!(
+            out.contains("B bridge starting (pid 4242)"),
+            "bridge start status missing: {out}"
+        );
+        assert!(
+            !out.contains("read-only"),
+            "stale read-only label still rendered"
+        );
     }
 
     #[test]

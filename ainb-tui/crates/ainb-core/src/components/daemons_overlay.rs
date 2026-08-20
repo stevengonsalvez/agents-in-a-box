@@ -439,6 +439,8 @@ mod tests {
             mcp_start_status: None,
             headroom_start_rx: None,
             headroom_start_status: None,
+            bridge_start_rx: None,
+            bridge_start_status: None,
         }
     }
 
@@ -563,6 +565,8 @@ mod tests {
             mcp_start_status: None,
             headroom_start_rx: None,
             headroom_start_status: None,
+            bridge_start_rx: None,
+            bridge_start_status: None,
         };
         let backend = TestBackend::new(120, 30);
         let mut term = Terminal::new(backend).unwrap();

@@ -1062,6 +1062,9 @@ pub struct DaemonsOverlayState {
     /// Headroom start result, shown in the unified Daemons table.
     pub headroom_start_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub headroom_start_status: Option<String>,
+    /// Phone bridge start result, shown in the Daemons footer.
+    pub bridge_start_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub bridge_start_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -5047,6 +5050,8 @@ impl AppState {
             mcp_start_status: None,
             headroom_start_rx: None,
             headroom_start_status: None,
+            bridge_start_rx: None,
+            bridge_start_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -5175,11 +5180,66 @@ impl AppState {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                    Err(error) => format!("hook repair failed: {error:#}"),
+                    Err(error) => format!("hook install failed: {error:#}"),
                 }
             })
             .await
-            .unwrap_or_else(|error| format!("hook repair task panicked: {error}"));
+            .unwrap_or_else(|error| format!("hook install task panicked: {error}"));
+            let _ = tx.send(line);
+        });
+    }
+
+    /// Detach-spawn the phone bridge (`ainb fleet bridge run`) from the Daemons
+    /// screen. Null stdio + its own process group so it outlives the TUI. The
+    /// heartbeat the bridge writes shows up in the top table within a couple of
+    /// collect intervals; this status line only reports the spawn itself.
+    pub fn spawn_bridge_start(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.bridge_start_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.bridge_start_rx = Some(rx);
+        o.bridge_start_status = Some("starting phone bridge…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                use std::os::unix::process::CommandExt;
+                use std::process::Stdio;
+                // Refuse up front when the bridge provably cannot run (no
+                // channel configured, the same check `bridge run` bails on)
+                // instead of spawning a child that dies silently into null
+                // stdio.
+                match crate::fleet::bridge::config::load_config(None) {
+                    Ok(cfg) if !cfg.any_channel() => {
+                        return "bridge not started: no channel configured; add \
+                                [fleet.bridge.telegram], [fleet.bridge.slack], or \
+                                [fleet.bridge.discord] to config.toml"
+                            .to_string();
+                    }
+                    Err(error) => return format!("bridge not started: {error:#}"),
+                    Ok(_) => {}
+                }
+                let exe =
+                    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ainb"));
+                match std::process::Command::new(&exe)
+                    .args(["fleet", "bridge", "run"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .spawn()
+                {
+                    Ok(child) => format!(
+                        "bridge starting (pid {}), watch the phone bridge row",
+                        child.id()
+                    ),
+                    Err(error) => format!("bridge start failed: {error:#}"),
+                }
+            })
+            .await
+            .unwrap_or_else(|error| format!("bridge start task panicked: {error}"));
             let _ = tx.send(line);
         });
     }
@@ -5290,6 +5350,13 @@ impl AppState {
             if let Ok(line) = rx.try_recv() {
                 o.headroom_start_rx = None;
                 o.headroom_start_status = Some(line);
+                refresh_after_start = true;
+            }
+        }
+        if let Some(rx) = o.bridge_start_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.bridge_start_rx = None;
+                o.bridge_start_status = Some(line);
                 refresh_after_start = true;
             }
         }

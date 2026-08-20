@@ -62,6 +62,8 @@ pub enum AppEvent {
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
     DaemonsStartHeadroom,
+    /// Detach-spawn the phone bridge daemon from the Daemons screen.
+    DaemonsStartBridge,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -2977,6 +2979,7 @@ impl EventHandler {
             KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
             KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
             KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
+            KeyCode::Char('B') => Some(AppEvent::DaemonsStartBridge),
             _ => None,
         }
     }
@@ -3672,6 +3675,7 @@ impl EventHandler {
             AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
+            AppEvent::DaemonsStartBridge => state.spawn_bridge_start(),
             AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
             AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
@@ -8816,6 +8820,10 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('P')),
             Some(AppEvent::DaemonsStartHeadroom)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('B')),
+            Some(AppEvent::DaemonsStartBridge)
         ));
     }
 
