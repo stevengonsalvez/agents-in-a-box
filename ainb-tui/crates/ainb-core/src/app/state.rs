@@ -5146,7 +5146,8 @@ impl AppState {
         });
     }
 
-    /// Reinstall only already-installed hooks against this running binary.
+    /// Reinstall installed hooks against this running binary, or perform the
+    /// first install for every agent when no hooks are installed yet.
     /// This is the repair action for stale package-manager paths and damaged
     /// wiring; it deliberately does not start/restart any daemon.
     pub fn spawn_hooks_repair(&mut self) {
@@ -5158,14 +5159,14 @@ impl AppState {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         o.hooks_repair_rx = Some(rx);
-        o.hooks_repair_status = Some("repairing hooks…".to_string());
+        o.hooks_repair_status = Some("installing hooks…".to_string());
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
                 let result = ainb_plugin_notifyd::Paths::from_home()
-                    .and_then(|paths| ainb_plugin_notifyd::repair_hooks(&paths));
+                    .and_then(|paths| ainb_plugin_notifyd::repair_or_install_hooks(&paths));
                 match result {
                     Ok(report) => format!(
-                        "hooks repaired for {}",
+                        "hooks installed for {}",
                         report
                             .record
                             .agents
