@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.3] - 2026-08-20
+### Added
+- Merge pull request #693 from stevengonsalvez/feat/daemon-version-health
+- build(daemon): add tokio test-util for the beat-timeout test
+- **atc**: accept an exhausted-session set on heartbeat
+- **atc**: list a whole instance retry ledger
+- **atc**: render the cap from the daemon ledger, report ERR rows
+- **daemons**: expose runtime version drift
+- **tui**: unify daemon health and controls
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- Merge pull request #684 from stevengonsalvez/fix/main-ci-drift
+- Merge pull request #690 from stevengonsalvez/f/scoped-codex-skills
+- Merge pull request #694 from stevengonsalvez/f/solve-interview
+- Merge pull request #696 from stevengonsalvez/fix/codex-websocket-frame-limit
+- **atc**: report scan validity and escalate past the nudge filter
+- **atc**: resolve the sibling ainb and fail closed on a degraded beat
+- **daemons**: prevent stale repair downgrades
+- **fleet**: confirm mirrored multi-select pickers with Tab
+- **fleet**: match picker text across a hard mid-token wrap
+- **fleet**: raise a card when Codex blocks on an approval
+- **fleet**: scope the wrap-tolerant matcher to the mirrored picker
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- **hooks**: make hook binary paths upgrade-safe
+- **hooks**: validate pointer against metadata
+- **store**: neutralise the duplicate event_watermark migration
+- **store**: neutralise the duplicate resumable migration
+- **store**: only skip 0087 when 0089/0090 already won
+- **tui**: report daemon start outcomes
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clean failed Codex launches
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- discard unmaterialized Codex threads
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- harden failed Codex cleanup
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- preserve scoped Codex skill collisions
+- provide cwd on Codex session restart
+- raise Codex WebSocket frame limit
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- share user Codex skills with Ainb
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: refresh doctor hook repair reference
+- **cli**: regenerate doctor reference
+- **cli**: regenerate reference for doctor --fix-daemons
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- **tui**: describe daemon repair controls
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- Merge pull request #682 from stevengonsalvez/f/atc-improve
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+- sync Cargo.lock to v1.20.5
+- **atc**: delegate the daemon beat to the CLI heartbeat
+
+
 ## [1.20.5] - 2026-08-12
 ### Added
 - Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
