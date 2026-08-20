@@ -46,7 +46,7 @@ pub use install::{
     Agent, ClaudeRegister, HookAgentHealth, HookBinaryMode, HookHealth, HookHealthIssue,
     InstallPrompt, InstallRecord, InstallReport, StatusRow, auto_repair_hook_binary,
     dismiss_prompt, embedded_plugin_version, hook_health, install as install_for,
-    install_under_home, prompt_state, repair_hooks, status, uninstall,
+    install_under_home, prompt_state, repair_hooks, repair_or_install_hooks, status, uninstall,
 };
 pub use listener::{RunConfig, run_daemon};
 pub use osnotify::{AlertKind, classify_attention};

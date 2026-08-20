@@ -553,6 +553,18 @@ pub fn repair_hooks(paths: &Paths) -> Result<InstallReport> {
     install(paths, &record.agents)
 }
 
+/// Repair installed hooks, or perform the first install for every agent when
+/// nothing is installed yet. This backs the TUI's repair keypress: unlike the
+/// diagnostic CLI path above, a keypress on the Daemons screen is explicit
+/// operator intent, so an empty record means "install", not "refuse".
+pub fn repair_or_install_hooks(paths: &Paths) -> Result<InstallReport> {
+    let record = InstallRecord::load(paths)?;
+    if record.agents.is_empty() {
+        return install(paths, Agent::ALL);
+    }
+    install(paths, &record.agents)
+}
+
 /// Install variant that takes an explicit `$HOME` root. Lets tests
 /// stay isolated without mutating the process-wide environment.
 pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Result<InstallRecord> {

@@ -661,7 +661,7 @@ fn render_hook_section(
                 "  I",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" repair", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" install / repair", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1287,8 +1287,8 @@ mod tests {
         );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
         assert!(
-            out.contains("I repair"),
-            "hook repair action missing: {out}"
+            out.contains("I install / repair"),
+            "hook install/repair action missing: {out}"
         );
         assert!(out.contains("release"), "hook mode missing: {out}");
         assert!(
