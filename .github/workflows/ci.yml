@@ -180,6 +180,17 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
+          # Same wall the Contracts job hit, and the same treatment. This job
+          # also builds `--all-features` across the workspace, and archiving
+          # that target tree exhausts GitHub-hosted runner disk during
+          # rust-cache's post-job pass: observed three consecutive runs where
+          # `cargo nextest` SUCCEEDED and the job was then failed by
+          # `Post Run Swatinem/rust-cache@v2` with "No space left on device".
+          # A green test run must not be reported as a failure by the step that
+          # saves a cache for next time.
+          cache-targets: false
+          # Registry restore is still useful; only saving invokes the failing pass.
+          save-if: false
       - uses: taiki-e/install-action@nextest
         if: >-
           always() && (github.event_name != 'pull_request' ||
