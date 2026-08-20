@@ -1443,9 +1443,16 @@ fn extract_permission_context(payload: &str) -> String {
 /// Where the saved tmux window name is parked while an interview banner is up.
 fn interview_banner_state() -> Option<std::path::PathBuf> {
     let pane = std::env::var("TMUX_PANE").ok().filter(|value| !value.is_empty())?;
-    let base = std::env::var_os("AINB_HOME").map(std::path::PathBuf::from).or_else(dirs::home_dir)?;
+    let base = std::env::var_os("AINB_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)?;
     let key = blake3::hash(pane.as_bytes()).to_hex();
-    Some(base.join(".agents-in-a-box").join("fleet").join("interview-banner").join(format!("{key}.txt")))
+    Some(
+        base.join(".agents-in-a-box")
+            .join("fleet")
+            .join("interview-banner")
+            .join(format!("{key}.txt")),
+    )
 }
 
 /// Tell the OPERATOR AT THE TERMINAL that this session is holding on a question.
@@ -1460,7 +1467,9 @@ fn interview_banner_state() -> Option<std::path::PathBuf> {
 /// rename, must still get its interview — an indication is worth nothing if its
 /// absence can block the answer path.
 fn announce_pending_interview(questions: &[serde_json::Value]) {
-    let Ok(pane) = std::env::var("TMUX_PANE") else { return };
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
     if pane.is_empty() {
         return;
     }
@@ -1506,11 +1515,15 @@ fn announce_pending_interview(questions: &[serde_json::Value]) {
 /// window left reading `[ASK]` after the question is gone is worse than no
 /// banner: it trains the operator to ignore the flag.
 fn clear_pending_interview_banner() {
-    let Ok(pane) = std::env::var("TMUX_PANE") else { return };
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
     if pane.is_empty() {
         return;
     }
-    let Some(path) = interview_banner_state() else { return };
+    let Some(path) = interview_banner_state() else {
+        return;
+    };
     if let Ok(previous) = std::fs::read_to_string(&path) {
         let previous = previous.trim();
         if !previous.is_empty() {
@@ -3208,5 +3221,164 @@ mod tests {
         assert_eq!(Scheduler::Daemon.as_str(), "daemon");
         assert_eq!(Scheduler::LocalTimer.as_str(), "local_timer");
         assert_eq!(Scheduler::None.as_str(), "none");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ask_hook_returns_complete_structured_answer_without_text_routing() {
+        use ainb_plugin_notifyd::broker::{
+            BrokerState, StructuredQuestionAnswer, client_answer_structured, client_list,
+        };
+        use tokio::net::UnixListener;
+
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("plain-claude-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let paths = ainb_plugin_notifyd::paths::Paths::under(home.path());
+        std::fs::create_dir_all(paths.approve_socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&paths.approve_socket).unwrap();
+        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            BrokerState::with_timeout(std::time::Duration::from_secs(30)),
+        ));
+
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_ask_1",
+            "tool_input": {
+                "questions": [
+                    {
+                        "question": "Region?",
+                        "header": "Region",
+                        "options": [
+                            {"label": "EU", "description": "Europe"},
+                            {"label": "US", "description": "United States"}
+                        ],
+                        "multiSelect": false
+                    },
+                    {
+                        "question": "Checks?",
+                        "header": "Checks",
+                        "options": [
+                            {"label": "Lint", "description": "Run linter"},
+                            {"label": "Test", "description": "Run tests"}
+                        ],
+                        "multiSelect": true
+                    }
+                ]
+            }
+        });
+        let original_questions = payload["tool_input"]["questions"].clone();
+        let hook_home = home.path().to_path_buf();
+        let hook_cwd = cwd.clone();
+        let hook_payload = payload.to_string();
+        let waiter = tokio::task::spawn_blocking(move || {
+            hook_core(
+                &hook_home,
+                "PreToolUse",
+                "ask-session",
+                hook_cwd.to_str().expect("temporary cwd is valid UTF-8"),
+                None,
+                None,
+                50,
+                &hook_payload,
+                Some("AskUserQuestion"),
+            )
+        });
+
+        let pending = loop {
+            let socket = paths.approve_socket.clone();
+            let listed = tokio::task::spawn_blocking(move || client_list(&socket))
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            if let Some(pending) = listed.into_iter().find(|item| item.session_id == "ask-session")
+            {
+                break pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            pending.questions,
+            original_questions.as_array().unwrap().clone()
+        );
+        let fingerprint = pending.request_fingerprint.unwrap();
+        // The hook REGISTERS with the broker before it appends the event, so a
+        // pending observed by `client_list` does not yet imply the file exists.
+        // Reading immediately made this test pass or fail on scheduling luck.
+        let events_path = home.path().join("events.jsonl");
+        let mut events = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&events_path) {
+                if read.contains("ask-session") {
+                    events = read;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(!events.is_empty(), "hook never appended its Fleet event");
+        assert!(
+            events.contains("ask-session"),
+            "Fleet event must appear only after broker registration"
+        );
+
+        let stale_socket = paths.approve_socket.clone();
+        let stale = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &stale_socket,
+                "ask-session",
+                "fnv1a64:stale",
+                &[StructuredQuestionAnswer {
+                    question: "Region?".to_string(),
+                    selected_options: vec!["EU".to_string()],
+                }],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(stale.stale);
+        assert!(!stale.matched);
+
+        let answer_socket = paths.approve_socket.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &answer_socket,
+                "ask-session",
+                &fingerprint,
+                &[
+                    StructuredQuestionAnswer {
+                        question: "Region?".to_string(),
+                        selected_options: vec!["EU".to_string()],
+                    },
+                    StructuredQuestionAnswer {
+                        question: "Checks?".to_string(),
+                        selected_options: vec!["Lint".to_string(), "Test".to_string()],
+                    },
+                ],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(accepted.matched);
+
+        let emitted = waiter.await.unwrap().unwrap().expect("structured hook output");
+        let HookEmit::Structured(line) = emitted else {
+            panic!("AskUserQuestion must emit structured hook output");
+        };
+        let output: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let specific = &output["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "PreToolUse");
+        assert_eq!(specific["permissionDecision"], "allow");
+        assert_eq!(specific["updatedInput"]["questions"], original_questions);
+        assert_eq!(specific["updatedInput"]["answers"]["Region?"], "EU");
+        assert_eq!(specific["updatedInput"]["answers"]["Checks?"], "Lint, Test");
+        assert!(
+            output.get("text").is_none(),
+            "must not route labels as generic text"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&paths.approve_socket);
     }
 }
