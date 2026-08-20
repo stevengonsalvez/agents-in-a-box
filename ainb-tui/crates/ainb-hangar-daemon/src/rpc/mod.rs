@@ -3438,46 +3438,66 @@ async fn handle_codex_session_discard(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_proto::fleet::{CodexSessionDiscardParams, CodexSessionDiscardResult};
+    use ainb_hangar_proto::fleet::CodexSessionDiscardParams;
 
     let params: CodexSessionDiscardParams = parse_params(req, "{ session_id }")?;
     if params.session_id.trim().is_empty() {
         return Err(invalid_params("session_id must not be empty"));
     }
 
+    let result =
+        discard_interactive_codex_thread(pool, &params.session_id, |thread_id| async move {
+            let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
+                std::time::Duration::from_secs(15),
+            )
+            .await
+            .ok_or_else(|| internal("Ainb Codex remote control unavailable during cleanup"))?;
+            manager
+                .thread_archive(&thread_id)
+                .await
+                .map_err(|error| internal(&format!("archive failed Codex thread: {error}")))?;
+            Ok(())
+        })
+        .await?;
+    to_value(&result)
+}
+
+async fn discard_interactive_codex_thread<F, Fut>(
+    pool: &SqlitePool,
+    session_id: &str,
+    archive: F,
+) -> Result<ainb_hangar_proto::fleet::CodexSessionDiscardResult, RpcError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), RpcError>>,
+{
+    use ainb_hangar_proto::fleet::CodexSessionDiscardResult;
+
     let thread_id: Option<Option<String>> =
         sqlx::query_scalar("SELECT thread_id FROM interactive_codex_thread WHERE session_id = ?")
-            .bind(&params.session_id)
+            .bind(session_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| internal(&format!("read Interactive Codex thread: {error}")))?;
 
     let Some(thread_id) = thread_id else {
-        return to_value(&CodexSessionDiscardResult {
+        return Ok(CodexSessionDiscardResult {
             discarded: false,
             archived: false,
         });
     };
 
-    if let Some(thread_id) = thread_id.as_deref() {
-        let manager = crate::fleet_provider::codex_manager::wait_for_active_handle(
-            std::time::Duration::from_secs(15),
-        )
-        .await
-        .ok_or_else(|| internal("Ainb Codex remote control unavailable during cleanup"))?;
-        manager
-            .thread_archive(thread_id)
-            .await
-            .map_err(|error| internal(&format!("archive failed Codex thread: {error}")))?;
+    if let Some(thread_id) = thread_id.clone() {
+        archive(thread_id).await?;
     }
 
     sqlx::query("DELETE FROM interactive_codex_thread WHERE session_id = ?")
-        .bind(&params.session_id)
+        .bind(session_id)
         .execute(pool)
         .await
         .map_err(|error| internal(&format!("discard Interactive Codex thread: {error}")))?;
 
-    to_value(&CodexSessionDiscardResult {
+    Ok(CodexSessionDiscardResult {
         discarded: true,
         archived: thread_id.is_some(),
     })
@@ -13195,6 +13215,40 @@ mod tests {
 
         assert!(result.discarded);
         assert!(!result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_archives_claimed_thread_before_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', 'thread-1', '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = discard_interactive_codex_thread(
+            store.pool(),
+            "failed-session",
+            |thread_id| async move {
+                assert_eq!(thread_id, "thread-1");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.discarded);
+        assert!(result.archived);
         let remaining: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
         )
