@@ -14,7 +14,7 @@
     "UserPromptExpansion": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "MessageDisplay": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 660 }] }],
-    "PermissionRequest": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PermissionRequest": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 660 }] }],
     "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "PostToolUseFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
     "PostToolBatch": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],

@@ -1441,32 +1441,48 @@ fn extract_permission_context(payload: &str) -> String {
 }
 
 /// Where the saved tmux window name is parked while an interview banner is up.
-fn interview_banner_state() -> Option<std::path::PathBuf> {
+fn interview_banner_state(home: &std::path::Path) -> Option<std::path::PathBuf> {
     let pane = std::env::var("TMUX_PANE").ok().filter(|value| !value.is_empty())?;
-    let base = std::env::var_os("AINB_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::home_dir)?;
     let key = blake3::hash(pane.as_bytes()).to_hex();
-    Some(
-        base.join(".agents-in-a-box")
-            .join("fleet")
-            .join("interview-banner")
-            .join(format!("{key}.txt")),
-    )
+    // Scoped to the `home` THIS invocation was given, not to $AINB_HOME.
+    // `plumbing::paths` already treats $AINB_HOME AS the ainb home, so joining
+    // `.agents-in-a-box` onto it again wrote
+    // `~/.agents-in-a-box/.agents-in-a-box/…`, and an empty $AINB_HOME wrote a
+    // RELATIVE path into whatever cwd the hook ran in. Threading `home` also
+    // keeps the tests inside their own tempdir.
+    Some(home.join("fleet").join("interview-banner").join(format!("{key}.txt")))
+}
+
+/// tmux expands `#` sequences in BOTH `rename-window` and `display-message`
+/// arguments: `#{...}` is a format, `#(...)` is a shell job. The header is
+/// MODEL-AUTHORED text, so every `#` is doubled before interpolation.
+fn tmux_escape(value: &str) -> String {
+    value.replace('#', "##")
+}
+
+/// Whether this process may touch tmux at all.
+///
+/// `cargo test` inherits `TMUX_PANE`, so without this the unit tests rename the
+/// DEVELOPER's own window, and leave it renamed if a test panics between
+/// announce and clear.
+const fn tmux_banner_enabled() -> bool {
+    !cfg!(test)
 }
 
 /// Tell the OPERATOR AT THE TERMINAL that this session is holding on a question.
 ///
 /// While the hook blocks, Claude's own UI cannot be reached: hook stdout is read
-/// only at exit, and writing to `/dev/tty` fights the TUI's repaint. tmux is the
-/// one surface that is ours, so the window name carries the flag (persistent,
-/// visible in the status bar for the whole wait) and a status overlay announces
-/// it once.
+/// only at exit, and writing to `/dev/tty` fights the TUI repaint. tmux is the
+/// one surface that is ours, so the window name carries the flag for the whole
+/// wait and a status overlay announces it once.
 ///
 /// Silent on every failure. A session outside tmux, or a tmux that refuses the
 /// rename, must still get its interview — an indication is worth nothing if its
 /// absence can block the answer path.
-fn announce_pending_interview(questions: &[serde_json::Value]) {
+fn announce_pending_interview(home: &std::path::Path, questions: &[serde_json::Value]) {
+    if !tmux_banner_enabled() {
+        return;
+    }
     let Ok(pane) = std::env::var("TMUX_PANE") else {
         return;
     };
@@ -1481,11 +1497,20 @@ fn announce_pending_interview(questions: &[serde_json::Value]) {
         .chars()
         .take(24)
         .collect::<String>();
+    let header = tmux_escape(&header);
 
-    // Save the current name so the wait does not permanently rename the window.
-    if let Some(path) = interview_banner_state() {
+    // Save the current name AND the automatic-rename setting, so the wait does
+    // not permanently freeze a window that was tracking its running program.
+    if let Some(path) = interview_banner_state(home) {
         if let Ok(out) = std::process::Command::new("tmux")
-            .args(["display-message", "-p", "-t", &pane, "-F", "#{window_name}"])
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &pane,
+                "-F",
+                "#{window_name}\t#{automatic-rename}",
+            ])
             .output()
         {
             if out.status.success() {
@@ -1509,26 +1534,38 @@ fn announce_pending_interview(questions: &[serde_json::Value]) {
         .status();
 }
 
-/// Restore the window name once the wait is over, however it ended.
+/// Restore the window name and its automatic-rename setting once the wait ends,
+/// however it ended.
 ///
-/// Called on EVERY exit from the wait (answered, released, timed out), because a
-/// window left reading `[ASK]` after the question is gone is worse than no
-/// banner: it trains the operator to ignore the flag.
-fn clear_pending_interview_banner() {
+/// Called on EVERY exit from the wait (answered, released, timed out): a window
+/// left reading `[ASK]` after the question is gone is worse than no banner, and
+/// `rename-window` itself turns `automatic-rename` off, so restoring the name
+/// without the option would silently freeze the window for good.
+fn clear_pending_interview_banner(home: &std::path::Path) {
+    if !tmux_banner_enabled() {
+        return;
+    }
     let Ok(pane) = std::env::var("TMUX_PANE") else {
         return;
     };
     if pane.is_empty() {
         return;
     }
-    let Some(path) = interview_banner_state() else {
+    let Some(path) = interview_banner_state(home) else {
         return;
     };
-    if let Ok(previous) = std::fs::read_to_string(&path) {
-        let previous = previous.trim();
+    if let Ok(saved) = std::fs::read_to_string(&path) {
+        let mut fields = saved.trim().splitn(2, '\t');
+        let previous = fields.next().unwrap_or_default();
+        let automatic = fields.next().unwrap_or_default();
         if !previous.is_empty() {
             let _ = std::process::Command::new("tmux")
                 .args(["rename-window", "-t", &pane, previous])
+                .status();
+        }
+        if automatic == "on" {
+            let _ = std::process::Command::new("tmux")
+                .args(["set-window-option", "-t", &pane, "automatic-rename", "on"])
                 .status();
         }
     }
@@ -1861,7 +1898,27 @@ fn hook_core_for_agent(
     //    The await deadline (640s) sits UNDER the hook timeout this event
     //    registers (660s, see `plumbing::hooks`), so the broker's own fallback
     //    always answers before Claude hard-kills the hook.
+    // FLEET MEMBERS ONLY, exactly as the permission gate below. Without this an
+    // unrelated `claude` typed in any terminal on a host that merely has
+    // ainb-hooks installed has its native picker suppressed and its tool call
+    // held by our broker, with no surface open to answer it and no CLI verb to
+    // release it. `notify.sh` lazily spawns notifyd, so registration succeeds
+    // almost anywhere.
     if is_structured_ask {
+        // FLEET MEMBERS ONLY may BLOCK, exactly as the permission gate below.
+        // Without this an unrelated `claude` typed in any terminal on a host
+        // that merely has ainb-hooks installed has its native picker suppressed
+        // and its tool call held by our broker, with no surface open to answer
+        // it and no CLI verb to release it. `notify.sh` lazily spawns notifyd,
+        // so registration would succeed almost anywhere.
+        //
+        // The CARD is still written for everyone: the hooks are installed
+        // globally and a non-member's interview should still be visible to
+        // Fleet, just answerable by the keystroke transport rather than held.
+        if !is_fleet_member {
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
         let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
         let Ok((tool_input, questions, fingerprint)) = extract_structured_tool_input(payload)
         else {
@@ -1884,7 +1941,7 @@ fn hook_core_for_agent(
             return Ok(None);
         }
         append_event_with(None);
-        announce_pending_interview(&questions);
+        announce_pending_interview(home, &questions);
         let resolution = ainb_plugin_notifyd::broker::client_await_structured(
             &socket,
             session_id,
@@ -1892,11 +1949,23 @@ fn hook_core_for_agent(
             &questions,
             ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
         );
-        clear_pending_interview_banner();
+        clear_pending_interview_banner(home);
+        // A resolution meaning NOBODY ANSWERED is not a refusal. Rendering the
+        // 640s fallback (or a supersede) as `deny` hands the model a refused
+        // tool, which it re-asks, which blocks another 640s: a deny/retry loop
+        // for any session with no Fleet surface watching. Yield to the native
+        // picker and re-stamp the card `mirrored`, so the keystroke transport
+        // applies to the picker now on screen. Only an explicit human dismiss
+        // reaches `structured_emit_json` as a deny.
+        if resolution.is_unanswered() {
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
         if matches!(
             resolution,
             ainb_plugin_notifyd::broker::StructuredResolution::ReleasedToNative
         ) {
+            append_event_with(Some("mirrored"));
             // Ownership yielded on purpose. No hook output means Claude renders
             // its own picker unchanged, and Fleet keeps the keystroke route.
             return Ok(None);
@@ -3143,6 +3212,55 @@ mod tests {
     }
 
     #[test]
+    fn ask_hook_from_a_non_member_session_never_blocks_but_still_persists_a_card() {
+        // An unrelated `claude` on a host that merely has ainb-hooks installed
+        // must keep its native picker. Holding its tool call would suppress the
+        // picker with no Fleet surface open to answer and no CLI verb to
+        // release it. The card is still written so Fleet can see the interview
+        // and answer it through the keystroke transport.
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("unrelated-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_nonmember",
+            "tool_input": {
+                "questions": [{
+                    "question": "Region?",
+                    "header": "Region",
+                    "options": [{"label": "eu"}, {"label": "us"}]
+                }]
+            }
+        });
+        let started = std::time::Instant::now();
+        let emitted = hook_core(
+            home.path(),
+            "PreToolUse",
+            "nonmember-session",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            50,
+            &payload.to_string(),
+            Some("AskUserQuestion"),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a non-member ask must return immediately, not hold the tool call"
+        );
+        assert!(
+            emitted.is_none(),
+            "a non-member ask must leave Claude's native picker unblocked"
+        );
+        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        assert!(
+            events.contains("\"fleet_delivery\":\"mirrored\""),
+            "the card must stay keystroke-answerable: {events}"
+        );
+    }
+
+    #[test]
     fn ask_hook_without_broker_fails_open_and_persists_a_mirrored_fleet_card() {
         let home = TempDir::new().unwrap();
         let cwd = home.path().join("plain-claude-worktree");
@@ -3276,7 +3394,10 @@ mod tests {
                 "PreToolUse",
                 "ask-session",
                 hook_cwd.to_str().expect("temporary cwd is valid UTF-8"),
-                None,
+                // A parent makes this a FLEET MEMBER, which is what earns the
+                // right to hold the tool call open. Non-members get a mirrored
+                // card and their native picker, never a block.
+                Some("ask-parent"),
                 None,
                 50,
                 &hook_payload,
