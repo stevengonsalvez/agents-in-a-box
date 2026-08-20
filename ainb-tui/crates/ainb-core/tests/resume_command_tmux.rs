@@ -250,7 +250,7 @@ async fn codex_resume_launches_resume_last() {
     kill(&name);
 
     assert!(
-        cmd.contains("codex resume --last"),
+        cmd.contains("check_for_update_on_startup=false resume --last"),
         "codex resume must be `resume --last`, got: {cmd}"
     );
     assert!(
