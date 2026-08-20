@@ -13236,11 +13236,20 @@ mod tests {
         .await
         .unwrap();
 
+        let archive_pool = store.pool().clone();
         let result = discard_interactive_codex_thread(
             store.pool(),
             "failed-session",
-            |thread_id| async move {
+            move |thread_id| async move {
                 assert_eq!(thread_id, "thread-1");
+                let remaining: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM interactive_codex_thread \
+                     WHERE session_id = 'failed-session'",
+                )
+                .fetch_one(&archive_pool)
+                .await
+                .unwrap();
+                assert_eq!(remaining, 1, "row deleted before remote archive");
                 Ok(())
             },
         )
