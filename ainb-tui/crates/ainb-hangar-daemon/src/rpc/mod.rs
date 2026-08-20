@@ -4356,9 +4356,8 @@ mod fleet_launch_tests {
                 "/repo",
                 "--",
                 "codex",
-                // Fleet-managed Codex launches run with apps disabled
-                // (`managed_tui_command`). The flags sit ahead of `--remote`
-                // because they are global, not subcommand, options.
+                "-c",
+                "check_for_update_on_startup=false",
                 "--disable",
                 "apps",
                 "--remote",

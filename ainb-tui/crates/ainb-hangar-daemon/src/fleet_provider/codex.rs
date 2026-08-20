@@ -190,6 +190,8 @@ pub fn managed_tui_command(
     additional_args: impl IntoIterator<Item = OsString>,
 ) -> CommandSpec {
     let mut args = vec![
+        "-c".into(),
+        "check_for_update_on_startup=false".into(),
         "--disable".into(),
         "apps".into(),
         "--remote".into(),
@@ -897,6 +899,8 @@ mod tests {
             )
             .args,
             vec![
+                OsString::from("-c"),
+                OsString::from("check_for_update_on_startup=false"),
                 OsString::from("--disable"),
                 OsString::from("apps"),
                 OsString::from("--remote"),

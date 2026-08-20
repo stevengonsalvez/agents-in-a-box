@@ -225,7 +225,7 @@ impl WorktreeManager {
         }
 
         // Remove the session symlink if it exists
-        if session_path.exists() {
+        if session_path.is_symlink() || session_path.exists() {
             std::fs::remove_file(&session_path)?;
         }
 
