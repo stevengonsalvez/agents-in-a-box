@@ -30,7 +30,10 @@ use tokio::sync::RwLock;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
-use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
+use tokio_tungstenite::{
+    WebSocketStream, client_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 
 #[cfg(test)]
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -45,6 +48,15 @@ use super::{ApprovalDecision, ProviderError, ProviderReceipt, QuestionAnswer};
 use crate::events::EventSink;
 
 const INITIALIZE_ID: u64 = 1;
+const CODEX_WEBSOCKET_MAX_MESSAGE_SIZE: usize = 64 << 20;
+
+fn codex_websocket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(CODEX_WEBSOCKET_MAX_MESSAGE_SIZE),
+        max_frame_size: Some(CODEX_WEBSOCKET_MAX_MESSAGE_SIZE),
+        ..WebSocketConfig::default()
+    }
+}
 
 static ACTIVE_MANAGER: OnceLock<RwLock<Option<CodexManagerHandle>>> = OnceLock::new();
 
@@ -723,7 +735,13 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             )));
         }
     };
-    let websocket = match client_async("ws://localhost/", socket).await {
+    let websocket = match client_async_with_config(
+        "ws://localhost/",
+        socket,
+        Some(codex_websocket_config()),
+    )
+    .await
+    {
         Ok((websocket, _)) => websocket,
         Err(error) => {
             if let Some(server) = server.as_mut() {
@@ -2350,6 +2368,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("app-server.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
+        let payload_size = (16 << 20) + 1;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut websocket = accept_async(stream).await.unwrap();
@@ -2363,20 +2382,36 @@ mod tests {
             );
             websocket
                 .send(Message::Text(
-                    json!({ "jsonrpc": "2.0", "id": 1, "result": {} }).to_string(),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": { "payload": "x".repeat(payload_size) },
+                    })
+                    .to_string(),
                 ))
                 .await
                 .unwrap();
         });
 
         let socket = UnixStream::connect(&socket_path).await.unwrap();
-        let (websocket, _) = client_async("ws://localhost/", socket).await.unwrap();
+        let (websocket, _) = client_async_with_config(
+            "ws://localhost/",
+            socket,
+            Some(codex_websocket_config()),
+        )
+        .await
+        .unwrap();
         let mut transport = WebSocketTransport { websocket };
         transport
             .write_message(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
             .await
             .unwrap();
-        assert_eq!(transport.read_message().await.unwrap()["id"], 1);
+        let response = transport.read_message().await.unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(
+            response["result"]["payload"].as_str().unwrap().len(),
+            payload_size
+        );
         server.await.unwrap();
     }
 
