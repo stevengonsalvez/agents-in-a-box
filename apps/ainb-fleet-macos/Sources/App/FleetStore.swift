@@ -323,6 +323,7 @@ final class FleetStore: ObservableObject {
                     action: action.wireAction(prompt: trimmedPrompt)
                 ))
                 self.record(result.receipt)
+                self.controlNotice = Self.controlNotice(for: result.receipt, failurePrefix: "Action")
                 await self.refreshAuthoritativeState(using: connection)
             } catch {
                 self.controlNotice = "Action refused: \(String(describing: error))"
@@ -467,6 +468,7 @@ final class FleetStore: ObservableObject {
                 ))
                 self.lastStart = result
                 self.record(result.receipt)
+                self.controlNotice = Self.controlNotice(for: result.receipt, failurePrefix: "Start")
                 await self.refreshAuthoritativeState(using: connection)
             } catch {
                 self.controlNotice = "Start refused: \(String(describing: error))"
@@ -501,6 +503,7 @@ final class FleetStore: ObservableObject {
                     idempotencyKey: intentID
                 ))
                 self.record(result.receipts)
+                self.controlNotice = Self.broadcastNotice(for: result.receipts)
                 await self.refreshAuthoritativeState(using: connection)
             } catch {
                 self.controlNotice = "Broadcast refused: \(String(describing: error))"
@@ -1052,10 +1055,28 @@ final class FleetStore: ObservableObject {
     /// `detail` is surfaced verbatim because it is the only place the reason
     /// exists; without it the operator sees "failed" and has to go read the
     /// database to learn what happened.
+    /// The one success wording, named so the refresh path can recognise it as
+    /// safe to overwrite.
+    nonisolated static let deliveredNotice = "Delivered. Confirming Fleet state."
+
+    /// Operator-facing notice for a fan-out, where "some landed" is the case
+    /// that matters and a bare success string would hide it.
+    nonisolated static func broadcastNotice(for receipts: [FleetActionReceipt]) -> String {
+        guard !receipts.isEmpty else { return "Broadcast reached no sessions." }
+        let failed = receipts.filter { $0.status != .delivered }
+        if failed.isEmpty {
+            return "Delivered to \(receipts.count) session\(receipts.count == 1 ? "" : "s")."
+        }
+        let reason = failed.compactMap { $0.detail?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        let head = "Broadcast: \(receipts.count - failed.count)/\(receipts.count) delivered, \(failed.count) failed"
+        return reason.map { "\(head): \($0)" } ?? "\(head)."
+    }
+
     nonisolated static func controlNotice(for receipt: FleetActionReceipt, failurePrefix: String) -> String {
         switch receipt.status {
         case .delivered:
-            return "Delivered. Confirming Fleet state."
+            return deliveredNotice
         case .pending:
             return "\(failurePrefix) accepted, awaiting delivery."
         case .failed, .rejected, .unknown:
@@ -1085,7 +1106,14 @@ final class FleetStore: ObservableObject {
             let snapshot = try await connection.snapshot()
             apply(FleetProjectionReducer.snapshot(snapshot, from: projection))
         } catch {
-            controlNotice = "Fleet refresh refused: \(String(describing: error))"
+            // A refresh complaint must NOT overwrite a delivery failure we just
+            // set: the receipt's reason is the only record of WHY the action was
+            // refused, and replacing it with a read error tells the operator the
+            // action landed and only the follow-up snapshot failed — the exact
+            // inversion this file was changed to stop.
+            if controlNotice == nil || controlNotice == Self.deliveredNotice {
+                controlNotice = "Fleet refresh refused: \(String(describing: error))"
+            }
         }
         guard canReadReceipts else { return }
         do {

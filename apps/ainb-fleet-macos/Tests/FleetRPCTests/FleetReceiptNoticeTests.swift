@@ -45,6 +45,34 @@ final class FleetReceiptNoticeTests: XCTestCase {
         XCTAssertEqual(notice, "Interview failed.")
     }
 
+    func testBroadcastWhereEveryLegFailedIsNotReportedAsClean() {
+        let notice = FleetStore.broadcastNotice(for: [
+            receipt(.failed, detail: "no live tmux session"),
+            receipt(.failed, detail: "no live tmux session"),
+        ])
+        XCTAssertFalse(notice.hasPrefix("Delivered"), "a total fan-out failure must not read as delivered: \(notice)")
+        XCTAssertTrue(notice.contains("0/2 delivered"), notice)
+        XCTAssertTrue(notice.contains("no live tmux session"), notice)
+    }
+
+    func testPartialBroadcastReportsBothHalves() {
+        let notice = FleetStore.broadcastNotice(for: [
+            receipt(.delivered, detail: nil),
+            receipt(.failed, detail: "pane died"),
+        ])
+        XCTAssertTrue(notice.contains("1/2 delivered"), notice)
+        XCTAssertTrue(notice.contains("1 failed"), notice)
+    }
+
+    func testFullyDeliveredBroadcastReadsAsDelivered() {
+        let notice = FleetStore.broadcastNotice(for: [receipt(.delivered, detail: nil), receipt(.delivered, detail: nil)])
+        XCTAssertEqual(notice, "Delivered to 2 sessions.")
+    }
+
+    func testEmptyBroadcastDoesNotClaimDelivery() {
+        XCTAssertEqual(FleetStore.broadcastNotice(for: []), "Broadcast reached no sessions.")
+    }
+
     private func receipt(_ status: ActionReceiptStatus, detail: String?) -> FleetActionReceipt {
         FleetActionReceipt(
             requestID: "req-1",

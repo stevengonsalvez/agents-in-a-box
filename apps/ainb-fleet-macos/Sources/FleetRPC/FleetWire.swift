@@ -497,9 +497,14 @@ enum ActionReceiptStatus: String, Codable, Equatable, CaseIterable { case pendin
 extension ActionReceiptStatus {
     /// The ONE operator-facing word for a status on this surface.
     ///
-    /// Mirrors `receipt_status_token` on the daemon side, and is exhaustive on
-    /// purpose: a new variant must be a compile error here rather than silently
-    /// rendering as whichever arm was written last.
+    /// DELIBERATELY PROSE, not the wire token. `receipt_status_token` on the
+    /// daemon side returns the uppercase wire words (`FAILED`, `REJECTED`, …)
+    /// for logs and CLI output; this reads inside an English sentence, so it is
+    /// lowercase and renders `.unknown` as a phrase. The divergence is intended
+    /// — do not "fix" it by aligning to the Rust strings.
+    ///
+    /// Exhaustive on purpose: a new variant must be a compile error here rather
+    /// than silently rendering as whichever arm was written last.
     var operatorToken: String {
         switch self {
         case .pending: return "pending"
