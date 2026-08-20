@@ -434,7 +434,7 @@ final class FleetStore: ObservableObject {
                     action: action
                 ))
                 self.record(result.receipt)
-                self.controlNotice = "Delivered. Confirming Fleet state."
+                self.controlNotice = Self.controlNotice(for: result.receipt, failurePrefix: failurePrefix)
                 await self.refreshAuthoritativeState(using: connection)
             } catch {
                 self.controlNotice = "\(failurePrefix) refused: \(String(describing: error))"
@@ -1037,6 +1037,34 @@ final class FleetStore: ObservableObject {
 
     private func handle(_ error: Error) {
         becomeStale(reason: error.localizedDescription)
+    }
+
+    /// Operator-facing notice for a receipt the daemon actually returned.
+    ///
+    /// A `FLEET_ACTION` that round-trips is NOT the same as one that landed: the
+    /// daemon answers a rejected or undeliverable action with a perfectly
+    /// successful RPC carrying a non-`delivered` status and a `detail` saying
+    /// why. Reporting "Delivered." for every non-throwing call is how a picker
+    /// that refused the answer, sent zero keys and left the target session
+    /// sitting on its question still read as success on this surface — the
+    /// failure was real, loud in the receipt, and invisible here.
+    ///
+    /// `detail` is surfaced verbatim because it is the only place the reason
+    /// exists; without it the operator sees "failed" and has to go read the
+    /// database to learn what happened.
+    nonisolated static func controlNotice(for receipt: FleetActionReceipt, failurePrefix: String) -> String {
+        switch receipt.status {
+        case .delivered:
+            return "Delivered. Confirming Fleet state."
+        case .pending:
+            return "\(failurePrefix) accepted, awaiting delivery."
+        case .failed, .rejected, .unknown:
+            let reason = receipt.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let outcome = receipt.status.operatorToken
+            return reason.isEmpty
+                ? "\(failurePrefix) \(outcome)."
+                : "\(failurePrefix) \(outcome): \(reason)"
+        }
     }
 
     private func record(_ receipt: FleetActionReceipt) {

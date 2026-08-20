@@ -31,6 +31,7 @@
 		A1000000000000000000003C /* FleetQuickSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003D /* FleetQuickSwitcher.swift */; };
 		A1000000000000000000003E /* FleetSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003F /* FleetSettingsView.swift */; };
 		A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000043 /* FleetRosterPresentationTests.swift */; };
+		A10000000000000000000097 /* FleetReceiptNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000098 /* FleetReceiptNoticeTests.swift */; };
 		A10000000000000000000045 /* FleetFixtureDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000049 /* FleetFixtureDaemon.swift */; };
 		A1000000000000000000005A /* FleetFixtureDaemonFallbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */; };
 		A1000000000000000000005C /* FleetFixtureDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000049 /* FleetFixtureDaemon.swift */; };
@@ -86,6 +87,7 @@
 		A1000000000000000000003D /* FleetQuickSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetRoster/FleetQuickSwitcher.swift; sourceTree = SOURCE_ROOT; };
 		A1000000000000000000003F /* FleetSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Settings/FleetSettingsView.swift; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000043 /* FleetRosterPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetRosterPresentationTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000098 /* FleetReceiptNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetReceiptNoticeTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000049 /* FleetFixtureDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/Support/FleetFixtureDaemon.swift; sourceTree = SOURCE_ROOT; };
 		A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/FleetRPCTests/FleetFixtureDaemonFallbackTests.swift; sourceTree = SOURCE_ROOT; };
 		A1000000000000000000004A /* FleetUITestCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/Support/FleetUITestCase.swift; sourceTree = SOURCE_ROOT; };
@@ -218,6 +220,7 @@
 				A1000000000000000000002D /* FleetConnectionTests.swift */,
 				A1000000000000000000002E /* FleetDaemonContractTests.swift */,
 				A10000000000000000000043 /* FleetRosterPresentationTests.swift */,
+				A10000000000000000000098 /* FleetReceiptNoticeTests.swift */,
 				A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */,
 				A100000000000000000000114 /* FleetChatPresentationTests.swift */,
 			);
@@ -416,6 +419,7 @@
 				A1000000000000000000001C /* FleetConnectionTests.swift in Sources */,
 				A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */,
 				A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */,
+				A10000000000000000000097 /* FleetReceiptNoticeTests.swift in Sources */,
 				A1000000000000000000005C /* FleetFixtureDaemon.swift in Sources */,
 				A1000000000000000000005A /* FleetFixtureDaemonFallbackTests.swift in Sources */,
 				A100000000000000000000115 /* FleetChatPresentationTests.swift in Sources */,
