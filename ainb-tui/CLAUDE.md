@@ -294,6 +294,31 @@ backend processes as Claude.
   plugins (`ainb-fleet`, `ainb-hooks`, `reflect`); never put a TUI/subprocess
   plugin there.
 
+## Fleet macOS app: validation is end-to-end or it is a failure
+
+Testing `apps/ainb-fleet-macos` means driving it to a **terminal user-visible
+outcome**, not confirming it built, launched, connected, or rendered a card.
+
+For an interview, exactly one of these is a pass:
+
+1. **It completes** — the answer reaches the target session, verified in that
+   session's JSONL `tool_result`, not just a `DELIVERED` receipt or a line
+   drawn in a tmux pane.
+2. **It shows the right status** — the action was refused and the app says so
+   with the daemon's `detail`, matching the `fleet_action_receipt` row.
+
+Anything else is a FAILURE and is reported as one: the control could not be
+clicked, automation could not focus the popover, the card rendered but nothing
+submitted, the receipt and the UI disagree, or the run was abandoned part-way.
+
+**Never record an unfinished GUI run as a success, and never substitute unit
+tests for it.** `xcodebuild test` proves the status→message mapping; only a
+driven run proves the app. If automation cannot complete the flow, say the
+validation FAILED and why.
+
+Always check `fleet_action_receipt.created_at` before citing a row — a stale
+receipt from an earlier run is indistinguishable from a fresh success.
+
 ## Monorepo Context
 
 The curated skills/agents/installer/catalog live in the standalone
