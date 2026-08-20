@@ -3433,7 +3433,7 @@ async fn handle_codex_session_ensure(
 }
 
 /// Remove one failed Interactive Codex launch after archiving any claimed
-/// remote thread. The row stays recoverable when archival fails.
+/// remote thread.
 async fn handle_codex_session_discard(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -3452,11 +3452,11 @@ async fn handle_codex_session_discard(
             )
             .await
             .ok_or_else(|| internal("Ainb Codex remote control unavailable during cleanup"))?;
-            manager
-                .thread_archive(&thread_id)
-                .await
-                .map_err(|error| internal(&format!("archive failed Codex thread: {error}")))?;
-            Ok(())
+            match manager.thread_archive(&thread_id).await {
+                Ok(_) => Ok(true),
+                Err(error) if error.to_string().contains("no rollout found") => Ok(false),
+                Err(error) => Err(internal(&format!("archive failed Codex thread: {error}"))),
+            }
         })
         .await?;
     to_value(&result)
@@ -3469,7 +3469,7 @@ async fn discard_interactive_codex_thread<F, Fut>(
 ) -> Result<ainb_hangar_proto::fleet::CodexSessionDiscardResult, RpcError>
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), RpcError>>,
+    Fut: std::future::Future<Output = Result<bool, RpcError>>,
 {
     use ainb_hangar_proto::fleet::CodexSessionDiscardResult;
 
@@ -3487,9 +3487,10 @@ where
         });
     };
 
-    if let Some(thread_id) = thread_id.clone() {
-        archive(thread_id).await?;
-    }
+    let archived = match thread_id {
+        Some(thread_id) => archive(thread_id).await?,
+        None => false,
+    };
 
     sqlx::query("DELETE FROM interactive_codex_thread WHERE session_id = ?")
         .bind(session_id)
@@ -3499,7 +3500,7 @@ where
 
     Ok(CodexSessionDiscardResult {
         discarded: true,
-        archived: thread_id.is_some(),
+        archived,
     })
 }
 
@@ -13250,7 +13251,7 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(remaining, 1, "row deleted before remote archive");
-                Ok(())
+                Ok(true)
             },
         )
         .await
@@ -13258,6 +13259,40 @@ mod tests {
 
         assert!(result.discarded);
         assert!(result.archived);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn codex_session_discard_removes_unmaterialized_claimed_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO interactive_codex_thread (session_id, thread_id, cwd) \
+             VALUES ('failed-session', 'thread-without-rollout', '/tmp')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = discard_interactive_codex_thread(
+            store.pool(),
+            "failed-session",
+            |thread_id| async move {
+                assert_eq!(thread_id, "thread-without-rollout");
+                Ok(false)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.discarded);
+        assert!(!result.archived);
         let remaining: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM interactive_codex_thread WHERE session_id = 'failed-session'",
         )
