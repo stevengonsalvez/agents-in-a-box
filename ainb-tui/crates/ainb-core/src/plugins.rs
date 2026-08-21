@@ -458,28 +458,63 @@ pub(crate) fn plugins_disabled() -> bool {
 ///
 /// Search order:
 /// 1. `$AINB_PLUGIN_ROOT` (test/CI override).
-/// 2. `<exe-dir>/dist/plugins/`         (release tarball layout).
-/// 3. `<exe-dir>/../dist/plugins/`      (cargo run from `target/<profile>/`).
-/// 4. `<cwd>/dist/plugins/`             (workspace dev layout).
-/// 5. `~/.agents-in-a-box/plugins/cache/` (installed plugins).
+/// 2. `<exe-dir>/plugins/`              (brew/libexec install layout).
+/// 3. `<exe-dir>/dist/plugins/`         (release tarball layout).
+/// 4. `<exe-dir>/../../dist/plugins/`   (cargo run from `target/<profile>/`).
+/// 5. `<cwd>/dist/plugins/`             (workspace dev layout).
+/// 6. `~/.agents-in-a-box/plugins/cache/` (installed plugins).
+///
+/// Every candidate after the env override is derived from the running binary
+/// or the cwd, so discovery keeps working with `AINB_PLUGIN_ROOT` unset. That
+/// matters because the Homebrew wrapper used to be the ONLY thing pointing a
+/// packaged install at its plugins: a keg-versioned `AINB_PLUGIN_ROOT` exported
+/// into a long-lived shell (or a tmux server's environment) outlives the keg it
+/// names, and once `brew upgrade` deletes that Cellar directory every `ainb`
+/// launched from it came up with zero plugins and no explanation. Candidate 2
+/// covers the same layout without the env var, so a stale export now degrades
+/// to a warning instead of an empty runtime.
 pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
     if let Ok(env_root) = std::env::var("AINB_PLUGIN_ROOT") {
-        let p = PathBuf::from(env_root);
-        if p.exists() {
-            return Some(p);
+        let trimmed = env_root.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.exists() {
+                return Some(p);
+            }
+            // Set, but pointing nowhere. Falling through silently is how a
+            // stale value became "the Hangar screen says the plugin isn't
+            // installed" with nothing in the log to explain it. Say so, then
+            // keep searching the derived candidates.
+            warn!(
+                plugin_root = %p.display(),
+                "AINB_PLUGIN_ROOT points at a path that does not exist - ignoring it and \
+                 falling back to the binary-relative plugin directories. A stale export \
+                 (e.g. naming a Homebrew keg that an upgrade deleted) is the usual cause; \
+                 unset it in your shell and in any tmux server environment."
+            );
         }
     }
 
     if let Ok(exe) = std::env::current_exe() {
         let exe_dir = exe.parent().map(Path::to_path_buf);
         if let Some(d) = &exe_dir {
+            // Homebrew/libexec layout: `libexec/ainb` sitting alongside
+            // `libexec/plugins`. Checked before `dist/plugins` because a
+            // packaged install has no `dist/` at all.
+            let libexec = d.join("plugins");
+            if libexec.is_dir() {
+                return Some(libexec);
+            }
             let here = d.join("dist").join("plugins");
             if here.exists() {
                 return Some(here);
             }
+            // `target/<profile>/ainb` -> repo-root `dist/plugins`. Canonicalize
+            // is best-effort: a failure must not abort the remaining candidates
+            // (it used to `?` straight out of the whole function).
             let up = d.join("..").join("..").join("dist").join("plugins");
             if up.exists() {
-                return Some(up.canonicalize().ok()?);
+                return Some(up.canonicalize().unwrap_or(up));
             }
         }
     }
@@ -521,6 +556,35 @@ mod tests {
             "runtime has zero plugins"
         );
         std::env::remove_var("AINB_PLUGIN_ROOT");
+    }
+
+    /// A keg-versioned `AINB_PLUGIN_ROOT` outlives the keg it names once
+    /// `brew upgrade` deletes that Cellar directory. Returning it anyway (or
+    /// falling through to it silently) is what produced a TUI with zero
+    /// plugins and a Hangar screen insisting the plugin wasn't installed.
+    #[test]
+    fn missing_plugin_root_is_never_returned() {
+        let stale = std::env::temp_dir().join("ainb-cellar-1.0.0-deleted/plugins");
+        assert!(!stale.exists(), "fixture path must not exist");
+        std::env::set_var("AINB_PLUGIN_ROOT", &stale);
+        let resolved = discover_plugin_root();
+        std::env::remove_var("AINB_PLUGIN_ROOT");
+        assert_ne!(
+            resolved.as_deref(),
+            Some(stale.as_path()),
+            "a plugin root that does not exist must not be handed to discovery"
+        );
+    }
+
+    /// The override still wins when it actually resolves — the fix above
+    /// must not turn `AINB_PLUGIN_ROOT` into a no-op for CI and tests.
+    #[test]
+    fn existing_plugin_root_still_wins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("AINB_PLUGIN_ROOT", dir.path());
+        let resolved = discover_plugin_root();
+        std::env::remove_var("AINB_PLUGIN_ROOT");
+        assert_eq!(resolved.as_deref(), Some(dir.path()));
     }
 
     #[test]
