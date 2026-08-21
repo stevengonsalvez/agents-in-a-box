@@ -772,6 +772,23 @@ impl PluginTask {
                     "plugin spawn failed"
                 );
                 self.record_failure();
+                // Leave a state the plugin can actually be judged from. This
+                // branch used to return with the state still `Spawning`, which
+                // `ensure_running` treats as spawnable — so a binary that can
+                // never be exec'd was retried on every later kick, and because
+                // the quarantine check lives only on `handle_exit` (a process
+                // that started, then died) the breaker never engaged for a
+                // process that never started at all.
+                if self.is_quarantine_due() {
+                    self.set_state(LifecycleState::Quarantined);
+                    error!(
+                        plugin = %self.plugin.id,
+                        "quarantined after {} failed spawns",
+                        self.failures.len()
+                    );
+                } else {
+                    self.set_state(LifecycleState::Idle);
+                }
                 return Err(e);
             }
         };
