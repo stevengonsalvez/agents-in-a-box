@@ -478,16 +478,16 @@ pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
         let trimmed = env_root.trim();
         if !trimmed.is_empty() {
             let p = PathBuf::from(trimmed);
-            if p.exists() {
+            if p.is_dir() {
                 return Some(p);
             }
-            // Set, but pointing nowhere. Falling through silently is how a
-            // stale value became "the Hangar screen says the plugin isn't
-            // installed" with nothing in the log to explain it. Say so, then
-            // keep searching the derived candidates.
+            // Set, but not naming a usable directory. Falling through silently
+            // is how a stale value became "the Hangar screen says the plugin
+            // isn't installed" with nothing in the log to explain it. Say so,
+            // then keep searching the derived candidates.
             warn!(
                 plugin_root = %p.display(),
-                "AINB_PLUGIN_ROOT points at a path that does not exist - ignoring it and \
+                "AINB_PLUGIN_ROOT does not name an existing directory - ignoring it and \
                  falling back to the binary-relative plugin directories. A stale export \
                  (e.g. naming a Homebrew keg that an upgrade deleted) is the usual cause; \
                  unset it in your shell and in any tmux server environment."
@@ -506,14 +506,14 @@ pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
                 return Some(libexec);
             }
             let here = d.join("dist").join("plugins");
-            if here.exists() {
+            if here.is_dir() {
                 return Some(here);
             }
             // `target/<profile>/ainb` -> repo-root `dist/plugins`. Canonicalize
             // is best-effort: a failure must not abort the remaining candidates
             // (it used to `?` straight out of the whole function).
             let up = d.join("..").join("..").join("dist").join("plugins");
-            if up.exists() {
+            if up.is_dir() {
                 return Some(up.canonicalize().unwrap_or(up));
             }
         }
@@ -521,14 +521,14 @@ pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
 
     if let Ok(cwd) = std::env::current_dir() {
         let here = cwd.join("dist").join("plugins");
-        if here.exists() {
+        if here.is_dir() {
             return Some(here);
         }
     }
 
     if let Some(home) = dirs::home_dir() {
         let installed = home.join(".agents-in-a-box").join("plugins").join("cache");
-        if installed.exists() {
+        if installed.is_dir() {
             return Some(installed);
         }
     }
@@ -573,6 +573,24 @@ mod tests {
             resolved.as_deref(),
             Some(stale.as_path()),
             "a plugin root that does not exist must not be handed to discovery"
+        );
+    }
+
+    /// A plugin root is a directory to scan. A path that exists but is a
+    /// regular file would be handed to discovery and fail there instead, so
+    /// reject it the same way as a missing one.
+    #[test]
+    fn plugin_root_that_is_a_file_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"").expect("write fixture file");
+        std::env::set_var("AINB_PLUGIN_ROOT", &file);
+        let resolved = discover_plugin_root();
+        std::env::remove_var("AINB_PLUGIN_ROOT");
+        assert_ne!(
+            resolved.as_deref(),
+            Some(file.as_path()),
+            "a plugin root that is a file must not be handed to discovery"
         );
     }
 
