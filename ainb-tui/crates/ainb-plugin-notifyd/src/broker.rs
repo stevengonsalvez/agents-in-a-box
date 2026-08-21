@@ -122,16 +122,35 @@ pub enum StructuredResolution {
 impl StructuredResolution {
     fn timed_out() -> Self {
         Self::Rejected {
-            reason: "no human answer before timeout".to_string(),
+            reason: TIMED_OUT_REASON.to_string(),
         }
     }
 
     fn superseded() -> Self {
         Self::Rejected {
-            reason: "superseded by a newer request for this session".to_string(),
+            reason: SUPERSEDED_REASON.to_string(),
         }
     }
+
+    /// Did this resolution arrive because NOBODY answered, rather than because a
+    /// human refused?
+    ///
+    /// Load-bearing for the blocking AskUserQuestion hook. Both cases below are
+    /// `Rejected`, but a caller that renders every `Rejected` as a tool DENY
+    /// turns "no operator was watching" into a refused tool the model re-asks,
+    /// which blocks again — a deny/retry loop for any session with no Fleet
+    /// surface open. Those two must yield to the native picker instead; only an
+    /// explicit human dismiss is a real denial.
+    #[must_use]
+    pub fn is_unanswered(&self) -> bool {
+        matches!(self, Self::Rejected { reason } if reason == TIMED_OUT_REASON || reason == SUPERSEDED_REASON)
+    }
 }
+
+/// Reasons that mean "no human answered", not "a human said no". Kept beside
+/// their constructors so the predicate above cannot silently drift from them.
+const TIMED_OUT_REASON: &str = "no human answer before timeout";
+const SUPERSEDED_REASON: &str = "superseded by a newer request for this session";
 
 impl Decision {
     /// The safe fallback when no human answered in time.

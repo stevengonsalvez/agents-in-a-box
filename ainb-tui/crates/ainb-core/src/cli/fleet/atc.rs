@@ -1440,6 +1440,138 @@ fn extract_permission_context(payload: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Where the saved tmux window name is parked while an interview banner is up.
+fn interview_banner_state(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let pane = std::env::var("TMUX_PANE").ok().filter(|value| !value.is_empty())?;
+    let key = blake3::hash(pane.as_bytes()).to_hex();
+    // Scoped to the `home` THIS invocation was given, not to $AINB_HOME.
+    // `plumbing::paths` already treats $AINB_HOME AS the ainb home, so joining
+    // `.agents-in-a-box` onto it again wrote
+    // `~/.agents-in-a-box/.agents-in-a-box/…`, and an empty $AINB_HOME wrote a
+    // RELATIVE path into whatever cwd the hook ran in. Threading `home` also
+    // keeps the tests inside their own tempdir.
+    Some(home.join("fleet").join("interview-banner").join(format!("{key}.txt")))
+}
+
+/// tmux expands `#` sequences in BOTH `rename-window` and `display-message`
+/// arguments: `#{...}` is a format, `#(...)` is a shell job. The header is
+/// MODEL-AUTHORED text, so every `#` is doubled before interpolation.
+fn tmux_escape(value: &str) -> String {
+    value.replace('#', "##")
+}
+
+/// Whether this process may touch tmux at all.
+///
+/// `cargo test` inherits `TMUX_PANE`, so without this the unit tests rename the
+/// DEVELOPER's own window, and leave it renamed if a test panics between
+/// announce and clear.
+const fn tmux_banner_enabled() -> bool {
+    !cfg!(test)
+}
+
+/// Tell the OPERATOR AT THE TERMINAL that this session is holding on a question.
+///
+/// While the hook blocks, Claude's own UI cannot be reached: hook stdout is read
+/// only at exit, and writing to `/dev/tty` fights the TUI repaint. tmux is the
+/// one surface that is ours, so the window name carries the flag for the whole
+/// wait and a status overlay announces it once.
+///
+/// Silent on every failure. A session outside tmux, or a tmux that refuses the
+/// rename, must still get its interview — an indication is worth nothing if its
+/// absence can block the answer path.
+fn announce_pending_interview(home: &std::path::Path, questions: &[serde_json::Value]) {
+    if !tmux_banner_enabled() {
+        return;
+    }
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
+    if pane.is_empty() {
+        return;
+    }
+    let header = questions
+        .first()
+        .and_then(|q| q.get("header").or_else(|| q.get("question")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("question")
+        .chars()
+        .take(24)
+        .collect::<String>();
+    let header = tmux_escape(&header);
+
+    // Save the current name AND the automatic-rename setting, so the wait does
+    // not permanently freeze a window that was tracking its running program.
+    if let Some(path) = interview_banner_state(home) {
+        if let Ok(out) = std::process::Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &pane,
+                "-F",
+                "#{window_name}\t#{automatic-rename}",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, String::from_utf8_lossy(&out.stdout).trim());
+            }
+        }
+    }
+    let _ = std::process::Command::new("tmux")
+        .args(["rename-window", "-t", &pane, &format!("[ASK] {header}")])
+        .status();
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            &pane,
+            &format!("Interview waiting: {header} — answer in Fleet, or release to answer here"),
+        ])
+        .status();
+}
+
+/// Restore the window name and its automatic-rename setting once the wait ends,
+/// however it ended.
+///
+/// Called on EVERY exit from the wait (answered, released, timed out): a window
+/// left reading `[ASK]` after the question is gone is worse than no banner, and
+/// `rename-window` itself turns `automatic-rename` off, so restoring the name
+/// without the option would silently freeze the window for good.
+fn clear_pending_interview_banner(home: &std::path::Path) {
+    if !tmux_banner_enabled() {
+        return;
+    }
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
+    if pane.is_empty() {
+        return;
+    }
+    let Some(path) = interview_banner_state(home) else {
+        return;
+    };
+    if let Ok(saved) = std::fs::read_to_string(&path) {
+        let mut fields = saved.trim().splitn(2, '\t');
+        let previous = fields.next().unwrap_or_default();
+        let automatic = fields.next().unwrap_or_default();
+        if !previous.is_empty() {
+            let _ = std::process::Command::new("tmux")
+                .args(["rename-window", "-t", &pane, previous])
+                .status();
+        }
+        if automatic == "on" {
+            let _ = std::process::Command::new("tmux")
+                .args(["set-window-option", "-t", &pane, "automatic-rename", "on"])
+                .status();
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 fn extract_structured_tool_input(
     payload: &str,
 ) -> Result<(serde_json::Value, Vec<serde_json::Value>, String)> {
@@ -1654,7 +1786,7 @@ fn hook_core_for_agent(
     //    session ID writes a raw envelope. Broker-mediated structured answers
     //    and approvals remain limited to known Fleet members below.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
-    let append_event = || {
+    let append_event_with = |delivery: Option<&str>| {
         let event_id = uuid::Uuid::new_v4().to_string();
         let raw_payload_stored = persist_raw_hook_payload(home, &event_id, payload).is_ok();
         let mut line = build_event_line_for_agent(
@@ -1669,13 +1801,22 @@ fn hook_core_for_agent(
             our_parent.as_deref(),
             raw_payload_stored,
         );
-        if is_structured_ask {
-            line["fleet_delivery"] = serde_json::Value::String("mirrored".to_string());
+        // The stamp SELECTS THE ANSWER TRANSPORT downstream: `mirrored` routes
+        // Fleet's answer through `execute_claude_mirrored_picker` (synthetic tmux
+        // keys + screen verification), anything else through the exact-JSON
+        // broker branch of `execute_claude_structured`. A blocked ask must NOT be
+        // stamped mirrored, or the daemon would type at a picker that is not on
+        // screen because we are still holding the tool call open.
+        if let Some(delivery) = delivery {
+            line["fleet_delivery"] = serde_json::Value::String(delivery.to_string());
         }
         let _ = append_event_line(home, &line);
     };
-    if !session_id.is_empty() {
-        append_event();
+    // A structured ask defers its event: the branch below decides whether this
+    // hook BLOCKS (answer returns as JSON) or yields to Claude's native picker
+    // (answer must be keyed in), and the card has to say which.
+    if !session_id.is_empty() && !is_structured_ask {
+        append_event_with(None);
     }
 
     // Self-heal the durable child→parent map. `ainb run` seeds only the live
@@ -1730,12 +1871,109 @@ fn hook_core_for_agent(
         }
     }
 
-    // 4. PreToolUse(AskUserQuestion): keep Claude's native picker visible while
-    //    the durable hook event exposes the same request to Fleet. Fleet routes
-    //    a selected answer back through the verified picker transport, so neither
-    //    surface owns a separate answer lifecycle.
+    // 4. PreToolUse(AskUserQuestion): HOLD the tool call open and answer with
+    //    exact JSON.
+    //
+    //    The alternative — return here, let Claude draw its own picker, and have
+    //    Fleet type synthetic arrow keys at it — is what this replaces. Once the
+    //    hook returns, `hookSpecificOutput` is gone and keystrokes are the only
+    //    channel left, which forces the answer's correctness to be re-derived
+    //    from a screenshot of a vendor TUI that has no compatibility contract.
+    //    That re-derivation broke four times in one week (multi-select Enter
+    //    toggling instead of confirming; a mid-token hard wrap with no space to
+    //    match on; the same normalisation silently breaking the sibling route;
+    //    and 2.1.237's two-column layout splicing a side panel through the
+    //    middle of a wrapped label). Holding the call open removes the screen
+    //    from the answer path entirely.
+    //
+    //    Three ways out, and none of them may wedge Claude:
+    //      * the broker cannot be reached / registration fails -> yield to the
+    //        native picker exactly as before, stamped `mirrored` so Fleet's
+    //        answer still has the keystroke transport available.
+    //      * a human at the terminal (or Fleet) explicitly releases -> yield,
+    //        same stamp, and Claude draws its picker untouched.
+    //      * an answer arrives -> emit it as `hookSpecificOutput`, no keys, no
+    //        screen parsing.
+    //
+    //    The await deadline (640s) sits UNDER the hook timeout this event
+    //    registers (660s, see `plumbing::hooks`), so the broker's own fallback
+    //    always answers before Claude hard-kills the hook.
+    // FLEET MEMBERS ONLY, exactly as the permission gate below. Without this an
+    // unrelated `claude` typed in any terminal on a host that merely has
+    // ainb-hooks installed has its native picker suppressed and its tool call
+    // held by our broker, with no surface open to answer it and no CLI verb to
+    // release it. `notify.sh` lazily spawns notifyd, so registration succeeds
+    // almost anywhere.
     if is_structured_ask {
-        return Ok(None);
+        // FLEET MEMBERS ONLY may BLOCK, exactly as the permission gate below.
+        // Without this an unrelated `claude` typed in any terminal on a host
+        // that merely has ainb-hooks installed has its native picker suppressed
+        // and its tool call held by our broker, with no surface open to answer
+        // it and no CLI verb to release it. `notify.sh` lazily spawns notifyd,
+        // so registration would succeed almost anywhere.
+        //
+        // The CARD is still written for everyone: the hooks are installed
+        // globally and a non-member's interview should still be visible to
+        // Fleet, just answerable by the keystroke transport rather than held.
+        if !is_fleet_member {
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
+        let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
+        let Ok((tool_input, questions, fingerprint)) = extract_structured_tool_input(payload)
+        else {
+            // Unparseable payload: record it as a keystroke-answerable card
+            // rather than holding a tool call we cannot describe to anyone.
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        };
+        let registered = ainb_plugin_notifyd::broker::client_register_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+        )
+        .unwrap_or(false);
+        if !registered {
+            // Fleet is an OPTIONAL control surface. A broker outage must never
+            // reject or stall Claude's own tool call.
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
+        append_event_with(None);
+        announce_pending_interview(home, &questions);
+        let resolution = ainb_plugin_notifyd::broker::client_await_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+            ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
+        );
+        clear_pending_interview_banner(home);
+        // A resolution meaning NOBODY ANSWERED is not a refusal. Rendering the
+        // 640s fallback (or a supersede) as `deny` hands the model a refused
+        // tool, which it re-asks, which blocks another 640s: a deny/retry loop
+        // for any session with no Fleet surface watching. Yield to the native
+        // picker and re-stamp the card `mirrored`, so the keystroke transport
+        // applies to the picker now on screen. Only an explicit human dismiss
+        // reaches `structured_emit_json` as a deny.
+        if resolution.is_unanswered() {
+            append_event_with(Some("mirrored"));
+            return Ok(None);
+        }
+        if matches!(
+            resolution,
+            ainb_plugin_notifyd::broker::StructuredResolution::ReleasedToNative
+        ) {
+            append_event_with(Some("mirrored"));
+            // Ownership yielded on purpose. No hook output means Claude renders
+            // its own picker unchanged, and Fleet keeps the keystroke route.
+            return Ok(None);
+        }
+        return Ok(Some(HookEmit::Structured(structured_emit_json(
+            tool_input,
+            &resolution,
+        ))));
     }
 
     // 5. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
@@ -2974,6 +3212,55 @@ mod tests {
     }
 
     #[test]
+    fn ask_hook_from_a_non_member_session_never_blocks_but_still_persists_a_card() {
+        // An unrelated `claude` on a host that merely has ainb-hooks installed
+        // must keep its native picker. Holding its tool call would suppress the
+        // picker with no Fleet surface open to answer and no CLI verb to
+        // release it. The card is still written so Fleet can see the interview
+        // and answer it through the keystroke transport.
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("unrelated-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_nonmember",
+            "tool_input": {
+                "questions": [{
+                    "question": "Region?",
+                    "header": "Region",
+                    "options": [{"label": "eu"}, {"label": "us"}]
+                }]
+            }
+        });
+        let started = std::time::Instant::now();
+        let emitted = hook_core(
+            home.path(),
+            "PreToolUse",
+            "nonmember-session",
+            cwd.to_str().unwrap(),
+            None,
+            None,
+            50,
+            &payload.to_string(),
+            Some("AskUserQuestion"),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a non-member ask must return immediately, not hold the tool call"
+        );
+        assert!(
+            emitted.is_none(),
+            "a non-member ask must leave Claude's native picker unblocked"
+        );
+        let events = std::fs::read_to_string(home.path().join("events.jsonl")).unwrap();
+        assert!(
+            events.contains("\"fleet_delivery\":\"mirrored\""),
+            "the card must stay keystroke-answerable: {events}"
+        );
+    }
+
+    #[test]
     fn ask_hook_without_broker_fails_open_and_persists_a_mirrored_fleet_card() {
         let home = TempDir::new().unwrap();
         let cwd = home.path().join("plain-claude-worktree");
@@ -3052,5 +3339,167 @@ mod tests {
         assert_eq!(Scheduler::Daemon.as_str(), "daemon");
         assert_eq!(Scheduler::LocalTimer.as_str(), "local_timer");
         assert_eq!(Scheduler::None.as_str(), "none");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ask_hook_returns_complete_structured_answer_without_text_routing() {
+        use ainb_plugin_notifyd::broker::{
+            BrokerState, StructuredQuestionAnswer, client_answer_structured, client_list,
+        };
+        use tokio::net::UnixListener;
+
+        let home = TempDir::new().unwrap();
+        let cwd = home.path().join("plain-claude-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let paths = ainb_plugin_notifyd::paths::Paths::under(home.path());
+        std::fs::create_dir_all(paths.approve_socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&paths.approve_socket).unwrap();
+        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            BrokerState::with_timeout(std::time::Duration::from_secs(30)),
+        ));
+
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_ask_1",
+            "tool_input": {
+                "questions": [
+                    {
+                        "question": "Region?",
+                        "header": "Region",
+                        "options": [
+                            {"label": "EU", "description": "Europe"},
+                            {"label": "US", "description": "United States"}
+                        ],
+                        "multiSelect": false
+                    },
+                    {
+                        "question": "Checks?",
+                        "header": "Checks",
+                        "options": [
+                            {"label": "Lint", "description": "Run linter"},
+                            {"label": "Test", "description": "Run tests"}
+                        ],
+                        "multiSelect": true
+                    }
+                ]
+            }
+        });
+        let original_questions = payload["tool_input"]["questions"].clone();
+        let hook_home = home.path().to_path_buf();
+        let hook_cwd = cwd.clone();
+        let hook_payload = payload.to_string();
+        let waiter = tokio::task::spawn_blocking(move || {
+            hook_core(
+                &hook_home,
+                "PreToolUse",
+                "ask-session",
+                hook_cwd.to_str().expect("temporary cwd is valid UTF-8"),
+                // A parent makes this a FLEET MEMBER, which is what earns the
+                // right to hold the tool call open. Non-members get a mirrored
+                // card and their native picker, never a block.
+                Some("ask-parent"),
+                None,
+                50,
+                &hook_payload,
+                Some("AskUserQuestion"),
+            )
+        });
+
+        let pending = loop {
+            let socket = paths.approve_socket.clone();
+            let listed = tokio::task::spawn_blocking(move || client_list(&socket))
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            if let Some(pending) = listed.into_iter().find(|item| item.session_id == "ask-session")
+            {
+                break pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            pending.questions,
+            original_questions.as_array().unwrap().clone()
+        );
+        let fingerprint = pending.request_fingerprint.unwrap();
+        // The hook REGISTERS with the broker before it appends the event, so a
+        // pending observed by `client_list` does not yet imply the file exists.
+        // Reading immediately made this test pass or fail on scheduling luck.
+        let events_path = home.path().join("events.jsonl");
+        let mut events = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&events_path) {
+                if read.contains("ask-session") {
+                    events = read;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(!events.is_empty(), "hook never appended its Fleet event");
+        assert!(
+            events.contains("ask-session"),
+            "Fleet event must appear only after broker registration"
+        );
+
+        let stale_socket = paths.approve_socket.clone();
+        let stale = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &stale_socket,
+                "ask-session",
+                "fnv1a64:stale",
+                &[StructuredQuestionAnswer {
+                    question: "Region?".to_string(),
+                    selected_options: vec!["EU".to_string()],
+                }],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(stale.stale);
+        assert!(!stale.matched);
+
+        let answer_socket = paths.approve_socket.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &answer_socket,
+                "ask-session",
+                &fingerprint,
+                &[
+                    StructuredQuestionAnswer {
+                        question: "Region?".to_string(),
+                        selected_options: vec!["EU".to_string()],
+                    },
+                    StructuredQuestionAnswer {
+                        question: "Checks?".to_string(),
+                        selected_options: vec!["Lint".to_string(), "Test".to_string()],
+                    },
+                ],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(accepted.matched);
+
+        let emitted = waiter.await.unwrap().unwrap().expect("structured hook output");
+        let HookEmit::Structured(line) = emitted else {
+            panic!("AskUserQuestion must emit structured hook output");
+        };
+        let output: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let specific = &output["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "PreToolUse");
+        assert_eq!(specific["permissionDecision"], "allow");
+        assert_eq!(specific["updatedInput"]["questions"], original_questions);
+        assert_eq!(specific["updatedInput"]["answers"]["Region?"], "EU");
+        assert_eq!(specific["updatedInput"]["answers"]["Checks?"], "Lint, Test");
+        assert!(
+            output.get("text").is_none(),
+            "must not route labels as generic text"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&paths.approve_socket);
     }
 }

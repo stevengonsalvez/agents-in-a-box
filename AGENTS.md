@@ -43,3 +43,33 @@ bd sync               # Sync with git
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+
+## Fleet macOS app: validation is end-to-end or it is a failure
+
+Testing the macOS Fleet app means driving it to a **terminal user-visible
+outcome**, not confirming it launched, connected, or rendered a card.
+
+For an interview, exactly one of these is a pass:
+
+1. **It completes.** The answer reaches the target session — verified in that
+   session's JSONL `tool_result` (and, where it matters, the model's next
+   message acting on it), not just a `DELIVERED` receipt or a line drawn in a
+   tmux pane.
+2. **It shows the right status.** The action was refused and the app says so,
+   with the daemon's `detail`, matching the `fleet_action_receipt` row.
+
+Anything else is a FAILURE and must be reported as one:
+
+- could not click the control / automation could not focus the window
+- the card rendered but the answer was never submitted
+- the receipt says `FAILED` while the app shows success (or vice versa)
+- the run was abandoned part-way for any reason
+
+**Never record an unfinished GUI run as a success, and never let unit tests
+stand in for it.** Tests prove the mapping; only a driven run proves the app.
+If the automation cannot complete the flow, say the validation FAILED and why —
+do not describe it as "verified by tests instead", and do not present a
+partially-driven run as evidence.
+
+Check the receipt's timestamp before citing it. A stale row from an earlier run
+reads exactly like a fresh success.

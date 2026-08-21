@@ -76,11 +76,25 @@ const DEFAULT_HOOK_TIMEOUT: u64 = 10;
 /// the hook cleanly before Claude ever hard-kills it.
 const PERMISSION_HOOK_TIMEOUT: u64 = 660;
 
+/// `PreToolUse` carries the SYNCHRONOUS AskUserQuestion gate: for that one
+/// matcher the hook holds the tool call open on the approve broker until a
+/// human answers from Fleet, releases to the native picker, or the broker's own
+/// 640s fallback fires. Same budget and same reasoning as
+/// [`PERMISSION_HOOK_TIMEOUT`] — Claude's ceiling must exceed the broker await
+/// so the fallback answers cleanly before Claude hard-kills the hook.
+///
+/// THIS IS A CEILING, NOT A DELAY. Every other `PreToolUse` (every Bash, Read,
+/// Edit …) returns in well under a second and is completely unaffected; raising
+/// the cap costs them nothing. It was lowered to 10s when the blocking branch
+/// was removed, which left the cap below the await the branch needs.
+const STRUCTURED_ASK_HOOK_TIMEOUT: u64 = 660;
+
 /// The Claude `timeout` (seconds) to register for `event`.
 #[must_use]
 fn timeout_for(event: &str) -> u64 {
     match event {
         "PermissionRequest" => PERMISSION_HOOK_TIMEOUT,
+        "PreToolUse" => STRUCTURED_ASK_HOOK_TIMEOUT,
         _ => DEFAULT_HOOK_TIMEOUT,
     }
 }
