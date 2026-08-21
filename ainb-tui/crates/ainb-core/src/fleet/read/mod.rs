@@ -12,8 +12,8 @@ pub mod state;
 pub use ainb_fleet_core::fleet::read::{errors, jsonl_tail, needs, tmux_pane};
 
 pub use claude_probe::{
-    ClaudeProbe, PidObservation, SOURCE_PROBE, load_dir as load_probe_dir, parse_probe,
-    probe_is_live, resolve_probe,
+    ClaudeProbe, PidObservation, SOURCE_PROBE, load_dir as load_probe_dir, observe_pid,
+    parse_probe, probe_is_live, resolve_probe,
 };
 pub use current_state::{CurrentStateIndex, Resolution};
 pub use errors::{API_ERROR_PATTERNS, detect_error_signals};

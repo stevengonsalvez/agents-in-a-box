@@ -51,10 +51,13 @@ pub struct ClaudeProbe {
     /// Epoch-ms of the last status flip. Ages an `idle` into an IDLE row.
     #[serde(default)]
     pub status_updated_at: i64,
-    /// `ps lstart`-style start time of `pid`. Defeats pid recycling: a
-    /// recycled pid is alive but reports a different start time.
+    /// Epoch-ms start time of `pid`, as Claude recorded it. Defeats pid
+    /// recycling: a recycled pid is alive but started at a different instant.
+    /// (The sibling `procStart` string is NOT used: it is a UTC asctime while
+    /// `ps lstart` prints local time, so string comparison breaks across
+    /// zones/DST. Epoch numbers compare unambiguously.)
     #[serde(default)]
-    pub proc_start: String,
+    pub started_at: i64,
 }
 
 /// Parse one probe file's contents. Corrupt/foreign JSON is `None`, never an
@@ -71,14 +74,19 @@ pub fn parse_probe(json: &str) -> Option<ClaudeProbe> {
 pub struct PidObservation {
     /// `kill -0`-style liveness of the pid.
     pub alive: bool,
-    /// The running process's start time in the SAME `ps lstart` format the
-    /// probe records, or `None` when the process (or its start time) could not
-    /// be read.
-    pub proc_start: Option<String>,
+    /// The running process's start instant as epoch-ms, or `None` when the
+    /// process (or its start time) could not be read.
+    pub started_epoch_ms: Option<i64>,
 }
 
+/// Tolerance when comparing the probe's recorded start instant against the
+/// observed one. `ps` reports whole seconds while the probe records
+/// milliseconds, so sub-second rounding alone spans up to a second.
+pub const START_MATCH_TOLERANCE_MS: i64 = 2_000;
+
 /// The liveness gate: trust a probe only when its pid is alive AND the running
-/// process's start time matches the recorded one exactly.
+/// process started within [`START_MATCH_TOLERANCE_MS`] of the recorded
+/// instant.
 ///
 /// Both checks are required. Alive-only trusts a recycled pid; a missing or
 /// mismatched start time reads as NOT live rather than "probably fine",
@@ -88,8 +96,45 @@ pub struct PidObservation {
 #[must_use]
 pub fn probe_is_live(probe: &ClaudeProbe, observed: &PidObservation) -> bool {
     observed.alive
-        && !probe.proc_start.is_empty()
-        && observed.proc_start.as_deref() == Some(probe.proc_start.as_str())
+        && probe.started_at > 0
+        && observed
+            .started_epoch_ms
+            .is_some_and(|obs| (obs - probe.started_at).abs() <= START_MATCH_TOLERANCE_MS)
+}
+
+/// Observe `pid` on the host: one `LC_ALL=C ps` call answers both liveness
+/// (empty output = dead) and the start instant (`lstart`, parsed as LOCAL time
+/// — `ps` prints the host zone — then converted to epoch-ms).
+#[must_use]
+pub fn observe_pid(pid: u32) -> PidObservation {
+    let out = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output();
+    let Ok(out) = out else {
+        return PidObservation::default();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || text.is_empty() {
+        return PidObservation::default();
+    }
+    PidObservation {
+        alive: true,
+        started_epoch_ms: parse_lstart_local(&text),
+    }
+}
+
+/// Parse a `LC_ALL=C ps -o lstart` value ("Thu Aug 20 19:53:18 2026") as host
+/// LOCAL time into epoch-ms. `%e` absorbs the padded day asctime uses.
+fn parse_lstart_local(s: &str) -> Option<i64> {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDateTime::parse_from_str(s.trim(), "%a %b %e %H:%M:%S %Y").ok()?;
+    // On a DST fold prefer the earliest mapping; ambiguity within the gate's
+    // 2s tolerance is not reachable in practice.
+    chrono::Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// Map a LIVE probe to the three-way [`Resolution`] the resolve loop already
@@ -229,14 +274,16 @@ mod tests {
             status: status.into(),
             waiting_for: None,
             status_updated_at: updated_at,
-            proc_start: "Fri Aug  7 10:35:33 2026".into(),
+            started_at: 1_786_098_934_524,
         }
     }
 
     fn live() -> PidObservation {
         PidObservation {
             alive: true,
-            proc_start: Some("Fri Aug  7 10:35:33 2026".into()),
+            // 900ms off the recorded instant: inside the 2s tolerance, the
+            // sub-second rounding ps introduces.
+            started_epoch_ms: Some(1_786_098_935_424),
         }
     }
 
@@ -246,7 +293,7 @@ mod tests {
         assert_eq!(p.pid, 29266);
         assert_eq!(p.status, "waiting");
         assert_eq!(p.waiting_for.as_deref(), Some("input needed"));
-        assert_eq!(p.proc_start, "Fri Aug  7 10:35:33 2026");
+        assert_eq!(p.started_at, 1786098934524);
         assert_eq!(p.status_updated_at, 1786106681993);
     }
 
@@ -257,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn liveness_requires_alive_pid_and_exact_proc_start() {
+    fn liveness_requires_alive_pid_and_matching_start_instant() {
         let p = probe("busy", 1);
-        assert!(probe_is_live(&p, &live()));
+        assert!(probe_is_live(&p, &live()), "within tolerance is live");
         // Dead pid.
         assert!(!probe_is_live(
             &p,
@@ -268,12 +315,12 @@ mod tests {
                 ..live()
             }
         ));
-        // Recycled pid: alive but a different start time.
+        // Recycled pid: alive but started at a different instant (> 2s off).
         assert!(!probe_is_live(
             &p,
             &PidObservation {
                 alive: true,
-                proc_start: Some("Sat Aug  8 09:00:00 2026".into())
+                started_epoch_ms: Some(1_786_098_934_524 + 60_000)
             }
         ));
         // Unreadable start time reads as NOT live, never "probably fine".
@@ -281,19 +328,44 @@ mod tests {
             &p,
             &PidObservation {
                 alive: true,
-                proc_start: None
+                started_epoch_ms: None
             }
         ));
         // A probe with no recorded start can never pass the gate.
         let mut blank = p;
-        blank.proc_start = String::new();
+        blank.started_at = 0;
         assert!(!probe_is_live(
             &blank,
             &PidObservation {
                 alive: true,
-                proc_start: Some(String::new())
+                started_epoch_ms: Some(0)
             }
         ));
+    }
+
+    #[test]
+    fn lstart_parses_as_local_time() {
+        // Genuine LC_ALL=C ps shape, single-digit day padded by asctime.
+        assert!(parse_lstart_local("Fri Aug  7 10:35:33 2026").is_some());
+        assert!(parse_lstart_local("Thu Aug 20 19:53:18 2026").is_some());
+        assert!(parse_lstart_local("").is_none());
+        assert!(parse_lstart_local("not a date").is_none());
+    }
+
+    /// The whole gate against THIS live process: observe our own pid, write a
+    /// probe naming it, and the gate must pass genuinely end to end.
+    #[test]
+    fn gate_passes_against_the_real_running_process() {
+        let me = std::process::id();
+        let obs = observe_pid(me);
+        assert!(obs.alive, "the test's own pid must be alive");
+        let started = obs.started_epoch_ms.expect("own lstart must parse");
+        let mut p = probe("busy", 1);
+        p.pid = me;
+        p.started_at = started;
+        assert!(probe_is_live(&p, &obs));
+        // And a dead pid observes as such (pid 2^30 is far above pid_max).
+        assert!(!observe_pid(1_073_741_824).alive);
     }
 
     #[test]
