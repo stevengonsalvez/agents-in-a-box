@@ -8805,11 +8805,15 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     // version over it would silence the very skew warning `status` exists to
     // print. Best-effort: a write failure must not fail the start (the skew
     // check just degrades to "unknown").
-    // Only when OUR child is the daemon now serving. `exited.is_none()` is not
-    // that test: a child still alive at the probe may be a slow starter that
-    // goes on to lose the lock, and stamping our version over the incumbent's
-    // silences the very skew warning `status` exists to print.
-    if owner == Some(child.id()) {
+    // Only when OUR child is the daemon this start recorded. That is the child
+    // holding the lock at the probe, OR the no-owner fallback above: with no
+    // lock on disk there is no incumbent whose stamp we could clobber, and the
+    // pid file we just wrote names the child, so the stamp must match it. A
+    // probe that merely finds the child still alive is NOT enough when someone
+    // ELSE holds the lock: a slow starter can go on to lose the race, and
+    // stamping our version over the incumbent's silences the very skew warning
+    // `status` exists to print.
+    if owner == Some(child.id()) || (owner.is_none() && exited.is_none()) {
         if let Ok(vpath) = daemon_version_path() {
             std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
         }
