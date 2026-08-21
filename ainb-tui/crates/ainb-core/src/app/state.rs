@@ -3148,6 +3148,16 @@ pub struct AppState {
     /// plugin screen) reads as `false`.
     pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
 
+    /// Last `plugin/render` failure per plugin-owned screen id, as reported by
+    /// the render oneshot that `tick_plugin_renders` now keeps instead of
+    /// dropping. Set on `RenderOutcome::RuntimeError` / `PluginError`, cleared
+    /// the moment a frame renders successfully.
+    ///
+    /// `PluginScreen::render` paints this instead of the "connecting…"
+    /// placeholder, which is the difference between a screen that explains it
+    /// cannot start the plugin and one that claims to be loading forever.
+    pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
+
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
     /// installs that haven't completed bundled-plugin discovery yet).
@@ -3671,6 +3681,7 @@ impl Default for AppState {
             plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_captures_text: std::collections::HashMap::new(),
+            plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
 
             statusline_status_cache: None,
@@ -11640,6 +11651,22 @@ pub struct App {
     /// `None` until [`App::init`] runs, or when no provider dir is
     /// watchable — the burndown then keeps its press-`r` refresh behaviour.
     usage_dir_watcher: Option<crate::models::usage_dir_watcher::UsageDirWatcher>,
+    /// In-flight `plugin/render` outcome receivers, keyed by screen id.
+    ///
+    /// The frame itself comes back via `RuntimeHandle::try_recv_render`, so
+    /// this oneshot used to be dropped on the spot — which threw away the
+    /// FAILURE half of the result. A lazy plugin whose subprocess can no
+    /// longer be spawned answers every kick with
+    /// `RenderOutcome::RuntimeError`, and with the receiver dropped that
+    /// error went nowhere: the screen sat on "connecting…" forever while
+    /// key and mouse events were silently dropped (`child.is_none()`).
+    /// Holding the receiver for one tick and polling it with `try_recv`
+    /// keeps `tick_plugin_renders` synchronous while letting the failure
+    /// reach `state.plugin_render_errors` and the user.
+    plugin_render_outcomes: std::collections::HashMap<
+        crate::app::screens::ScreenId,
+        tokio::sync::oneshot::Receiver<ainb_plugin_runtime::RenderOutcome>,
+    >,
 }
 
 impl App {
@@ -11648,6 +11675,7 @@ impl App {
             state: AppState::new(),
             plugin_runtime_owner: None,
             usage_dir_watcher: None,
+            plugin_render_outcomes: std::collections::HashMap::new(),
         }
     }
 
@@ -11720,6 +11748,14 @@ impl App {
             if handle.lifecycle_state(&pid).is_none() {
                 continue;
             }
+
+            // Collect the previous kick's outcome before issuing another one.
+            // Only the failure half matters here (the frame arrives via
+            // `try_recv_render` above), and it MUST be collected: a lazy
+            // plugin whose binary is gone answers every kick with
+            // `RuntimeError`, and dropping that receiver is what left the
+            // screen on "connecting…" indefinitely with no log line.
+            self.collect_plugin_render_outcome(screen_id);
 
             // Drain the cached frame (if any) into the screen map. The
             // plugin task pushes a fresh frame each time it returns from
@@ -11810,11 +11846,56 @@ impl App {
                 .insert((*screen_id).to_string(), (width, height));
 
             let viewport = ainb_plugin_runtime::Viewport { width, height };
-            // Returned oneshot is intentionally dropped — the cache
-            // pickup happens via `try_recv_render` next tick.
-            let _ = handle.render(&pid, viewport, 0);
+            // The frame lands in the cache for `try_recv_render`; the
+            // returned oneshot carries the outcome, and specifically the
+            // failure case that cache can never represent. Park it until
+            // the next tick's `collect_plugin_render_outcome`.
+            let rx = handle.render(&pid, viewport, 0);
+            self.plugin_render_outcomes.insert((*screen_id).to_string(), rx);
         }
         drained
+    }
+
+    /// Poll the parked `plugin/render` oneshot for `screen_id`, recording any
+    /// failure in `state.plugin_render_errors` (and clearing it on success).
+    ///
+    /// Non-blocking by construction — `try_recv` never awaits, so
+    /// `tick_plugin_renders` stays synchronous per its `build.rs`-enforced
+    /// contract. A receiver that is still `Empty` is put back so a slow render
+    /// is judged on the tick it actually completes, not abandoned.
+    fn collect_plugin_render_outcome(&mut self, screen_id: &str) {
+        use ainb_plugin_runtime::RenderOutcome;
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let Some(mut rx) = self.plugin_render_outcomes.remove(screen_id) else {
+            return;
+        };
+        let message = match rx.try_recv() {
+            Ok(RenderOutcome::Ok(_)) => {
+                self.state.plugin_render_errors.remove(screen_id);
+                return;
+            }
+            Ok(RenderOutcome::RuntimeError(e)) => e,
+            Ok(RenderOutcome::PluginError { code, message }) => {
+                format!("{message} (code {code})")
+            }
+            Err(TryRecvError::Empty) => {
+                // Still rendering. Keep waiting rather than treating a slow
+                // frame as a failure.
+                self.plugin_render_outcomes.insert(screen_id.to_string(), rx);
+                return;
+            }
+            // Sender dropped without answering: the plugin task is gone.
+            Err(TryRecvError::Closed) => "plugin task stopped without answering".to_string(),
+        };
+
+        // Log once per distinct message so a failing screen doesn't spam the
+        // log at tick cadence while the user sits on it.
+        let is_new = self.state.plugin_render_errors.get(screen_id) != Some(&message);
+        if is_new {
+            warn!(screen = %screen_id, error = %message, "plugin render failed");
+        }
+        self.state.plugin_render_errors.insert(screen_id.to_string(), message);
     }
 
     pub async fn init(&mut self) {
@@ -12396,6 +12477,47 @@ mod plugin_render_gate_tests {
         assert!(
             handle.take_render_dirty(&PluginId::from("burndown")),
             "unfocused plugin must stay dirty for its deferred first paint"
+        );
+
+        runtime.shutdown();
+    }
+
+    /// A lazy plugin only execs its binary on first use, so one that vanished
+    /// after discovery (`brew upgrade` deleting the keg a running TUI was
+    /// launched from) fails at the render kick. The render oneshot used to be
+    /// dropped, so that failure reached nobody: the screen sat on
+    /// "connecting…" forever while key and mouse events were dropped. The
+    /// outcome must land in `plugin_render_errors` for the placeholder to
+    /// paint instead.
+    #[test]
+    fn unspawnable_plugin_records_a_render_error() {
+        // `app_with_plugins` registers against /nonexistent/plugin-binary,
+        // which is exactly the post-upgrade state.
+        let (runtime, mut app) = app_with_plugins(&["learnings"]);
+
+        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+
+        // First tick kicks the render; the spawn attempt and its failure
+        // happen on the runtime's executor, so poll a bounded number of
+        // ticks for the outcome rather than assuming one is enough.
+        let mut recorded = None;
+        for _ in 0..200 {
+            app.tick_plugin_renders();
+            if let Some(err) = app.state.plugin_render_errors.get(ids::LEARNINGS) {
+                recorded = Some(err.clone());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let err = recorded.expect(
+            "a plugin whose binary cannot be spawned must record a render error, \
+             not leave the screen on the loading placeholder forever",
+        );
+        assert!(
+            !err.is_empty(),
+            "the recorded render error must carry a message to show the user"
         );
 
         runtime.shutdown();

@@ -759,6 +759,18 @@ impl PluginTask {
         let mut child = match spawn_plugin(&self.plugin.binary_path) {
             Ok(c) => c,
             Err(e) => {
+                // Loud on purpose. A lazy plugin only execs its binary on
+                // first use, so a binary that vanished after discovery (the
+                // classic case: `brew upgrade` deleting the keg a still-running
+                // TUI was launched from) fails here and nowhere else. The
+                // caller's error goes to a oneshot the render tick may drop,
+                // so without this line the whole failure is invisible.
+                warn!(
+                    plugin = %self.plugin.id,
+                    binary = %self.plugin.binary_path.display(),
+                    error = %e,
+                    "plugin spawn failed"
+                );
                 self.record_failure();
                 return Err(e);
             }
