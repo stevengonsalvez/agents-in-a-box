@@ -481,6 +481,16 @@ jobs:
               man1.install "share/man/man1/ainb.1" if File.exist?("share/man/man1/ainb.1")
               (bin/"ainb").write <<~WRAPPER
                 #!/bin/bash
+                # This value names a keg-versioned path, so an older install's
+                # export outlives the keg once `brew upgrade` deletes that
+                # Cellar directory. Inherited from a long-lived shell or a tmux
+                # server environment it then silently pointed the runtime at a
+                # directory that no longer exists, and every plugin screen came
+                # up empty. Drop a value that no longer resolves; a real
+                # user-set override still wins.
+                if [ -n "${AINB_PLUGIN_ROOT}" ] && [ ! -d "${AINB_PLUGIN_ROOT}" ]; then
+                  unset AINB_PLUGIN_ROOT
+                fi
                 export AINB_PLUGIN_ROOT="${AINB_PLUGIN_ROOT:-#{libexec}/plugins}"
                 exec "#{libexec}/ainb" "$@"
               WRAPPER
