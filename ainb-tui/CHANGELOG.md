@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.4] - 2026-08-21
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: address review of the blocking interview hook
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+
+### Documentation
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+
 ## [1.21.3] - 2026-08-20
 ### Added
 - Merge pull request #693 from stevengonsalvez/feat/daemon-version-health
