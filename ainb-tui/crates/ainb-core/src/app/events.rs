@@ -2968,7 +2968,46 @@ impl EventHandler {
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
     /// `GoToDaemons` saved, instead of hardcoding home (L2).
-    fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+    fn handle_daemons_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        let daemons = &mut state.daemons_state;
+        // Selection and the action menu are pure in-memory state, so they are
+        // applied here rather than routed through an AppEvent each. Nothing on
+        // this path touches disk, a socket, or a process — `Enter` only ARMS an
+        // action; the action itself runs on its own thread.
+        match key_event.code {
+            // Esc unwinds the innermost thing first: the error view, then the
+            // menu, and only then the screen. Popping straight out from under
+            // an open overlay is how a user loses the error they just opened.
+            KeyCode::Esc if daemons.has_overlay() => {
+                daemons.close_overlay();
+                return None;
+            }
+            KeyCode::Enter if daemons.has_overlay() => {
+                daemons.confirm_menu();
+                return None;
+            }
+            KeyCode::Enter => {
+                daemons.open_menu();
+                return None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if daemons.has_overlay() {
+                    daemons.move_menu(-1);
+                } else {
+                    daemons.move_selection(-1);
+                }
+                return None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if daemons.has_overlay() {
+                    daemons.move_menu(1);
+                } else {
+                    daemons.move_selection(1);
+                }
+                return None;
+            }
+            _ => {}
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
