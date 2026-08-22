@@ -317,7 +317,7 @@ struct FleetAnswerQueue: View {
             Text(question.header).font(.title3.weight(.semibold))
             Text(question.text).font(.body).fixedSize(horizontal: false, vertical: true)
             if deck.mirroredPicker {
-                Text("Claude picker is also open. Submit here to select the same answer there. Text answers unavailable.")
+                Text("Showing in Claude's own picker — answer it in the session. Hold the next one for Fleet with `ainb fleet interview surface fleet`.")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(FleetPalette.mint)
             }
@@ -327,7 +327,20 @@ struct FleetAnswerQueue: View {
                     .foregroundStyle(FleetPalette.mint)
             }
 
-            if question.options.isEmpty {
+            if deck.readOnlyPicker {
+                // Listed but not selectable: the question is answered in the
+                // session that owns the picker, not from here.
+                ForEach(question.options, id: \.self) { option in
+                    HStack {
+                        Image(systemName: question.multiSelect ? "square" : "circle")
+                        Text(option)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(FleetPalette.control, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .opacity(0.65)
+                }
+            } else if question.options.isEmpty {
                 TextField("Type answer", text: textBinding(deck: deck, question: question), axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(3...8)
@@ -370,9 +383,13 @@ struct FleetAnswerQueue: View {
                     }
                     .disabled(store.pendingIntentID != nil)
                 }
-                Button("Submit all answers") { submit(deck) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(deck.nativePicker || !complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
+                // Hidden, not just disabled, for a read-only deck: the daemon
+                // refuses these answers, so the button could never honour a click.
+                if !deck.readOnlyPicker {
+                    Button("Submit all answers") { submit(deck) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!complete(deck) || store.pendingIntentID != nil)
+                }
             }
 
             if let notice = store.controlNotice {
@@ -466,6 +483,15 @@ struct FleetInterviewDeck {
     let questions: [FleetInterviewQuestion]
     let nativePicker: Bool
     let mirroredPicker: Bool
+
+    /// Claude drew its own picker, so this deck can be READ here but not
+    /// answered here.
+    ///
+    /// Both stamps mean the same thing operationally — the interview was never
+    /// held, Claude owns that pane's stdin, and the daemon refuses answers for
+    /// either. They are kept as separate fields because they still describe
+    /// different origins, but every UI decision keys off this.
+    var readOnlyPicker: Bool { nativePicker || mirroredPicker }
 
     init?(session: FleetSession) {
         guard session.attention == .ask,
