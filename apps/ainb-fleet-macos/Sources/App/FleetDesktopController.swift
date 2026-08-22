@@ -635,6 +635,15 @@ private struct FleetNotchDetail: View {
                     .disabled(questionIndex + 1 >= deck.questions.count)
             }
             Spacer()
+            // The app can be deeplinked INTO (ainbfleet://session/<key>) but had
+            // no way to send you OUT, so a card named a pane you then had to go
+            // find. `ainb fleet open-terminal` owns the terminal choice, from
+            // config.toml [fleet] terminal, so this stays a one-line call.
+            if let target = session.tmuxTarget, !target.isEmpty {
+                Button("Open session") { openSession(target) }
+                    .font(.caption)
+                    .help("Attach to this session in a terminal window")
+            }
             if session.capabilities.structuredDismiss {
                 Button("Reject", role: .destructive) { rejectConfirmation = true }
                     .font(.caption)
@@ -643,6 +652,30 @@ private struct FleetNotchDetail: View {
                 .buttonStyle(.borderedProminent)
                 .font(.caption)
                 .disabled(!complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
+        }
+    }
+
+    /// Attach to a session in a real terminal window.
+    ///
+    /// Shells out rather than reimplementing the launch: which terminal to use
+    /// is a setting (`[fleet] terminal`), and duplicating that resolution in
+    /// Swift would let the two drift. Failure is surfaced in `controlNotice`
+    /// for the same reason a failed delivery is — a button that silently does
+    /// nothing is worse than one that says why.
+    private func openSession(_ tmuxTarget: String) {
+        let candidates = ["/opt/homebrew/bin/ainb", "/usr/local/bin/ainb"]
+        guard let binary = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        else {
+            store.reportControlNotice("Open session failed: ainb not found on this machine.")
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["fleet", "open-terminal", tmuxTarget]
+        do {
+            try process.run()
+        } catch {
+            store.reportControlNotice("Open session failed: \(error.localizedDescription)")
         }
     }
 

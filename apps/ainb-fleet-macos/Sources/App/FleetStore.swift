@@ -1088,6 +1088,15 @@ final class FleetStore: ObservableObject {
         }
     }
 
+    /// Surface a message from a caller that is not itself a store action.
+    ///
+    /// `controlNotice` stays `private(set)` so the store keeps ownership of what
+    /// the operator is told; this is the one narrow door, used by side actions
+    /// like "Open session" whose failure must not be silent.
+    func reportControlNotice(_ message: String) {
+        controlNotice = message
+    }
+
     private func record(_ receipt: FleetActionReceipt) {
         record([receipt])
     }
