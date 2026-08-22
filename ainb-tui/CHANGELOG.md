@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.6] - 2026-08-22
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+
 ## [1.21.3] - 2026-08-20
 ### Added
 - Merge pull request #693 from stevengonsalvez/feat/daemon-version-health
