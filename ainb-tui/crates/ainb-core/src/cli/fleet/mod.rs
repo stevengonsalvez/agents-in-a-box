@@ -20,8 +20,10 @@ pub mod cost;
 pub mod daemon;
 pub mod daemons;
 pub mod enrich_cache;
+pub mod interview;
 pub mod msg;
 pub mod needs;
+pub mod open_terminal;
 pub mod runtime;
 pub mod sequence;
 pub mod standup;
@@ -36,6 +38,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
             )
             .await
         }
+        Some(("interview", sub)) => interview::execute(sub, format).await,
+        Some(("open-terminal", sub)) => open_terminal::execute(sub),
         Some(("deny", sub)) => {
             approve::execute(sub, format, ainb_plugin_notifyd::broker::DecisionKind::Deny).await
         }

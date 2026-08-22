@@ -448,11 +448,92 @@ pub struct PluginsConfig {
 /// Currently only carries cost budget caps; reserved as the home for
 /// future fleet-wide knobs so they share one `[fleet]` table in
 /// `config.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FleetConfig {
     /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
     #[serde(default)]
     pub cost: CostBudgetConfig,
+    /// Which surface answers Claude interviews. See [`InterviewConfig`].
+    #[serde(default)]
+    pub interview: InterviewConfig,
+    /// Terminal the macOS Fleet app opens when you jump to a session.
+    ///
+    /// `warp` | `iterm` | `ghostty` | `terminal`. Defaults to `warp`; the macOS
+    /// default handler would almost always be Terminal.app, which lands you in
+    /// the wrong terminal.
+    /// `Option` for the same presence reason as [`InterviewConfig::surface`].
+    #[serde(default)]
+    pub terminal: Option<String>,
+}
+
+fn default_fleet_terminal() -> &'static str {
+    "warp"
+}
+
+impl Default for FleetConfig {
+    fn default() -> Self {
+        Self {
+            cost: CostBudgetConfig::default(),
+            interview: InterviewConfig::default(),
+            terminal: None,
+        }
+    }
+}
+
+/// Where an `AskUserQuestion` is answered.
+///
+/// `native` (the DEFAULT) lets Claude draw its own picker immediately and
+/// mirrors a read-only card into Fleet. `fleet` makes the PreToolUse hook HOLD
+/// the tool call so Fleet or the macOS app can answer it as exact JSON, with no
+/// synthetic keystrokes — at the cost of suppressing the terminal picker until
+/// someone answers or releases it.
+///
+/// Native is the default deliberately: holding is the more powerful mode but it
+/// strands an operator who is sitting at the terminal, so it is opted into
+/// rather than inherited.
+///
+/// Example `config.toml`:
+/// ```toml
+/// [fleet.interview]
+/// surface = "native"   # or "fleet" to hold for remote answering
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterviewConfig {
+    /// `"native"` or `"fleet"`. Unrecognised values read as `"native"`, so a
+    /// typo can never silently start holding tool calls.
+    ///
+    /// `Option` so the merge can tell "this layer said native" from "this layer
+    /// said nothing". Comparing against the default cannot: a project config
+    /// explicitly setting `native` would be indistinguishable from an absent
+    /// section and would lose to a user config saying `fleet`.
+    #[serde(default)]
+    pub surface: Option<String>,
+}
+
+fn default_interview_surface() -> String {
+    "native".to_string()
+}
+
+impl Default for InterviewConfig {
+    fn default() -> Self {
+        Self { surface: None }
+    }
+}
+
+impl FleetConfig {
+    /// The effective terminal token, applying the `warp` default.
+    #[must_use]
+    pub fn terminal_token(&self) -> &str {
+        self.terminal.as_deref().unwrap_or(default_fleet_terminal())
+    }
+}
+
+impl InterviewConfig {
+    /// The effective surface token, applying the `native` default.
+    #[must_use]
+    pub fn surface_token(&self) -> &str {
+        self.surface.as_deref().unwrap_or("native")
+    }
 }
 
 /// Spend ceilings consumed by `ainb fleet cost`.
@@ -1051,6 +1132,16 @@ impl AppConfig {
         // intact.
         if !other.fleet.cost.is_empty() {
             self.fleet.cost = other.fleet.cost;
+        }
+        // `merge_loaded` is a hand-written field-by-field merge, so a struct
+        // field that is not named here is silently DROPPED no matter what the
+        // file says. An unset section deserializes to the default, so only a
+        // non-default value counts as "the file set this".
+        if other.fleet.interview.surface.is_some() {
+            self.fleet.interview = other.fleet.interview.clone();
+        }
+        if other.fleet.terminal.is_some() {
+            self.fleet.terminal.clone_from(&other.fleet.terminal);
         }
 
         // Pool settings: trust the loaded layer whenever it differs from the

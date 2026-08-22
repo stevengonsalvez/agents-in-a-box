@@ -1441,6 +1441,109 @@ fn extract_permission_context(payload: &str) -> String {
 }
 
 /// Where the saved tmux window name is parked while an interview banner is up.
+/// Which surface owns the next interview for a session.
+///
+/// DEFAULT IS NATIVE, deliberately. Holding the tool call is the powerful mode
+/// but it suppresses Claude's own picker, so a session whose operator is at the
+/// terminal would stare at a banner instead of a question. Native costs nothing
+/// and never strands anyone; Fleet-hold is opted into per session (or globally)
+/// by whoever actually wants to answer from another surface.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterviewSurface {
+    /// Claude draws its own picker immediately; Fleet gets a mirrored card.
+    Native,
+    /// The hook holds the tool call so Fleet/macOS can answer as exact JSON.
+    Fleet,
+}
+
+impl InterviewSurface {
+    /// Parse a stored token. Anything unrecognised is NATIVE: a corrupt or
+    /// half-written file must never silently start holding tool calls.
+    fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "fleet" => Self::Fleet,
+            _ => Self::Native,
+        }
+    }
+
+    /// The token written to disk.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Fleet => "fleet",
+        }
+    }
+}
+
+/// Directory holding the surface preference: one file per session id, plus a
+/// `default` file for the global setting.
+#[must_use]
+pub fn interview_surface_dir(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("fleet").join("interview-surface")
+}
+
+/// Resolve the surface for `session_id`: per-session override, else the global
+/// default, else [`InterviewSurface::Native`].
+///
+/// Two small file reads, no TOML parse — this runs on EVERY `AskUserQuestion`
+/// and must not become a cost on the hook path.
+#[must_use]
+pub fn interview_surface(home: &std::path::Path, session_id: &str) -> InterviewSurface {
+    let dir = interview_surface_dir(home);
+    if !session_id.is_empty() {
+        if let Ok(raw) = std::fs::read_to_string(dir.join(sanitize_surface_key(session_id))) {
+            return InterviewSurface::parse(&raw);
+        }
+    }
+    // The GLOBAL default lives in config.toml (`[fleet.interview] surface`), not
+    // a hidden state file, so it sits visible beside every other setting. Only
+    // the per-session override above stays runtime state: it is ephemeral and
+    // keyed by uuid, which does not belong in a config file.
+    crate::config::AppConfig::load().map_or(InterviewSurface::Native, |config| {
+        InterviewSurface::parse(config.fleet.interview.surface_token())
+    })
+}
+
+/// Persist the surface for a session id, or for the global default when
+/// `session_id` is `None`.
+///
+/// # Errors
+/// Returns an [`std::io::Error`] if the directory or file cannot be written.
+pub fn set_interview_surface(
+    home: &std::path::Path,
+    session_id: Option<&str>,
+    surface: InterviewSurface,
+) -> std::io::Result<()> {
+    let Some(session_id) = session_id else {
+        // Global default: persist into config.toml so `ainb fleet interview
+        // surface fleet` is visible in the same file the user already edits.
+        let mut config = crate::config::AppConfig::load()
+            .map_err(|e| std::io::Error::other(format!("loading config: {e}")))?;
+        config.fleet.interview.surface = Some(surface.token().to_string());
+        return config.save().map_err(|e| std::io::Error::other(format!("saving config: {e}")));
+    };
+    let dir = interview_surface_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(sanitize_surface_key(session_id)), surface.token())
+}
+
+/// A session id is used as a FILE NAME here, so anything that could escape the
+/// directory or collide is replaced. Ids are UUID-shaped in practice; this is a
+/// guard, not a transformation anyone should depend on.
+fn sanitize_surface_key(session_id: &str) -> String {
+    session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn interview_banner_state(home: &std::path::Path) -> Option<std::path::PathBuf> {
     let pane = std::env::var("TMUX_PANE").ok().filter(|value| !value.is_empty())?;
     let key = blake3::hash(pane.as_bytes()).to_hex();
@@ -1479,7 +1582,25 @@ const fn tmux_banner_enabled() -> bool {
 /// Silent on every failure. A session outside tmux, or a tmux that refuses the
 /// rename, must still get its interview — an indication is worth nothing if its
 /// absence can block the answer path.
-fn announce_pending_interview(home: &std::path::Path, questions: &[serde_json::Value]) {
+/// The provider session id whose interview is being held in THIS tmux pane.
+///
+/// `prefix + A` runs inside the held pane and must release that pane's own
+/// interview, not "the only one held" — with two held at once the latter frees
+/// somebody else's question into a terminal nobody is watching. The hook is the
+/// only party that knows both facts at once, so it records the pairing here.
+#[must_use]
+pub fn pane_held_session(home: &std::path::Path) -> Option<String> {
+    let path = interview_banner_state(home)?.with_extension("session");
+    let id = std::fs::read_to_string(path).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+fn announce_pending_interview(
+    home: &std::path::Path,
+    session_id: &str,
+    questions: &[serde_json::Value],
+) {
     if !tmux_banner_enabled() {
         return;
     }
@@ -1502,27 +1623,72 @@ fn announce_pending_interview(home: &std::path::Path, questions: &[serde_json::V
     // Save the current name AND the automatic-rename setting, so the wait does
     // not permanently freeze a window that was tracking its running program.
     if let Some(path) = interview_banner_state(home) {
-        if let Ok(out) = std::process::Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &pane,
-                "-F",
-                "#{window_name}\t#{automatic-rename}",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+        // NEVER overwrite an existing record. A hook that died without clearing
+        // (pane closed, session interrupted, hook killed) leaves the banner in
+        // place; capturing it again would record "[ASK>FLEET] …" and the yellow
+        // style AS the previous state, and the next clear would restore those
+        // permanently.
+        if !path.exists() {
+            if let Ok(out) = std::process::Command::new("tmux")
+                .args([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pane,
+                    "-F",
+                    "#{window_name}\t#{automatic-rename}",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    // `#{window-status-style}` reports the EFFECTIVE (inherited)
+                    // value, not "set at window scope", so restoring from it would
+                    // pin an explicit window-level style and stop the window
+                    // following later theme changes. `show-window-options` prints
+                    // nothing when the option is unset, which is the distinction.
+                    let style = std::process::Command::new("tmux")
+                        .args(["show-window-options", "-t", &pane, "window-status-style"])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    let style = style
+                        .split_once(' ')
+                        .map_or(String::new(), |(_, value)| value.trim().to_string());
+                    let _ = std::fs::write(
+                        &path,
+                        format!("{}\t{}", String::from_utf8_lossy(&out.stdout).trim(), style),
+                    );
+                    let _ = std::fs::write(path.with_extension("session"), session_id);
                 }
-                let _ = std::fs::write(&path, String::from_utf8_lossy(&out.stdout).trim());
             }
         }
     }
+    // Name the SURFACE, not just the fact of a question: this banner only ever
+    // appears while the hook is holding for Fleet, and "[ASK]" alone left the
+    // operator guessing whether to answer here or somewhere else.
     let _ = std::process::Command::new("tmux")
-        .args(["rename-window", "-t", &pane, &format!("[ASK] {header}")])
+        .args([
+            "rename-window",
+            "-t",
+            &pane,
+            &format!("[ASK>FLEET] {header}"),
+        ])
+        .status();
+    // Light the window up in the status bar. A rename alone is easy to scan
+    // past in a bar full of windows; a colour change is not.
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "set-window-option",
+            "-t",
+            &pane,
+            "window-status-style",
+            "fg=black,bg=yellow,bold",
+        ])
         .status();
     let _ = std::process::Command::new("tmux")
         .args([
@@ -1555,20 +1721,46 @@ fn clear_pending_interview_banner(home: &std::path::Path) {
         return;
     };
     if let Ok(saved) = std::fs::read_to_string(&path) {
-        let mut fields = saved.trim().splitn(2, '\t');
+        let mut fields = saved.trim().splitn(3, '\t');
         let previous = fields.next().unwrap_or_default();
         let automatic = fields.next().unwrap_or_default();
+        let style = fields.next().unwrap_or_default();
         if !previous.is_empty() {
             let _ = std::process::Command::new("tmux")
                 .args(["rename-window", "-t", &pane, previous])
                 .status();
         }
-        if automatic == "on" {
+        if automatic == "1" {
             let _ = std::process::Command::new("tmux")
                 .args(["set-window-option", "-t", &pane, "automatic-rename", "on"])
                 .status();
         }
+        // Put the status style back. An empty capture means the window had no
+        // explicit style, so the option is UNSET rather than set to "" — the
+        // latter would pin an empty style and stop it inheriting the theme.
+        let _ = if style.is_empty() {
+            std::process::Command::new("tmux")
+                .args([
+                    "set-window-option",
+                    "-t",
+                    &pane,
+                    "-u",
+                    "window-status-style",
+                ])
+                .status()
+        } else {
+            std::process::Command::new("tmux")
+                .args([
+                    "set-window-option",
+                    "-t",
+                    &pane,
+                    "window-status-style",
+                    style,
+                ])
+                .status()
+        };
     }
+    let _ = std::fs::remove_file(path.with_extension("session"));
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1915,7 +2107,11 @@ fn hook_core_for_agent(
         // The CARD is still written for everyone: the hooks are installed
         // globally and a non-member's interview should still be visible to
         // Fleet, just answerable by the keystroke transport rather than held.
-        if !is_fleet_member {
+        // NATIVE IS THE DEFAULT. Holding is opt-in per session (or globally)
+        // via `ainb fleet interview surface`, and only ever for fleet members.
+        // A non-member, or a session left on the default, keeps Claude's own
+        // picker and gets a mirrored card so Fleet can still see and answer it.
+        if !is_fleet_member || interview_surface(home, session_id) != InterviewSurface::Fleet {
             append_event_with(Some("mirrored"));
             return Ok(None);
         }
@@ -1941,7 +2137,7 @@ fn hook_core_for_agent(
             return Ok(None);
         }
         append_event_with(None);
-        announce_pending_interview(home, &questions);
+        announce_pending_interview(home, session_id, &questions);
         let resolution = ainb_plugin_notifyd::broker::client_await_structured(
             &socket,
             session_id,
@@ -3212,6 +3408,56 @@ mod tests {
     }
 
     #[test]
+    fn native_is_the_configured_default_surface() {
+        // Pinned WITHOUT touching the filesystem. `interview_surface` falls back
+        // to the real `AppConfig::load()`, so asserting the default through it
+        // reads the developer's own config.toml and fails on any machine that
+        // has opted into fleet — which is exactly how this test first broke.
+        // Absent, not "native": the merge needs to tell "unset" from "set to
+        // native", and the default is applied by surface_token().
+        assert_eq!(crate::config::InterviewConfig::default().surface, None);
+        assert_eq!(
+            crate::config::InterviewConfig::default().surface_token(),
+            "native"
+        );
+    }
+
+    #[test]
+    fn a_per_session_surface_overrides_whatever_the_global_default_is() {
+        let home = TempDir::new().unwrap();
+        let global = super::interview_surface(home.path(), "");
+        super::set_interview_surface(home.path(), Some("sess-a"), super::InterviewSurface::Fleet)
+            .unwrap();
+        assert_eq!(
+            super::interview_surface(home.path(), "sess-a"),
+            super::InterviewSurface::Fleet
+        );
+        // Per-session, not global: a sibling session still follows the default.
+        assert_eq!(super::interview_surface(home.path(), "sess-b"), global);
+        // And it flips back.
+        super::set_interview_surface(home.path(), Some("sess-a"), super::InterviewSurface::Native)
+            .unwrap();
+        assert_eq!(
+            super::interview_surface(home.path(), "sess-a"),
+            super::InterviewSurface::Native
+        );
+    }
+
+    #[test]
+    fn unrecognised_surface_token_reads_as_native() {
+        // A truncated or hand-edited value must never silently start holding
+        // tool calls.
+        let home = TempDir::new().unwrap();
+        let dir = super::interview_surface_dir(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sess-c"), "flee").unwrap();
+        assert_eq!(
+            super::interview_surface(home.path(), "sess-c"),
+            super::InterviewSurface::Native
+        );
+    }
+
+    #[test]
     fn ask_hook_from_a_non_member_session_never_blocks_but_still_persists_a_card() {
         // An unrelated `claude` on a host that merely has ainb-hooks installed
         // must keep its native picker. Holding its tool call would suppress the
@@ -3385,6 +3631,14 @@ mod tests {
             }
         });
         let original_questions = payload["tool_input"]["questions"].clone();
+        // Native is the DEFAULT, so this session has to opt into fleet-hold or
+        // the hook returns immediately and there is nothing to answer.
+        super::set_interview_surface(
+            home.path(),
+            Some("ask-session"),
+            super::InterviewSurface::Fleet,
+        )
+        .unwrap();
         let hook_home = home.path().to_path_buf();
         let hook_cwd = cwd.clone();
         let hook_payload = payload.to_string();

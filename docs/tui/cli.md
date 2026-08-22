@@ -2018,28 +2018,30 @@ Fleet orchestration: standup / broadcast / sequence / needs / cost / runtime / d
 Usage: ainb fleet [OPTIONS] <COMMAND>
 
 Commands:
-  approve       Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
-  deny          Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
-  standup       Live fleet status: every claude session across ainb + peers + bg jobs
-  broadcast     Send one prompt to selected sessions (peers-first, tmux fallback)
-  msg           Chat bus: persisted messages with per-recipient delivery receipts
-  acp           ACP sessions: daemon-owned headless agents that answer on the chat bus
-  transcript    Page or follow one session's full execution transcript
-  channel       Chat channels: a named scope with a recipient set
-  copilot       The fleet copilot session's per-session adapter config
-  confirm       Guardrail confirm cards: copilot tool calls held for a human
-  activity      The append-only copilot activity feed
-  sequence      Ordered prompts with ack between steps
-  needs         Center control panel — sessions blocked on input / errors / idle / waiting
-  archived      Sessions the daemon retired out of the live roster (still browsable)
-  cost          Per-session / model / day / group spend rollups + budget caps
-  daemon        Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
-  daemons       Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
-  runtime       Install the standalone Fleet daemon and provider hooks
-  atc           Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
-  bridge        Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
-  enrich-cache  Content-addressed enrich cache (the producer's write path)
-  help          Print this message or the help of the given subcommand(s)
+  approve        Approve a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
+  deny           Deny a session's pending permission request (no arg: list every waiter with worktree, tool, input and age)
+  interview      Claude interviews: which surface answers them, and release a held one
+  open-terminal  Attach to a session in a real terminal window (terminal from config.toml [fleet] terminal)
+  standup        Live fleet status: every claude session across ainb + peers + bg jobs
+  broadcast      Send one prompt to selected sessions (peers-first, tmux fallback)
+  msg            Chat bus: persisted messages with per-recipient delivery receipts
+  acp            ACP sessions: daemon-owned headless agents that answer on the chat bus
+  transcript     Page or follow one session's full execution transcript
+  channel        Chat channels: a named scope with a recipient set
+  copilot        The fleet copilot session's per-session adapter config
+  confirm        Guardrail confirm cards: copilot tool calls held for a human
+  activity       The append-only copilot activity feed
+  sequence       Ordered prompts with ack between steps
+  needs          Center control panel — sessions blocked on input / errors / idle / waiting
+  archived       Sessions the daemon retired out of the live roster (still browsable)
+  cost           Per-session / model / day / group spend rollups + budget caps
+  daemon         Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+  daemons        Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
+  runtime        Install the standalone Fleet daemon and provider hooks
+  atc            Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
+  bridge         Native phone bridge (Telegram + Slack): relay messages two-way to ainb sessions
+  enrich-cache   Content-addressed enrich cache (the producer's write path)
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -2097,6 +2099,97 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --reason <reason>  Optional reason relayed to the agent with the decision [default: ""]
       --full             When listing, print the complete tool input and cwd, not a preview
+  -h, --help             Print help
+```
+
+### `ainb fleet interview`
+
+Claude interviews: which surface answers them, and release a held one
+
+```console
+$ ainb fleet interview --help
+Claude interviews: which surface answers them, and release a held one
+
+Usage: ainb fleet interview [OPTIONS] <COMMAND>
+
+Commands:
+  list     Interviews currently held open, with their fingerprints
+  release  Hand a held interview back to Claude's own picker in the terminal
+  surface  Where interviews are answered (config.toml [fleet.interview]). Default: native
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet interview list`
+
+Interviews currently held open, with their fingerprints
+
+```console
+$ ainb fleet interview list --help
+Interviews currently held open, with their fingerprints
+
+Usage: ainb fleet interview list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet interview release`
+
+Hand a held interview back to Claude's own picker in the terminal
+
+```console
+$ ainb fleet interview release --help
+Hand a held interview back to Claude's own picker in the terminal
+
+Usage: ainb fleet interview release [OPTIONS] [session]
+
+Arguments:
+  [session]  Provider session id (see `ainb fleet interview list`)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet interview surface`
+
+Where interviews are answered (config.toml [fleet.interview]). Default: native
+
+```console
+$ ainb fleet interview surface --help
+Where interviews are answered (config.toml [fleet.interview]). Default: native
+
+Usage: ainb fleet interview surface [OPTIONS] [mode]
+
+Arguments:
+  [mode]  native = picker shows immediately; fleet = hold for Fleet/macOS [possible values: native, fleet]
+
+Options:
+      --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
+      --session <session>  Apply to one session id instead of the global default
+  -h, --help               Print help
+```
+
+### `ainb fleet open-terminal`
+
+Attach to a session in a real terminal window (terminal from config.toml [fleet] terminal)
+
+```console
+$ ainb fleet open-terminal --help
+Attach to a session in a real terminal window (terminal from config.toml [fleet] terminal)
+
+Usage: ainb fleet open-terminal [OPTIONS] <target>
+
+Arguments:
+  <target>  tmux target, e.g. tmux_myrepo--f-thing--abcd1234_f_thing
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
 ```
 
