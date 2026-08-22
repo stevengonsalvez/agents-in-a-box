@@ -2028,10 +2028,14 @@ mod tests {
         ];
         annotate_bridge_config(
             &mut rows,
-            Some("/home/u/config.toml: config has no [fleet.bridge] table\n\nconfigure at least ONE channel"),
+            Some(
+                "/home/u/config.toml: config has no [fleet.bridge] table\n\nconfigure at least ONE channel",
+            ),
         );
         assert!(
-            rows[0].reason.contains("cannot start: /home/u/config.toml: config has no [fleet.bridge] table"),
+            rows[0]
+                .reason
+                .contains("cannot start: /home/u/config.toml: config has no [fleet.bridge] table"),
             "{}",
             rows[0].reason
         );
