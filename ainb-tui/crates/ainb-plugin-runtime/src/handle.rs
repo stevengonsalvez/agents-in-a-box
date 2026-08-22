@@ -249,6 +249,17 @@ impl RuntimeHandle {
     /// calls this once per plugin per tick and skips the render kick
     /// entirely when the result is `false` — turning the loop from a
     /// fixed-cadence render storm into an event-driven repaint.
+    /// True while this plugin's `plugin/render` is overrunning its budget.
+    ///
+    /// A plugin blocked inside its own render cannot service keys either — the
+    /// SDK holds one mutex across both. The host uses this to keep `q`/`Esc`
+    /// working on a wedged plugin screen instead of trapping the user there.
+    /// Clears as soon as the plugin answers a render again.
+    #[must_use]
+    pub fn render_wedged(&self, plugin_id: &PluginId) -> bool {
+        self.lookup(plugin_id).is_some_and(|p| p.render_wedged.load(Ordering::Acquire))
+    }
+
     pub fn take_render_dirty(&self, plugin_id: &PluginId) -> bool {
         self.lookup(plugin_id)
             .is_some_and(|p| p.render_dirty.swap(false, Ordering::AcqRel))
@@ -528,20 +539,21 @@ impl RuntimeHandle {
             arc.manifest.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Eager
         );
-        let (inbox, key_inbox, mouse_inbox, cache, state) = crate::plugin_task::spawn(
-            arc.clone(),
-            self.inner.snapshots.clone(),
-            self.inner.inboxes.clone(),
-            self.inner.dirty.clone(),
-            self.inner.event_streams.clone(),
-            self.inner.managed_subprocess.clone(),
-            self.inner.unix_sockets.clone(),
-            self.inner.secret_backend.clone(),
-            self.inner.workspace_store.clone(),
-            self.inner.log_tap.clone(),
-            self.inner.config,
-            &self.inner.tokio,
-        );
+        let (inbox, key_inbox, mouse_inbox, cache, state, render_wedged) =
+            crate::plugin_task::spawn(
+                arc.clone(),
+                self.inner.snapshots.clone(),
+                self.inner.inboxes.clone(),
+                self.inner.dirty.clone(),
+                self.inner.event_streams.clone(),
+                self.inner.managed_subprocess.clone(),
+                self.inner.unix_sockets.clone(),
+                self.inner.secret_backend.clone(),
+                self.inner.workspace_store.clone(),
+                self.inner.log_tap.clone(),
+                self.inner.config,
+                &self.inner.tokio,
+            );
         if eager {
             let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
         }
@@ -559,6 +571,7 @@ impl RuntimeHandle {
                 state,
                 plugin: arc,
                 render_dirty,
+                render_wedged,
             }),
         );
     }
