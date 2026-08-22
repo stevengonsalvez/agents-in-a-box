@@ -1328,7 +1328,7 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
                 .selected_key
                 .as_deref()
                 .and_then(|key| state.roster.iter().find(|row| row.session_key == key))
-                .is_some_and(native_claude_picker);
+                .is_some_and(read_only_picker);
             if let Some(intent) = release_structured_intent(state) {
                 return Some(intent);
             }
@@ -1500,8 +1500,9 @@ fn release_structured_intent(state: &mut FleetPaneState) -> Option<FleetIntent> 
         .selected_key
         .as_deref()
         .and_then(|key| state.roster.iter().find(|row| row.session_key == key))?;
-    if native_claude_picker(row) {
-        state.feedback = Some("Claude native picker route is unavailable".into());
+    if read_only_picker(row) {
+        state.feedback =
+            Some("answer in the session — or `ainb fleet interview surface fleet` to hold".into());
         return None;
     }
     if !row.provider.eq_ignore_ascii_case("claude")
@@ -1530,7 +1531,7 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
         .roster
         .iter()
         .find(|row| row.session_key == selected_key)
-        .is_some_and(native_claude_picker)
+        .is_some_and(read_only_picker)
     {
         state.feedback = Some("Claude picker active, answer in the Claude session".into());
         return;
@@ -1547,12 +1548,19 @@ fn begin_structured_answer(state: &mut FleetPaneState) {
     state.mode = FleetMode::Answer(AnswerQueue { answers, active });
 }
 
-fn native_claude_picker(row: &FleetSessionRow) -> bool {
+/// Claude drew its own picker for this row, so the interview is READ-ONLY here.
+///
+/// Covers both native-picker stamps. `mirrored` used to be answerable from
+/// Fleet by replaying blind keystrokes into the pane and screen-scraping to
+/// confirm they landed; that depended on a vendor TUI layout which is not a
+/// contract, and its failure mode was answering the wrong question. The daemon
+/// now refuses both, so the UI must not offer to answer either.
+fn read_only_picker(row: &FleetSessionRow) -> bool {
     row.current_request
         .as_ref()
         .and_then(|request| request.get("fleet_delivery"))
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|route| route == "native_claude")
+        .is_some_and(|route| matches!(route, "native_claude" | "mirrored"))
 }
 
 fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
@@ -3012,7 +3020,7 @@ fn render_detail(
     if session.is_actionable() {
         put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
-        if native_claude_picker(session) {
+        if read_only_picker(session) {
             put_str(buffer, left, y, "CLAUDE PICKER ACTIVE", VIOLET, right);
             y = y.saturating_add(1);
             put_str(
@@ -3162,7 +3170,7 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
         && session.is_managed()
         && session.capabilities.contains("structured_answer")
     {
-        if native_claude_picker(session) {
+        if read_only_picker(session) {
             actions.push("→ Open Claude");
         } else {
             actions.push("Enter Answer");
@@ -5362,7 +5370,25 @@ mod tests {
         assert!(native_reduced.intent.is_none());
         assert_eq!(
             native_reduced.state.feedback.as_deref(),
-            Some("Claude native picker route is unavailable")
+            Some("answer in the session — or `ainb fleet interview surface fleet` to hold")
+        );
+
+        // `mirrored` is the SAME situation: the interview was never held, so
+        // Claude owns that pane's stdin. It used to be answerable here by
+        // replaying keystrokes; the daemon now refuses, so the pane must not
+        // open an answer queue for it either.
+        let mut mirrored = session("claude:mirrored", "claude", "IDLE", "ASK", "managed");
+        mirrored.current_request_fingerprint = Some("mirrored-fp".into());
+        mirrored.current_request = Some(serde_json::json!({
+            "fleet_delivery": "mirrored",
+            "questions": [{"id": "q", "question": "Ship?", "options": ["Yes"]}]
+        }));
+        let mut mirrored_state = FleetPaneState::default();
+        mirrored_state.set_sessions(vec![mirrored]);
+        let mirrored_reduced = apply(&mirrored_state, FleetEvent::Key(FleetKey::Char('c')));
+        assert!(
+            mirrored_reduced.intent.is_none(),
+            "a mirrored interview must not produce an answer intent"
         );
 
         let mut ordinary_state = FleetPaneState::default();
