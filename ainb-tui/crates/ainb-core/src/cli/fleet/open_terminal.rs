@@ -26,6 +26,11 @@ fn terminal_app(token: &str) -> &'static str {
 }
 
 pub fn execute(matches: &clap::ArgMatches) -> Result<()> {
+    // `open -a` is macOS-only, and this verb is registered on every platform.
+    // Say so, rather than failing with a generic "launching the terminal".
+    if !cfg!(target_os = "macos") {
+        anyhow::bail!("`fleet open-terminal` is macOS-only; attach with `tmux attach -t <target>`");
+    }
     let target = matches.get_one::<String>("target").context("a tmux target is required")?;
     // tmux targets are shell-interpolated into the script below, so anything
     // that is not a plausible target is refused rather than escaped: these
@@ -38,7 +43,7 @@ pub fn execute(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("refusing to open an implausible tmux target: {target}");
     }
     let config = crate::config::AppConfig::load().unwrap_or_default();
-    let app = terminal_app(&config.fleet.terminal);
+    let app = terminal_app(config.fleet.terminal_token());
 
     // A `.command` file is the one launch shape every macOS terminal honours:
     // `open -a <App> <file>` opens a window running it. Passing the command as

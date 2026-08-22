@@ -672,6 +672,27 @@ private struct FleetNotchDetail: View {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = ["fleet", "open-terminal", tmuxTarget]
+        let errors = Pipe()
+        process.standardError = errors
+        // `run()` throws only when the LAUNCH fails. A non-zero exit — the
+        // configured terminal not being installed, or a refused target — would
+        // otherwise leave the button doing visibly nothing, which is the exact
+        // defect this function's own doc says it exists to prevent.
+        process.terminationHandler = { finished in
+            guard finished.terminationStatus != 0 else { return }
+            let detail = String(
+                data: errors.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            )?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            Task { @MainActor in
+                self.store.reportControlNotice(
+                    detail.isEmpty
+                        ? "Open session failed (exit \(finished.terminationStatus))."
+                        : "Open session failed: \(detail)"
+                )
+            }
+        }
         do {
             try process.run()
         } catch {

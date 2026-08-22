@@ -1501,7 +1501,7 @@ pub fn interview_surface(home: &std::path::Path, session_id: &str) -> InterviewS
     // the per-session override above stays runtime state: it is ephemeral and
     // keyed by uuid, which does not belong in a config file.
     crate::config::AppConfig::load().map_or(InterviewSurface::Native, |config| {
-        InterviewSurface::parse(&config.fleet.interview.surface)
+        InterviewSurface::parse(config.fleet.interview.surface_token())
     })
 }
 
@@ -1520,7 +1520,7 @@ pub fn set_interview_surface(
         // surface fleet` is visible in the same file the user already edits.
         let mut config = crate::config::AppConfig::load()
             .map_err(|e| std::io::Error::other(format!("loading config: {e}")))?;
-        config.fleet.interview.surface = surface.token().to_string();
+        config.fleet.interview.surface = Some(surface.token().to_string());
         return config.save().map_err(|e| std::io::Error::other(format!("saving config: {e}")));
     };
     let dir = interview_surface_dir(home);
@@ -1623,23 +1623,48 @@ fn announce_pending_interview(
     // Save the current name AND the automatic-rename setting, so the wait does
     // not permanently freeze a window that was tracking its running program.
     if let Some(path) = interview_banner_state(home) {
-        if let Ok(out) = std::process::Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &pane,
-                "-F",
-                "#{window_name}\t#{automatic-rename}\t#{window-status-style}",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+        // NEVER overwrite an existing record. A hook that died without clearing
+        // (pane closed, session interrupted, hook killed) leaves the banner in
+        // place; capturing it again would record "[ASK>FLEET] …" and the yellow
+        // style AS the previous state, and the next clear would restore those
+        // permanently.
+        if !path.exists() {
+            if let Ok(out) = std::process::Command::new("tmux")
+                .args([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pane,
+                    "-F",
+                    "#{window_name}\t#{automatic-rename}",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    // `#{window-status-style}` reports the EFFECTIVE (inherited)
+                    // value, not "set at window scope", so restoring from it would
+                    // pin an explicit window-level style and stop the window
+                    // following later theme changes. `show-window-options` prints
+                    // nothing when the option is unset, which is the distinction.
+                    let style = std::process::Command::new("tmux")
+                        .args(["show-window-options", "-t", &pane, "window-status-style"])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    let style = style
+                        .split_once(' ')
+                        .map_or(String::new(), |(_, value)| value.trim().to_string());
+                    let _ = std::fs::write(
+                        &path,
+                        format!("{}\t{}", String::from_utf8_lossy(&out.stdout).trim(), style),
+                    );
+                    let _ = std::fs::write(path.with_extension("session"), session_id);
                 }
-                let _ = std::fs::write(&path, String::from_utf8_lossy(&out.stdout).trim());
-                let _ = std::fs::write(path.with_extension("session"), session_id);
             }
         }
     }
@@ -1705,7 +1730,7 @@ fn clear_pending_interview_banner(home: &std::path::Path) {
                 .args(["rename-window", "-t", &pane, previous])
                 .status();
         }
-        if automatic == "on" {
+        if automatic == "1" {
             let _ = std::process::Command::new("tmux")
                 .args(["set-window-option", "-t", &pane, "automatic-rename", "on"])
                 .status();
@@ -3388,7 +3413,13 @@ mod tests {
         // to the real `AppConfig::load()`, so asserting the default through it
         // reads the developer's own config.toml and fails on any machine that
         // has opted into fleet — which is exactly how this test first broke.
-        assert_eq!(crate::config::InterviewConfig::default().surface, "native");
+        // Absent, not "native": the merge needs to tell "unset" from "set to
+        // native", and the default is applied by surface_token().
+        assert_eq!(crate::config::InterviewConfig::default().surface, None);
+        assert_eq!(
+            crate::config::InterviewConfig::default().surface_token(),
+            "native"
+        );
     }
 
     #[test]

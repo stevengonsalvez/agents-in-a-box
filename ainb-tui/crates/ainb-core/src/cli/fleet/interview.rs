@@ -19,8 +19,6 @@ use ainb_plugin_notifyd::broker::{client_list, client_release_structured};
 #[derive(serde::Serialize)]
 struct HeldRow {
     session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workspace: Option<String>,
     request_fingerprint: String,
     waiting_secs: u64,
     surface: String,
@@ -46,24 +44,39 @@ fn socket(home: &Path) -> std::path::PathBuf {
     ainb_plugin_notifyd::paths::Paths::under(home).approve_socket
 }
 
-fn held(home: &Path) -> Vec<HeldRow> {
+fn held(home: &Path) -> Result<Vec<HeldRow>> {
     let sock = socket(home);
-    client_list(&sock)
-        .unwrap_or_default()
+    // A broker we cannot reach is NOT "nothing is held" — a hook may be parked
+    // right now. Saying "no interviews are being held open" to someone whose
+    // session is blocked is the same lie as reporting a failed delivery as
+    // delivered, so this fails loudly like its sibling `approve` verb does.
+    Ok(client_list(&sock)
+        .with_context(|| {
+            format!(
+                "approve broker unreachable at {} (repair with `ainb notifyd restart`)",
+                sock.display()
+            )
+        })?
         .into_iter()
         .filter(|p| p.tool == "AskUserQuestion")
         .map(|p| HeldRow {
             surface: interview_surface(home, &p.session_id).token().to_string(),
             session_id: p.session_id,
-            workspace: None,
             request_fingerprint: p.request_fingerprint.unwrap_or_default(),
             waiting_secs: p.waiting_ms / 1000,
         })
-        .collect()
+        .collect())
+}
+
+/// Strip control characters. These strings arrive off the socket from whoever
+/// registered the request, and are printed straight to a terminal — the sibling
+/// `approve` verb sanitises the same class of value for the same reason.
+fn sanitize(value: &str) -> String {
+    value.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 fn list(home: &Path, format: OutputFormat) -> Result<()> {
-    let rows = held(home);
+    let rows = held(home)?;
     if matches!(format, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -76,17 +89,13 @@ fn list(home: &Path, format: OutputFormat) -> Result<()> {
         );
         return Ok(());
     }
-    println!(
-        "{:<38} {:<26} {:>8}  {}",
-        "SESSION", "WORKSPACE", "WAITING", "FINGERPRINT"
-    );
+    println!("{:<38} {:>8}  {}", "SESSION", "WAITING", "FINGERPRINT");
     for r in &rows {
         println!(
-            "{:<38} {:<26} {:>7}s  {}",
-            r.session_id,
-            r.workspace.as_deref().unwrap_or("-"),
+            "{:<38} {:>7}s  {}",
+            sanitize(&r.session_id),
             r.waiting_secs,
-            r.request_fingerprint
+            sanitize(&r.request_fingerprint)
         );
     }
     println!("\nrelease to the terminal: ainb fleet interview release <session>");
@@ -94,10 +103,7 @@ fn list(home: &Path, format: OutputFormat) -> Result<()> {
 }
 
 fn release(home: &Path, session: Option<&str>) -> Result<()> {
-    let rows = held(home);
-    // With no argument, release the ONLY held interview. Guessing between
-    // several would be worse than refusing: the wrong pick silently hands
-    // somebody else's question back to a terminal nobody is watching.
+    let rows = held(home)?;
     let pane_session = crate::cli::fleet::atc::pane_held_session(home);
     let row = match session {
         Some(id) => rows.iter().find(|r| r.session_id == id).with_context(|| {
@@ -107,12 +113,19 @@ fn release(home: &Path, session: Option<&str>) -> Result<()> {
         // own session is the only sane target: releasing "the only held one"
         // would hand somebody else's question back to a terminal nobody is
         // watching the moment two are held at once.
-        None => match pane_session.and_then(|id| rows.iter().find(|r| r.session_id == id)) {
-            Some(row) => row,
-            None if rows.len() == 1 => &rows[0],
+        None => match pane_session {
+            // Inside a tmux pane the pane's OWN interview is the only safe
+            // target. Falling back to "the only held one" here would release
+            // somebody else's question into a terminal nobody is watching,
+            // which is exactly what the pane-aware lookup exists to prevent.
+            Some(id) => rows
+                .iter()
+                .find(|r| r.session_id == id)
+                .with_context(|| "this pane is not holding an interview".to_string())?,
             None if rows.is_empty() => anyhow::bail!("no interviews are being held open"),
+            None if rows.len() == 1 => &rows[0],
             None => anyhow::bail!(
-                "this pane is not holding an interview, and {} others are; name one \
+                "{} interviews are held and this is not a tmux pane; name one \
                  (see `ainb fleet interview list`)",
                 rows.len()
             ),
@@ -128,7 +141,7 @@ fn release(home: &Path, session: Option<&str>) -> Result<()> {
     } else {
         println!(
             "{} was not holding that request any more (already answered or released)",
-            row.session_id
+            sanitize(&row.session_id)
         );
     }
     Ok(())

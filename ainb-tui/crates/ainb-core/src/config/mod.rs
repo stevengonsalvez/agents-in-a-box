@@ -461,12 +461,13 @@ pub struct FleetConfig {
     /// `warp` | `iterm` | `ghostty` | `terminal`. Defaults to `warp`; the macOS
     /// default handler would almost always be Terminal.app, which lands you in
     /// the wrong terminal.
-    #[serde(default = "default_fleet_terminal")]
-    pub terminal: String,
+    /// `Option` for the same presence reason as [`InterviewConfig::surface`].
+    #[serde(default)]
+    pub terminal: Option<String>,
 }
 
-fn default_fleet_terminal() -> String {
-    "warp".to_string()
+fn default_fleet_terminal() -> &'static str {
+    "warp"
 }
 
 impl Default for FleetConfig {
@@ -474,7 +475,7 @@ impl Default for FleetConfig {
         Self {
             cost: CostBudgetConfig::default(),
             interview: InterviewConfig::default(),
-            terminal: default_fleet_terminal(),
+            terminal: None,
         }
     }
 }
@@ -500,8 +501,13 @@ impl Default for FleetConfig {
 pub struct InterviewConfig {
     /// `"native"` or `"fleet"`. Unrecognised values read as `"native"`, so a
     /// typo can never silently start holding tool calls.
-    #[serde(default = "default_interview_surface")]
-    pub surface: String,
+    ///
+    /// `Option` so the merge can tell "this layer said native" from "this layer
+    /// said nothing". Comparing against the default cannot: a project config
+    /// explicitly setting `native` would be indistinguishable from an absent
+    /// section and would lose to a user config saying `fleet`.
+    #[serde(default)]
+    pub surface: Option<String>,
 }
 
 fn default_interview_surface() -> String {
@@ -510,9 +516,23 @@ fn default_interview_surface() -> String {
 
 impl Default for InterviewConfig {
     fn default() -> Self {
-        Self {
-            surface: default_interview_surface(),
-        }
+        Self { surface: None }
+    }
+}
+
+impl FleetConfig {
+    /// The effective terminal token, applying the `warp` default.
+    #[must_use]
+    pub fn terminal_token(&self) -> &str {
+        self.terminal.as_deref().unwrap_or(default_fleet_terminal())
+    }
+}
+
+impl InterviewConfig {
+    /// The effective surface token, applying the `native` default.
+    #[must_use]
+    pub fn surface_token(&self) -> &str {
+        self.surface.as_deref().unwrap_or("native")
     }
 }
 
@@ -1117,10 +1137,10 @@ impl AppConfig {
         // field that is not named here is silently DROPPED no matter what the
         // file says. An unset section deserializes to the default, so only a
         // non-default value counts as "the file set this".
-        if other.fleet.interview != InterviewConfig::default() {
+        if other.fleet.interview.surface.is_some() {
             self.fleet.interview = other.fleet.interview.clone();
         }
-        if other.fleet.terminal != default_fleet_terminal() {
+        if other.fleet.terminal.is_some() {
             self.fleet.terminal.clone_from(&other.fleet.terminal);
         }
 
