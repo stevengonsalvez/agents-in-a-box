@@ -139,15 +139,36 @@ pub fn default_opener() -> Box<dyn Opener> {
 /// [`RecordingDaemonStarter`] that writes a marker file instead of launching the
 /// binary.
 pub trait DaemonStarter: std::fmt::Debug + Send + Sync {
-    /// Start the Hangar daemon (typically by spawning `ainb hangar daemon
-    /// start`).
+    /// Begin starting the Hangar daemon (typically by spawning `ainb hangar
+    /// daemon start`) and return AT ONCE.
     ///
-    /// # Errors
-    ///
-    /// Returns an [`io::Error`] when the underlying launch fails (e.g. the
-    /// resolved `ainb` binary could not be spawned). The plugin surfaces the
-    /// message in the offline empty-state rather than crashing.
-    fn start(&self) -> io::Result<()>;
+    /// The verdict — spawn failure, a non-zero exit with its stderr tail, or
+    /// "still running, presumed fine" — arrives later on the returned channel.
+    /// Nothing here may block: this is called from the plugin's `render`, which
+    /// holds the per-plugin mutex that inline `handle_key` dispatch also needs.
+    /// Waiting for the verdict here is what used to make `q` and `Esc` dead for
+    /// three seconds after pressing `[s]`.
+    fn start(&self) -> StartVerdict;
+}
+
+/// Late-arriving outcome of a [`DaemonStarter::start`].
+///
+/// The producing side is an ordinary thread reaping a child process, and the
+/// consuming side polls with `try_recv` from `render`. A tokio receiver rather
+/// than `std::sync::mpsc` because the plugin future must stay `Send + Sync` and
+/// `std::sync::mpsc::Receiver` is not `Sync`; the tokio sender is plain (not
+/// async) to `send` on, so the producer needs no runtime. A dropped sender (the
+/// producer thread vanished) reads as a failed start rather than as silence.
+pub type StartVerdict = tokio::sync::mpsc::UnboundedReceiver<io::Result<()>>;
+
+/// Run `work` on a throwaway thread and hand back the channel its result lands
+/// on. Shared by every [`DaemonStarter`] impl so they are uniformly non-blocking.
+fn verdict_from_thread(work: impl FnOnce() -> io::Result<()> + Send + 'static) -> StartVerdict {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx
 }
 
 /// The real daemon starter: spawns the resolved `ainb` binary with
@@ -167,48 +188,55 @@ pub struct SystemDaemonStarter;
 const START_VERDICT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl DaemonStarter for SystemDaemonStarter {
-    fn start(&self) -> io::Result<()> {
-        let bin = resolve_ainb_bin();
-        let mut child = std::process::Command::new(bin)
-            .args(DAEMON_START_ARGS)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+    fn start(&self) -> StartVerdict {
+        verdict_from_thread(spawn_and_await_verdict)
+    }
+}
 
-        let deadline = std::time::Instant::now() + START_VERDICT_WINDOW;
-        loop {
-            match child.try_wait()? {
-                Some(status) if status.success() => return Ok(()),
-                Some(status) => {
-                    let mut msg = String::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = err.read_to_string(&mut msg);
-                    }
-                    // Last non-empty stderr line is the anyhow error summary.
-                    let tail = msg
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("(no stderr)")
-                        .trim()
-                        .to_string();
-                    return Err(io::Error::other(format!("{status}: {tail}")));
+/// The blocking half of [`SystemDaemonStarter`], run on its own thread: spawn
+/// `ainb hangar daemon start` and poll-wait up to [`START_VERDICT_WINDOW`] for
+/// its verdict.
+fn spawn_and_await_verdict() -> io::Result<()> {
+    let bin = resolve_ainb_bin();
+    let mut child = std::process::Command::new(bin)
+        .args(DAEMON_START_ARGS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let deadline = std::time::Instant::now() + START_VERDICT_WINDOW;
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                let mut msg = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut msg);
                 }
-                None if std::time::Instant::now() >= deadline => {
-                    // Still running — assume a slow-but-fine start; reap the
-                    // child off-thread so it never zombifies under us. Drop
-                    // the stderr pipe first so a chatty child can't block on
-                    // a full pipe nobody reads.
-                    drop(child.stderr.take());
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
-                    return Ok(());
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+                // Last non-empty stderr line is the anyhow error summary.
+                let tail = msg
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("(no stderr)")
+                    .trim()
+                    .to_string();
+                return Err(io::Error::other(format!("{status}: {tail}")));
             }
+            None if std::time::Instant::now() >= deadline => {
+                // Still running — assume a slow-but-fine start; reap the
+                // child off-thread so it never zombifies under us. Drop
+                // the stderr pipe first so a chatty child can't block on
+                // a full pipe nobody reads.
+                drop(child.stderr.take());
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
 }
@@ -258,8 +286,9 @@ impl RecordingDaemonStarter {
 }
 
 impl DaemonStarter for RecordingDaemonStarter {
-    fn start(&self) -> io::Result<()> {
-        std::fs::write(&self.probe_path, DAEMON_START_ARGS.join(" "))
+    fn start(&self) -> StartVerdict {
+        let probe_path = self.probe_path.clone();
+        verdict_from_thread(move || std::fs::write(&probe_path, DAEMON_START_ARGS.join(" ")))
     }
 }
 
@@ -269,11 +298,13 @@ impl DaemonStarter for RecordingDaemonStarter {
 pub struct FailingDaemonStarter;
 
 impl DaemonStarter for FailingDaemonStarter {
-    fn start(&self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "ainb binary not found",
-        ))
+    fn start(&self) -> StartVerdict {
+        verdict_from_thread(|| {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "ainb binary not found",
+            ))
+        })
     }
 }
 
@@ -294,6 +325,23 @@ pub fn default_daemon_starter() -> Box<dyn DaemonStarter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Poll a [`StartVerdict`] to its answer. Production code never waits like
+    /// this — `render` polls once per frame — but a test needs the outcome.
+    fn recv_verdict(rx: &mut StartVerdict) -> io::Result<()> {
+        for _ in 0..300 {
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("starter dropped its sender without reporting")
+                }
+            }
+        }
+        panic!("verdict never arrived")
+    }
 
     /// The recording opener writes the URL verbatim to its probe file.
     #[test]
@@ -329,7 +377,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("started.txt");
         let starter = RecordingDaemonStarter::new(&probe);
-        starter.start().expect("record start");
+        let mut verdict = starter.start();
+        recv_verdict(&mut verdict).expect("record start");
         let written = std::fs::read_to_string(&probe).expect("read probe");
         assert_eq!(written, "hangar daemon start");
     }
@@ -338,7 +387,8 @@ mod tests {
     /// plugin can show it in the empty-state (e38.36).
     #[test]
     fn failing_daemon_starter_returns_error() {
-        let err = FailingDaemonStarter.start().expect_err("must fail");
+        let mut verdict = FailingDaemonStarter.start();
+        let err = recv_verdict(&mut verdict).expect_err("must fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
