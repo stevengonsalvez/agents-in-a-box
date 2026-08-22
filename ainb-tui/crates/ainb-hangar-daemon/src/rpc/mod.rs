@@ -86,6 +86,14 @@ const PERMISSION_DENIED: i32 = -32000;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Why a `mirrored` interview cannot be answered from a remote surface.
+///
+/// Shown verbatim to the operator, so it names the fix rather than the fault:
+/// the question is answerable, just not from here while the surface is native.
+pub const MIRRORED_IS_READ_ONLY: &str =
+    "this interview is showing in Claude's own picker — answer it in the session, \
+     or set `ainb fleet interview surface fleet` to hold the next one for Fleet";
+
 /// Cross-process, crash-safe ownership of one operation against one Hangar DB.
 ///
 /// The lock file sits beside `hangar.db`, so duplicate daemons using the same
@@ -3995,7 +4003,6 @@ async fn execute_fleet_action(
                         pool,
                         events,
                         &session,
-                        params.expected_version,
                         request_fingerprint,
                         answers,
                     )
@@ -4390,9 +4397,8 @@ async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod fleet_launch_tests {
     use super::{
-        MirroredClaudePickerStep, managed_codex_tmux_args, managed_codex_tmux_name,
-        mirrored_claude_picker_steps, normalize_picker_text, squeeze_picker_text,
-        verify_claude_picker_question, verify_picker_pane,
+        managed_codex_tmux_args, managed_codex_tmux_name, normalize_picker_text,
+        verify_picker_pane,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
@@ -4521,164 +4527,10 @@ mod fleet_launch_tests {
         assert!(error.contains("newer picker"));
     }
 
-    #[test]
-    fn mirrored_claude_picker_routes_multi_question_answers_and_submit() {
-        let questions = vec![
-            serde_json::json!({
-                "id": "region",
-                "question": "Deploy to which region?",
-                "options": [{"label": "Europe"}, {"label": "United States"}]
-            }),
-            serde_json::json!({
-                "id": "checks",
-                "question": "Which checks should run?",
-                "multiSelect": true,
-                "options": [{"label": "Lint"}, {"label": "Test"}, {"label": "Tripwire"}]
-            }),
-        ];
-        let answers = vec![
-            ainb_hangar_proto::fleet::FleetQuestionAnswer {
-                question_id: "region".to_string(),
-                selected_options: vec!["United States".to_string()],
-                text: None,
-            },
-            ainb_hangar_proto::fleet::FleetQuestionAnswer {
-                question_id: "checks".to_string(),
-                selected_options: vec!["Test".to_string(), "Tripwire".to_string()],
-                text: None,
-            },
-        ];
-        assert_eq!(
-            mirrored_claude_picker_steps(&questions, &answers),
-            Ok(vec![
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[0].clone(),
-                    key: "Down".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[0].clone(),
-                    key: "Enter".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[1].clone(),
-                    key: "Down".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[1].clone(),
-                    key: "Space".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[1].clone(),
-                    key: "Down".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[1].clone(),
-                    key: "Space".to_string()
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: questions[1].clone(),
-                    key: "Tab".to_string()
-                },
-                MirroredClaudePickerStep::Submit { answers },
-            ])
-        );
-    }
 
-    #[test]
-    fn mirrored_claude_picker_single_select_stops_after_option_enter() {
-        let question = serde_json::json!({
-            "id": "choice",
-            "question": "Choose silver or indigo",
-            "options": [{"label": "silver"}, {"label": "indigo"}],
-        });
-        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
-            question_id: "choice".to_string(),
-            selected_options: vec!["indigo".to_string()],
-            text: None,
-        }];
-        assert_eq!(
-            mirrored_claude_picker_steps(&[question.clone()], &answers),
-            Ok(vec![
-                MirroredClaudePickerStep::QuestionKey {
-                    question,
-                    key: "Down".to_string(),
-                },
-                MirroredClaudePickerStep::QuestionKey {
-                    question: serde_json::json!({
-                        "id": "choice",
-                        "question": "Choose silver or indigo",
-                        "options": [{"label": "silver"}, {"label": "indigo"}],
-                    }),
-                    key: "Enter".to_string(),
-                },
-            ])
-        );
-    }
 
-    #[test]
-    fn mirrored_claude_picker_confirms_multi_select_with_tab_never_enter() {
-        // REGRESSION. `Enter` on a Claude multi-select row is a TOGGLE: measured on
-        // 2.1.233 the confirming Enter un-ticked the option the preceding `Space`
-        // had ticked, so the picker never reached the review screen and the answer
-        // landed half-applied. Only `Tab` advances a multi-select question.
-        let question = serde_json::json!({
-            "id": "checks",
-            "question": "Which checks should run?",
-            "multiSelect": true,
-            "options": [{"label": "Lint"}, {"label": "Test"}],
-        });
-        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
-            question_id: "checks".to_string(),
-            selected_options: vec!["Lint".to_string()],
-            text: None,
-        }];
-        let steps = mirrored_claude_picker_steps(&[question], &answers).expect("steps");
-        let keys: Vec<&str> = steps
-            .iter()
-            .filter_map(|step| match step {
-                MirroredClaudePickerStep::QuestionKey { key, .. } => Some(key.as_str()),
-                MirroredClaudePickerStep::Submit { .. } => None,
-            })
-            .collect();
-        assert_eq!(keys, vec!["Space", "Tab"], "got {keys:?}");
-        assert!(
-            matches!(steps.last(), Some(MirroredClaudePickerStep::Submit { .. })),
-            "a multi-select question still has to reach the review screen"
-        );
-    }
 
-    #[test]
-    fn picker_verification_survives_a_hard_wrapped_option_label() {
-        // REGRESSION. The picker box hard-wraps a run of non-space characters that
-        // is longer than its content width, with NO space at the break. Collapsing
-        // whitespace to a single space therefore INVENTED a separator the label
-        // never had and the exact substring match missed, rejecting the answer
-        // before a single key was sent.
-        let long = "hardwrapmidtokenalphabetagammadeltaepsilonzetaetathetaiotakappa";
-        let (head, tail) = long.split_at(long.len() - 1);
-        let question = serde_json::json!({
-            "question": "Which reflow tolerance should the renderer adopt?",
-            "options": [{"label": "softreflow"}, {"label": long}],
-        });
-        let pane = format!(
-            "Which reflow tolerance should the renderer adopt?\n\n\
-             \u{276f} 1. softreflow\n     soft reflow\n  2. {head}\n     {tail}\n     hard wrap\n\n\
-             Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel\n"
-        );
-        assert_eq!(verify_claude_picker_question(&question, &pane), Ok(()));
-    }
 
-    #[test]
-    fn squeeze_drops_whitespace_while_normalize_keeps_one_space() {
-        // The mirrored route needs a wrap-tolerant form; the `verify_picker_pane`
-        // route needs the single-space separator its offset reconstruction in
-        // `has_later_picker_candidate` and its whitespace-split option-marker
-        // check are both written against. Two contracts, two functions.
-        assert_eq!(squeeze_picker_text("abc\n  d"), squeeze_picker_text("abcd"));
-        assert_eq!(squeeze_picker_text(" \u{2502} a b \u{2502} "), "ab");
-        assert_eq!(normalize_picker_text("abc\n  d"), "abc d");
-        assert_eq!(normalize_picker_text(" \u{2502} a b \u{2502} "), "a b");
-    }
 
     #[test]
     fn verified_picker_rejects_a_newer_picker_whose_prompt_has_no_question_mark() {
@@ -4698,24 +4550,6 @@ mod fleet_launch_tests {
         assert!(error.contains("newer picker"), "got: {error}");
     }
 
-    #[test]
-    fn mirrored_claude_picker_rejects_unverified_text_route() {
-        let questions = vec![serde_json::json!({
-            "id": "region",
-            "question": "Deploy to which region?",
-            "options": [{"label": "Europe"}]
-        })];
-        let answers = vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
-            question_id: "region".to_string(),
-            selected_options: vec![],
-            text: Some("Custom region".to_string()),
-        }];
-        assert!(
-            mirrored_claude_picker_steps(&questions, &answers)
-                .unwrap_err()
-                .contains("free-text")
-        );
-    }
 }
 
 async fn claude_broker_decide(
@@ -5197,7 +5031,6 @@ async fn execute_claude_structured(
     pool: &SqlitePool,
     events: &EventSink,
     session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
-    expected_version: i64,
     request_fingerprint: &str,
     answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
 ) -> (
@@ -5223,17 +5056,19 @@ async fn execute_claude_structured(
             Some("stored Claude question payload is invalid".to_string()),
         );
     };
-    if request.get("fleet_delivery").and_then(serde_json::Value::as_str) == Some("mirrored") {
-        return execute_claude_mirrored_picker(
-            pool,
-            events,
-            session,
-            expected_version,
-            request_fingerprint,
-            questions,
-            answers,
-        )
-        .await;
+    // `mirrored` means the interview was NOT held: the surface is `native`, so
+    // Claude already drew its own picker and owns that pane's stdin. The only
+    // way to answer from here would be to type blind arrow keys at a vendor TUI
+    // and screen-scrape to check they landed — a guess about a layout that is
+    // not a contract and changed four times in one week, whose failure mode is
+    // answering the WRONG question. Remote answering is the held (`fleet`) lane,
+    // which delivers exact JSON. Native stays read-only: the surfaces show the
+    // question and deep-link into the session so it is answered where it is.
+    if fleet_delivery_uses_native_picker(&request) {
+        return (
+            ActionReceiptStatus::Failed,
+            Some(MIRRORED_IS_READ_ONLY.to_string()),
+        );
     }
     let mut mapped = Vec::with_capacity(answers.len());
     for answer in answers {
@@ -5307,294 +5142,11 @@ async fn execute_claude_structured(
     }
 }
 
-/// Submit one mirrored Claude interview through its visible native picker.
-///
-/// Every key is checked against the exact request and live native screen before
-/// delivery. Free-text controls stay unavailable until their input state has
-/// equivalent verification coverage.
-async fn execute_claude_mirrored_picker(
-    pool: &SqlitePool,
-    events: &EventSink,
-    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
-    expected_version: i64,
-    request_fingerprint: &str,
-    questions: &[serde_json::Value],
-    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
-) -> (
-    ainb_hangar_proto::fleet::ActionReceiptStatus,
-    Option<String>,
-) {
-    use ainb_hangar_proto::fleet::ActionReceiptStatus;
 
-    let steps = match mirrored_claude_picker_steps(questions, answers) {
-        Ok(steps) => steps,
-        Err(detail) => return (ActionReceiptStatus::Rejected, Some(detail)),
-    };
-    for (index, step) in steps.into_iter().enumerate() {
-        if index > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        let (status, detail) = verified_tmux_picker_for_mirrored_step(
-            pool,
-            session,
-            expected_version,
-            request_fingerprint,
-            &step,
-        )
-        .await;
-        if status != ActionReceiptStatus::Delivered {
-            let detail = detail.unwrap_or_else(|| "mirrored Claude picker step failed".to_string());
-            if index == 0 && detail == "Claude native picker is no longer active" {
-                return reconcile_claude_structured(
-                    pool,
-                    events,
-                    session,
-                    request_fingerprint,
-                    expected_version,
-                )
-                .await;
-            }
-            let detail = if index == 0 {
-                detail
-            } else {
-                format!("{detail}; native picker already advanced {index} key(s)")
-            };
-            return (status, Some(detail));
-        }
-    }
-    (
-        ActionReceiptStatus::Delivered,
-        Some("mirrored Claude native picker".to_string()),
-    )
-}
 
-#[derive(Debug, PartialEq, Eq)]
-enum MirroredClaudePickerStep {
-    QuestionKey {
-        question: serde_json::Value,
-        key: String,
-    },
-    Submit {
-        answers: Vec<ainb_hangar_proto::fleet::FleetQuestionAnswer>,
-    },
-}
 
-fn mirrored_claude_picker_steps(
-    questions: &[serde_json::Value],
-    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
-) -> Result<Vec<MirroredClaudePickerStep>, String> {
-    if questions.len() != answers.len() || questions.is_empty() {
-        return Err("mirrored Claude answers do not cover every question".to_string());
-    }
-    let mut steps = Vec::new();
-    for (index, question) in questions.iter().enumerate() {
-        let question_id = question
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| index.to_string());
-        let answer = answers
-            .iter()
-            .find(|answer| answer.question_id == question_id)
-            .ok_or_else(|| "mirrored Claude question is stale".to_string())?;
-        if answer.text.as_deref().is_some_and(|text| !text.trim().is_empty()) {
-            return Err("mirrored Claude free-text answer is not available yet".to_string());
-        }
-        let options = question
-            .get("options")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "mirrored Claude options are absent".to_string())?;
-        let mut selected = answer
-            .selected_options
-            .iter()
-            .map(|label| {
-                options
-                    .iter()
-                    .position(|option| {
-                        option.get("label").and_then(serde_json::Value::as_str) == Some(label)
-                    })
-                    .ok_or_else(|| "mirrored Claude option is stale".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        selected.sort_unstable();
-        selected.dedup();
-        if selected.len() != answer.selected_options.len() || selected.is_empty() {
-            return Err("mirrored Claude requires listed options".to_string());
-        }
-        let multi_select = question
-            .get("multiSelect")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !multi_select && selected.len() != 1 {
-            return Err("mirrored Claude single-select requires one option".to_string());
-        }
-        let mut cursor = 0;
-        for selected_index in selected {
-            for _ in cursor..selected_index {
-                steps.push(MirroredClaudePickerStep::QuestionKey {
-                    question: question.clone(),
-                    key: "Down".to_string(),
-                });
-            }
-            steps.push(MirroredClaudePickerStep::QuestionKey {
-                question: question.clone(),
-                key: if multi_select { "Space" } else { "Enter" }.to_string(),
-            });
-            cursor = selected_index;
-        }
-        if multi_select {
-            // TAB, NOT ENTER. Claude Code's multi-select rows are checkboxes and
-            // `Enter` on one is a TOGGLE, not a confirm: measured on 2.1.233, the
-            // confirming Enter un-ticked the option the preceding `Space` had just
-            // ticked, the picker stayed on the same question, and the `Submit` step
-            // below then failed its `Review your answers` guard with the answer
-            // half-applied and the picker still owning the pane. `Tab` is what
-            // advances a multi-select question to the next tab (or, on the last
-            // question, to the review screen the `Submit` step expects).
-            //
-            // Single-select keeps `Enter`, which both selects and advances there.
-            steps.push(MirroredClaudePickerStep::QuestionKey {
-                question: question.clone(),
-                key: "Tab".to_string(),
-            });
-        }
-    }
-    if questions.len() == 1
-        && !questions[0]
-            .get("multiSelect")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    {
-        return Ok(steps);
-    }
-    steps.push(MirroredClaudePickerStep::Submit {
-        answers: answers.to_vec(),
-    });
-    Ok(steps)
-}
 
-async fn verified_tmux_picker_for_mirrored_step(
-    pool: &SqlitePool,
-    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
-    expected_version: i64,
-    request_fingerprint: &str,
-    step: &MirroredClaudePickerStep,
-) -> (
-    ainb_hangar_proto::fleet::ActionReceiptStatus,
-    Option<String>,
-) {
-    use ainb_hangar_proto::fleet::ActionReceiptStatus;
-    let (Some(target), Some(fingerprint)) = (
-        session.tmux_target.as_deref(),
-        session.process_start_fingerprint.as_deref(),
-    ) else {
-        return (
-            ActionReceiptStatus::Unknown,
-            Some(DETAIL_TMUX_IDENTITY_UNKNOWN.to_string()),
-        );
-    };
-    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
-        Ok(discovered) => discovered,
-        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
-    };
-    if !discovered.iter().any(|candidate| {
-        candidate.exact_tmux_target.as_deref() == Some(target)
-            && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
-            && candidate.provider.as_str() == session.provider
-    }) {
-        return (
-            ActionReceiptStatus::Failed,
-            Some("tmux provider or process identity changed".to_string()),
-        );
-    }
-    let pane = match ainb_fleet_core::read::capture_pane(target, 0).await {
-        Ok(pane) => pane,
-        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
-    };
-    let verified = match step {
-        MirroredClaudePickerStep::QuestionKey { question, .. } => {
-            verify_claude_picker_question(question, &pane)
-        }
-        MirroredClaudePickerStep::Submit { answers } => verify_claude_picker_submit(answers, &pane),
-    };
-    if let Err(detail) = verified {
-        return (ActionReceiptStatus::Failed, Some(detail));
-    }
-    if let Err(error) = ainb_hangar_store::repo::fleet::FleetRepo::validate_action_target(
-        pool,
-        &session.session_key,
-        expected_version,
-        Some(request_fingerprint),
-    )
-    .await
-    {
-        return (ActionReceiptStatus::Failed, Some(error.to_string()));
-    }
-    let key = match step {
-        MirroredClaudePickerStep::QuestionKey { key, .. } => key,
-        MirroredClaudePickerStep::Submit { .. } => "Enter",
-    };
-    match ainb_fleet_core::send::tmux_send_picker_key(target, key).await {
-        Ok(()) => (
-            ActionReceiptStatus::Delivered,
-            Some(format!("mirrored tmux picker ({target})")),
-        ),
-        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
-    }
-}
 
-fn verify_claude_picker_question(question: &serde_json::Value, pane: &str) -> Result<(), String> {
-    if !claude_native_picker_is_visible(pane) {
-        return Err("Claude native picker is no longer active".to_string());
-    }
-    let prompt = question
-        .get("question")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "mirrored Claude question text is absent".to_string())?;
-    let visible = squeeze_picker_text(pane);
-    let start = visible
-        .rfind(&squeeze_picker_text(prompt))
-        .ok_or_else(|| "visible picker prompt does not match current question".to_string())?;
-    let mut cursor = start + squeeze_picker_text(prompt).len();
-    for option in question
-        .get("options")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "mirrored Claude options are absent".to_string())?
-    {
-        let label = option
-            .get("label")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mirrored Claude option label is absent".to_string())?;
-        let label = squeeze_picker_text(label);
-        let offset = visible[cursor..].find(&label).ok_or_else(|| {
-            "visible picker option order does not match current question".to_string()
-        })?;
-        cursor += offset + label.len();
-    }
-    Ok(())
-}
-
-fn verify_claude_picker_submit(
-    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
-    pane: &str,
-) -> Result<(), String> {
-    let visible = squeeze_picker_text(pane);
-    if !visible.contains(&squeeze_picker_text(CLAUDE_PICKER_REVIEW_HEADING))
-        || !visible.contains(&squeeze_picker_text(CLAUDE_PICKER_SUBMIT_ACTION))
-    {
-        return Err("Claude native picker is not ready to submit".to_string());
-    }
-    for answer in answers {
-        for selected in &answer.selected_options {
-            if !visible.contains(&squeeze_picker_text(selected)) {
-                return Err(
-                    "Claude native picker review does not match selected answer".to_string()
-                );
-            }
-        }
-    }
-    Ok(())
-}
 
 /// One-line render of a delivered interview answer for the attention row's audit
 /// `answer` column: what the control centre shows as "answered by fleet: …".
@@ -5953,10 +5505,6 @@ fn fleet_delivery_uses_native_picker(request: &serde_json::Value) -> bool {
     )
 }
 
-// Observed in Claude Code 2.1.226, exercised by the mirrored-picker live test.
-const CLAUDE_PICKER_REVIEW_HEADING: &str = "Review your answers";
-const CLAUDE_PICKER_SUBMIT_ACTION: &str = "Submit answers";
-
 /// The approve broker socket this daemon delivers answers and permission
 /// decisions on.
 ///
@@ -6235,8 +5783,12 @@ fn picker_question_evidence(
 /// whole-pane rendering of this function by adding exactly one character
 /// between lines, and [`is_numbered_picker_token`] splits a normalized line on
 /// whitespace to find a `1.` / `2)` option marker. Both silently mis-behave if
-/// this joins with anything else. The wrap-tolerant form the mirrored Claude
-/// picker needs is [`squeeze_picker_text`], deliberately a separate function.
+/// this joins with anything else.
+///
+/// Scope note: this is only used to answer "is a picker on screen at all", for
+/// deciding whether a release put one back. It deliberately does NOT try to
+/// match option labels in order — that is what the deleted mirrored-answer path
+/// did, and matching a vendor TUI's wrapped layout is what made it unreliable.
 fn normalize_picker_text(value: &str) -> String {
     value
         .chars()
@@ -6271,30 +5823,6 @@ fn normalize_picker_text(value: &str) -> String {
         .join(" ")
 }
 
-/// [`normalize_picker_text`] with every separator removed, for the mirrored
-/// Claude picker's substring matching only.
-///
-/// Claude Code's picker box hard-wraps a run of non-space characters longer
-/// than its content width, so a 115-character single-token option label renders
-/// as `...phichipsiomeg` on one row and `a` on the next with NO space between
-/// them. Collapsing to a single space INSERTS a separator the label never had,
-/// the exact substring match in [`verify_claude_picker_question`] misses, and
-/// the answer is rejected before a single key is sent (measured:
-/// `visible picker option order does not match current question`, zero keys
-/// delivered).
-///
-/// Scoped to the mirrored route on purpose. The `verify_picker_pane` route
-/// shares the wrap fragility, but its stale-picker guard reads normalized line
-/// offsets and whitespace-split option markers, so widening this there is a
-/// separate change with its own measurements — not a free rename.
-///
-/// The cost, stated rather than hidden: with separators gone, one option's
-/// suffix concatenated with the next row could in principle match another
-/// option's label. The surrounding checks still pin the picker to the right
-/// question and screen.
-fn squeeze_picker_text(value: &str) -> String {
-    normalize_picker_text(value).split_whitespace().collect()
-}
 
 /// Mint an ACP session: the `fleet_session` + `fleet_acp_session` PAIR under one
 /// `session_key`, in ONE transaction, with NO process spawn.
@@ -13414,6 +12942,32 @@ mod tests {
         assert!(!fleet_delivery_uses_native_picker(&serde_json::json!({
             "fleet_delivery": "fleet"
         })));
+    }
+
+    /// Both native-picker deliveries are READ-ONLY from a remote surface.
+    ///
+    /// This is the gate that replaced the mirrored send-keys path. It matters
+    /// that `native_claude` is covered as well as `mirrored`: an answer for
+    /// either would otherwise fall through to the broker lane and wait on a
+    /// waiter that was never registered, reporting "no longer waiting" instead
+    /// of saying the question is answerable in the session.
+    #[test]
+    fn native_picker_deliveries_are_never_answerable_from_a_remote_surface() {
+        for delivery in ["mirrored", "native_claude"] {
+            assert!(
+                fleet_delivery_uses_native_picker(&serde_json::json!({
+                    "fleet_delivery": delivery,
+                })),
+                "{delivery} must be treated as read-only"
+            );
+        }
+        // A held interview carries no native-picker stamp, so it stays
+        // answerable over the broker as exact JSON.
+        assert!(!fleet_delivery_uses_native_picker(&serde_json::json!({})));
+        assert!(
+            MIRRORED_IS_READ_ONLY.contains("answer it in the session"),
+            "the refusal must tell the operator where the question CAN be answered"
+        );
     }
 
     #[tokio::test]
