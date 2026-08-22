@@ -2503,6 +2503,49 @@ impl CliCommand for FleetCommand {
             "Deny a session's pending permission request \
              (no arg: list every waiter with worktree, tool, input and age)",
         ));
+        // `interview` is the non-GUI lever for the AskUserQuestion surface.
+        // Releasing a held interview used to require a key in the Hangar Fleet
+        // screen, which is useless precisely when the thing you need to unblock
+        // IS your terminal.
+        let interview = Command::new("interview")
+            .about("Claude interviews: which surface answers them, and release a held one")
+            .subcommand_required(true)
+            .subcommand(
+                Command::new("list")
+                    .about("Interviews currently held open, with their fingerprints"),
+            )
+            .subcommand(
+                Command::new("release")
+                    .about("Hand a held interview back to Claude's own picker in the terminal")
+                    .arg(
+                        clap::Arg::new("session")
+                            .help("Provider session id (see `ainb fleet interview list`)")
+                            .required(false),
+                    ),
+            )
+            .subcommand(
+                Command::new("surface")
+                    .about("Where interviews are answered (config.toml [fleet.interview]). Default: native")
+                    .arg(
+                        clap::Arg::new("mode")
+                            .help("native = picker shows immediately; fleet = hold for Fleet/macOS")
+                            .value_parser(["native", "fleet"])
+                            .required(false),
+                    )
+                    .arg(
+                        clap::Arg::new("session")
+                            .long("session")
+                            .help("Apply to one session id instead of the global default")
+                            .required(false),
+                    ),
+            );
+        let open_terminal = Command::new("open-terminal")
+            .about("Attach to a session in a real terminal window (terminal from config.toml [fleet] terminal)")
+            .arg(
+                clap::Arg::new("target")
+                    .help("tmux target, e.g. tmux_myrepo--f-thing--abcd1234_f_thing")
+                    .required(true),
+            );
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2527,6 +2570,8 @@ impl CliCommand for FleetCommand {
                 .arg_required_else_help(true)
                 .subcommand(approve)
                 .subcommand(deny)
+                .subcommand(interview)
+                .subcommand(open_terminal)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(msg)
@@ -3028,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_twenty_one_subcommands_including_the_chat_bus_verbs() {
+    fn fleet_exposes_twenty_three_subcommands_including_the_interview_levers() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -3060,8 +3105,10 @@ mod tests {
                 "daemons",
                 "deny",
                 "enrich-cache",
+                "interview",
                 "msg",
                 "needs",
+                "open-terminal",
                 "runtime",
                 "sequence",
                 "standup",
@@ -3071,8 +3118,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            21,
-            "expected 21 fleet subcommands, got {names:?}"
+            23,
+            "expected 23 fleet subcommands, got {names:?}"
         );
     }
 

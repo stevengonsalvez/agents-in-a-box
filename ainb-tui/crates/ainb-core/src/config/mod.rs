@@ -448,11 +448,72 @@ pub struct PluginsConfig {
 /// Currently only carries cost budget caps; reserved as the home for
 /// future fleet-wide knobs so they share one `[fleet]` table in
 /// `config.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FleetConfig {
     /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
     #[serde(default)]
     pub cost: CostBudgetConfig,
+    /// Which surface answers Claude interviews. See [`InterviewConfig`].
+    #[serde(default)]
+    pub interview: InterviewConfig,
+    /// Terminal the macOS Fleet app opens when you jump to a session.
+    ///
+    /// `warp` | `iterm` | `ghostty` | `terminal`. Defaults to `warp`; the macOS
+    /// default handler would almost always be Terminal.app, which lands you in
+    /// the wrong terminal.
+    #[serde(default = "default_fleet_terminal")]
+    pub terminal: String,
+}
+
+fn default_fleet_terminal() -> String {
+    "warp".to_string()
+}
+
+impl Default for FleetConfig {
+    fn default() -> Self {
+        Self {
+            cost: CostBudgetConfig::default(),
+            interview: InterviewConfig::default(),
+            terminal: default_fleet_terminal(),
+        }
+    }
+}
+
+/// Where an `AskUserQuestion` is answered.
+///
+/// `native` (the DEFAULT) lets Claude draw its own picker immediately and
+/// mirrors a read-only card into Fleet. `fleet` makes the PreToolUse hook HOLD
+/// the tool call so Fleet or the macOS app can answer it as exact JSON, with no
+/// synthetic keystrokes — at the cost of suppressing the terminal picker until
+/// someone answers or releases it.
+///
+/// Native is the default deliberately: holding is the more powerful mode but it
+/// strands an operator who is sitting at the terminal, so it is opted into
+/// rather than inherited.
+///
+/// Example `config.toml`:
+/// ```toml
+/// [fleet.interview]
+/// surface = "native"   # or "fleet" to hold for remote answering
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterviewConfig {
+    /// `"native"` or `"fleet"`. Unrecognised values read as `"native"`, so a
+    /// typo can never silently start holding tool calls.
+    #[serde(default = "default_interview_surface")]
+    pub surface: String,
+}
+
+fn default_interview_surface() -> String {
+    "native".to_string()
+}
+
+impl Default for InterviewConfig {
+    fn default() -> Self {
+        Self {
+            surface: default_interview_surface(),
+        }
+    }
 }
 
 /// Spend ceilings consumed by `ainb fleet cost`.
@@ -1051,6 +1112,16 @@ impl AppConfig {
         // intact.
         if !other.fleet.cost.is_empty() {
             self.fleet.cost = other.fleet.cost;
+        }
+        // `merge_loaded` is a hand-written field-by-field merge, so a struct
+        // field that is not named here is silently DROPPED no matter what the
+        // file says. An unset section deserializes to the default, so only a
+        // non-default value counts as "the file set this".
+        if other.fleet.interview != InterviewConfig::default() {
+            self.fleet.interview = other.fleet.interview.clone();
+        }
+        if other.fleet.terminal != default_fleet_terminal() {
+            self.fleet.terminal.clone_from(&other.fleet.terminal);
         }
 
         // Pool settings: trust the loaded layer whenever it differs from the
