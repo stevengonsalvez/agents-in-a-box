@@ -16,9 +16,10 @@ use ratatui::{
 };
 
 use crate::app::state::DaemonsOverlayState;
+use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
-use crate::fleet::daemons::probe::{DaemonState, DaemonStatus};
+use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -65,6 +66,63 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
+    /// Index of the highlighted row, clamped to the snapshot on every render.
+    selected: usize,
+    /// The open per-row action menu, if any.
+    menu: Option<ActionMenu>,
+    /// True while the full error of the selected row's last action is showing.
+    error_open: bool,
+    /// Last action outcome per daemon, keyed by [`DaemonKind::id`]. A failure
+    /// stays on its own row rather than becoming a toast that scrolls away from
+    /// the thing it is about.
+    outcomes: std::collections::HashMap<&'static str, ActionOutcome>,
+    /// In-flight actions per daemon. Present = an action is running, which also
+    /// serves as the one-outstanding guard for that row.
+    inflight: std::collections::HashMap<
+        &'static str,
+        tokio::sync::mpsc::UnboundedReceiver<ActionOutcome>,
+    >,
+}
+
+/// The open action menu: which daemon it belongs to and where the cursor is.
+#[derive(Debug)]
+struct ActionMenu {
+    kind: DaemonKind,
+    /// Index into [`ActionMenu::entries`].
+    cursor: usize,
+}
+
+/// One entry in the action menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuEntry {
+    /// A lifecycle verb.
+    Act(Action),
+    /// Show the full error of this row's last failed action.
+    ViewError,
+}
+
+impl ActionMenu {
+    /// The entries for this menu. `view last error` only appears when there IS
+    /// one — an always-present entry that usually does nothing is noise.
+    fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
+        let mut entries: Vec<MenuEntry> = Action::ALL.into_iter().map(MenuEntry::Act).collect();
+        if has_error {
+            entries.push(MenuEntry::ViewError);
+        }
+        entries
+    }
+}
+
+/// What a finished lifecycle action reported.
+#[derive(Debug, Clone)]
+pub struct ActionOutcome {
+    action: Action,
+    ok: bool,
+    /// One line for the row itself.
+    summary: String,
+    /// Everything the command said: the argv, its exit status, and its output.
+    /// This is what the error view shows, verbatim.
+    detail: String,
 }
 
 impl DaemonsState {
@@ -94,6 +152,128 @@ impl DaemonsState {
         let _ = self.shared();
     }
 
+    // ── Selection ───────────────────────────────────────────────────────────
+
+    /// Move the row selection. `delta` is rows down (negative = up); the
+    /// selection saturates at both ends rather than wrapping, so holding a key
+    /// parks at the edge instead of cycling past what you were aiming at.
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.row_count();
+        if len == 0 {
+            return;
+        }
+        let next = self.selected.saturating_add_signed(delta).min(len - 1);
+        self.selected = next;
+    }
+
+    fn row_count(&mut self) -> usize {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.rows.len()
+    }
+
+    /// The daemon the selection is on, if the snapshot has landed.
+    fn selected_kind(&mut self) -> Option<DaemonKind> {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.rows.get(self.selected).map(|r| r.kind)
+    }
+
+    // ── Action menu ─────────────────────────────────────────────────────────
+
+    /// True while the action menu or the error view is open, so the key handler
+    /// knows Esc should close that rather than leave the screen.
+    #[must_use]
+    pub fn has_overlay(&self) -> bool {
+        self.menu.is_some() || self.error_open
+    }
+
+    /// Open the action menu on the selected row. No-op before the first
+    /// snapshot lands — a menu over an empty table has nothing to act on.
+    pub fn open_menu(&mut self) {
+        if let Some(kind) = self.selected_kind() {
+            self.menu = Some(ActionMenu { kind, cursor: 0 });
+        }
+    }
+
+    /// Close whichever overlay is open, innermost first.
+    pub fn close_overlay(&mut self) {
+        if self.error_open {
+            self.error_open = false;
+            return;
+        }
+        self.menu = None;
+    }
+
+    /// Move the menu cursor, saturating at both ends.
+    pub fn move_menu(&mut self, delta: isize) {
+        let Some(menu) = self.menu.as_ref() else {
+            return;
+        };
+        let len = menu.entries(self.has_error_for(menu.kind)).len();
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        menu.cursor = menu.cursor.saturating_add_signed(delta).min(len.saturating_sub(1));
+    }
+
+    fn has_error_for(&self, kind: DaemonKind) -> bool {
+        self.outcomes.get(kind.id()).is_some_and(|o| !o.ok)
+    }
+
+    /// Run the highlighted menu entry.
+    pub fn confirm_menu(&mut self) {
+        let Some(menu) = self.menu.as_ref() else {
+            return;
+        };
+        let kind = menu.kind;
+        let entries = menu.entries(self.has_error_for(kind));
+        let Some(entry) = entries.get(menu.cursor).copied() else {
+            return;
+        };
+        match entry {
+            MenuEntry::ViewError => self.error_open = true,
+            MenuEntry::Act(action) => {
+                self.menu = None;
+                self.dispatch(kind, action);
+            }
+        }
+    }
+
+    /// Start one lifecycle action off the UI thread.
+    ///
+    /// The whole point of the Daemons screen's rewrite: an action must never be
+    /// run inline. Shelling `ainb daemon …` on a throwaway thread keeps the UI
+    /// responsive AND gives the error view the real argv, exit status, and
+    /// stderr to show instead of a paraphrase.
+    pub fn dispatch(&mut self, kind: DaemonKind, action: Action) {
+        if self.inflight.contains_key(kind.id()) {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.inflight.insert(kind.id(), rx);
+        self.outcomes.remove(kind.id());
+        let (kind_id, verb) = (kind.id(), action.id());
+        std::thread::spawn(move || {
+            let _ = tx.send(run_daemon_action(kind_id, verb, action));
+        });
+    }
+
+    /// Drain finished actions. Cheap enough for the render path — it is a
+    /// channel poll, not I/O, and the H-D2 rule is about blocking syscalls.
+    fn poll_actions(&mut self) {
+        let mut done = Vec::new();
+        for (id, rx) in &mut self.inflight {
+            if let Ok(outcome) = rx.try_recv() {
+                done.push((*id, outcome));
+            }
+        }
+        for (id, outcome) in done {
+            self.inflight.remove(id);
+            self.outcomes.insert(id, outcome);
+        }
+    }
+
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
     fn snapshot(&mut self) -> Snapshot {
@@ -104,6 +284,68 @@ impl DaemonsState {
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
         }
+    }
+}
+
+/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
+///
+/// Runs on a throwaway thread. The captured argv, exit status, and output are
+/// what the row's error view shows verbatim — the operator sees the actual
+/// failure, not our summary of it.
+fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome {
+    let argv = format!("ainb daemon {kind_id} {verb}");
+    let bin = match std::env::current_exe() {
+        Ok(bin) => bin,
+        Err(e) => {
+            return ActionOutcome {
+                action,
+                ok: false,
+                summary: format!("{verb} failed"),
+                detail: format!("cmd: {argv}\ncould not resolve the running ainb binary: {e}"),
+            };
+        }
+    };
+    match std::process::Command::new(bin).args(["daemon", kind_id, verb]).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let ok = out.status.success();
+            let first_line = |s: &str| {
+                s.lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let summary = if ok {
+                let line = first_line(&stdout);
+                if line.is_empty() {
+                    format!("{verb} ok")
+                } else {
+                    line
+                }
+            } else {
+                format!("{verb} failed")
+            };
+            ActionOutcome {
+                action,
+                ok,
+                summary,
+                detail: format!(
+                    "cmd: {argv}\nexit: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+                    out.status,
+                    if stdout.is_empty() { "(none)" } else { &stdout },
+                    if stderr.is_empty() { "(none)" } else { &stderr },
+                ),
+            }
+        }
+        Err(e) => ActionOutcome {
+            action,
+            ok: false,
+            summary: format!("{verb} failed"),
+            detail: format!("cmd: {argv}\ncould not run it: {e}"),
+        },
     }
 }
 
@@ -153,7 +395,10 @@ pub fn render(
     state: &mut DaemonsState,
     runtime: Option<&DaemonsOverlayState>,
 ) {
+    state.poll_actions();
     let snapshot = state.snapshot();
+    // Clamp before painting: the collector can shrink the table under us.
+    state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
 
     let outer = Block::default()
         .title(Line::from(vec![
@@ -180,180 +425,156 @@ pub fn render(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    // A normal 24-row terminal gets all three tables: fleet daemons, system
-    // services, and hooks. The system table omits a redundant column header so
-    // its five rows fit beside the Fleet table and compact Hooks section.
-    if chunks[0].height >= 21 {
+    // One table, plus the Hooks box. The old System services panel is gone: it
+    // listed the MCP pool, the Hangar daemon and the Headroom proxy as ad-hoc
+    // lines because they had no DaemonKind, and it sat on "collecting…" when
+    // its separate async fetch wedged. Those three are real rows now, so the
+    // panel was a second place to look that showed strictly less.
+    if chunks[0].height >= 14 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(7),
-                Constraint::Length(7),
-                Constraint::Length(7),
-            ])
+            .constraints([Constraint::Min(7), Constraint::Length(7)])
             .split(chunks[0]);
-        render_table(frame, sections[0], &snapshot);
-        render_system_services(frame, sections[1], runtime);
-        render_hook_section(frame, sections[2], snapshot.hook_health.as_ref(), runtime);
-    } else if chunks[0].height >= 18 {
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(7)])
-            .split(chunks[0]);
-        render_table(frame, sections[0], &snapshot);
-        render_hook_section(frame, sections[1], snapshot.hook_health.as_ref(), runtime);
+        render_table(frame, sections[0], &snapshot, state);
+        render_hook_section(
+            frame,
+            sections[1],
+            snapshot.hook_health.as_ref(),
+            runtime,
+            snapshot.collected_at_ms > 0,
+        );
     } else {
-        render_table(frame, chunks[0], &snapshot);
+        render_table(frame, chunks[0], &snapshot, state);
     }
-    render_footer(frame, chunks[1]);
+    render_footer(frame, chunks[1], state);
+    // Overlays paint last so they float above the table.
+    if state.error_open {
+        render_error_view(frame, inner, state);
+    } else if state.menu.is_some() {
+        render_action_menu(frame, inner, state);
+    }
 }
 
-fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
+/// The per-row action menu — the one place every daemon offers the same verbs.
+fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+    let Some(menu) = state.menu.as_ref() else {
+        return;
+    };
+    let entries = menu.entries(state.has_error_for(menu.kind));
+    let width = 30_u16.min(area.width.saturating_sub(2));
+    let height = u16::try_from(entries.len()).unwrap_or(3) + 3;
+    let popup = centered(area, width, height.min(area.height));
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" ◇ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" ", Style::default()),
             Span::styled(
-                "System services",
+                menu.kind.display_name(),
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  r",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" refresh · ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("M", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" restart MCP · ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("P", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" Headroom · ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" notifyd · ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" start / upgrade Hangar", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" ", Style::default()),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(SUBDUED_BORDER))
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
         .style(Style::default().bg(PANEL_BG));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
 
-    let rows = match runtime {
-        None => vec![Row::new(["collecting…", "", "", ""])],
-        Some(runtime) if runtime.loading => vec![Row::new(["collecting…", "", "", ""])],
-        Some(runtime) => {
-            let status = |up| if up { "● up" } else { "○ down" };
-            let headroom_detail = format!(
-                ":{}  {}",
-                runtime.headroom.port,
-                runtime
-                    .headroom
-                    .pid
-                    .map(|pid| format!("pid {pid}"))
-                    .unwrap_or_else(|| "not running".to_string())
-            );
-            let action_detail = |status: Option<&String>, default: &str| {
-                status.cloned().unwrap_or_else(|| default.to_string())
-            };
-            let version = |running: Option<&str>, old: bool| match running {
-                Some(version) if old => format!("{version} → {}", env!("CARGO_PKG_VERSION")),
-                Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
-                Some(version) => format!("{version} newer"),
-                None => "version unknown".to_string(),
-            };
-            let notify_version = notifyd_version_label(&runtime.notifyd);
-            vec![
-                Row::new(vec![
-                    Cell::from("MCP pool"),
-                    Cell::from(status(runtime.mcp_alive)),
-                    Cell::from(action_detail(
-                        runtime.mcp_start_status.as_ref(),
-                        &version(
-                            runtime.mcp_runtime.version.as_deref(),
-                            runtime.mcp_runtime.old,
-                        ),
-                    )),
-                    Cell::from("M restart current"),
-                ]),
-                Row::new(vec![
-                    Cell::from("Headroom"),
-                    Cell::from(status(runtime.headroom.running)),
-                    Cell::from(action_detail(
-                        runtime.headroom_start_status.as_ref(),
-                        &headroom_detail,
-                    )),
-                    Cell::from("P start"),
-                ]),
-                Row::new(vec![
-                    Cell::from("Hangar"),
-                    Cell::from(status(runtime.hangar_running)),
-                    Cell::from(action_detail(
-                        runtime.hangar_start_status.as_ref(),
-                        &version(
-                            runtime.hangar_runtime.version.as_deref(),
-                            runtime.hangar_runtime.old,
-                        ),
-                    )),
-                    Cell::from("S start / upgrade"),
-                ]),
-                Row::new(vec![
-                    Cell::from("notifyd"),
-                    Cell::from(status(
-                        runtime.notifyd.iter().any(|daemon| daemon.class.is_healthy()),
-                    )),
-                    Cell::from(action_detail(
-                        runtime.notifyd_restart_status.as_ref(),
-                        &notify_version,
-                    )),
-                    Cell::from("R restart current"),
-                ]),
-                Row::new(vec![
-                    Cell::from("approval broker"),
-                    Cell::from(status(runtime.approve_running)),
-                    Cell::from(format!("{notify_version} · {}", runtime.approve_reason)),
-                    Cell::from("repaired by R"),
-                ]),
-            ]
-        }
-    };
-    let widths = [
-        Constraint::Length(18),
-        Constraint::Length(12),
-        Constraint::Min(22),
-        Constraint::Length(24),
-    ];
+    let mut lines: Vec<Line> = Vec::with_capacity(entries.len() + 1);
+    for (i, entry) in entries.iter().enumerate() {
+        let label = match entry {
+            MenuEntry::Act(a) => a.id(),
+            MenuEntry::ViewError => "view last error",
+        };
+        let selected = i == menu.cursor;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "▶ " } else { "  " },
+                Style::default().fg(HEALTHY_GREEN),
+            ),
+            Span::styled(
+                label,
+                if selected {
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED_GRAY)
+                },
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
+        Span::styled(" run · ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Esc", Style::default().fg(CORNFLOWER_BLUE)),
+        Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+    ]));
     frame.render_widget(
-        Table::new(rows, widths).style(Style::default().fg(SOFT_WHITE).bg(PANEL_BG)),
+        Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
         inner,
     );
 }
 
-fn notifyd_version_label(daemons: &[ainb_plugin_notifyd::ClassifiedDaemon]) -> String {
-    let Some(owner) = daemons.iter().find(|daemon| daemon.class.is_healthy()) else {
-        return if daemons.is_empty() {
-            "not running".to_string()
-        } else {
-            "owner unknown".to_string()
-        };
+/// The full text of the selected row's last failed action.
+fn render_error_view(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+    let Some(kind) = state.menu.as_ref().map(|m| m.kind) else {
+        return;
     };
-    let version = owner
-        .proc
-        .bin
-        .split_once("/Cellar/ainb/")
-        .and_then(|(_, rest)| rest.split('/').next())
-        .filter(|version| !version.is_empty());
-    match version {
-        Some(version)
-            if crate::fleet::daemons::probe::release_version_is_older(
-                version,
-                env!("CARGO_PKG_VERSION"),
-            ) =>
-        {
-            format!("{version} → {}", env!("CARGO_PKG_VERSION"))
-        }
-        Some(version) if version == env!("CARGO_PKG_VERSION") => format!("{version} ✓"),
-        Some(version) => format!("{version} newer"),
-        None if owner.binary_drift => "different build".to_string(),
-        None => format!("{} ✓", env!("CARGO_PKG_VERSION")),
+    let Some(outcome) = state.outcomes.get(kind.id()) else {
+        return;
+    };
+    let width = area.width.saturating_sub(6).min(76);
+    let height = area.height.saturating_sub(4).min(18);
+    let popup = centered(area, width, height);
+    frame.render_widget(ratatui::widgets::Clear, popup);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                kind.display_name(),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {} failed ", outcome.action.id()),
+                Style::default().fg(STOPPED_RED),
+            ),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(STOPPED_RED))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = outcome
+        .detail
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(SOFT_WHITE))))
+        .collect();
+    lines.push(Line::from(Span::styled(String::new(), Style::default())));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(CORNFLOWER_BLUE)),
+        Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+    ]));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(Style::default().bg(PANEL_BG)),
+        inner,
+    );
+}
+
+/// A `width` × `height` rect centred in `area`, clamped to fit.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
     }
 }
 
@@ -362,6 +583,7 @@ fn render_hook_section(
     area: Rect,
     health: Option<&HookHealth>,
     runtime: Option<&DaemonsOverlayState>,
+    collected: bool,
 ) {
     let block = Block::default()
         .title(Line::from(vec![
@@ -385,8 +607,15 @@ fn render_hook_section(
     frame.render_widget(block, area);
 
     let lines = match health {
+        // Once a collect HAS run, "collecting…" is a lie — the collector looked
+        // and found nothing readable. Saying so is what lets the operator act
+        // on it instead of waiting for a placeholder that never resolves.
+        None if collected => vec![Line::from(Span::styled(
+            "hook health unavailable — run `ainb doctor --fix-hooks`",
+            Style::default().fg(STOPPED_RED),
+        ))],
         None => vec![Line::from(Span::styled(
-            "collecting hook health…",
+            "reading hook health…",
             Style::default().fg(MUTED_GRAY),
         ))],
         Some(health) => {
@@ -486,7 +715,7 @@ fn render_hook_section(
     );
 }
 
-fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
+fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &DaemonsState) {
     let now = if snapshot.collected_at_ms > 0 {
         snapshot.collected_at_ms
     } else {
@@ -494,7 +723,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     };
 
     let header = Row::new(vec![
-        Cell::from("DAEMON"),
+        Cell::from("  DAEMON"),
         Cell::from("STATE"),
         Cell::from("PID"),
         Cell::from("UPTIME"),
@@ -508,7 +737,9 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     let rows: Vec<Row> = snapshot
         .rows
         .iter()
-        .map(|d| {
+        .enumerate()
+        .map(|(i, d)| {
+            let selected = i == state.selected;
             let (glyph, glyph_style) = match d.state {
                 DaemonState::Running => ("● running", Style::default().fg(HEALTHY_GREEN)),
                 // Amber, not green: the process is up but one half of its job is
@@ -528,9 +759,39 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
                 }
                 _ => d.reason.clone(),
             };
+            // A running or finished action owns the STATE cell until the next
+            // collect: it is the most recent truth about this row, and a
+            // failure has to be attached to the daemon it happened to.
+            let (glyph, glyph_style) = match (
+                state.inflight.contains_key(d.kind.id()),
+                state.outcomes.get(d.kind.id()),
+            ) {
+                (true, _) => ("⟳ working", Style::default().fg(GOLD)),
+                (false, Some(o)) if !o.ok => (
+                    "✗ failed",
+                    Style::default().fg(STOPPED_RED).add_modifier(Modifier::BOLD),
+                ),
+                _ => (glyph, glyph_style),
+            };
+            // A failed action replaces HEALTH with its own summary plus the way
+            // to read the rest. A stale probe reason under a red badge reads as
+            // if nothing happened.
+            let health = match state.outcomes.get(d.kind.id()) {
+                Some(o) if !o.ok => format!("{}  ·  Enter → error", o.summary),
+                Some(o) => o.summary.clone(),
+                None => health,
+            };
             Row::new(vec![
-                Cell::from(d.kind.display_name())
-                    .style(Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+                Cell::from(format!(
+                    "{}{}",
+                    if selected { "▶ " } else { "  " },
+                    d.kind.display_name()
+                ))
+                .style(if selected {
+                    Style::default().fg(HEALTHY_GREEN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                }),
                 Cell::from(glyph).style(glyph_style),
                 Cell::from(pid),
                 Cell::from(uptime),
@@ -547,7 +808,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
         .collect();
 
     let widths = [
-        Constraint::Length(14),
+        Constraint::Length(16),
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(8),
@@ -588,14 +849,37 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled("read-only • live", Style::default().fg(MUTED_GRAY)),
-        Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
-        Span::styled("q/Esc", Style::default().fg(CORNFLOWER_BLUE)),
-        Span::styled(" back", Style::default().fg(MUTED_GRAY)),
-    ]))
-    .style(Style::default().bg(PANEL_BG));
+fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+    // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
+    // so advertising the table's keys underneath it would be a lie.
+    let spans = if state.error_open {
+        vec![
+            Span::styled("Esc", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" close error", Style::default().fg(MUTED_GRAY)),
+        ]
+    } else if state.menu.is_some() {
+        vec![
+            Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" choose  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" run  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Esc", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+        ]
+    } else {
+        vec![
+            Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" start / restart / stop  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
+            Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled("q/Esc", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(" back", Style::default().fg(MUTED_GRAY)),
+        ]
+    };
+    let footer = Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL_BG));
     frame.render_widget(footer, area);
 }
 
@@ -670,6 +954,7 @@ mod tests {
         }));
         DaemonsState {
             shared: Some(shared),
+            ..DaemonsState::default()
         }
     }
 
@@ -722,6 +1007,7 @@ mod tests {
         }));
         DaemonsState {
             shared: Some(shared),
+            ..DaemonsState::default()
         }
     }
 
@@ -852,9 +1138,15 @@ mod tests {
         );
         let runtime = system_runtime();
         let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        // The System services panel is gone on purpose: everything it listed is
+        // a real table row now, so a second panel would show strictly less.
         assert!(
-            out.contains("System services"),
-            "system section missing: {out}"
+            !out.contains("System services"),
+            "the System services panel must not come back: {out}"
+        );
+        assert!(
+            !out.contains("collecting…"),
+            "nothing on this screen may sit on a collecting placeholder: {out}"
         );
         assert!(out.contains("Hooks"), "hook section missing: {out}");
         assert!(
@@ -866,18 +1158,6 @@ mod tests {
             out.contains("/usr/local/bin/ainb"),
             "hook target missing: {out}"
         );
-        for service in [
-            "MCP pool",
-            "Headroom",
-            "Hangar",
-            "notifyd",
-            "approval broker",
-        ] {
-            assert!(
-                out.contains(service),
-                "service row missing: {service}; {out}"
-            );
-        }
         assert!(
             out.contains("0.4.4 → 0.4.5"),
             "version state missing: {out}"
@@ -887,6 +1167,151 @@ mod tests {
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+    }
+
+    /// Bug 3: a stopped daemon had no way back up. Every row is now selectable
+    /// and Enter offers the same three verbs — the point of the whole screen.
+    #[test]
+    fn enter_opens_an_action_menu_offering_start_restart_and_stop() {
+        let mut state = seeded_state(vec![
+            status(DaemonKind::Atc, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::McpPool,
+                DaemonState::Running,
+                true,
+                Some("sock"),
+            ),
+        ]);
+        state.open_menu();
+        let out = render_to_string(&mut state, None, 120, 24);
+        assert!(out.contains("start"), "menu must offer start: {out}");
+        assert!(out.contains("restart"), "menu must offer restart: {out}");
+        assert!(out.contains("stop"), "menu must offer stop: {out}");
+        assert!(
+            out.contains("ATC"),
+            "the menu must name the row it acts on: {out}"
+        );
+    }
+
+    /// The menu acts on the SELECTED row, not always the first one.
+    #[test]
+    fn the_menu_follows_the_selection() {
+        let mut state = seeded_state(vec![
+            status(DaemonKind::Atc, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::McpPool,
+                DaemonState::Running,
+                true,
+                Some("sock"),
+            ),
+        ]);
+        state.move_selection(1);
+        state.open_menu();
+        assert_eq!(
+            state.menu.as_ref().map(|m| m.kind),
+            Some(DaemonKind::McpPool)
+        );
+    }
+
+    /// Selection saturates rather than wrapping, so holding a key parks at the
+    /// edge instead of cycling past the row you were aiming for.
+    #[test]
+    fn selection_saturates_at_both_ends() {
+        let mut state = seeded_state(vec![
+            status(DaemonKind::Atc, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::McpPool,
+                DaemonState::Running,
+                true,
+                Some("sock"),
+            ),
+        ]);
+        state.move_selection(-5);
+        assert_eq!(state.selected, 0);
+        state.move_selection(50);
+        assert_eq!(state.selected, 1);
+    }
+
+    /// A failure belongs to the daemon it happened to. The row shows a badge
+    /// plus the way to read the rest, and the full text is one Enter away.
+    #[test]
+    fn a_failed_action_badges_its_own_row_and_its_detail_is_readable() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        state.outcomes.insert(
+            DaemonKind::Atc.id(),
+            ActionOutcome {
+                action: Action::Start,
+                ok: false,
+                summary: "start failed".to_string(),
+                detail: "cmd: ainb daemon atc start\nexit: exit status: 1\n\nstderr:\nsocket already bound by pid 4412".to_string(),
+            },
+        );
+        let out = render_to_string(&mut state, None, 120, 24);
+        assert!(
+            out.contains("✗ failed"),
+            "row must badge the failure: {out}"
+        );
+        assert!(
+            out.contains("Enter → error"),
+            "the row must say how to read the error: {out}"
+        );
+
+        state.open_menu();
+        // start, restart, stop, then `view last error` — the entry only exists
+        // because this row HAS an error.
+        state.move_menu(3);
+        state.confirm_menu();
+        let out = render_to_string(&mut state, None, 120, 24);
+        assert!(
+            out.contains("socket already bound by pid 4412"),
+            "the error view must show the real stderr: {out}"
+        );
+        assert!(
+            out.contains("ainb daemon atc start"),
+            "the error view must show the command that failed: {out}"
+        );
+    }
+
+    /// A row with no failure does not offer to show one.
+    #[test]
+    fn a_clean_row_has_no_view_error_entry() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::McpPool,
+            DaemonState::Running,
+            true,
+            Some("sock"),
+        )]);
+        state.open_menu();
+        let out = render_to_string(&mut state, None, 120, 24);
+        assert!(
+            !out.contains("view last error"),
+            "nothing failed here, so there is nothing to view: {out}"
+        );
+    }
+
+    /// Esc unwinds the innermost overlay first. Popping straight out from under
+    /// an open error view would throw away what the user just opened.
+    #[test]
+    fn esc_closes_the_error_view_before_the_menu() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        state.open_menu();
+        state.error_open = true;
+        state.close_overlay();
+        assert!(!state.error_open, "the error view closes first");
+        assert!(state.menu.is_some(), "the menu is still open underneath");
+        state.close_overlay();
+        assert!(state.menu.is_none(), "then the menu closes");
+        assert!(!state.has_overlay(), "and the screen is free to pop");
     }
 
     #[test]
@@ -908,7 +1333,11 @@ mod tests {
         let shared = Mutex::new(Snapshot::default());
         collect_into(&shared);
         let guard = shared.lock().unwrap();
-        assert_eq!(guard.rows.len(), 5, "collect publishes every daemon");
+        assert_eq!(
+            guard.rows.len(),
+            crate::cli::daemon::CONTROLLABLE.len(),
+            "collect publishes every daemon"
+        );
         assert!(
             guard.collected_at_ms > 0,
             "publish stamps the collect clock"
