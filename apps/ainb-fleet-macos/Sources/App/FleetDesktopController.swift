@@ -527,7 +527,7 @@ private struct FleetNotchDetail: View {
                 }
             } else if let deck, let question = deck.questions[safe: clampedIndex(deck)] {
                 if deck.mirroredPicker {
-                    Text("Claude picker is also open. Submit here to select the same answer there. Text answers unavailable.")
+                    Text("Showing in Claude's own picker — answer it in the session. Open session, or hold the next one for Fleet with `ainb fleet interview surface fleet`.")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(FleetNotchPalette.mint)
                 }
@@ -597,7 +597,23 @@ private struct FleetNotchDetail: View {
         Text(question.header).font(.subheadline.weight(.semibold))
         Text(question.text).font(.caption).fixedSize(horizontal: false, vertical: true)
 
-        if question.options.isEmpty {
+        if deck.mirroredPicker {
+            // Read-only: Claude owns this pane's stdin and already drew the
+            // picker, so there is nothing to select here. Options are still
+            // listed — the point of the card is to let you READ the question
+            // from another surface and decide whether to go answer it.
+            ForEach(question.options, id: \.self) { option in
+                HStack(spacing: 6) {
+                    Image(systemName: question.multiSelect ? "square" : "circle")
+                        .font(.caption)
+                        .foregroundStyle(FleetNotchPalette.muted)
+                    Text(option).font(.caption).foregroundStyle(FleetNotchPalette.muted)
+                    Spacer()
+                }
+                .padding(6)
+                .background(FleetNotchPalette.canvas, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+        } else if question.options.isEmpty {
             TextField("Type answer", text: textBinding(deck: deck, question: question), axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
@@ -644,14 +660,21 @@ private struct FleetNotchDetail: View {
                     .font(.caption)
                     .help("Attach to this session in a terminal window")
             }
-            if session.capabilities.structuredDismiss {
+            if session.capabilities.structuredDismiss && !deck.mirroredPicker {
                 Button("Reject", role: .destructive) { rejectConfirmation = true }
                     .font(.caption)
             }
-            Button("Submit") { submit(deck) }
-                .buttonStyle(.borderedProminent)
-                .font(.caption)
-                .disabled(!complete(deck) || (deck.mirroredPicker && hasTextAnswer(deck)) || store.pendingIntentID != nil)
+            // No Submit for a mirrored deck. The only transport back into a
+            // native picker is blind keystrokes verified by screen-scraping a
+            // vendor TUI, which fails whenever that TUI is relaid out, and
+            // whose failure mode is answering the wrong question. Offering a
+            // button that cannot honour the click is worse than not offering it.
+            if !deck.mirroredPicker {
+                Button("Submit") { submit(deck) }
+                    .buttonStyle(.borderedProminent)
+                    .font(.caption)
+                    .disabled(!complete(deck) || store.pendingIntentID != nil)
+            }
         }
     }
 
