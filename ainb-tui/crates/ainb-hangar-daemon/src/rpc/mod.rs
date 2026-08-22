@@ -90,8 +90,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// Shown verbatim to the operator, so it names the fix rather than the fault:
 /// the question is answerable, just not from here while the surface is native.
-pub const MIRRORED_IS_READ_ONLY: &str =
-    "this interview is showing in Claude's own picker — answer it in the session, \
+pub const MIRRORED_IS_READ_ONLY: &str = "this interview is showing in Claude's own picker — answer it in the session, \
      or set `ainb fleet interview surface fleet` to hold the next one for Fleet";
 
 /// Cross-process, crash-safe ownership of one operation against one Hangar DB.
@@ -3999,14 +3998,8 @@ async fn execute_fleet_action(
                     answers,
                     ..
                 } if session.provider == "claude" => {
-                    execute_claude_structured(
-                        pool,
-                        events,
-                        &session,
-                        request_fingerprint,
-                        answers,
-                    )
-                    .await
+                    execute_claude_structured(pool, events, &session, request_fingerprint, answers)
+                        .await
                 }
                 ControlAction::DismissStructured {
                     request_fingerprint,
@@ -4397,8 +4390,7 @@ async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod fleet_launch_tests {
     use super::{
-        managed_codex_tmux_args, managed_codex_tmux_name, normalize_picker_text,
-        verify_picker_pane,
+        managed_codex_tmux_args, managed_codex_tmux_name, normalize_picker_text, verify_picker_pane,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
@@ -4527,11 +4519,6 @@ mod fleet_launch_tests {
         assert!(error.contains("newer picker"));
     }
 
-
-
-
-
-
     #[test]
     fn verified_picker_rejects_a_newer_picker_whose_prompt_has_no_question_mark() {
         // Guards the separator contract from the other side. Both pre-existing
@@ -4549,7 +4536,6 @@ mod fleet_launch_tests {
         let error = verify_picker_pane("claude", &picker_request(), pane).unwrap_err();
         assert!(error.contains("newer picker"), "got: {error}");
     }
-
 }
 
 async fn claude_broker_decide(
@@ -5141,12 +5127,6 @@ async fn execute_claude_structured(
         Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
     }
 }
-
-
-
-
-
-
 
 /// One-line render of a delivered interview answer for the attention row's audit
 /// `answer` column: what the control centre shows as "answered by fleet: …".
@@ -5822,7 +5802,6 @@ fn normalize_picker_text(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-
 
 /// Mint an ACP session: the `fleet_session` + `fleet_acp_session` PAIR under one
 /// `session_key`, in ONE transaction, with NO process spawn.
