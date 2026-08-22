@@ -57,6 +57,24 @@ pub fn proxy_port() -> u16 {
 
 // ── Liveness probe ───────────────────────────────────────────────────────────
 
+/// Synchronous liveness: is anything accepting on the proxy port?
+///
+/// [`is_healthy`] is the richer probe but it is async, and the Daemons
+/// background collector runs on a plain thread with no tokio runtime under it.
+/// A bounded TCP connect answers the only question that row needs — is the
+/// proxy listening — without dragging a runtime into the collector.
+#[must_use]
+pub fn is_listening() -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], proxy_port()));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+}
+
+/// The pid of the ainb-managed proxy, when one is recorded.
+#[must_use]
+pub fn pid() -> Option<u32> {
+    read_pid()
+}
+
 /// Returns `true` when the Headroom proxy answers `GET /health` within 500ms.
 /// Never panics; any error maps to `false`.
 pub async fn is_healthy() -> bool {
