@@ -1,0 +1,27 @@
+# Journey 2 — every daemon row is selectable and Enter offers the same three
+# verbs. Before this, each daemon had one fixed key bound to one action, and a
+# stopped ATC or fleet daemon had no way back up at all.
+Output tests/recordings/daemons-actions.gif
+Set Theme "Dracula"
+Set Width 1500
+Set Height 620
+Set FontSize 15
+Set Padding 12
+
+Hide
+Type "clear && HOME=__HOME__ AINB_HOME=__HOME__/.agents-in-a-box exec __AINB__ tui"
+Enter
+Sleep 12s
+Type "d"
+Sleep 4s
+Show
+
+Sleep 1s
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+Down
+Sleep 1s
+Enter
+Sleep 3s

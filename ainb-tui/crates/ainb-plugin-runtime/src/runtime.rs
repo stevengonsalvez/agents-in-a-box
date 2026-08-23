@@ -46,6 +46,11 @@ pub(crate) struct PluginHandle {
     /// have landed by then, but either way the host needs an initial
     /// `plugin/render` to populate the screen).
     pub(crate) render_dirty: Arc<AtomicBool>,
+    /// Set by the plugin task when a `plugin/render` blew its deadline, cleared
+    /// when one completes. The host reads it to stop forwarding `q`/`Esc` into
+    /// a plugin that cannot service them — see
+    /// [`crate::RuntimeHandle::render_wedged`].
+    pub(crate) render_wedged: Arc<AtomicBool>,
 }
 
 /// Owns the tokio runtime + per-plugin tasks. Construct with
@@ -272,7 +277,7 @@ impl Runtime {
             arc.manifest.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Eager
         );
-        let (inbox, key_inbox, mouse_inbox, cache, state) = plugin_task::spawn(
+        let (inbox, key_inbox, mouse_inbox, cache, state, render_wedged) = plugin_task::spawn(
             arc.clone(),
             self.snapshots.clone(),
             self.inboxes.clone(),
@@ -304,6 +309,7 @@ impl Runtime {
             state,
             plugin: arc.clone(),
             render_dirty,
+            render_wedged,
         });
         self.plugins.write().insert(arc.id.clone(), handle);
     }

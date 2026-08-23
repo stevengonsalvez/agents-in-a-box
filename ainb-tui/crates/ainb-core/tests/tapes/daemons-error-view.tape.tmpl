@@ -1,0 +1,41 @@
+# Journey 3 — a failed action badges its own row, and the full command, exit
+# status and stderr are one Enter away. Before this an action that failed had
+# nowhere to say why.
+Output tests/recordings/daemons-error-view.gif
+Set Theme "Dracula"
+Set Width 1500
+Set Height 620
+Set FontSize 15
+Set Padding 12
+
+Hide
+Type "clear && HOME=__HOME__ AINB_HOME=__HOME__/.agents-in-a-box exec __AINB__ tui"
+Enter
+Sleep 12s
+Type "d"
+Sleep 4s
+Down
+Sleep 400ms
+Down
+Sleep 400ms
+Down
+Sleep 800ms
+Enter
+Sleep 1s
+Show
+
+# Run `start` on an ATC with no provisioned instance — it fails, and the row
+# says so.
+Enter
+Sleep 3s
+# Open the failure: Enter, then down to `view last error`.
+Enter
+Sleep 800ms
+Down
+Sleep 400ms
+Down
+Sleep 400ms
+Down
+Sleep 700ms
+Enter
+Sleep 4s

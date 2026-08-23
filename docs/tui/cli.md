@@ -3093,6 +3093,582 @@ Options:
   -h, --help             Print help
 ```
 
+## `ainb daemon`
+
+Start, stop, or restart any ainb daemon
+
+```console
+$ ainb daemon --help
+Start, stop, or restart any ainb daemon
+
+Usage: ainb daemon [OPTIONS] <COMMAND>
+
+Commands:
+  list            List every controllable daemon
+  bridge          phone bridge
+  notifyd         notifyd
+  approve-broker  approve broker
+  atc             ATC
+  fleet-daemon    fleet daemon
+  mcp-pool        mcp pool
+  hangar-daemon   hangar daemon
+  headroom-proxy  headroom proxy
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb daemon list                 Every daemon and its id
+  ainb daemon atc restart          Re-assert the ATC timer
+  ainb daemon mcp-pool restart     Replace a stale MCP pool
+  ainb daemon hangar-daemon start  Bring the Hangar backend up
+```
+
+### `ainb daemon list`
+
+List every controllable daemon
+
+```console
+$ ainb daemon list --help
+List every controllable daemon
+
+Usage: ainb daemon list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon bridge`
+
+phone bridge
+
+```console
+$ ainb daemon bridge --help
+phone bridge
+
+Usage: ainb daemon bridge [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon bridge start`
+
+Bring it up
+
+```console
+$ ainb daemon bridge start --help
+Bring it up
+
+Usage: ainb daemon bridge start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon bridge restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon bridge restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon bridge restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon bridge stop`
+
+Take it down
+
+```console
+$ ainb daemon bridge stop --help
+Take it down
+
+Usage: ainb daemon bridge stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon notifyd`
+
+notifyd
+
+```console
+$ ainb daemon notifyd --help
+notifyd
+
+Usage: ainb daemon notifyd [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon notifyd start`
+
+Bring it up
+
+```console
+$ ainb daemon notifyd start --help
+Bring it up
+
+Usage: ainb daemon notifyd start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon notifyd restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon notifyd restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon notifyd restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon notifyd stop`
+
+Take it down
+
+```console
+$ ainb daemon notifyd stop --help
+Take it down
+
+Usage: ainb daemon notifyd stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon approve-broker`
+
+approve broker
+
+```console
+$ ainb daemon approve-broker --help
+approve broker
+
+Usage: ainb daemon approve-broker [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon approve-broker start`
+
+Bring it up
+
+```console
+$ ainb daemon approve-broker start --help
+Bring it up
+
+Usage: ainb daemon approve-broker start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon approve-broker restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon approve-broker restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon approve-broker restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon approve-broker stop`
+
+Take it down
+
+```console
+$ ainb daemon approve-broker stop --help
+Take it down
+
+Usage: ainb daemon approve-broker stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon atc`
+
+ATC
+
+```console
+$ ainb daemon atc --help
+ATC
+
+Usage: ainb daemon atc [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc start`
+
+Bring it up
+
+```console
+$ ainb daemon atc start --help
+Bring it up
+
+Usage: ainb daemon atc start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon atc restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon atc restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc stop`
+
+Take it down
+
+```console
+$ ainb daemon atc stop --help
+Take it down
+
+Usage: ainb daemon atc stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon fleet-daemon`
+
+fleet daemon
+
+```console
+$ ainb daemon fleet-daemon --help
+fleet daemon
+
+Usage: ainb daemon fleet-daemon [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon fleet-daemon start`
+
+Bring it up
+
+```console
+$ ainb daemon fleet-daemon start --help
+Bring it up
+
+Usage: ainb daemon fleet-daemon start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon fleet-daemon restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon fleet-daemon restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon fleet-daemon restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon fleet-daemon stop`
+
+Take it down
+
+```console
+$ ainb daemon fleet-daemon stop --help
+Take it down
+
+Usage: ainb daemon fleet-daemon stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon mcp-pool`
+
+mcp pool
+
+```console
+$ ainb daemon mcp-pool --help
+mcp pool
+
+Usage: ainb daemon mcp-pool [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon mcp-pool start`
+
+Bring it up
+
+```console
+$ ainb daemon mcp-pool start --help
+Bring it up
+
+Usage: ainb daemon mcp-pool start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon mcp-pool restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon mcp-pool restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon mcp-pool restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon mcp-pool stop`
+
+Take it down
+
+```console
+$ ainb daemon mcp-pool stop --help
+Take it down
+
+Usage: ainb daemon mcp-pool stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon hangar-daemon`
+
+hangar daemon
+
+```console
+$ ainb daemon hangar-daemon --help
+hangar daemon
+
+Usage: ainb daemon hangar-daemon [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon hangar-daemon start`
+
+Bring it up
+
+```console
+$ ainb daemon hangar-daemon start --help
+Bring it up
+
+Usage: ainb daemon hangar-daemon start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon hangar-daemon restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon hangar-daemon restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon hangar-daemon restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon hangar-daemon stop`
+
+Take it down
+
+```console
+$ ainb daemon hangar-daemon stop --help
+Take it down
+
+Usage: ainb daemon hangar-daemon stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon headroom-proxy`
+
+headroom proxy
+
+```console
+$ ainb daemon headroom-proxy --help
+headroom proxy
+
+Usage: ainb daemon headroom-proxy [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon headroom-proxy start`
+
+Bring it up
+
+```console
+$ ainb daemon headroom-proxy start --help
+Bring it up
+
+Usage: ainb daemon headroom-proxy start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon headroom-proxy restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon headroom-proxy restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon headroom-proxy restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon headroom-proxy stop`
+
+Take it down
+
+```console
+$ ainb daemon headroom-proxy stop --help
+Take it down
+
+Usage: ainb daemon headroom-proxy stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
 ## `ainb mcp`
 
 Shared MCP server pool: daemon / proxy / status / stop / import / install

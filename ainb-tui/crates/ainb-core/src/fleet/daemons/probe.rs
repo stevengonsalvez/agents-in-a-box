@@ -63,6 +63,13 @@ pub enum DaemonKind {
     Atc,
     /// Auto-continue API-error watcher (`ainb fleet daemon`).
     FleetDaemon,
+    /// Shared MCP server pool (`ainb mcp daemon`), reachable on its control
+    /// socket. One process serving every session's MCP servers.
+    McpPool,
+    /// Hangar daemon — the board/fleet backend behind the `g` screen.
+    HangarDaemon,
+    /// Headroom context proxy (`headroom proxy`), when ainb manages one.
+    HeadroomProxy,
 }
 
 impl DaemonKind {
@@ -75,6 +82,9 @@ impl DaemonKind {
             Self::ApproveBroker => "approve-broker",
             Self::Atc => "atc",
             Self::FleetDaemon => "fleet-daemon",
+            Self::McpPool => "mcp-pool",
+            Self::HangarDaemon => "hangar-daemon",
+            Self::HeadroomProxy => "headroom-proxy",
         }
     }
 
@@ -87,6 +97,9 @@ impl DaemonKind {
             Self::ApproveBroker => "approve broker",
             Self::Atc => "ATC",
             Self::FleetDaemon => "fleet daemon",
+            Self::McpPool => "mcp pool",
+            Self::HangarDaemon => "hangar daemon",
+            Self::HeadroomProxy => "headroom proxy",
         }
     }
 }
@@ -207,6 +220,17 @@ impl DaemonStatus {
             inbound_live: 0,
             last_inbound_error: None,
             reason: reason.into(),
+        }
+    }
+
+    /// A blank `Running` row for the socket-probed daemons, which have no
+    /// heartbeat file to read uptime, activity, or error counts from. Callers
+    /// fill in what they actually know via struct-update syntax; everything
+    /// left at the default stays honestly empty rather than being invented.
+    fn running(kind: DaemonKind) -> Self {
+        Self {
+            state: DaemonState::Running,
+            ..Self::stopped(kind, String::new())
         }
     }
 }
@@ -868,13 +892,36 @@ fn read_pid_file(path: &Path) -> Option<u32> {
 /// liveness probe of the listener itself, not a duplicate read of
 /// `socket_path.exists()`.
 ///
-/// H-D2: a `connect(2)` on an AF_UNIX socket returns at once (success or
-/// `ECONNREFUSED`) — there is no network round-trip to hang on — but the
-/// surrounding `collect` (this probe + the disk reads it sits beside) is run on a
-/// BACKGROUND tick, never the TUI render thread, so even a pathologically slow FS
-/// can never freeze the UI. See `components::daemons` for the background collector.
+/// H-D2: the surrounding `collect` runs on a BACKGROUND tick, never the TUI
+/// render thread, so the UI can never freeze on it. That is not the same as the
+/// collector being safe, though: `connect(2)` on an AF_UNIX socket usually
+/// returns at once (success or `ECONNREFUSED`), but it BLOCKS for as long as the
+/// listener lives when a bound-but-not-accepting daemon has a full backlog —
+/// the exact shape of a half-dead daemon. An unbounded connect there kills the
+/// single collector thread for the rest of the process, which freezes the whole
+/// table on its last snapshot with no way to recover it. So it is bounded.
 fn socket_is_listening(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    connect_bounded(path, SOCKET_PROBE_TIMEOUT).is_some()
+}
+
+/// How long any single socket probe may take before it is called dead.
+pub(crate) const SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Connect to `path`, giving up after `timeout`.
+///
+/// The connect runs on a throwaway thread because `std` offers no connect
+/// timeout for AF_UNIX. A wedged connect leaks that one thread until the kernel
+/// gives up on it, which is strictly better than leaking the collector.
+pub(crate) fn connect_bounded(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Option<std::os::unix::net::UnixStream> {
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::os::unix::net::UnixStream::connect(path).ok());
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 /// Best-effort last-write time of a file as epoch ms — used as notifyd's
@@ -883,6 +930,105 @@ fn db_mtime_ms(path: &Path) -> Option<i64> {
     let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
     let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
     i64::try_from(dur.as_millis()).ok()
+}
+
+/// Probe the shared MCP server pool from its own control socket.
+///
+/// Unlike the heartbeat daemons, the pool reports its identity over the wire —
+/// so pid and version come from the process actually serving pooled tools, not
+/// from a file some other binary wrote.
+#[must_use]
+pub fn probe_mcp_pool() -> DaemonStatus {
+    let kind = DaemonKind::McpPool;
+    // Probe the socket with a bounded connect BEFORE asking the client: its
+    // `query` sets read/write timeouts only after an unbounded connect, so a
+    // wedged listener would hang the collector there.
+    let listening = crate::mcp_pool::paths::control_socket().ok().is_some_and(|path| {
+        path.exists() && connect_bounded(&path, SOCKET_PROBE_TIMEOUT).is_some()
+    });
+    if !listening || !crate::mcp_pool::client::daemon_alive() {
+        return DaemonStatus::stopped(kind, "control socket not answering".to_string());
+    }
+    let runtime = crate::mcp_pool::client::daemon_runtime_status();
+    let reason = if runtime.old {
+        "serving — older than this ainb, restart to upgrade".to_string()
+    } else {
+        "control socket serving".to_string()
+    };
+    DaemonStatus {
+        pid: runtime.pid,
+        version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+        version: runtime.version,
+        connected: true,
+        channel: Some("control socket".to_string()),
+        reason,
+        ..DaemonStatus::running(kind)
+    }
+}
+
+/// Probe the Hangar daemon from its recorded ownership lock plus its socket.
+///
+/// The recorded owner is authoritative for pid/version — the same probe
+/// `ainb hangar daemon status` uses, so the two surfaces cannot drift. The
+/// socket connect answers the separate question of whether it is still serving.
+#[must_use]
+pub fn probe_hangar_daemon() -> DaemonStatus {
+    let kind = DaemonKind::HangarDaemon;
+    let runtime = crate::cli::hangar::daemon_runtime_status();
+    let serving = crate::fleet::bridge::daemon::socket_path()
+        .is_some_and(|socket| socket_is_listening(&socket));
+    match (runtime.pid, serving) {
+        (None, false) => DaemonStatus::stopped(kind, "not running".to_string()),
+        // A recorded owner with a dead socket is the half-alive case the
+        // Daemons screen exists to make visible.
+        (Some(pid), false) => DaemonStatus {
+            state: DaemonState::Degraded,
+            pid: Some(pid),
+            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version: runtime.version,
+            reason: format!("pid {pid} owns this home but the socket is not accepting"),
+            ..DaemonStatus::running(kind)
+        },
+        (pid, true) => DaemonStatus {
+            pid,
+            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version: runtime.version,
+            connected: true,
+            channel: Some("unix socket".to_string()),
+            reason: if runtime.old {
+                "serving — older than this ainb, restart to upgrade".to_string()
+            } else {
+                "socket serving".to_string()
+            },
+            ..DaemonStatus::running(kind)
+        },
+    }
+}
+
+/// Probe the Headroom context proxy.
+///
+/// Only the ainb-managed proxy records a pid; a proxy the user started by hand
+/// still shows as running (the port answers) but with no pid, which is honest
+/// rather than a guess.
+#[must_use]
+pub fn probe_headroom_proxy() -> DaemonStatus {
+    let kind = DaemonKind::HeadroomProxy;
+    let port = crate::headroom::proxy_port();
+    if !crate::headroom::is_listening() {
+        let reason = if crate::headroom::is_installed() {
+            format!("nothing listening on port {port}")
+        } else {
+            "headroom is not installed".to_string()
+        };
+        return DaemonStatus::stopped(kind, reason);
+    }
+    DaemonStatus {
+        pid: crate::headroom::pid(),
+        connected: true,
+        channel: Some(format!("http :{port}")),
+        reason: format!("listening on port {port}"),
+        ..DaemonStatus::running(kind)
+    }
 }
 
 /// Append the CAUSE to a bridge row that is not running, when the bridge could
@@ -922,6 +1068,22 @@ pub fn collect_in(ainb_home: &Path, notifyd_base: &Path, now_ms: i64) -> Vec<Dae
     ]
 }
 
+/// The socket-probed daemons, appended after the heartbeat ones.
+///
+/// Kept out of [`collect_in`] on purpose: these three resolve their own
+/// endpoints from the environment (MCP control socket, Hangar home, Headroom
+/// port) rather than from injected paths, so folding them into the pure seam
+/// would make every `collect_in` test read whatever happens to be running on
+/// the developer's machine.
+#[must_use]
+pub fn collect_socket_daemons() -> Vec<DaemonStatus> {
+    vec![
+        probe_mcp_pool(),
+        probe_hangar_daemon(),
+        probe_headroom_proxy(),
+    ]
+}
+
 /// Aggregate every daemon from the real on-disk layout. Resolves the ainb
 /// home (honouring `$AINB_HOME`) for bridge/fleet/ATC; notifyd's base comes
 /// from `Paths::from_home()`, which honours the same `$AINB_HOME` override,
@@ -932,6 +1094,7 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
         .map(|p| p.base)
         .unwrap_or_else(|_| ainb_home.clone());
     let mut rows = collect_in(&ainb_home, &notifyd_base, super::heartbeat::now_ms());
+    rows.extend(collect_socket_daemons());
     // Only pay for the config read when a bridge row is actually down — this
     // runs on the TUI's refresh loop.
     if rows
@@ -1960,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_in_returns_all_daemons_in_stable_order() {
+    fn collect_in_returns_all_heartbeat_daemons_in_stable_order() {
         let home = TempDir::new().unwrap();
         let notifyd = TempDir::new().unwrap();
         let rows = collect_in(
@@ -1976,6 +2139,44 @@ mod tests {
         assert_eq!(rows[4].kind, DaemonKind::FleetDaemon);
         // Empty homes → everything stopped, never a false running.
         assert!(rows.iter().all(|r| r.state == DaemonState::Stopped));
+    }
+
+    /// The Daemons view is meant to be the ONE place every managed process
+    /// shows up. MCP pool, the Hangar daemon and the Headroom proxy used to be
+    /// real processes with no row here — visible only as ad-hoc lines in a
+    /// separate panel, with no way to act on them.
+    #[test]
+    fn the_socket_probed_daemons_complete_the_roster() {
+        let kinds: Vec<DaemonKind> = collect_socket_daemons().iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DaemonKind::McpPool,
+                DaemonKind::HangarDaemon,
+                DaemonKind::HeadroomProxy,
+            ]
+        );
+    }
+
+    /// Every kind has a distinct id and display name. A collision would make
+    /// two rows indistinguishable in the table and alias their heartbeat files.
+    #[test]
+    fn every_daemon_kind_has_a_unique_id_and_name() {
+        let kinds = [
+            DaemonKind::Bridge,
+            DaemonKind::Notifyd,
+            DaemonKind::ApproveBroker,
+            DaemonKind::Atc,
+            DaemonKind::FleetDaemon,
+            DaemonKind::McpPool,
+            DaemonKind::HangarDaemon,
+            DaemonKind::HeadroomProxy,
+        ];
+        let ids: std::collections::HashSet<&str> = kinds.iter().map(|k| k.id()).collect();
+        assert_eq!(ids.len(), kinds.len(), "daemon ids must be unique");
+        let names: std::collections::HashSet<&str> =
+            kinds.iter().map(|k| k.display_name()).collect();
+        assert_eq!(names.len(), kinds.len(), "display names must be unique");
     }
 
     #[test]

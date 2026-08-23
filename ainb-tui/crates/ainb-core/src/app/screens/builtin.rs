@@ -220,20 +220,23 @@ pub fn forward_key_to_focused_plugin(
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
     let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
-    if !delivered
+    // A plugin whose render has blown its budget is holding the one mutex its
+    // inline `handle_key` dispatch also needs, so the key WAS delivered and
+    // will simply sit in its channel unserviced. That is indistinguishable from
+    // a frozen screen to the user, so treat it exactly like a dead plugin.
+    let unserviceable = !delivered || runtime.render_wedged(&pid);
+    if unserviceable
         && matches!(
             key.code,
             crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q')
         )
     {
-        // Plugin unregistered or its task is gone — the screen is
-        // showing the "plugin unavailable" placeholder and the key
-        // just got dropped on the floor. Esc/q must stay escapable
-        // there (the central dispatch resolves them to PanelBack), or
-        // the user is trapped with only Ctrl+C. Other keys stay
-        // claimed so the session-list fallthrough's destructive
-        // bindings (`d` delete, `n` new session, …) can't fire from a
-        // dead plugin screen.
+        // Plugin unregistered, its task is gone, or its render is wedged — the
+        // key is not going to be acted on. Esc/q must stay escapable there (the
+        // central dispatch resolves them to PanelBack), or the user is trapped
+        // with only Ctrl+C. Other keys stay claimed so the session-list
+        // fallthrough's destructive bindings (`d` delete, `n` new session, …)
+        // can't fire from a dead or wedged plugin screen.
         return EventOutcome::NotHandled;
     }
     EventOutcome::Handled

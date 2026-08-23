@@ -427,6 +427,12 @@ pub struct HangarPlugin {
     /// Last redial attempt inside the window — throttles dials to ~1/s while
     /// `wants_redraw` keeps frames coming.
     daemon_start_last_redial: Option<std::time::Instant>,
+    /// The in-flight `[s]` start's late-arriving verdict. `DaemonStarter::start`
+    /// returns immediately and reports here; `render` polls it with `try_recv`.
+    /// Waiting on it inline is exactly what used to wedge `q`/`Esc` for three
+    /// seconds — the SDK holds the per-plugin mutex across `render`, and inline
+    /// `handle_key` dispatch needs that same mutex.
+    daemon_start_verdict: Option<crate::shell::StartVerdict>,
     /// The issue id of a task-detail screen with a bound PR that just opened
     /// (e38.34), so `render` can fire `hangar/pr_status_refresh` for it (the
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
@@ -632,6 +638,7 @@ impl Default for HangarPlugin {
             daemon_start_error: None,
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
+            daemon_start_verdict: None,
             pending_pr_status_refresh: None,
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
@@ -730,17 +737,40 @@ impl HangarPlugin {
     /// `daemon_start_error` (surfaced in the empty-state) so it is visible rather
     /// than silent. Host-free so the start dispatch is unit-testable; the re-dial
     /// (which needs the [`HostClient`]) is the caller's concern.
-    fn try_start_daemon(&mut self) -> bool {
-        match self.daemon_starter.start() {
-            Ok(()) => {
-                self.daemon_start_error = None;
-                true
+    fn begin_start_daemon(&mut self) {
+        self.daemon_start_error = None;
+        self.daemon_start_verdict = Some(self.daemon_starter.start());
+    }
+
+    /// Poll the in-flight `[s]` verdict without ever waiting on it.
+    ///
+    /// On failure this records the error AND stands the redial window down,
+    /// returning the message so the caller can log it: a start that could not
+    /// even spawn is never going to bind a socket, and leaving the window armed
+    /// would bury the real error under a generic "did not come up" fifteen
+    /// seconds later. Returns `None` while the verdict is still outstanding, and
+    /// on a clean start.
+    fn poll_start_verdict(&mut self) -> Option<String> {
+        use tokio::sync::mpsc::error::TryRecvError;
+        let rx = self.daemon_start_verdict.as_mut()?;
+        let failure = match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.daemon_start_verdict = None;
+                return None;
             }
-            Err(e) => {
-                self.daemon_start_error = Some(format!("start failed: {e}"));
-                false
+            Ok(Err(e)) => format!("start failed: {e}"),
+            // The starter thread died without reporting. Treat it as a failure
+            // rather than waiting forever for a verdict that cannot arrive.
+            Err(TryRecvError::Disconnected) => {
+                "start failed: the starter did not report".to_string()
             }
-        }
+            Err(TryRecvError::Empty) => return None,
+        };
+        self.daemon_start_verdict = None;
+        self.daemon_start_error = Some(failure.clone());
+        self.daemon_start_redial_until = None;
+        self.daemon_start_last_redial = None;
+        Some(failure)
     }
 
     /// Run the deferred offline `[s]` start: shell `ainb hangar daemon start`,
@@ -751,19 +781,18 @@ impl HangarPlugin {
     /// prior error is cleared and `connect` re-runs the dial/auth/subscribe
     /// handshake.
     async fn start_daemon_and_redial(&mut self, host: &HostClient) {
-        if self.try_start_daemon() {
-            let _ = host.log_info("hangar: [s] started daemon, re-dialing").await;
-            // The daemon needs a beat to boot + bind its socket, so one
-            // immediate dial is not enough: arm a bounded redial window the
-            // render loop pumps (via `wants_redraw`) until the link flips
-            // online or the window expires.
-            self.daemon_start_redial_until =
-                Some(std::time::Instant::now() + Self::START_REDIAL_WINDOW);
-            self.daemon_start_last_redial = Some(std::time::Instant::now());
-            self.connect(host).await;
-        } else if let Some(msg) = &self.daemon_start_error {
-            let _ = host.log_info(format!("hangar: {msg}")).await;
-        }
+        self.begin_start_daemon();
+        let _ = host.log_info("hangar: [s] starting daemon, re-dialing").await;
+        // The daemon needs a beat to boot + bind its socket, so one immediate
+        // dial is not enough: arm a bounded redial window the render loop pumps
+        // (via `wants_redraw`) until the link flips online or the window
+        // expires. Armed BEFORE the verdict lands — the start is asynchronous
+        // now, so the window is what keeps frames coming while it resolves. A
+        // failed verdict tears it down again in `pump_start_redial`.
+        self.daemon_start_redial_until =
+            Some(std::time::Instant::now() + Self::START_REDIAL_WINDOW);
+        self.daemon_start_last_redial = Some(std::time::Instant::now());
+        self.connect(host).await;
     }
 
     /// How long `[s]` keeps re-dialing before declaring the start failed.
@@ -776,6 +805,12 @@ impl HangarPlugin {
     /// re-dial at most once per [`Self::START_REDIAL_GAP`]. On expiry, surface
     /// a hard error in the offline panel instead of staying silent forever.
     async fn pump_start_redial(&mut self, host: &HostClient) {
+        // A start that failed to spawn can never bind a socket. Surface its real
+        // error now and stand the window down instead of redialing into nothing.
+        if let Some(msg) = self.poll_start_verdict() {
+            let _ = host.log_info(format!("hangar: {msg}")).await;
+            return;
+        }
         let Some(until) = self.daemon_start_redial_until else {
             return;
         };
@@ -6039,53 +6074,106 @@ mod tests {
         );
     }
 
+    /// Drive an in-flight start to its verdict the way successive `render` calls
+    /// do: poll, never wait. Returns the failure message if one landed.
+    fn settle_start_verdict(p: &mut HangarPlugin) -> Option<String> {
+        for _ in 0..300 {
+            if p.daemon_start_verdict.is_none() {
+                return None;
+            }
+            if let Some(msg) = p.poll_start_verdict() {
+                return Some(msg);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("start verdict never arrived");
+    }
+
+    /// A starter that takes a visible amount of time to produce its verdict —
+    /// the shape of the real `ainb hangar daemon start` poll-wait.
+    #[derive(Debug)]
+    struct SlowDaemonStarter;
+
+    impl crate::shell::DaemonStarter for SlowDaemonStarter {
+        fn start(&self) -> crate::shell::StartVerdict {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                let _ = tx.send(Ok(()));
+            });
+            rx
+        }
+    }
+
+    /// THE regression this whole change exists for: dispatching `[s]` must
+    /// return immediately. It used to poll-wait up to three seconds for the
+    /// spawned CLI's verdict while holding the per-plugin mutex, which is the
+    /// mutex inline `handle_key` dispatch needs — so `q` and `Esc` were dead
+    /// for the whole window and the user could not leave the screen.
+    #[test]
+    fn dispatching_a_start_returns_before_the_verdict() {
+        let mut p = HangarPlugin::with_daemon_starter(Box::new(SlowDaemonStarter));
+        let began = std::time::Instant::now();
+        p.begin_start_daemon();
+        let elapsed = began.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "dispatch must not wait on the starter, took {elapsed:?}"
+        );
+        assert!(
+            p.daemon_start_verdict.is_some(),
+            "the verdict must be outstanding, not already resolved"
+        );
+        assert_eq!(settle_start_verdict(&mut p), None);
+    }
+
     /// The armed start actually dispatches to the `DaemonStarter` seam: with a
     /// recording starter, draining the pending start writes the probe marker
-    /// (proving the `[s]` action reaches the real spawn path) and clears any prior
-    /// error.
+    /// (proving the `[s]` action reaches the real spawn path) and clears any
+    /// prior error.
     #[test]
-    fn try_start_daemon_dispatches_to_starter() {
+    fn start_dispatches_to_starter() {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("started.txt");
         let mut p = HangarPlugin::with_daemon_starter(Box::new(
             crate::shell::RecordingDaemonStarter::new(&probe),
         ));
-        let ok = p.try_start_daemon();
-        assert!(ok, "recording starter must succeed");
+        p.begin_start_daemon();
+        assert_eq!(settle_start_verdict(&mut p), None);
         let written = std::fs::read_to_string(&probe).expect("probe written");
         assert_eq!(written, "hangar daemon start");
         assert!(p.daemon_start_error.is_none());
     }
 
-    /// A start failure is recorded (not panicked) so the empty-state can show it,
-    /// and `try_start_daemon` reports `false` so the re-dial is skipped.
+    /// A start failure is recorded (not panicked) so the empty-state can show
+    /// it, and it arrives through the verdict channel rather than inline.
     #[test]
-    fn try_start_daemon_records_error_on_failure() {
+    fn start_records_error_on_failure() {
         let mut p = HangarPlugin::with_daemon_starter(Box::new(crate::shell::FailingDaemonStarter));
-        let ok = p.try_start_daemon();
-        assert!(!ok, "failing starter must report failure");
+        p.begin_start_daemon();
+        let failure = settle_start_verdict(&mut p).expect("failing starter must report a failure");
         assert!(
-            p.daemon_start_error.as_deref().is_some_and(|m| m.contains("start failed")),
-            "failure must be recorded for the empty-state, got {:?}",
-            p.daemon_start_error
+            failure.contains("start failed"),
+            "failure must be legible, got {failure:?}"
         );
+        assert_eq!(p.daemon_start_error.as_deref(), Some(failure.as_str()));
     }
 
-    /// A successful `[s]` start arms the bounded redial window (and the
-    /// level-triggered `wants_redraw` that pumps it), so the plugin keeps
-    /// re-dialing while the daemon boots instead of dialing exactly once and
-    /// sitting on the offline panel forever.
+    /// Dispatching `[s]` arms the bounded redial window (and the
+    /// level-triggered `wants_redraw` that pumps it) straight away, so the
+    /// plugin keeps re-dialing while the daemon boots instead of sitting on the
+    /// offline panel forever. The window is armed BEFORE the verdict now — the
+    /// start is asynchronous, so the window is what keeps frames coming while it
+    /// resolves.
     #[test]
-    fn successful_start_arms_redial_window() {
+    fn start_arms_redial_window() {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("started.txt");
         let mut p = HangarPlugin::with_daemon_starter(Box::new(
             crate::shell::RecordingDaemonStarter::new(&probe),
         ));
         assert!(p.daemon_start_redial_until.is_none());
-        // Drive the start dispatch directly (the host round-trip of
-        // `start_daemon_and_redial` is covered by the socket tests).
-        assert!(p.try_start_daemon());
+        p.begin_start_daemon();
         p.daemon_start_redial_until =
             Some(std::time::Instant::now() + HangarPlugin::START_REDIAL_WINDOW);
         assert!(
@@ -6094,12 +6182,16 @@ mod tests {
         );
     }
 
-    /// A failed `[s]` start must NOT arm the redial window — there is nothing
-    /// to wait for, and the error line already tells the user what happened.
+    /// A failed verdict tears the redial window back down. There is nothing to
+    /// wait for, and leaving it armed would bury the real error under a generic
+    /// "did not come up" once the window expired.
     #[test]
-    fn failed_start_leaves_redial_window_unarmed() {
+    fn a_failed_verdict_tears_the_redial_window_down() {
         let mut p = HangarPlugin::with_daemon_starter(Box::new(crate::shell::FailingDaemonStarter));
-        assert!(!p.try_start_daemon());
+        p.begin_start_daemon();
+        p.daemon_start_redial_until =
+            Some(std::time::Instant::now() + HangarPlugin::START_REDIAL_WINDOW);
+        assert!(settle_start_verdict(&mut p).is_some());
         assert!(p.daemon_start_redial_until.is_none());
         assert!(!p.wants_redraw());
     }

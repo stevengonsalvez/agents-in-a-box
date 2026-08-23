@@ -114,6 +114,7 @@ impl CommandRegistry {
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
         r.register(HeadroomCommand);
+        r.register(DaemonCommand); // uniform start/stop/restart for every daemon
         r.register(McpCommand);
         r.register(NotifydCommand); // ainb-hooks daemon: status/restart/install
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
@@ -2823,6 +2824,50 @@ impl CliCommand for HeadroomCommand {
     }
 }
 
+pub struct DaemonCommand;
+impl CliCommand for DaemonCommand {
+    fn name(&self) -> &'static str {
+        "daemon"
+    }
+    fn build(&self, app: Command) -> Command {
+        // One verb set per daemon. Before this every daemon had its own
+        // spelling (ATC's setup/teardown/repair, notifyd's restart, the MCP
+        // pool's foreground `daemon`) and several had no stop or restart at
+        // all — so a stopped daemon in the Daemons view had nothing to offer.
+        let mut cmd = Command::new(self.name())
+            .about("Start, stop, or restart any ainb daemon")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(Command::new("list").about("List every controllable daemon"))
+            .after_help(
+                "EXAMPLES:\n  \
+                 ainb daemon list                 Every daemon and its id\n  \
+                 ainb daemon atc restart          Re-assert the ATC timer\n  \
+                 ainb daemon mcp-pool restart     Replace a stale MCP pool\n  \
+                 ainb daemon hangar-daemon start  Bring the Hangar backend up",
+            );
+        for kind in crate::cli::daemon::CONTROLLABLE {
+            let mut sub = Command::new(kind.id())
+                .about(kind.display_name())
+                .subcommand_required(true)
+                .arg_required_else_help(true);
+            for action in crate::cli::daemon::Action::ALL {
+                sub = sub.subcommand(Command::new(action.id()).about(match action {
+                    crate::cli::daemon::Action::Start => "Bring it up",
+                    crate::cli::daemon::Action::Stop => "Take it down",
+                    crate::cli::daemon::Action::Restart => "Take it down and bring it back up",
+                }));
+            }
+            cmd = cmd.subcommand(sub);
+        }
+        app.subcommand(cmd)
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::daemon::execute(&matches, ctx.format).await })
+    }
+}
+
 pub struct McpCommand;
 impl CliCommand for McpCommand {
     fn name(&self) -> &'static str {
@@ -3026,11 +3071,12 @@ mod tests {
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
         // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
-        // notifyd + hangar) + headroom + rtk + the web dashboard = 33.
-        // The TUI is NOT in the registry — main.rs handles `tui` /
-        // no-subcommand inline.
-        assert_eq!(names.len(), 33, "expected 33 entries, got {names:?}");
+        // notifyd + hangar) + headroom + rtk + the web dashboard + the daemon
+        // lifecycle surface = 34. The TUI is NOT in the registry — main.rs
+        // handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 34, "expected 34 entries, got {names:?}");
         for required in [
+            "daemon",
             "run",
             "list",
             "logs",

@@ -60,10 +60,6 @@ pub enum AppEvent {
     DaemonsOverlaySelect(isize),
     /// Restart whichever daemon row is selected in the overlay.
     DaemonsOverlayRestartSelected,
-    /// Move the Daemons SCREEN cursor by a signed step (saturating).
-    DaemonsSelect(isize),
-    /// Restart the daemon the Daemons screen cursor is on.
-    DaemonsRestartSelected,
     DaemonsRepairHooks,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
@@ -2976,20 +2972,60 @@ impl EventHandler {
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
     /// `GoToDaemons` saved, instead of hardcoding home (L2).
-    fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+    fn handle_daemons_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        let daemons = &mut state.daemons_state;
+        // Selection and the action menu are pure in-memory state, so they are
+        // applied here rather than routed through an AppEvent each. Nothing on
+        // this path touches disk, a socket, or a process — `Enter` only ARMS an
+        // action; the action itself runs on its own thread.
+        match key_event.code {
+            // Esc unwinds the innermost thing first: the error view, then the
+            // menu, and only then the screen. Popping straight out from under
+            // an open overlay is how a user loses the error they just opened.
+            KeyCode::Esc if daemons.has_overlay() => {
+                daemons.close_overlay();
+                return None;
+            }
+            // `q` leaves the screen outright, so it must not leave an overlay
+            // armed behind it: the state is app-level, and re-entering would
+            // paint a stale menu bound to a row the selection no longer sits on.
+            KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
+            KeyCode::Enter if daemons.has_overlay() => {
+                daemons.confirm_menu();
+                return None;
+            }
+            KeyCode::Enter => {
+                daemons.open_menu();
+                return None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if daemons.has_overlay() {
+                    daemons.move_menu(-1);
+                } else {
+                    daemons.move_selection(-1);
+                }
+                return None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if daemons.has_overlay() {
+                    daemons.move_menu(1);
+                } else {
+                    daemons.move_selection(1);
+                }
+                return None;
+            }
+            _ => {}
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsSelect(-1)),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsSelect(1)),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-            // Acts on the row the cursor is drawn on — see
-            // `DaemonsState::selected_kind`, which is the single authority for
-            // both the highlight and this target.
-            KeyCode::Char('R') => Some(AppEvent::DaemonsRestartSelected),
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
-            KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
-            KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
-            KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
+            // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
+            // (headroom) and `S` (hangar) wrote status fields whose only
+            // renderer was the System services panel, so after that panel was
+            // deleted they fired real lifecycle actions with no visible result
+            // at all, bypassing the row's own working/failed state. Every daemon
+            // is reachable through Enter now, which does show what happened.
             _ => None,
         }
     }
@@ -3687,35 +3723,13 @@ impl EventHandler {
                     o.selected = o.selected.step(delta);
                 }
             }
-            AppEvent::DaemonsSelect(delta) => {
-                let rows = state.daemons_state.snapshot().rows;
-                state.daemons_state.move_selection(delta, rows.len());
-            }
-            AppEvent::DaemonsRestartSelected => {
-                let rows = state.daemons_state.snapshot().rows;
-                match state.daemons_state.selected_kind(&rows) {
-                    None => state.daemons_state.set_restart_outcome("no daemon selected"),
-                    Some(kind) => {
-                        match crate::components::daemons::DaemonsState::restart_support(kind) {
-                            // Only notifyd has an in-process restart; the broker
-                            // rides its runtime. Anything else says why, so the key
-                            // never silently no-ops or hits a different daemon.
-                            Ok(_) => {
-                                state.daemons_state.set_restart_outcome(format!(
-                                    "restarting {}…",
-                                    kind.display_name()
-                                ));
-                                state.spawn_daemon_restart(crate::app::state::DaemonRow::Notifyd);
-                            }
-                            // The outcome goes to the SCREEN's own state: the
-                            // first cut wrote it to the overlay's, which this
-                            // screen never renders, so a correct refusal was
-                            // invisible and R read as a dead key.
-                            Err(why) => state.daemons_state.set_restart_outcome(why),
-                        }
-                    }
-                }
-            }
+            // `DaemonsSelect` / `DaemonsRestartSelected` are gone. They moved the
+            // cursor and restarted ONLY notifyd, refusing every other daemon
+            // with "has no TUI restart; use its own CLI verb" — including ATC,
+            // the row this work exists to make restartable. Selection and the
+            // per-row start/restart/stop menu are handled inline in
+            // `handle_daemons_keys` now, against `ainb daemon <kind> <verb>`,
+            // which every daemon actually implements.
             AppEvent::DaemonsOverlayRestartSelected => {
                 if let Some(kind) = state.daemons_overlay.as_ref().map(|o| o.selected) {
                     state.spawn_daemon_restart(kind);
@@ -8922,21 +8936,23 @@ mod panel_back_tests {
 
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        // Selection and the action menu are applied inline against the SCREEN's
+        // own state, so they resolve to no AppEvent at all. Routing them
+        // through an event was how the cursor ended up wired to the overlay —
+        // a different component the operator was not looking at.
         assert!(
-            matches!(
-                route(&mut state, KeyCode::Char('R')),
-                Some(AppEvent::DaemonsRestartSelected)
-            ),
-            "R must restart the row the screen highlights"
+            route(&mut state, KeyCode::Down).is_none(),
+            "Down moves the screen cursor inline, not via an event"
         );
-        assert!(matches!(
-            route(&mut state, KeyCode::Down),
-            Some(AppEvent::DaemonsSelect(1))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('k')),
-            Some(AppEvent::DaemonsSelect(-1))
-        ));
+        assert!(route(&mut state, KeyCode::Char('k')).is_none());
+        assert!(
+            route(&mut state, KeyCode::Enter).is_none(),
+            "Enter opens the screen's own action menu"
+        );
+        // `R` restarted ONLY notifyd and refused every other daemon, ATC
+        // included — the row this work exists to make restartable. It is gone;
+        // Enter offers start/restart/stop on whichever row is highlighted.
+        assert!(route(&mut state, KeyCode::Char('R')).is_none());
     }
 
     /// Daemons repair keys stay next to the table that reports their state.
@@ -8959,10 +8975,6 @@ mod panel_back_tests {
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
         assert!(matches!(
-            route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::DaemonsRestartSelected)
-        ));
-        assert!(matches!(
             route(&mut state, KeyCode::Char('I')),
             Some(AppEvent::DaemonsRepairHooks)
         ));
@@ -8970,14 +8982,18 @@ mod panel_back_tests {
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::DaemonsOverlayRefresh)
         ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('M')),
-            Some(AppEvent::DaemonsStartMcp)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('P')),
-            Some(AppEvent::DaemonsStartHeadroom)
-        ));
+        // The one-key-per-daemon actions are gone. `M` (mcp), `P` (headroom)
+        // and `S` (hangar) wrote status fields whose only renderer was the
+        // System services panel; once that panel was deleted they fired real
+        // lifecycle actions with no visible result at all, and bypassed the
+        // row's own working/failed state. Every daemon is reachable through
+        // Enter now, which does show what happened.
+        for orphaned in ['M', 'P', 'S', 'R'] {
+            assert!(
+                route(&mut state, KeyCode::Char(orphaned)).is_none(),
+                "`{orphaned}` must not fire a blind lifecycle action"
+            );
+        }
     }
 
     #[test]

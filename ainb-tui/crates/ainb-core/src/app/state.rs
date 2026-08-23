@@ -1109,6 +1109,11 @@ pub struct DaemonsOverlayState {
     pub headroom_start_status: Option<String>,
 }
 
+/// How long the whole blocking probe gets before the overlay gives up on it and
+/// unlatches. Every individual probe inside is bounded too; this is the backstop
+/// that guarantees the screen leaves `collecting…` even when one of them wedges.
+pub(crate) const DAEMONS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
 /// + notifyd process scan. These are sync calls (the notifyd scan shells out
 /// to `ps`) so they run on the blocking thread pool.
@@ -1143,7 +1148,12 @@ pub(crate) fn daemons_sync_probe() -> (
         Err(e) => (false, format!("home unresolved: {e}")),
     };
     let hangar = crate::fleet::bridge::daemon::socket_path()
-        .and_then(|socket| std::os::unix::net::UnixStream::connect(socket).ok())
+        .and_then(|socket| {
+            crate::fleet::daemons::probe::connect_bounded(
+                &socket,
+                crate::fleet::daemons::probe::SOCKET_PROBE_TIMEOUT,
+            )
+        })
         .map_or((false, "not running".to_string()), |_| {
             (true, "serving".to_string())
         });
@@ -5116,7 +5126,14 @@ impl AppState {
         o.loading = true;
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
-            // blocking pool.
+            // blocking pool. Bounded by DAEMONS_PROBE_TIMEOUT: a probe that
+            // wedges must degrade to "probe timed out" rows, never to a screen
+            // stuck on `collecting…`. On timeout the blocking task is left to
+            // finish on its own thread — its result is simply discarded.
+            let probe = tokio::time::timeout(
+                DAEMONS_PROBE_TIMEOUT,
+                tokio::task::spawn_blocking(daemons_sync_probe),
+            );
             let (
                 mcp_alive,
                 mcp_runtime,
@@ -5125,15 +5142,18 @@ impl AppState {
                 approve,
                 hangar,
                 hangar_runtime,
-            ) = tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
-                false,
-                crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-                Vec::new(),
-                Vec::new(),
-                (false, "probe failed".to_string()),
-                (false, "probe failed".to_string()),
-                crate::cli::hangar::DaemonRuntimeStatus::default(),
-            ));
+            ) = match probe.await {
+                Ok(Ok(values)) => values,
+                Ok(Err(_)) | Err(_) => (
+                    false,
+                    crate::mcp_pool::client::DaemonRuntimeStatus::default(),
+                    Vec::new(),
+                    Vec::new(),
+                    (false, "probe timed out".to_string()),
+                    (false, "probe timed out".to_string()),
+                    crate::cli::hangar::DaemonRuntimeStatus::default(),
+                ),
+            };
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
             let result = DaemonsFetchResult {
@@ -5351,20 +5371,34 @@ impl AppState {
             return;
         };
         if let Some(rx) = o.fetch_rx.as_mut() {
-            if let Ok(result) = rx.try_recv() {
-                o.fetch_rx = None;
-                o.loading = false;
-                o.mcp_alive = result.mcp_alive;
-                o.mcp_runtime = result.mcp_runtime;
-                o.headroom = result.headroom;
-                o.headroom_consumers = result.headroom_consumers;
-                o.notifyd = result.notifyd;
-                o.approve_running = result.approve_running;
-                o.approve_reason = result.approve_reason;
-                o.hangar_running = result.hangar_running;
-                o.hangar_reason = result.hangar_reason;
-                o.hangar_runtime = result.hangar_runtime;
-                o.last_refreshed = Some(std::time::Instant::now());
+            match rx.try_recv() {
+                Ok(result) => {
+                    o.fetch_rx = None;
+                    o.loading = false;
+                    o.mcp_alive = result.mcp_alive;
+                    o.mcp_runtime = result.mcp_runtime;
+                    o.headroom = result.headroom;
+                    o.headroom_consumers = result.headroom_consumers;
+                    o.notifyd = result.notifyd;
+                    o.approve_running = result.approve_running;
+                    o.approve_reason = result.approve_reason;
+                    o.hangar_running = result.hangar_running;
+                    o.hangar_reason = result.hangar_reason;
+                    o.hangar_runtime = result.hangar_runtime;
+                    o.last_refreshed = Some(std::time::Instant::now());
+                }
+                // A dropped sender (the fetch task died before sending) MUST
+                // release the one-outstanding guard too. Leaving `fetch_rx`
+                // armed made every later refresh return early, which is how the
+                // screen used to sit on `collecting…` forever.
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    o.fetch_rx = None;
+                    o.loading = false;
+                    o.approve_reason = "probe did not report".to_string();
+                    o.hangar_reason = "probe did not report".to_string();
+                    o.last_refreshed = Some(std::time::Instant::now());
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {}
             }
         }
         let mut refresh_after_start = false;
@@ -12360,6 +12394,75 @@ mod plugin_render_gate_tests {
         );
 
         runtime.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod daemons_overlay_unlatch_tests {
+    //! The Daemons screen used to sit on `collecting…` forever. Two latches
+    //! caused it: a fetch that never reported, and a `fetch_rx` left armed
+    //! afterwards so the one-outstanding guard rejected every later refresh.
+    //! Both must clear on a fetch that dies without sending.
+
+    use super::{AppState, DaemonsOverlayState};
+
+    /// An overlay in exactly the state `spawn_daemons_fetch` leaves behind:
+    /// `loading` set and the receiver armed, waiting on a sender that is
+    /// already gone (the shape of a fetch task that died mid-probe).
+    fn overlay_awaiting_a_dead_sender() -> DaemonsOverlayState {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(tx);
+        DaemonsOverlayState {
+            mcp_alive: false,
+            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
+            headroom: crate::headroom::ProxyStatus {
+                running: false,
+                port: crate::headroom::proxy_port(),
+                pid: None,
+                tokens_saved: None,
+            },
+            headroom_consumers: Vec::new(),
+            notifyd: Vec::new(),
+            approve_running: false,
+            approve_reason: "probing…".to_string(),
+            hangar_running: false,
+            hangar_reason: "probing…".to_string(),
+            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
+            loading: true,
+            last_refreshed: None,
+            fetch_rx: Some(rx),
+            selected: super::DaemonRow::Notifyd,
+            restart_rx: None,
+            restart_status: None,
+            hooks_repair_rx: None,
+            hooks_repair_status: None,
+            hangar_start_rx: None,
+            hangar_start_status: None,
+            mcp_start_rx: None,
+            mcp_start_status: None,
+            headroom_start_rx: None,
+            headroom_start_status: None,
+        }
+    }
+
+    #[test]
+    fn a_fetch_that_never_reports_clears_loading_and_rearms_refresh() {
+        let mut state = AppState::default();
+        state.daemons_overlay = Some(overlay_awaiting_a_dead_sender());
+
+        state.check_daemons_overlay();
+
+        let overlay = state.daemons_overlay.as_ref().expect("overlay still open");
+        assert!(!overlay.loading, "screen must leave `collecting…`");
+        assert!(
+            overlay.fetch_rx.is_none(),
+            "one-outstanding guard must release so `r` can refetch"
+        );
+        assert!(
+            overlay.last_refreshed.is_some(),
+            "a failed probe still counts as a completed attempt"
+        );
+        assert_eq!(overlay.hangar_reason, "probe did not report");
     }
 }
 
