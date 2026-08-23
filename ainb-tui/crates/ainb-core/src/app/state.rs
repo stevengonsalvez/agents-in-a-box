@@ -1069,28 +1069,6 @@ pub struct DaemonsOverlayState {
 /// that guarantees the screen leaves `collecting…` even when one of them wedges.
 pub(crate) const DAEMONS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// `connect(2)` on an AF_UNIX socket normally returns at once — success, or
-/// `ECONNREFUSED` for a stale socket file. It does NOT when a listener is bound
-/// but has stopped accepting and its backlog is full: the connect then blocks
-/// for as long as the wedged listener lives. That is exactly the shape of a
-/// half-dead hangar daemon, and it used to pin the Daemons overlay on
-/// `collecting…` forever.
-///
-/// Bound it by doing the connect on a throwaway thread and waiting only
-/// `timeout` for the answer. A wedged connect leaks that one thread until the
-/// kernel gives up on it, which is strictly better than leaking the UI.
-fn connect_unix_bounded(
-    path: &std::path::Path,
-    timeout: std::time::Duration,
-) -> Option<std::os::unix::net::UnixStream> {
-    let path = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(std::os::unix::net::UnixStream::connect(path).ok());
-    });
-    rx.recv_timeout(timeout).ok().flatten()
-}
-
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
 /// + notifyd process scan. These are sync calls (the notifyd scan shells out
 /// to `ps`) so they run on the blocking thread pool.
@@ -1125,7 +1103,12 @@ pub(crate) fn daemons_sync_probe() -> (
         Err(e) => (false, format!("home unresolved: {e}")),
     };
     let hangar = crate::fleet::bridge::daemon::socket_path()
-        .and_then(|socket| connect_unix_bounded(&socket, std::time::Duration::from_millis(500)))
+        .and_then(|socket| {
+            crate::fleet::daemons::probe::connect_bounded(
+                &socket,
+                crate::fleet::daemons::probe::SOCKET_PROBE_TIMEOUT,
+            )
+        })
         .map_or((false, "not running".to_string()), |_| {
             (true, "serving".to_string())
         });

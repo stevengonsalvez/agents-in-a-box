@@ -892,13 +892,36 @@ fn read_pid_file(path: &Path) -> Option<u32> {
 /// liveness probe of the listener itself, not a duplicate read of
 /// `socket_path.exists()`.
 ///
-/// H-D2: a `connect(2)` on an AF_UNIX socket returns at once (success or
-/// `ECONNREFUSED`) — there is no network round-trip to hang on — but the
-/// surrounding `collect` (this probe + the disk reads it sits beside) is run on a
-/// BACKGROUND tick, never the TUI render thread, so even a pathologically slow FS
-/// can never freeze the UI. See `components::daemons` for the background collector.
+/// H-D2: the surrounding `collect` runs on a BACKGROUND tick, never the TUI
+/// render thread, so the UI can never freeze on it. That is not the same as the
+/// collector being safe, though: `connect(2)` on an AF_UNIX socket usually
+/// returns at once (success or `ECONNREFUSED`), but it BLOCKS for as long as the
+/// listener lives when a bound-but-not-accepting daemon has a full backlog —
+/// the exact shape of a half-dead daemon. An unbounded connect there kills the
+/// single collector thread for the rest of the process, which freezes the whole
+/// table on its last snapshot with no way to recover it. So it is bounded.
 fn socket_is_listening(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    connect_bounded(path, SOCKET_PROBE_TIMEOUT).is_some()
+}
+
+/// How long any single socket probe may take before it is called dead.
+pub(crate) const SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Connect to `path`, giving up after `timeout`.
+///
+/// The connect runs on a throwaway thread because `std` offers no connect
+/// timeout for AF_UNIX. A wedged connect leaks that one thread until the kernel
+/// gives up on it, which is strictly better than leaking the collector.
+pub(crate) fn connect_bounded(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Option<std::os::unix::net::UnixStream> {
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::os::unix::net::UnixStream::connect(path).ok());
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 /// Best-effort last-write time of a file as epoch ms — used as notifyd's
@@ -913,12 +936,17 @@ fn db_mtime_ms(path: &Path) -> Option<i64> {
 ///
 /// Unlike the heartbeat daemons, the pool reports its identity over the wire —
 /// so pid and version come from the process actually serving pooled tools, not
-/// from a file some other binary wrote. `daemon_alive` is bounded (500ms r/w
-/// timeouts on the control socket), so this is safe on the background collector.
+/// from a file some other binary wrote.
 #[must_use]
 pub fn probe_mcp_pool() -> DaemonStatus {
     let kind = DaemonKind::McpPool;
-    if !crate::mcp_pool::client::daemon_alive() {
+    // Probe the socket with a bounded connect BEFORE asking the client: its
+    // `query` sets read/write timeouts only after an unbounded connect, so a
+    // wedged listener would hang the collector there.
+    let listening = crate::mcp_pool::paths::control_socket().ok().is_some_and(|path| {
+        path.exists() && connect_bounded(&path, SOCKET_PROBE_TIMEOUT).is_some()
+    });
+    if !listening || !crate::mcp_pool::client::daemon_alive() {
         return DaemonStatus::stopped(kind, "control socket not answering".to_string());
     }
     let runtime = crate::mcp_pool::client::daemon_runtime_status();
