@@ -71,20 +71,6 @@ pub fn kind_from_id(id: &str) -> Option<DaemonKind> {
     CONTROLLABLE.into_iter().find(|k| k.id() == id)
 }
 
-/// Why an action is not offered for a daemon.
-///
-/// Returned rather than silently omitting the menu entry: "you cannot stop this
-/// and here is why" is information; a missing row is a mystery.
-#[must_use]
-pub fn unsupported_reason(kind: DaemonKind, action: Action) -> Option<&'static str> {
-    match (kind, action) {
-        // The broker has no process of its own — notifyd serves approve.sock.
-        // Its verbs are honestly notifyd's verbs, so they are offered, not hidden.
-        (DaemonKind::ApproveBroker, _) => None,
-        _ => None,
-    }
-}
-
 /// `ainb daemon …` entry point.
 pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) -> Result<()> {
     let Some((kind_id, sub)) = matches.subcommand() else {
@@ -111,13 +97,6 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
 /// Errors carry the underlying failure verbatim — the TUI shows them in the
 /// row's error view, so a vague message here is a vague message on screen.
 pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
-    if let Some(reason) = unsupported_reason(kind, action) {
-        bail!(
-            "{} cannot be {}ed: {reason}",
-            kind.display_name(),
-            action.id()
-        );
-    }
     match kind {
         DaemonKind::McpPool => mcp_pool(action),
         DaemonKind::HeadroomProxy => headroom(action).await,
@@ -225,7 +204,10 @@ fn atc(action: Action) -> Result<String> {
         // `repair` re-asserts the OS timer and the daemon registration, which is
         // exactly what starting a stopped ATC means.
         Action::Start | Action::Restart => delegate(&["fleet", "atc", "repair", &name]),
-        Action::Stop => delegate(&["fleet", "atc", "teardown", &name, "--yes"]),
+        // No confirmation flag: `fleet atc teardown` takes only <name> and
+        // --purge. Passing --yes made clap reject the whole invocation, so
+        // `stop` failed every time.
+        Action::Stop => delegate(&["fleet", "atc", "teardown", &name]),
     }
 }
 
@@ -371,6 +353,36 @@ mod tests {
                 .collect();
         view.extend(crate::fleet::daemons::probe::collect_socket_daemons().iter().map(|r| r.kind));
         assert_eq!(view, CONTROLLABLE.to_vec());
+    }
+
+    /// Every argv this module delegates to must actually parse against the real
+    /// clap tree. `fleet atc teardown --yes` did not — there is no such flag —
+    /// so `ainb daemon atc stop`, one of the three verbs this whole surface
+    /// exists to provide, failed with a usage error every single time.
+    #[test]
+    fn every_delegated_argv_parses_against_the_real_cli() {
+        let registry = crate::cli::registry::CommandRegistry::built_ins();
+        let app = registry.build_clap(clap::Command::new("ainb"));
+        // The argvs `control` can produce. ATC's carry a placeholder instance
+        // name; the shape is what is under test, not the name.
+        let delegated: &[&[&str]] = &[
+            &["hangar", "daemon", "start"],
+            &["hangar", "daemon", "stop"],
+            &["hangar", "daemon", "restart"],
+            &["notifyd", "restart"],
+            &["notifyd", "stop"],
+            &["fleet", "atc", "repair", "main"],
+            &["fleet", "atc", "teardown", "main"],
+            &["fleet", "bridge", "install"],
+            &["fleet", "bridge", "uninstall"],
+            &["fleet", "daemon"],
+        ];
+        for argv in delegated {
+            let full: Vec<&str> = std::iter::once("ainb").chain(argv.iter().copied()).collect();
+            if let Err(e) = app.clone().try_get_matches_from(&full) {
+                panic!("`ainb {}` does not parse: {e}", argv.join(" "));
+            }
+        }
     }
 
     #[test]
