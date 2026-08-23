@@ -110,36 +110,53 @@ fn a_render_that_overruns_its_budget_is_failed_and_flags_the_plugin_wedged() {
     );
 }
 
-/// The wedge is not a one-way door: once the plugin answers a render again, it
+/// The wedge is not a one-way door: once the SAME plugin answers a render, it
 /// goes back to receiving its own keys.
+///
+/// The earlier version of this test registered a second plugin under a second
+/// runtime and asserted that one was unwedged — which only proved a fresh
+/// registration starts clean, and never exercised the lift path at all.
 #[test]
-fn the_wedge_lifts_once_the_plugin_renders_again() {
+fn the_wedge_lifts_once_the_same_plugin_renders_again() {
+    // A budget the fixture blows on the first render but can meet once the
+    // process is warm would be racy, so instead: wedge under a tight budget,
+    // then prove the very same plugin lifts it by answering.
     let (rt, handle) = runtime_with_render_budget(Duration::from_millis(20));
     let id = register_slow_fixture(&rt);
 
     let rx = handle.render(&id, Viewport::new(40, 8), 0);
-    let _ = rt
-        .tokio_handle()
-        .block_on(async { tokio::time::timeout(Duration::from_secs(5), rx).await });
-    assert!(handle.render_wedged(&id), "precondition: wedged");
-
-    // Ask again with a budget the fixture comfortably meets. The runtime config
-    // is fixed at construction, so re-render under a fresh, generous runtime.
-    let (rt2, handle2) = runtime_with_render_budget(Duration::from_secs(5));
-    let id2 = register_slow_fixture(&rt2);
-    let rx2 = handle2.render(&id2, Viewport::new(40, 8), 0);
-    let outcome = rt2.tokio_handle().block_on(async {
-        tokio::time::timeout(Duration::from_secs(10), rx2)
+    let outcome = rt.tokio_handle().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), rx)
             .await
-            .expect("render timed out")
-            .expect("render channel closed")
+            .expect("watchdog must answer")
     });
     assert!(
-        matches!(outcome, RenderOutcome::Ok(_)),
-        "a render inside its budget must still succeed"
+        matches!(outcome, Ok(RenderOutcome::RuntimeError(_))),
+        "precondition: the first render must be failed by the watchdog"
     );
+    assert!(handle.render_wedged(&id), "precondition: wedged");
+
+    // The fixture answers ~200ms after each request. Keep asking until one of
+    // those late answers lands and clears the flag on THIS plugin — that is the
+    // lift path, and nothing else in the suite covers it.
+    let lifted = rt.tokio_handle().block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            let rx = handle.render(&id, Viewport::new(40, 8), 0);
+            // The watchdog answers this receiver at the 20ms budget; the
+            // fixture's own answer lands ~180ms later. It is that later answer
+            // that must lift the wedge, so wait past it before checking.
+            let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if !handle.render_wedged(&id) {
+                return true;
+            }
+        }
+        false
+    });
     assert!(
-        !handle2.render_wedged(&id2),
-        "a responsive plugin must not be flagged wedged"
+        lifted,
+        "a plugin that answers a render again must stop being treated as wedged, \
+         or q/Esc are permanently diverted away from a healthy screen"
     );
 }
