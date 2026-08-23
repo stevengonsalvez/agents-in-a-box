@@ -1125,9 +1125,7 @@ pub(crate) fn daemons_sync_probe() -> (
         Err(e) => (false, format!("home unresolved: {e}")),
     };
     let hangar = crate::fleet::bridge::daemon::socket_path()
-        .and_then(|socket| {
-            connect_unix_bounded(&socket, std::time::Duration::from_millis(500))
-        })
+        .and_then(|socket| connect_unix_bounded(&socket, std::time::Duration::from_millis(500)))
         .map_or((false, "not running".to_string()), |_| {
             (true, "serving".to_string())
         });
