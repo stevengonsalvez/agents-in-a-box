@@ -38,6 +38,11 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a lifecycle action may run before the row gives up on it. Generous:
+/// a real restart genuinely takes seconds. The point is only that a wedged
+/// action cannot hold its row's one-outstanding guard forever.
+const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
 /// takes to swap or clone the row vector — never across I/O.
@@ -70,8 +75,10 @@ pub struct DaemonsState {
     selected: usize,
     /// The open per-row action menu, if any.
     menu: Option<ActionMenu>,
-    /// True while the full error of the selected row's last action is showing.
-    error_open: bool,
+    /// The daemon whose full error is showing, if the error view is open. Held
+    /// separately from `menu` so the view never depends on the menu still being
+    /// open to know what it is displaying.
+    error_open: Option<DaemonKind>,
     /// Last action outcome per daemon, keyed by [`DaemonKind::id`]. A failure
     /// stays on its own row rather than becoming a toast that scrolls away from
     /// the thing it is about.
@@ -80,7 +87,10 @@ pub struct DaemonsState {
     /// serves as the one-outstanding guard for that row.
     inflight: std::collections::HashMap<
         &'static str,
-        tokio::sync::mpsc::UnboundedReceiver<ActionOutcome>,
+        (
+            tokio::sync::mpsc::UnboundedReceiver<ActionOutcome>,
+            std::time::Instant,
+        ),
     >,
 }
 
@@ -185,7 +195,7 @@ impl DaemonsState {
     /// knows Esc should close that rather than leave the screen.
     #[must_use]
     pub fn has_overlay(&self) -> bool {
-        self.menu.is_some() || self.error_open
+        self.menu.is_some() || self.error_open.is_some()
     }
 
     /// Open the action menu on the selected row. No-op before the first
@@ -196,10 +206,19 @@ impl DaemonsState {
         }
     }
 
+    /// Close every overlay at once — for a key that leaves the screen outright.
+    ///
+    /// The state is app-level, so an overlay left armed would still be there on
+    /// re-entry, bound to a row the selection no longer sits on.
+    pub fn close_all_overlays(&mut self) {
+        self.error_open = None;
+        self.menu = None;
+    }
+
     /// Close whichever overlay is open, innermost first.
     pub fn close_overlay(&mut self) {
-        if self.error_open {
-            self.error_open = false;
+        if self.error_open.is_some() {
+            self.error_open = None;
             return;
         }
         self.menu = None;
@@ -232,8 +251,12 @@ impl DaemonsState {
             return;
         };
         match entry {
-            MenuEntry::ViewError => self.error_open = true,
+            MenuEntry::ViewError => self.error_open = Some(kind),
             MenuEntry::Act(action) => {
+                // BOTH overlays close. Clearing only `menu` left `error_open`
+                // set with nothing to render it: the screen painted normally but
+                // `has_overlay` stayed true, so every key but Esc was swallowed.
+                self.error_open = None;
                 self.menu = None;
                 self.dispatch(kind, action);
             }
@@ -251,7 +274,7 @@ impl DaemonsState {
             return;
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.insert(kind.id(), rx);
+        self.inflight.insert(kind.id(), (rx, std::time::Instant::now()));
         self.outcomes.remove(kind.id());
         let (kind_id, verb) = (kind.id(), action.id());
         std::thread::spawn(move || {
@@ -263,9 +286,28 @@ impl DaemonsState {
     /// channel poll, not I/O, and the H-D2 rule is about blocking syscalls.
     fn poll_actions(&mut self) {
         let mut done = Vec::new();
-        for (id, rx) in &mut self.inflight {
+        for (id, (rx, started)) in &mut self.inflight {
             if let Ok(outcome) = rx.try_recv() {
                 done.push((*id, outcome));
+            } else if started.elapsed() > ACTION_TIMEOUT {
+                // `inflight` doubles as the one-outstanding guard, so an action
+                // that never returns would pin its row on `⟳ working` and
+                // silently swallow every later action on that daemon for the
+                // rest of the process. Give up and say so.
+                done.push((
+                    *id,
+                    ActionOutcome {
+                        action: Action::Restart,
+                        ok: false,
+                        summary: "timed out".to_string(),
+                        detail: format!(
+                            "`ainb daemon {id} …` did not finish within {}s.\n\n\
+                             It may still be running. Check with `ainb daemon {id} \
+                             start` from a terminal, where you can watch it.",
+                            ACTION_TIMEOUT.as_secs()
+                        ),
+                    },
+                ));
             }
         }
         for (id, outcome) in done {
@@ -448,7 +490,7 @@ pub fn render(
     }
     render_footer(frame, chunks[1], state);
     // Overlays paint last so they float above the table.
-    if state.error_open {
+    if state.error_open.is_some() {
         render_error_view(frame, inner, state);
     } else if state.menu.is_some() {
         render_action_menu(frame, inner, state);
@@ -518,7 +560,7 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
 
 /// The full text of the selected row's last failed action.
 fn render_error_view(frame: &mut Frame, area: Rect, state: &DaemonsState) {
-    let Some(kind) = state.menu.as_ref().map(|m| m.kind) else {
+    let Some(kind) = state.error_open else {
         return;
     };
     let Some(outcome) = state.outcomes.get(kind.id()) else {
@@ -852,7 +894,7 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
 fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
-    let spans = if state.error_open {
+    let spans = if state.error_open.is_some() {
         vec![
             Span::styled("Esc", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" close error", Style::default().fg(MUTED_GRAY)),
@@ -1294,6 +1336,93 @@ mod tests {
         );
     }
 
+    /// Running an action from under the open error view must close BOTH
+    /// overlays. Clearing only the menu left `error_open` set with nothing able
+    /// to render it: the screen painted normally, but `has_overlay` stayed true
+    /// so every key except Esc was swallowed and the table was unusable.
+    #[test]
+    fn acting_from_under_the_error_view_closes_both_overlays() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        state.outcomes.insert(
+            DaemonKind::Atc.id(),
+            ActionOutcome {
+                action: Action::Start,
+                ok: false,
+                summary: "start failed".to_string(),
+                detail: "boom".to_string(),
+            },
+        );
+        state.open_menu();
+        state.error_open = Some(DaemonKind::Atc);
+        // Move the cursor back onto a verb and run it.
+        state.move_menu(1);
+        state.confirm_menu();
+        assert!(state.error_open.is_none(), "the error view must close");
+        assert!(state.menu.is_none(), "the menu must close");
+        assert!(
+            !state.has_overlay(),
+            "no overlay may remain armed, or the screen swallows every key"
+        );
+    }
+
+    /// `q` leaves the screen outright, so it must not leave an overlay armed:
+    /// the state is app-level and would still be there on re-entry, bound to a
+    /// row the selection no longer sits on.
+    #[test]
+    fn close_all_overlays_clears_both_layers() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        state.open_menu();
+        state.error_open = Some(DaemonKind::Atc);
+        state.close_all_overlays();
+        assert!(!state.has_overlay());
+    }
+
+    /// An action that never returns must not pin its row: `inflight` doubles as
+    /// the one-outstanding guard, so a stuck entry would silently swallow every
+    /// later action on that daemon for the rest of the process.
+    #[test]
+    fn an_action_that_never_returns_gives_up_instead_of_pinning_its_row() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::McpPool,
+            DaemonState::Running,
+            true,
+            Some("sock"),
+        )]);
+        // A sender that never sends, started long enough ago to be past the
+        // give-up point.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ActionOutcome>();
+        let started = std::time::Instant::now() - (ACTION_TIMEOUT + Duration::from_secs(1));
+        state.inflight.insert(DaemonKind::McpPool.id(), (rx, started));
+
+        state.poll_actions();
+
+        assert!(
+            !state.inflight.contains_key(DaemonKind::McpPool.id()),
+            "the guard must release so the row is actionable again"
+        );
+        let outcome = state
+            .outcomes
+            .get(DaemonKind::McpPool.id())
+            .expect("giving up must leave a visible outcome");
+        assert!(!outcome.ok);
+        assert!(
+            outcome.detail.contains("did not finish"),
+            "the row must say what happened, got {:?}",
+            outcome.detail
+        );
+        drop(tx);
+    }
+
     /// Esc unwinds the innermost overlay first. Popping straight out from under
     /// an open error view would throw away what the user just opened.
     #[test]
@@ -1305,9 +1434,9 @@ mod tests {
             None,
         )]);
         state.open_menu();
-        state.error_open = true;
+        state.error_open = Some(DaemonKind::Atc);
         state.close_overlay();
-        assert!(!state.error_open, "the error view closes first");
+        assert!(state.error_open.is_none(), "the error view closes first");
         assert!(state.menu.is_some(), "the menu is still open underneath");
         state.close_overlay();
         assert!(state.menu.is_none(), "then the menu closes");
