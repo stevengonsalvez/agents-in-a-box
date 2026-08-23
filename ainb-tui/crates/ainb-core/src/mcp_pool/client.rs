@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
 use super::paths;
+use crate::self_exec_guard::running_under_cargo_test;
 
 /// True when the daemon's control socket answers within ~500ms.
 pub fn daemon_alive() -> bool {
@@ -108,6 +109,23 @@ pub fn ensure_daemon() -> Result<()> {
         return Ok(());
     }
 
+    // A cargo test binary must never be re-executed as the daemon. `cargo test`
+    // runs `target/<profile>/deps/<crate>-<hash>`, so `current_exe()` here is the
+    // TEST binary, and libtest reads the `mcp daemon` argv as two name FILTERS
+    // rather than a subcommand: the child re-runs every test matching `mcp` or
+    // `daemon`, each of which can reach this function and detach another copy.
+    // With `process_group(0)` below shielding each one from the test runner's
+    // signals, that recursion is unbounded. Observed 2026-08-23: 135 orphans
+    // (see issue #715). Erroring is the correct outcome — every caller already
+    // treats a failed ensure as "fall back to per-session stdio".
+    if running_under_cargo_test() {
+        anyhow::bail!(
+            "refusing to spawn the MCP daemon from a cargo test binary \
+             (current_exe is a test harness, not `ainb`); \
+             start a real daemon first if a test needs one"
+        );
+    }
+
     let exe = std::env::current_exe().context("current_exe")?;
     let log_path = paths::daemon_log()?;
     if let Some(dir) = log_path.parent() {
@@ -157,4 +175,28 @@ pub fn restart_daemon() -> Result<()> {
         }
     }
     ensure_daemon()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The behavioural guarantee issue #715 is about: this very process IS a
+    /// cargo test binary, so `ensure_daemon` must refuse rather than detach a
+    /// copy of the test harness. Guarded on the probe agreeing we are under
+    /// cargo, so a non-cargo invocation of the test binary does not fail here.
+    #[test]
+    fn ensure_daemon_refuses_to_self_exec_the_test_harness() {
+        if !running_under_cargo_test() {
+            return;
+        }
+        if daemon_alive() {
+            return; // A real daemon is up; ensure short-circuits before the guard.
+        }
+        let err = ensure_daemon().expect_err("must refuse to spawn from a test binary");
+        assert!(
+            err.to_string().contains("cargo test binary"),
+            "unexpected error: {err}"
+        );
+    }
 }
