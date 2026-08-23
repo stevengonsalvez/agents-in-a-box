@@ -2982,6 +2982,10 @@ impl EventHandler {
                 daemons.close_overlay();
                 return None;
             }
+            // `q` leaves the screen outright, so it must not leave an overlay
+            // armed behind it: the state is app-level, and re-entering would
+            // paint a stale menu bound to a row the selection no longer sits on.
+            KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
             KeyCode::Enter if daemons.has_overlay() => {
                 daemons.confirm_menu();
                 return None;
@@ -3013,9 +3017,12 @@ impl EventHandler {
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
             KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
-            KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
-            KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
-            KeyCode::Char('P') => Some(AppEvent::DaemonsStartHeadroom),
+            // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
+            // (headroom) and `S` (hangar) wrote status fields whose only
+            // renderer was the System services panel, so after that panel was
+            // deleted they fired real lifecycle actions with no visible result
+            // at all, bypassing the row's own working/failed state. Every daemon
+            // is reachable through Enter now, which does show what happened.
             _ => None,
         }
     }
@@ -8848,14 +8855,18 @@ mod panel_back_tests {
             route(&mut state, KeyCode::Char('r')),
             Some(AppEvent::DaemonsOverlayRefresh)
         ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('M')),
-            Some(AppEvent::DaemonsStartMcp)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('P')),
-            Some(AppEvent::DaemonsStartHeadroom)
-        ));
+        // The one-key-per-daemon actions are gone. `M` (mcp), `P` (headroom)
+        // and `S` (hangar) wrote status fields whose only renderer was the
+        // System services panel; once that panel was deleted they fired real
+        // lifecycle actions with no visible result at all, and bypassed the
+        // row's own working/failed state. Every daemon is reachable through
+        // Enter now, which does show what happened.
+        for orphaned in ['M', 'P', 'S'] {
+            assert!(
+                route(&mut state, KeyCode::Char(orphaned)).is_none(),
+                "`{orphaned}` must not fire a blind lifecycle action"
+            );
+        }
     }
 
     #[test]
