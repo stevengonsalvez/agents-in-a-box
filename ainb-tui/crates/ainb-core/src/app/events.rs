@@ -56,8 +56,10 @@ pub enum AppEvent {
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
-    /// Restart the notifyd daemon (single resume/repair) from the overlay.
-    DaemonsOverlayRestartNotifyd,
+    /// Move the overlay's row selection by a signed step (saturating).
+    DaemonsOverlaySelect(isize),
+    /// Restart whichever daemon row is selected in the overlay.
+    DaemonsOverlayRestartSelected,
     DaemonsRepairHooks,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
@@ -1421,8 +1423,10 @@ impl EventHandler {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
                 }
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
                 KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
                 KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
                 _ => None,
@@ -3015,7 +3019,6 @@ impl EventHandler {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
             // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
             // (headroom) and `S` (hangar) wrote status fields whose only
@@ -3715,7 +3718,23 @@ impl EventHandler {
             AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
-            AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
+            AppEvent::DaemonsOverlaySelect(delta) => {
+                if let Some(o) = state.daemons_overlay.as_mut() {
+                    o.selected = o.selected.step(delta);
+                }
+            }
+            // `DaemonsSelect` / `DaemonsRestartSelected` are gone. They moved the
+            // cursor and restarted ONLY notifyd, refusing every other daemon
+            // with "has no TUI restart; use its own CLI verb" — including ATC,
+            // the row this work exists to make restartable. Selection and the
+            // per-row start/restart/stop menu are handled inline in
+            // `handle_daemons_keys` now, against `ainb daemon <kind> <verb>`,
+            // which every daemon actually implements.
+            AppEvent::DaemonsOverlayRestartSelected => {
+                if let Some(kind) = state.daemons_overlay.as_ref().map(|o| o.selected) {
+                    state.spawn_daemon_restart(kind);
+                }
+            }
             AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
             AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
@@ -8824,6 +8843,118 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
+    /// `R` restarts the SELECTED daemon, and the selection is movable.
+    ///
+    /// The overlay previously hardcoded `R` to notifyd and had no cursor, so an
+    /// already-running daemon on a stale binary — the state a `brew upgrade`
+    /// leaves behind — could not be cycled from the TUI at all. Selection
+    /// saturates rather than wraps, so holding a direction parks at an end
+    /// instead of silently cycling past it.
+    #[test]
+    fn daemons_overlay_restarts_the_selected_row() {
+        use crate::app::state::DaemonRow;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+
+        let selected = |s: &AppState| s.daemons_overlay.as_ref().map(|o| o.selected);
+        assert_eq!(
+            selected(&state),
+            Some(DaemonRow::ORDER[0]),
+            "selection starts on the first row"
+        );
+
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Headroom));
+
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
+
+        // Saturates at the top rather than wrapping to the bottom.
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
+
+        // ...and at the bottom.
+        for _ in 0..10 {
+            EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
+        }
+        assert_eq!(selected(&state), Some(DaemonRow::Notifyd));
+
+        // Key routing is NOT asserted here: `GoToDaemons` opens the Daemons
+        // SCREEN, whose arrows drive that screen's cursor, not this overlay's.
+        // `daemons_screen_keys_drive_the_screen_cursor_not_the_overlay` owns
+        // that contract — conflating the two is what shipped a cursor nobody
+        // could reach.
+    }
+
+    /// Every row is labelled, and the labels are distinct.
+    ///
+    /// Deliberately does NOT call `spawn_daemon_restart`: each arm performs
+    /// REAL daemon lifecycle work (SIGTERM the running owner, respawn, poll a
+    /// socket). Driving that from a unit test kills the daemons on whatever
+    /// machine runs the suite and hangs CI — which is exactly what it did, so
+    /// the dispatch itself is covered by the compiler instead. The match in
+    /// `spawn_daemon_restart` is exhaustive over `DaemonRow`, so a new row
+    /// cannot be added without giving it an arm.
+    #[test]
+    fn every_daemon_row_is_labelled_distinctly() {
+        use crate::app::state::DaemonRow;
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        for row in DaemonRow::ORDER {
+            let label = row.label();
+            assert!(!label.is_empty(), "{row:?} needs a label");
+            assert!(
+                seen.insert(label),
+                "{row:?} reuses the label {label:?}; the restart status line \
+                 would then name the wrong daemon"
+            );
+        }
+        assert_eq!(seen.len(), DaemonRow::ORDER.len());
+    }
+
+    /// `d` reaches the Daemons SCREEN, and its keys drive that screen's cursor.
+    ///
+    /// Pinned because a previous change wired the cursor into the Daemons
+    /// OVERLAY — a different component — so `R` restarted a row nobody could
+    /// see highlighted while the screen's help still advertised notifyd. The
+    /// keys the operator actually presses must map to the surface they are
+    /// looking at.
+    #[test]
+    fn daemons_screen_keys_drive_the_screen_cursor_not_the_overlay() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        // Selection and the action menu are applied inline against the SCREEN's
+        // own state, so they resolve to no AppEvent at all. Routing them
+        // through an event was how the cursor ended up wired to the overlay —
+        // a different component the operator was not looking at.
+        assert!(
+            route(&mut state, KeyCode::Down).is_none(),
+            "Down moves the screen cursor inline, not via an event"
+        );
+        assert!(route(&mut state, KeyCode::Char('k')).is_none());
+        assert!(
+            route(&mut state, KeyCode::Enter).is_none(),
+            "Enter opens the screen's own action menu"
+        );
+        // `R` restarted ONLY notifyd and refused every other daemon, ATC
+        // included — the row this work exists to make restartable. It is gone;
+        // Enter offers start/restart/stop on whichever row is highlighted.
+        assert!(route(&mut state, KeyCode::Char('R')).is_none());
+    }
+
     /// Daemons repair keys stay next to the table that reports their state.
     #[test]
     fn daemons_repair_key_routing() {
@@ -8844,10 +8975,6 @@ mod panel_back_tests {
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
         assert!(matches!(
-            route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::DaemonsOverlayRestartNotifyd)
-        ));
-        assert!(matches!(
             route(&mut state, KeyCode::Char('I')),
             Some(AppEvent::DaemonsRepairHooks)
         ));
@@ -8861,7 +8988,7 @@ mod panel_back_tests {
         // lifecycle actions with no visible result at all, and bypassed the
         // row's own working/failed state. Every daemon is reachable through
         // Enter now, which does show what happened.
-        for orphaned in ['M', 'P', 'S'] {
+        for orphaned in ['M', 'P', 'S', 'R'] {
             assert!(
                 route(&mut state, KeyCode::Char(orphaned)).is_none(),
                 "`{orphaned}` must not fire a blind lifecycle action"

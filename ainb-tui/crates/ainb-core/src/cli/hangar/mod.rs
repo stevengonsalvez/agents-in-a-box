@@ -8680,6 +8680,17 @@ fn open_daemon_stderr_log(log_dir: &std::path::Path) -> Result<std::fs::File> {
 /// recording its EXACT pid. When `announce` is true the outcome is printed
 /// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
 pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
+    // `resolve_daemon_launch` self-execs `(current_exe, ["hangar","daemon","run"])`
+    // on both of its fallback paths. Under `cargo test` that exe is the TEST
+    // binary, and libtest reads the argv as name filters, so the "daemon" is a
+    // detached re-run of every test matching `hangar`/`daemon`/`run`. See
+    // `crate::self_exec_guard` and issue #715.
+    if crate::self_exec_guard::running_under_cargo_test() {
+        anyhow::bail!(
+            "refusing to start the hangar daemon from a cargo test binary \
+             (current_exe is a test harness, not `ainb`)"
+        );
+    }
     let pid_path = daemon_pid_path()?;
 
     // Already running? Bail out cleanly rather than spawning a duplicate.
@@ -9130,6 +9141,13 @@ fn restart_daemon(announce: bool) -> Result<()> {
 /// the home was contested a moment ago and is free now, which is a race to
 /// re-run, not a failure to report.
 fn respawn_once(bin: &std::path::Path, args: &[&str]) -> Result<Option<u32>> {
+    // Same rule as `start_daemon_if_stopped`: never detach a test harness.
+    if crate::self_exec_guard::running_under_cargo_test() {
+        anyhow::bail!(
+            "refusing to respawn the hangar daemon from a cargo test binary \
+             (current_exe is a test harness, not `ainb`)"
+        );
+    }
     let mut command = std::process::Command::new(bin);
     command
         .args(args)

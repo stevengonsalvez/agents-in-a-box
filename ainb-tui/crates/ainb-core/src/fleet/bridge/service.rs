@@ -285,9 +285,13 @@ fn teardown_systemd() -> Result<Option<PathBuf>> {
 /// wrapper means the scheduler spawns successfully and `exec ainb` exits 127,
 /// so `KeepAlive` / `Restart=always` respawn it forever into an unrotated log.
 /// Writing it inactive leaves the operator a unit to reload once PATH is fixed.
-pub fn install() -> Result<PathBuf> {
+///
+/// `config_ok` is the same judgement about the OTHER way the daemon exits
+/// immediately — an unusable `[fleet.bridge]` — decided by the caller, which
+/// owns the config loader. Either blocker leaves the unit written but stopped.
+pub fn install(config_ok: bool) -> Result<PathBuf> {
     let paths = resolve_paths()?;
-    let activate = unit_would_be_unrunnable(&paths).is_none();
+    let activate = config_ok && unit_would_be_unrunnable(&paths).is_none();
     if cfg!(target_os = "macos") {
         install_launchd(&paths, activate)
     } else {

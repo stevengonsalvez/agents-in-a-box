@@ -26,6 +26,10 @@ use ainb_plugin_notifyd::{HookHealth, Paths};
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
 const HEALTHY_GREEN: Color = Color::Rgb(100, 200, 100);
+/// Cursor colour, per the TUI style guide. Same RGB as HEALTHY_GREEN but kept
+/// separate: one means "this daemon is up", the other means "R acts on this
+/// row", and they must be free to diverge.
+const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
 const STOPPED_RED: Color = Color::Rgb(220, 100, 100);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
@@ -318,7 +322,7 @@ impl DaemonsState {
 
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
-    fn snapshot(&mut self) -> Snapshot {
+    pub fn snapshot(&mut self) -> Snapshot {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
         Snapshot {
@@ -336,6 +340,21 @@ impl DaemonsState {
 /// failure, not our summary of it.
 fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome {
     let argv = format!("ainb daemon {kind_id} {verb}");
+    // Never self-exec a test harness: under `cargo test` current_exe() is the
+    // test binary, and libtest treats the trailing argv as name filters, so
+    // this would re-run the suite instead of running a subcommand. See
+    // `crate::self_exec_guard` and issue #715.
+    if crate::self_exec_guard::running_under_cargo_test() {
+        return ActionOutcome {
+            action,
+            ok: false,
+            summary: format!("{verb} unavailable"),
+            detail: format!(
+                "cmd: {argv}\nrefusing to self-exec a cargo test binary \
+                 (current_exe is a test harness, not `ainb`)"
+            ),
+        };
+    }
     let bin = match std::env::current_exe() {
         Ok(bin) => bin,
         Err(e) => {
@@ -453,6 +472,13 @@ pub fn render(
                 "  runtime health",
                 Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
+            Span::styled(
+                "  \u{2191}\u{2193}",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" select \u{b7} ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" restart selected", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -765,7 +791,10 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Daem
     };
 
     let header = Row::new(vec![
-        Cell::from("  DAEMON"),
+        // The cursor gets its own column. Prefixing it into the DAEMON cell ate
+        // two characters of every name, so long ones truncated.
+        Cell::from(""),
+        Cell::from("DAEMON"),
         Cell::from("STATE"),
         Cell::from("PID"),
         Cell::from("UPTIME"),
@@ -824,12 +853,9 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Daem
                 None => health,
             };
             Row::new(vec![
-                Cell::from(format!(
-                    "{}{}",
-                    if selected { "▶ " } else { "  " },
-                    d.kind.display_name()
-                ))
-                .style(if selected {
+                Cell::from(if selected { "▶" } else { "" })
+                    .style(Style::default().fg(HEALTHY_GREEN)),
+                Cell::from(d.kind.display_name()).style(if selected {
                     Style::default().fg(HEALTHY_GREEN).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
@@ -849,8 +875,12 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Daem
         })
         .collect();
 
+    // The cursor lives in its OWN gutter column rather than being prefixed onto
+    // the name: "approve broker" is exactly the 14 columns DAEMON allows, so a
+    // 2-char marker inside that cell truncated the daemon's name.
     let widths = [
-        Constraint::Length(16),
+        Constraint::Length(1),
+        Constraint::Length(15),
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(8),
@@ -1068,8 +1098,77 @@ mod tests {
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
+    /// Render and return the buffer as LINES, so a test can ask which row the
+    /// cursor is drawn on rather than only whether a glyph exists somewhere.
+    fn render_to_lines(
+        state: &mut DaemonsState,
+        runtime: Option<&DaemonsOverlayState>,
+        w: u16,
+        h: u16,
+    ) -> Vec<String> {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The row the cursor is DRAWN on is the row `R` restarts — always.
+    ///
+    /// This is the safety property, so it is asserted against the rendered
+    /// buffer rather than against state: it reads back which line carries the
+    /// cursor glyph and requires that line to name the same daemon that
+    /// `selected_kind` hands the action menu. If render and dispatch ever
+    /// compute the row separately and disagree — the highlighted daemon
+    /// differing from the one acted on — this fails.
+    #[test]
+    fn the_highlighted_row_is_the_row_the_menu_acts_on() {
+        let rows = vec![
+            status(DaemonKind::Bridge, DaemonState::Stopped, false, None),
+            status(
+                DaemonKind::Notifyd,
+                DaemonState::Running,
+                true,
+                Some("unix socket"),
+            ),
+            status(DaemonKind::ApproveBroker, DaemonState::Running, true, None),
+            status(DaemonKind::Atc, DaemonState::Running, true, None),
+        ];
+        let mut state = seeded_state(rows.clone());
+
+        for want in 0..rows.len() {
+            // Drive the cursor the way the key handler does, from wherever it is.
+            state.selected = 0;
+            state.move_selection(want as isize);
+
+            let target =
+                state.selected_kind().expect("a populated table always has a selected row");
+
+            let lines = render_to_lines(&mut state, None, 160, 30);
+            let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
+            assert_eq!(
+                marked.len(),
+                1,
+                "exactly one row may carry the cursor, got {marked:?}"
+            );
+            assert!(
+                marked[0].contains(target.display_name()),
+                "cursor is drawn on {:?} but restart would target {:?}",
+                marked[0].trim(),
+                target.display_name()
+            );
+        }
+    }
+
     fn system_runtime() -> DaemonsOverlayState {
         DaemonsOverlayState {
+            selected: crate::app::state::DaemonRow::ORDER[0],
             mcp_alive: true,
             mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
@@ -1088,8 +1187,8 @@ mod tests {
             loading: false,
             last_refreshed: None,
             fetch_rx: None,
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_start_rx: None,

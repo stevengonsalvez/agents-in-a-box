@@ -265,7 +265,19 @@ fn stop_by_heartbeat_pid(name: &str) -> Option<u32> {
 // ── Delegation plumbing ─────────────────────────────────────────────────────
 
 /// This ainb binary, for re-entrant delegation.
+///
+/// Refuses outright under `cargo test`: `current_exe()` is then the TEST
+/// harness, libtest reads the trailing argv as name FILTERS rather than a
+/// subcommand, and `detach` puts each copy in its own process group — so a
+/// single delegation becomes an unbounded, detached re-run of the suite. See
+/// `crate::self_exec_guard` and issue #715.
 fn ainb_bin() -> Result<std::path::PathBuf> {
+    if crate::self_exec_guard::running_under_cargo_test() {
+        bail!(
+            "refusing to run an ainb subcommand from a cargo test binary \
+             (current_exe is a test harness, not `ainb`)"
+        );
+    }
     std::env::current_exe().context("resolve the running ainb binary")
 }
 

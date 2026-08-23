@@ -1024,10 +1024,55 @@ pub struct DaemonsFetchResult {
     pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
 }
 
+/// One restartable daemon in the overlay, in the order the rows are drawn.
+///
+/// The overlay used to expose lifecycle only through per-daemon keys (`S`
+/// hangar, `M` mcp, `P` headroom) which all START, plus `R` hardcoded to
+/// notifyd. That left no way to cycle an already-running daemon — exactly what
+/// a version drift after `brew upgrade` needs, since the old binary keeps
+/// serving until the process is replaced. Selecting a row and pressing `R`
+/// gives every daemon the same lever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRow {
+    Mcp,
+    Headroom,
+    Hangar,
+    Notifyd,
+}
+
+impl DaemonRow {
+    /// Draw order, which is also selection order.
+    pub const ORDER: [Self; 4] = [Self::Mcp, Self::Headroom, Self::Hangar, Self::Notifyd];
+
+    /// Label used in the table and in restart status lines.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mcp => "MCP pool",
+            Self::Headroom => "Headroom",
+            Self::Hangar => "Hangar",
+            Self::Notifyd => "notifyd",
+        }
+    }
+
+    /// Move the selection, saturating at both ends.
+    ///
+    /// Deliberately does NOT wrap: a wrapping list gives no feedback that you
+    /// reached the end, and this list is short enough to see in full.
+    #[must_use]
+    pub fn step(self, delta: isize) -> Self {
+        let at = Self::ORDER.iter().position(|k| *k == self).unwrap_or(0);
+        let next = at.saturating_add_signed(delta).min(Self::ORDER.len().saturating_sub(1));
+        Self::ORDER[next]
+    }
+}
+
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
 /// the overlay is open; dropping it stops all refresh activity.
 #[derive(Debug)]
 pub struct DaemonsOverlayState {
+    /// Row the `R` restart acts on. Starts at the top row.
+    pub selected: DaemonRow,
     pub mcp_alive: bool,
     pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
     pub headroom: crate::headroom::ProxyStatus,
@@ -1046,9 +1091,9 @@ pub struct DaemonsOverlayState {
     pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
     /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
     /// Carries the one-line outcome to show under the notifyd section.
-    pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub restart_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Last restart outcome line (transient, shown until the next refresh).
-    pub notifyd_restart_status: Option<String>,
+    pub restart_status: Option<String>,
     /// Receiver for a targeted hook reinstall. Kept separate from notifyd
     /// restart: repairing a binary pointer must not imply daemon lifecycle.
     pub hooks_repair_rx: Option<mpsc::UnboundedReceiver<String>>,
@@ -5029,6 +5074,7 @@ impl AppState {
             return;
         }
         self.daemons_overlay = Some(DaemonsOverlayState {
+            selected: DaemonRow::ORDER[0],
             mcp_alive: false,
             mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: crate::headroom::ProxyStatus {
@@ -5044,8 +5090,8 @@ impl AppState {
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_running: false,
@@ -5126,23 +5172,74 @@ impl AppState {
         });
     }
 
-    /// Restart the notifyd daemon from the Daemons overlay — the single
-    /// resume/repair lever. Runs [`ainb_plugin_notifyd::procs::restart`] off the
-    /// UI thread (it SIGTERMs the old owner, reaps stragglers, respawns, and
-    /// polls the approve socket, up to a few seconds). Once the socket rebinds,
-    /// every still-blocked permission waiter re-dials and resumes on its own —
-    /// so this one action both repairs a dead socket and resumes pending
-    /// prompts. One-outstanding guard mirrors the fetch path.
-    pub fn spawn_notifyd_restart(&mut self) {
+    /// Restart whichever daemon the overlay has selected.
+    ///
+    /// One in-flight restart at a time, shared across kinds: the outcome line
+    /// has a single slot in the overlay, and cycling two daemons at once would
+    /// race for it. Every arm reuses the same lifecycle the CLI uses rather
+    /// than reimplementing stop/start here, so the TUI and `ainb <d> daemon
+    /// restart` cannot drift apart.
+    pub fn spawn_daemon_restart(&mut self, kind: DaemonRow) {
         let Some(o) = self.daemons_overlay.as_mut() else {
             return;
         };
-        if o.notifyd_restart_rx.is_some() {
+        if o.restart_rx.is_some() {
             return;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        o.notifyd_restart_rx = Some(rx);
-        o.notifyd_restart_status = Some("restarting notifyd…".to_string());
+        o.restart_rx = Some(rx);
+        o.restart_status = Some(format!("restarting {}…", kind.label()));
+        match kind {
+            DaemonRow::Notifyd => self.spawn_notifyd_restart(tx),
+            DaemonRow::Hangar => {
+                Self::spawn_blocking_restart(tx, kind, || crate::cli::hangar::run_daemon_restart())
+            }
+            DaemonRow::Mcp => {
+                Self::spawn_blocking_restart(tx, kind, || crate::mcp_pool::client::restart_daemon())
+            }
+            // Headroom has no single restart entry point, so it is composed
+            // from its own stop + start. `stop()` returning false means it was
+            // not running, which is not an error for a restart. Its start is
+            // async, so this cannot use the blocking helper: `stop()` is sync
+            // and runs on the blocking pool, then the proxy is awaited.
+            DaemonRow::Headroom => {
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(crate::headroom::stop).await;
+                    let line = crate::headroom::ensure_proxy_running()
+                        .await
+                        .map(|()| "restarted Headroom".to_string())
+                        .unwrap_or_else(|e| format!("Headroom restart failed: {e:#}"));
+                    let _ = tx.send(line);
+                });
+            }
+        }
+    }
+
+    /// Run one blocking daemon lifecycle call and report a single outcome line.
+    fn spawn_blocking_restart<F>(tx: mpsc::UnboundedSender<String>, kind: DaemonRow, action: F)
+    where
+        F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+    {
+        let label = kind.label();
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(move || match action() {
+                Ok(()) => format!("restarted {label}"),
+                Err(e) => format!("{label} restart failed: {e:#}"),
+            })
+            .await
+            .unwrap_or_else(|e| format!("{label} restart task panicked: {e}"));
+            let _ = tx.send(line);
+        });
+    }
+
+    /// notifyd's arm of [`Self::spawn_daemon_restart`].
+    ///
+    /// Kept separate from the blocking helper because its outcome line is
+    /// richer than "restarted": the restart SIGTERMs the old owner, reaps
+    /// stragglers, respawns and then polls the approve socket, and whether
+    /// that socket rebound is the part that matters — once it does, every
+    /// still-blocked permission waiter re-dials and resumes on its own.
+    fn spawn_notifyd_restart(&mut self, tx: mpsc::UnboundedSender<String>) {
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
                 match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
@@ -5328,10 +5425,10 @@ impl AppState {
         }
         // A finished restart updates the status line and triggers a fresh scan
         // so the new pid shows up in the notifyd section.
-        if let Some(rx) = o.notifyd_restart_rx.as_mut() {
+        if let Some(rx) = o.restart_rx.as_mut() {
             if let Ok(line) = rx.try_recv() {
-                o.notifyd_restart_rx = None;
-                o.notifyd_restart_status = Some(line);
+                o.restart_rx = None;
+                o.restart_status = Some(line);
                 refresh_after_start = true;
             }
         }
@@ -12334,8 +12431,9 @@ mod daemons_overlay_unlatch_tests {
             loading: true,
             last_refreshed: None,
             fetch_rx: Some(rx),
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            selected: super::DaemonRow::Notifyd,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_start_rx: None,

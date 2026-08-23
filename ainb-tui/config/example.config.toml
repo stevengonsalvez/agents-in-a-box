@@ -209,3 +209,53 @@ show_git_status = true
 # [session_reader]
 # Trailing recent-window size in days (default 30, minimum 1).
 # incremental_window_days = 30
+
+# ── Phone bridge (`ainb fleet bridge`) ────────────────────────────────
+# Two-way relay between a chat app and the fleet. Read ONLY from this
+# file (`~/.agents-in-a-box/config/config.toml`, or $AINB_CONFIG_PATH) —
+# the bridge does not use the layered search, so a project-level
+# `.ainb/config.toml` is invisible to it.
+#
+# Configure at least ONE channel, or `ainb fleet bridge run` exits and
+# `ainb fleet bridge install` writes the service without starting it.
+#
+# Every secret takes a literal, an env ref ("$TELEGRAM_BOT_TOKEN"), or a
+# keychain ref ("keychain:<service>"). It is resolved in-process and is
+# never written into the launchd/systemd unit.
+#
+# [fleet.bridge]
+# Seconds to wait for a session's reply before giving up (shared default
+# for every channel below; each may override it).
+# response_timeout = 300
+#
+# Proactive push of the fleet's open asks to the phone (default true),
+# and how often the attention inbox is polled (default 15s).
+# outbound_enabled = true
+# outbound_poll_secs = 15
+#
+# [fleet.bridge.telegram]
+# Required: token, user_id.
+# token = "$TELEGRAM_BOT_TOKEN"
+# user_id = 123456789
+# Optional: session to prefer when a message carries no target prefix,
+# and whether group messages must @mention the bot (default true).
+# default_target = "conductor"
+# require_mention_in_groups = true
+#
+# [fleet.bridge.slack]
+# Required: bot_token (xoxb-…), app_token (xapp-…), user_id.
+# bot_token = "$SLACK_BOT_TOKEN"
+# app_token = "$SLACK_APP_TOKEN"
+# user_id = "U0123ABC"
+# Optional: "mentions" (default) acts only on @mentions and DMs; "all"
+# acts on every message in channels the bot is in.
+# listen_mode = "mentions"
+# default_target = "conductor"
+#
+# [fleet.bridge.discord]
+# Required: token, user_id (snowflake, as a string).
+# token = "$DISCORD_BOT_TOKEN"
+# user_id = "123456789012345678"
+# Optional: channel to reply in when the inbound message carries none.
+# channel_id = "123456789012345678"
+# default_target = "conductor"
