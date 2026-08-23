@@ -857,7 +857,12 @@ mod tests {
     fn the_highlighted_row_is_the_row_restart_targets() {
         let rows = vec![
             status(DaemonKind::Bridge, DaemonState::Stopped, false, None),
-            status(DaemonKind::Notifyd, DaemonState::Running, true, Some(1)),
+            status(
+                DaemonKind::Notifyd,
+                DaemonState::Running,
+                true,
+                Some("unix socket"),
+            ),
             status(DaemonKind::ApproveBroker, DaemonState::Running, true, None),
             status(DaemonKind::Atc, DaemonState::Running, true, None),
         ];
@@ -916,7 +921,12 @@ mod tests {
     fn cursor_saturates_and_tolerates_an_empty_table() {
         let rows = vec![
             status(DaemonKind::Bridge, DaemonState::Stopped, false, None),
-            status(DaemonKind::Notifyd, DaemonState::Running, true, Some(1)),
+            status(
+                DaemonKind::Notifyd,
+                DaemonState::Running,
+                true,
+                Some("unix socket"),
+            ),
         ];
         let mut state = seeded_state(rows.clone());
 
