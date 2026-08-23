@@ -3071,11 +3071,12 @@ mod tests {
         let names = r.names();
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
         // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
-        // notifyd + hangar) + headroom + rtk + the web dashboard = 33.
-        // The TUI is NOT in the registry — main.rs handles `tui` /
-        // no-subcommand inline.
-        assert_eq!(names.len(), 33, "expected 33 entries, got {names:?}");
+        // notifyd + hangar) + headroom + rtk + the web dashboard + the daemon
+        // lifecycle surface = 34. The TUI is NOT in the registry — main.rs
+        // handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 34, "expected 34 entries, got {names:?}");
         for required in [
+            "daemon",
             "run",
             "list",
             "logs",
