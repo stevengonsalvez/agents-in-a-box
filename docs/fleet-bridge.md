@@ -81,6 +81,12 @@ argv or written into the launchd/systemd unit:
 Config lives in ainb's `~/.agents-in-a-box/config/config.toml` (override with
 `AINB_CONFIG_PATH`). At least one channel table must be present.
 
+The bridge reads **that one file**, not ainb's layered config search: a
+project-level `.ainb/config.toml` or `/etc/agents-in-a-box/config.toml` is
+invisible to it. Without a usable `[fleet.bridge]`, `ainb fleet bridge run`
+exits naming the file it read and the keys it needs, and `install` writes the
+service without starting it (see below).
+
 ```toml
 [fleet.bridge]
 response_timeout = 300              # optional shared default (seconds)
@@ -146,9 +152,17 @@ ainb fleet bridge run
 # Install as a launchd (macOS) / systemd-user (Linux) service. The unit's
 # ProgramArguments/ExecStart is `ainb fleet bridge run` — no token on the command
 # line; the daemon reads it from config at startup. Idempotent.
+#
+# Install validates before it starts: if `ainb` does not resolve on the unit's
+# PATH, or the config cannot start a bridge, the unit is WRITTEN but NOT
+# started, and the blocker is printed on stderr. Otherwise KeepAlive /
+# Restart=always would respawn an instant-exit process forever. Fix the
+# blocker, re-run install.
 ainb fleet bridge install
 
 # Status / teardown:
+# `status` reports BOTH halves: the unit (installed / program resolves) and the
+# config (`ok` / `UNUSABLE — <why>`).
 ainb fleet bridge status
 ainb fleet bridge uninstall
 ```

@@ -885,6 +885,28 @@ fn db_mtime_ms(path: &Path) -> Option<i64> {
     i64::try_from(dur.as_millis()).ok()
 }
 
+/// Append the CAUSE to a bridge row that is not running, when the bridge could
+/// not have started at all.
+///
+/// "stale heartbeat — pid 89585 not alive (crashed)" is a true row and a dead
+/// end: it never says the crash was `ainb fleet bridge run` exiting 1 on a
+/// config with no `[fleet.bridge]` table. This is the surface an operator
+/// actually reads (`ainb doctor`, `ainb fleet daemons`, the TUI Daemons
+/// screen), so the cause belongs on it. Only the first line of the problem is
+/// used — the full setup skeleton belongs in `bridge status`, not a table cell.
+///
+/// Pure over `problem` so the annotation is testable without a config file.
+pub fn annotate_bridge_config(rows: &mut [DaemonStatus], problem: Option<&str>) {
+    let Some(problem) = problem else { return };
+    let head = problem.lines().next().unwrap_or(problem).trim();
+    for row in rows
+        .iter_mut()
+        .filter(|r| r.kind == DaemonKind::Bridge && r.state != DaemonState::Running)
+    {
+        row.reason = format!("{} — cannot start: {head}", row.reason);
+    }
+}
+
 /// Aggregate every daemon under an explicit ainb home + notifyd base. The
 /// test seam — every path is injected so a test isolates to a tempdir.
 ///
@@ -909,11 +931,16 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
     let notifyd_base = ainb_plugin_notifyd::Paths::from_home()
         .map(|p| p.base)
         .unwrap_or_else(|_| ainb_home.clone());
-    Ok(collect_in(
-        &ainb_home,
-        &notifyd_base,
-        super::heartbeat::now_ms(),
-    ))
+    let mut rows = collect_in(&ainb_home, &notifyd_base, super::heartbeat::now_ms());
+    // Only pay for the config read when a bridge row is actually down — this
+    // runs on the TUI's refresh loop.
+    if rows
+        .iter()
+        .any(|r| r.kind == DaemonKind::Bridge && r.state != DaemonState::Running)
+    {
+        annotate_bridge_config(&mut rows, crate::fleet::bridge::config_problem().as_deref());
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -1991,5 +2018,47 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 4);
+    }
+
+    #[test]
+    fn stopped_bridge_row_names_the_config_cause() {
+        let mut rows = vec![
+            DaemonStatus::stopped(DaemonKind::Bridge, "stale heartbeat — pid 1 not alive"),
+            DaemonStatus::stopped(DaemonKind::Notifyd, "not running"),
+        ];
+        annotate_bridge_config(
+            &mut rows,
+            Some(
+                "/home/u/config.toml: config has no [fleet.bridge] table\n\nconfigure at least ONE channel",
+            ),
+        );
+        assert!(
+            rows[0]
+                .reason
+                .contains("cannot start: /home/u/config.toml: config has no [fleet.bridge] table"),
+            "{}",
+            rows[0].reason
+        );
+        // Only the first line — the table cell is not the place for the skeleton.
+        assert!(!rows[0].reason.contains("configure at least ONE channel"));
+        // Other daemons are untouched.
+        assert_eq!(rows[1].reason, "not running");
+    }
+
+    #[test]
+    fn running_bridge_row_is_not_annotated() {
+        let mut rows = vec![DaemonStatus {
+            state: DaemonState::Running,
+            ..DaemonStatus::stopped(DaemonKind::Bridge, "connected")
+        }];
+        annotate_bridge_config(&mut rows, Some("some config problem"));
+        assert_eq!(rows[0].reason, "connected");
+    }
+
+    #[test]
+    fn no_config_problem_leaves_every_row_alone() {
+        let mut rows = vec![DaemonStatus::stopped(DaemonKind::Bridge, "stale heartbeat")];
+        annotate_bridge_config(&mut rows, None);
+        assert_eq!(rows[0].reason, "stale heartbeat");
     }
 }

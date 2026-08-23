@@ -184,6 +184,48 @@ pub fn default_config_path() -> PathBuf {
     p
 }
 
+/// What a usable `[fleet.bridge]` table has to contain, as a paste-able
+/// skeleton. Every secret is a NAME or a placeholder ref — this string must
+/// never gain a real token value, it is printed to terminals and logs.
+pub const SETUP_SKELETON: &str = "\
+configure at least ONE channel. Required keys per channel:\n\
+\x20 [fleet.bridge.telegram]  token, user_id\n\
+\x20 [fleet.bridge.slack]     bot_token, app_token, user_id\n\
+\x20 [fleet.bridge.discord]   token, user_id\n\
+\n\
+Optional, all channels: default_target, response_timeout (default 300s).\n\
+Optional, [fleet.bridge]: outbound_enabled (default true), outbound_poll_secs\n\
+(default 15s), response_timeout (shared default for every channel).\n\
+\n\
+Every secret key takes a literal, an env ref (\"$TELEGRAM_BOT_TOKEN\"), or a\n\
+keychain ref (\"keychain:<service>\"); it is resolved in-process and is never\n\
+written into the launchd/systemd unit.\n\
+\n\
+Telegram example:\n\
+\n\
+\x20 [fleet.bridge]\n\
+\x20 response_timeout = 300\n\
+\n\
+\x20 [fleet.bridge.telegram]\n\
+\x20 token = \"$TELEGRAM_BOT_TOKEN\"\n\
+\x20 user_id = 123456789\n\
+\n\
+Then re-run `ainb fleet bridge install` — it validates this config and refuses\n\
+to start a service that cannot run.";
+
+/// Which file the bridge reads, spelled out. The bridge does NOT use ainb's
+/// layered config search: a project-level `.ainb/config.toml` is invisible to
+/// it, which is its own dead end when the table is "obviously there".
+#[must_use]
+pub fn config_source_note(path: &Path) -> String {
+    let via = if std::env::var_os("AINB_CONFIG_PATH").is_some() {
+        " (from $AINB_CONFIG_PATH)"
+    } else {
+        " (the user config; project-level .ainb/config.toml is NOT read by the bridge)"
+    };
+    format!("{}{via}", path.display())
+}
+
 /// Coerce a TOML scalar seconds value (`response_timeout`,
 /// `outbound_poll_secs`) into a positive `u64`. The caller attaches the key name
 /// via `.context(...)`, so the messages here stay key-neutral.
@@ -333,7 +375,7 @@ pub fn parse_config(toml_text: &str) -> Result<BridgeConfig> {
     let bridge = root
         .fleet
         .and_then(|f| f.bridge)
-        .ok_or_else(|| anyhow!("config has no [fleet.bridge] table"))?;
+        .ok_or_else(|| anyhow!("config has no [fleet.bridge] table\n\n{SETUP_SKELETON}"))?;
 
     let shared_timeout = coerce_timeout(bridge.response_timeout.as_ref(), RESPONSE_TIMEOUT)
         .context("[fleet.bridge] `response_timeout`")?;
@@ -343,10 +385,7 @@ pub fn parse_config(toml_text: &str) -> Result<BridgeConfig> {
     let discord = bridge.discord.map(|d| parse_discord(d, shared_timeout)).transpose()?;
 
     if telegram.is_none() && slack.is_none() && discord.is_none() {
-        bail!(
-            "[fleet.bridge] has no channel — configure at least one of \
-             [fleet.bridge.telegram], [fleet.bridge.slack], or [fleet.bridge.discord]"
-        );
+        bail!("[fleet.bridge] has no channel\n\n{SETUP_SKELETON}");
     }
     let outbound_enabled = bridge.outbound_enabled.unwrap_or(true);
     let outbound_poll_secs = coerce_timeout(bridge.outbound_poll_secs.as_ref(), OUTBOUND_POLL_SECS)
@@ -372,11 +411,16 @@ pub fn load_config(path: Option<&Path>) -> Result<BridgeConfig> {
         }
     };
     if !cfg_path.exists() {
-        bail!("config file not found: {}", cfg_path.display());
+        bail!(
+            "no bridge config: {} does not exist\n\n{SETUP_SKELETON}",
+            config_source_note(cfg_path)
+        );
     }
     let text = std::fs::read_to_string(cfg_path)
         .with_context(|| format!("failed to read {}", cfg_path.display()))?;
-    parse_config(&text)
+    // `{e:#}` flattens the whole context chain into the one message, so the
+    // file name leads and no `Caused by:` tail is needed to read the fix.
+    parse_config(&text).map_err(|e| anyhow!("{}: {e:#}", config_source_note(cfg_path)))
 }
 
 #[cfg(test)]
@@ -517,12 +561,21 @@ mod tests {
     fn missing_bridge_table_errors() {
         let err = parse_config("[fleet]\n").unwrap_err();
         assert!(err.to_string().contains("no [fleet.bridge] table"));
+        // A dead end is the bug: the message has to carry the fix.
+        let msg = err.to_string();
+        assert!(msg.contains("[fleet.bridge.telegram]"), "{msg}");
+        assert!(msg.contains("token, user_id"), "{msg}");
+        assert!(msg.contains("ainb fleet bridge install"), "{msg}");
     }
 
     #[test]
     fn no_channel_errors() {
         let err = parse_config("[fleet.bridge]\nresponse_timeout = 60\n").unwrap_err();
-        assert!(err.to_string().contains("at least one"));
+        let msg = err.to_string();
+        assert!(msg.contains("[fleet.bridge] has no channel"), "{msg}");
+        // and carries the same paste-able skeleton as the missing-table case.
+        assert!(msg.contains("at least ONE channel"), "{msg}");
+        assert!(msg.contains("[fleet.bridge.discord]"), "{msg}");
     }
 
     #[test]
@@ -658,5 +711,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("user_id"));
+    }
+
+    #[test]
+    fn setup_skeleton_never_carries_a_secret_value() {
+        // It is printed to terminals and logs. Placeholders and key names only.
+        let lower = SETUP_SKELETON.to_lowercase();
+        assert!(!lower.contains("xoxb-"), "{SETUP_SKELETON}");
+        assert!(!lower.contains("xapp-"), "{SETUP_SKELETON}");
+        // The only token-ish strings are the documented ref forms.
+        assert!(SETUP_SKELETON.contains("$TELEGRAM_BOT_TOKEN"));
+        assert!(SETUP_SKELETON.contains("keychain:<service>"));
+    }
+
+    #[test]
+    fn load_config_names_the_missing_file_and_the_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("config.toml");
+        let err = load_config(Some(&missing)).unwrap_err().to_string();
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        assert!(err.contains("[fleet.bridge.slack]"), "{err}");
+    }
+
+    #[test]
+    fn load_config_error_leads_with_the_file_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[other]\nkey = 1\n").unwrap();
+        let err = load_config(Some(&path)).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&path.display().to_string()),
+            "the file has to lead, got: {err}"
+        );
+        assert!(err.contains("config has no [fleet.bridge] table"), "{err}");
+    }
+
+    #[test]
+    fn load_config_flattens_the_context_chain_into_one_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[fleet.bridge.slack]\nbot_token = \"b\"\napp_token = \"a\"\nuser_id = \"U1\"\nlisten_mode = \"shouting\"\n",
+        )
+        .unwrap();
+        let err = load_config(Some(&path)).unwrap_err().to_string();
+        // `{e:#}` keeps the inner cause on the one line the operator sees.
+        assert!(err.contains("listen_mode"), "{err}");
+        assert!(err.contains(&path.display().to_string()), "{err}");
     }
 }

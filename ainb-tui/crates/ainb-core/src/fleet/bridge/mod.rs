@@ -239,16 +239,34 @@ fn build_outbound_notifier(cfg: &BridgeConfig) -> Option<outbound::Fanout> {
 }
 
 /// Install the bridge as a launchd/systemd service (idempotent).
+///
+/// The unit is always written, but it is only STARTED when the daemon could
+/// actually run: an unresolvable program OR an unusable config both mean
+/// `ainb fleet bridge run` exits immediately, and `KeepAlive` /
+/// `Restart=always` then respawn that exit forever into an unrotated log. The
+/// config half is why this host ran a service that had never once started.
 pub fn install() -> Result<std::path::PathBuf> {
-    service::install()
+    service::install(config_problem().is_none())
 }
 
-/// `Some(warning)` when the unit `install` would write names a program that
-/// does not resolve, so the CLI can say so rather than reporting a success
-/// that can never start.
+/// `Some(warning)` when the service `install` writes could not start: either
+/// the unit names a program that does not resolve, or the config the daemon
+/// reads is missing/unusable. The CLI prints this rather than reporting a
+/// success that can never run.
 #[must_use]
 pub fn install_would_be_unrunnable() -> Option<String> {
-    service::install_would_be_unrunnable()
+    service::install_would_be_unrunnable().or_else(config_problem)
+}
+
+/// `Some(explanation)` when the config `ainb fleet bridge run` would load
+/// cannot start a bridge. The explanation is the loader's own error, which
+/// already names the file it looked in and the keys it needs.
+///
+/// Secrets never reach this string: the loader reports missing/empty KEYS, and
+/// resolved values are not echoed.
+#[must_use]
+pub fn config_problem() -> Option<String> {
+    load_config(None).err().map(|e| format!("{e:#}"))
 }
 
 /// Uninstall the bridge service. Returns the removed unit path, if any.
@@ -257,8 +275,16 @@ pub fn uninstall() -> Result<Option<std::path::PathBuf>> {
 }
 
 /// Human-readable install status.
+///
+/// Install state alone was a half-truth: a correctly-installed unit whose
+/// config has no `[fleet.bridge]` table reported clean while the bridge exited
+/// 1 on every launch. The config verdict is part of the status.
 pub fn status() -> Result<String> {
-    service::status()
+    let unit = service::status()?;
+    Ok(match config_problem() {
+        Some(problem) => format!("{unit}\n  config: UNUSABLE — {problem}"),
+        None => format!("{unit}\n  config: ok"),
+    })
 }
 
 #[cfg(test)]
