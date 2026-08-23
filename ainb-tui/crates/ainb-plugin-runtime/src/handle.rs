@@ -240,15 +240,6 @@ impl RuntimeHandle {
         self.lookup(plugin_id).is_some_and(|p| p.cache.captures_text())
     }
 
-    /// Atomically check-and-clear the render-dirty flag for a plugin.
-    /// Returns `true` iff the host should kick a fresh `plugin/render`
-    /// this tick because state may have changed since the last paint.
-    ///
-    /// Set by `send_key` and `publish_snapshot` (for each subscriber)
-    /// and initially by plugin registration. The render-tick loop
-    /// calls this once per plugin per tick and skips the render kick
-    /// entirely when the result is `false` — turning the loop from a
-    /// fixed-cadence render storm into an event-driven repaint.
     /// True while this plugin's `plugin/render` is overrunning its budget.
     ///
     /// A plugin blocked inside its own render cannot service keys either — the
@@ -260,6 +251,15 @@ impl RuntimeHandle {
         self.lookup(plugin_id).is_some_and(|p| p.render_wedged.load(Ordering::Acquire))
     }
 
+    /// Atomically check-and-clear the render-dirty flag for a plugin.
+    /// Returns `true` iff the host should kick a fresh `plugin/render`
+    /// this tick because state may have changed since the last paint.
+    ///
+    /// Set by `send_key` and `publish_snapshot` (for each subscriber)
+    /// and initially by plugin registration. The render-tick loop
+    /// calls this once per plugin per tick and skips the render kick
+    /// entirely when the result is `false` — turning the loop from a
+    /// fixed-cadence render storm into an event-driven repaint.
     pub fn take_render_dirty(&self, plugin_id: &PluginId) -> bool {
         self.lookup(plugin_id)
             .is_some_and(|p| p.render_dirty.swap(false, Ordering::AcqRel))

@@ -374,7 +374,7 @@ pub fn spawn(
         last_used: Instant::now(),
         child: None,
         redraw_governor: RedrawGovernor::default(),
-        render_deadline: None,
+        render_deadlines: HashMap::new(),
         render_wedged: render_wedged.clone(),
     };
     handle.spawn(task.run());
@@ -489,14 +489,18 @@ struct PluginTask {
     /// `RenderResult.redraw = true` frames the host will honor before it
     /// stops re-marking the render-dirty flag — see [`RedrawGovernor`].
     redraw_governor: RedrawGovernor,
-    /// Request id and deadline of the outstanding `plugin/render`.
+    /// Deadline per outstanding `plugin/render`.
     ///
-    /// A plugin that blocks inside its own `render` never answers, and the
-    /// SDK holds the per-plugin mutex across that future — so its inline
+    /// A plugin that blocks inside its own `render` never answers, and the SDK
+    /// holds the per-plugin mutex across that future — so its inline
     /// `handle_key` dispatch is stuck behind it too. Without a deadline the
     /// reply oneshot simply never resolves: the host paints a stale frame and
     /// nothing anywhere reports that the screen has stopped responding.
-    render_deadline: Option<(u64, Instant)>,
+    ///
+    /// A map rather than one slot because the host does not serialise renders —
+    /// it kicks one per dirty tick — so a plugin slower than the tick genuinely
+    /// has several in flight, and each needs its own deadline.
+    render_deadlines: HashMap<u64, Instant>,
     /// Set when a render blew its deadline, cleared when one completes.
     ///
     /// The host reads this (`RuntimeHandle::render_wedged`) to stop forwarding
@@ -515,6 +519,9 @@ impl PluginTask {
         idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            // Computed before the select so the watchdog arm's future borrows
+            // nothing from `self` (the other arms hold mutable borrows).
+            let next_deadline = self.earliest_render_deadline();
             tokio::select! {
                 // `biased;` makes the macro check arms top-down rather
                 // than randomising, so keystrokes always preempt the
@@ -543,7 +550,7 @@ impl PluginTask {
                     self.maybe_idle_reap().await;
                     self.retry_capped_redraw();
                 }
-                id = await_render_deadline(self.render_deadline) => {
+                id = await_render_deadline(next_deadline) => {
                     self.expire_render(id);
                 }
             }
@@ -592,6 +599,15 @@ impl PluginTask {
         let _ = self.send_notification(methods::PLUGIN_HANDLE_MOUSE, json).await;
     }
 
+    /// The soonest deadline among the outstanding renders — the one the
+    /// watchdog arm sleeps on. `None` when nothing is in flight.
+    fn earliest_render_deadline(&self) -> Option<(u64, Instant)> {
+        self.render_deadlines
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(id, at)| (*id, *at))
+    }
+
     /// Fail an outstanding `plugin/render` that blew its deadline.
     ///
     /// The plugin may still answer later; that late reply finds no ledger entry
@@ -599,7 +615,7 @@ impl PluginTask {
     /// that `render_wedged` flips so `q`/`Esc` stop being forwarded into a
     /// plugin that cannot service them.
     fn expire_render(&mut self, id: u64) {
-        self.render_deadline = None;
+        self.render_deadlines.remove(&id);
         let Some(Pending::Render(reply)) = self.ledger.remove(&id) else {
             return;
         };
@@ -640,10 +656,8 @@ impl PluginTask {
                         let _ = r.send(RenderOutcome::RuntimeError(e.to_string()));
                     }
                 } else {
-                    // Arm the watchdog for exactly this request. Only one render
-                    // is ever outstanding, so a single slot is enough.
-                    self.render_deadline =
-                        Some((id, Instant::now() + self.config.default_render_timeout));
+                    self.render_deadlines
+                        .insert(id, Instant::now() + self.config.default_render_timeout);
                 }
             }
             Command::Cli {
@@ -850,6 +864,13 @@ impl PluginTask {
     }
 
     async fn handle_response(&mut self, id: u64, result: Result<Value, RpcError>) {
+        // ANY response is proof the plugin is reading and answering again, which
+        // is exactly what `render_wedged` claims it is not doing. Lift it here
+        // rather than only on a matched render: a render the watchdog already
+        // expired has had its ledger entry removed, so its late reply lands on
+        // the stray path below — and a plugin that is merely slow would
+        // otherwise have q/Esc diverted away from it forever.
+        self.render_wedged.store(false, std::sync::atomic::Ordering::Release);
         let Some(pending) = self.ledger.remove(&id) else {
             warn!(plugin = %self.plugin.id, "stray response id={id}");
             return;
@@ -911,10 +932,16 @@ impl PluginTask {
                         message: e.message,
                     },
                 };
-                // A render answered: disarm the watchdog and lift any wedge, so
-                // keys go back to the plugin the moment it is responsive again.
-                self.render_deadline = None;
-                self.render_wedged.store(false, std::sync::atomic::Ordering::Release);
+                // Only THIS render's answer disarms the watchdog. The host does
+                // not serialise renders — it kicks one per dirty tick — so a
+                // plugin slower than the tick has several outstanding at once.
+                // Clearing unconditionally let a late reply to an older render
+                // disarm the deadline of one still in flight, and lift the wedge
+                // while the plugin was still blocked.
+                // Disarm only THIS render's deadline — a late reply to an older
+                // one must not disarm a request still in flight. The wedge is
+                // lifted for every response, in `handle_response`.
+                self.render_deadlines.remove(&id);
                 let _ = reply.send(outcome);
             }
             Pending::Cli(reply) => {
