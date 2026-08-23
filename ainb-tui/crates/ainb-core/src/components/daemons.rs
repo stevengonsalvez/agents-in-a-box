@@ -18,13 +18,17 @@ use ratatui::{
 use crate::app::state::DaemonsOverlayState;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
-use crate::fleet::daemons::probe::{DaemonState, DaemonStatus};
+use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
 const HEALTHY_GREEN: Color = Color::Rgb(100, 200, 100);
+/// Cursor colour, per the TUI style guide. Same RGB as HEALTHY_GREEN but kept
+/// separate: one means "this daemon is up", the other means "R acts on this
+/// row", and they must be free to diverge.
+const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
 const STOPPED_RED: Color = Color::Rgb(220, 100, 100);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
@@ -65,6 +69,66 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
+    /// Cursor into the rendered rows. `R` restarts THIS row and nothing else.
+    ///
+    /// Stored as an index rather than a [`DaemonKind`] because the row list is
+    /// whatever the collector last published: an index keeps the cursor
+    /// meaningful even before the first snapshot arrives, and
+    /// [`Self::selected_kind`] is the single place that turns it into a target.
+    selected: usize,
+}
+
+impl DaemonsState {
+    /// The daemon the cursor is on, or `None` when there are no rows.
+    ///
+    /// THE authority for both the highlight and the restart target. Render and
+    /// key handling must both go through it — if one of them ever computed the
+    /// row independently, `R` could restart a daemon other than the one the
+    /// operator can see highlighted, which is the exact failure this indirection
+    /// exists to make impossible.
+    #[must_use]
+    pub fn selected_kind(&self, rows: &[DaemonStatus]) -> Option<DaemonKind> {
+        rows.get(self.selected_index(rows)).map(|d| d.kind)
+    }
+
+    /// The cursor clamped to the current row count.
+    ///
+    /// The collector republishes the row list, so a cursor parked past the end
+    /// (rows disappeared between renders) must not silently point at nothing.
+    #[must_use]
+    pub fn selected_index(&self, rows: &[DaemonStatus]) -> usize {
+        self.selected.min(rows.len().saturating_sub(1))
+    }
+
+    /// Whether `R` can act on a daemon kind, and why not when it cannot.
+    ///
+    /// Only notifyd has an in-process restart. The approve broker is served on
+    /// notifyd's runtime, so restarting notifyd restarts it too. The bridge,
+    /// ATC and the fleet daemon expose no restart entry point, and `R` says so
+    /// rather than doing nothing — a key that silently no-ops reads as broken,
+    /// and a key that falls back to "some other daemon" would be dangerous.
+    #[must_use]
+    pub fn restart_support(kind: DaemonKind) -> Result<DaemonKind, String> {
+        match kind {
+            DaemonKind::Notifyd => Ok(DaemonKind::Notifyd),
+            // Same runtime as notifyd: restarting that rebinds this socket.
+            DaemonKind::ApproveBroker => Ok(DaemonKind::Notifyd),
+            DaemonKind::Bridge | DaemonKind::Atc | DaemonKind::FleetDaemon => Err(format!(
+                "{} has no restart from the TUI — use its own CLI verb",
+                kind.display_name()
+            )),
+        }
+    }
+
+    /// Move the cursor, saturating at both ends.
+    pub fn move_selection(&mut self, delta: isize, row_count: usize) {
+        if row_count == 0 {
+            self.selected = 0;
+            return;
+        }
+        let at = self.selected.min(row_count - 1);
+        self.selected = at.saturating_add_signed(delta).min(row_count - 1);
+    }
 }
 
 impl DaemonsState {
@@ -96,7 +160,7 @@ impl DaemonsState {
 
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
-    fn snapshot(&mut self) -> Snapshot {
+    pub fn snapshot(&mut self) -> Snapshot {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
         Snapshot {
@@ -166,6 +230,13 @@ pub fn render(
                 "  runtime health",
                 Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
+            Span::styled(
+                "  \u{2191}\u{2193}",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" select \u{b7} ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" restart selected", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -225,8 +296,6 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
             Span::styled(" restart MCP · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("P", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" Headroom · ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" notifyd · ", Style::default().fg(MUTED_GRAY)),
             Span::styled("S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" start / upgrade Hangar", Style::default().fg(MUTED_GRAY)),
         ]))
@@ -505,10 +574,14 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     ])
     .style(Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD));
 
+    // The highlight comes from the SAME call the restart target does, so the
+    // marked row and the row `R` acts on cannot drift apart.
+    let cursor = state.selected_index(&snapshot.rows);
     let rows: Vec<Row> = snapshot
         .rows
         .iter()
-        .map(|d| {
+        .enumerate()
+        .map(|(index, d)| {
             let (glyph, glyph_style) = match d.state {
                 DaemonState::Running => ("● running", Style::default().fg(HEALTHY_GREEN)),
                 // Amber, not green: the process is up but one half of its job is
@@ -528,9 +601,17 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
                 }
                 _ => d.reason.clone(),
             };
+            let marker = if index == cursor { "\u{25b6} " } else { "  " };
             Row::new(vec![
-                Cell::from(d.kind.display_name())
-                    .style(Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+                Cell::from(format!("{marker}{}", d.kind.display_name())).style(
+                    if index == cursor {
+                        Style::default()
+                            .fg(SELECTION_GREEN)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                    },
+                ),
                 Cell::from(glyph).style(glyph_style),
                 Cell::from(pid),
                 Cell::from(uptime),
@@ -670,6 +751,7 @@ mod tests {
         }));
         DaemonsState {
             shared: Some(shared),
+            selected: 0,
         }
     }
 
@@ -722,6 +804,7 @@ mod tests {
         }));
         DaemonsState {
             shared: Some(shared),
+            selected: 0,
         }
     }
 
@@ -738,6 +821,120 @@ mod tests {
         terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
+    }
+
+    /// Render and return the buffer as LINES, so a test can ask which row the
+    /// cursor is drawn on rather than only whether a glyph exists somewhere.
+    fn render_to_lines(
+        state: &mut DaemonsState,
+        runtime: Option<&DaemonsOverlayState>,
+        w: u16,
+        h: u16,
+    ) -> Vec<String> {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The row the cursor is DRAWN on is the row `R` restarts — always.
+    ///
+    /// This is the safety property, so it is asserted against the rendered
+    /// buffer rather than against state: it reads back which line carries the
+    /// cursor glyph and requires that line to name the same daemon that
+    /// `selected_kind` hands the restart. If render and dispatch ever compute
+    /// the row separately and disagree — the highlighted daemon differing from
+    /// the restarted one — this fails.
+    #[test]
+    fn the_highlighted_row_is_the_row_restart_targets() {
+        let rows = vec![
+            status(DaemonKind::Bridge, DaemonState::Stopped, false, None),
+            status(DaemonKind::Notifyd, DaemonState::Running, true, Some(1)),
+            status(DaemonKind::ApproveBroker, DaemonState::Running, true, None),
+            status(DaemonKind::Atc, DaemonState::Running, true, None),
+        ];
+        let mut state = seeded_state(rows.clone());
+
+        for want in 0..rows.len() {
+            // Drive the cursor the way the key handler does, from wherever it is.
+            state.selected = 0;
+            state.move_selection(want as isize, rows.len());
+
+            let target = state
+                .selected_kind(&rows)
+                .expect("a populated table always has a selected row");
+
+            let lines = render_to_lines(&mut state, None, 160, 30);
+            let marked: Vec<&String> =
+                lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
+            assert_eq!(
+                marked.len(),
+                1,
+                "exactly one row may carry the cursor, got {marked:?}"
+            );
+            assert!(
+                marked[0].contains(target.display_name()),
+                "cursor is drawn on {:?} but restart would target {:?}",
+                marked[0].trim(),
+                target.display_name()
+            );
+        }
+    }
+
+    /// `R` refuses daemons it cannot restart instead of silently no-opping or
+    /// falling back to a different daemon.
+    #[test]
+    fn restart_support_never_redirects_to_an_unrelated_daemon() {
+        assert_eq!(
+            DaemonsState::restart_support(DaemonKind::Notifyd),
+            Ok(DaemonKind::Notifyd)
+        );
+        // The broker shares notifyd's runtime, so this redirect is the one
+        // legitimate case — and it is the ONLY one.
+        assert_eq!(
+            DaemonsState::restart_support(DaemonKind::ApproveBroker),
+            Ok(DaemonKind::Notifyd)
+        );
+        for kind in [DaemonKind::Bridge, DaemonKind::Atc, DaemonKind::FleetDaemon] {
+            let err = DaemonsState::restart_support(kind)
+                .expect_err("{kind:?} has no restart entry point");
+            assert!(
+                err.contains(kind.display_name()),
+                "the refusal must name the daemon the cursor is on, got {err:?}"
+            );
+        }
+    }
+
+    /// The cursor saturates rather than wrapping, and survives an empty table.
+    #[test]
+    fn cursor_saturates_and_tolerates_an_empty_table() {
+        let rows = vec![
+            status(DaemonKind::Bridge, DaemonState::Stopped, false, None),
+            status(DaemonKind::Notifyd, DaemonState::Running, true, Some(1)),
+        ];
+        let mut state = seeded_state(rows.clone());
+
+        state.move_selection(-1, rows.len());
+        assert_eq!(state.selected_index(&rows), 0, "saturates at the top");
+
+        state.move_selection(50, rows.len());
+        assert_eq!(
+            state.selected_index(&rows),
+            rows.len() - 1,
+            "saturates at the bottom"
+        );
+
+        // A cursor parked past the end must not point at nothing when the
+        // collector republishes a shorter list.
+        assert_eq!(state.selected_kind(&[]), None);
+        assert_eq!(state.selected_index(&[]), 0);
     }
 
     fn system_runtime() -> DaemonsOverlayState {
