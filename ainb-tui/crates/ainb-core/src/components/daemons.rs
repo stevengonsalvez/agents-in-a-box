@@ -472,13 +472,9 @@ pub fn render(
                 "  runtime health",
                 Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
-            Span::styled(
-                "  \u{2191}\u{2193}",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" select \u{b7} ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" restart selected", Style::default().fg(MUTED_GRAY)),
+            // The footer carries the live key hints, which change with whatever
+            // overlay is open. Repeating a fixed set here just gives the title
+            // a second, staler copy — `R restart selected` outlived the key.
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
