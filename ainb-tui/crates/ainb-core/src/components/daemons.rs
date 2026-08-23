@@ -76,6 +76,13 @@ pub struct DaemonsState {
     /// meaningful even before the first snapshot arrives, and
     /// [`Self::selected_kind`] is the single place that turns it into a target.
     selected: usize,
+    /// What the last `R` did, or why it could not act.
+    ///
+    /// Owned by THIS screen. The first cut wrote it to
+    /// `DaemonsOverlayState::restart_status`, a field this screen does not own
+    /// and never renders, so a correct refusal was invisible and `R` read as a
+    /// dead key on every row that cannot be restarted.
+    restart_outcome: Option<String>,
 }
 
 impl DaemonsState {
@@ -114,10 +121,21 @@ impl DaemonsState {
             // Same runtime as notifyd: restarting that rebinds this socket.
             DaemonKind::ApproveBroker => Ok(DaemonKind::Notifyd),
             DaemonKind::Bridge | DaemonKind::Atc | DaemonKind::FleetDaemon => Err(format!(
-                "{} has no restart from the TUI — use its own CLI verb",
+                "{} has no TUI restart; use its own CLI verb",
                 kind.display_name()
             )),
         }
+    }
+
+    /// The line describing the last `R`, for the renderer.
+    #[must_use]
+    pub fn restart_outcome(&self) -> Option<&str> {
+        self.restart_outcome.as_deref()
+    }
+
+    /// Record what `R` did, or why it refused.
+    pub fn set_restart_outcome(&mut self, line: impl Into<String>) {
+        self.restart_outcome = Some(line.into());
     }
 
     /// Move the cursor, saturating at both ends.
@@ -279,7 +297,7 @@ pub fn render(
     } else {
         render_table(frame, chunks[0], &snapshot, cursor);
     }
-    render_footer(frame, chunks[1]);
+    render_footer(frame, chunks[1], state.restart_outcome());
 }
 
 fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&DaemonsOverlayState>) {
@@ -675,14 +693,24 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(vec![
+/// `outcome` is the last `R` result. It renders in the footer because the
+/// footer is drawn on EVERY layout branch: a message shown only in the tall
+/// layout would be missing exactly when the terminal is small.
+fn render_footer(frame: &mut Frame, area: Rect, outcome: Option<&str>) {
+    let mut spans = vec![
         Span::styled("read-only • live", Style::default().fg(MUTED_GRAY)),
         Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
         Span::styled("q/Esc", Style::default().fg(CORNFLOWER_BLUE)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
-    ]))
-    .style(Style::default().bg(PANEL_BG));
+    ];
+    if let Some(line) = outcome {
+        spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let footer = Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL_BG));
     frame.render_widget(footer, area);
 }
 
@@ -758,6 +786,7 @@ mod tests {
         DaemonsState {
             shared: Some(shared),
             selected: 0,
+            restart_outcome: None,
         }
     }
 
@@ -811,6 +840,7 @@ mod tests {
         DaemonsState {
             shared: Some(shared),
             selected: 0,
+            restart_outcome: None,
         }
     }
 
@@ -895,6 +925,54 @@ mod tests {
                 target.display_name()
             );
         }
+    }
+
+    /// Every refusal REACHES THE SCREEN, asserted from the drawn buffer.
+    ///
+    /// Deliberately renders instead of checking `restart_support`'s return
+    /// value. That return value was already correct in the shipped build and
+    /// the message still never appeared, because it was written to a field this
+    /// screen does not own. Asserting the wrong layer is what shipped an
+    /// unreachable cursor and then an invisible refusal, so this reads the
+    /// pixels. It covers EVERY non-restartable row rather than a sample: a row
+    /// whose refusal silently fails to render is a dead key on that row.
+    #[test]
+    fn every_refusal_is_visible_on_the_rendered_screen() {
+        for kind in [DaemonKind::Bridge, DaemonKind::Atc, DaemonKind::FleetDaemon] {
+            let why = DaemonsState::restart_support(kind)
+                .expect_err("this row has no restart entry point");
+
+            let mut state = seeded_state(vec![status(kind, DaemonState::Running, true, None)]);
+            state.set_restart_outcome(why.clone());
+
+            let text = render_to_string(&mut state, None, 200, 40);
+            assert!(
+                text.contains(kind.display_name()),
+                "{kind:?}: the refusal must name the daemon on screen"
+            );
+            let tail = why.rsplit("; ").next().unwrap_or(&why);
+            assert!(
+                text.contains(tail.trim()),
+                "{kind:?}: refusal text {tail:?} never rendered; R would look like a dead key"
+            );
+        }
+    }
+
+    /// A successful restart is announced too, so `R` is never silent.
+    #[test]
+    fn a_restartable_row_announces_that_it_is_restarting() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Notifyd,
+            DaemonState::Running,
+            true,
+            Some("unix socket"),
+        )]);
+        state.set_restart_outcome("restarting notifyd…");
+        let text = render_to_string(&mut state, None, 200, 40);
+        assert!(
+            text.contains("restarting notifyd"),
+            "a restart must report itself on screen"
+        );
     }
 
     /// `R` refuses daemons it cannot restart instead of silently no-opping or
