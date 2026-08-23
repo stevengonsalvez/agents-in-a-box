@@ -8850,29 +8850,31 @@ mod panel_back_tests {
         ));
     }
 
-    /// Every row maps to a restart, so no row is a dead end under `R`.
+    /// Every row is labelled, and the labels are distinct.
+    ///
+    /// Deliberately does NOT call `spawn_daemon_restart`: each arm performs
+    /// REAL daemon lifecycle work (SIGTERM the running owner, respawn, poll a
+    /// socket). Driving that from a unit test kills the daemons on whatever
+    /// machine runs the suite and hangs CI — which is exactly what it did, so
+    /// the dispatch itself is covered by the compiler instead. The match in
+    /// `spawn_daemon_restart` is exhaustive over `DaemonRow`, so a new row
+    /// cannot be added without giving it an arm.
     #[test]
-    fn every_daemon_row_has_a_label_and_restart_arm() {
+    fn every_daemon_row_is_labelled_distinctly() {
         use crate::app::state::DaemonRow;
+        use std::collections::HashSet;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-
+        let mut seen = HashSet::new();
         for row in DaemonRow::ORDER {
-            assert!(!row.label().is_empty(), "{row:?} needs a label");
-            let mut state = AppState::default();
-            EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-            state.spawn_daemon_restart(row);
-            let overlay = state.daemons_overlay.as_ref().expect("overlay");
+            let label = row.label();
+            assert!(!label.is_empty(), "{row:?} needs a label");
             assert!(
-                overlay.restart_rx.is_some(),
-                "{row:?} must arm an in-flight restart"
-            );
-            assert!(
-                overlay.restart_status.as_deref().is_some_and(|s| s.contains(row.label())),
-                "{row:?} status line must name the daemon being restarted"
+                seen.insert(label),
+                "{row:?} reuses the label {label:?}; the restart status line \
+                 would then name the wrong daemon"
             );
         }
+        assert_eq!(seen.len(), DaemonRow::ORDER.len());
     }
 
     /// Daemons repair keys stay next to the table that reports their state.
