@@ -950,7 +950,7 @@ mod tests {
                 text.contains(kind.display_name()),
                 "{kind:?}: the refusal must name the daemon on screen"
             );
-            let tail = why.split("; ").next_back().unwrap_or(&why);
+            let tail = why.rsplit("; ").next().unwrap_or(&why);
             assert!(
                 text.contains(tail.trim()),
                 "{kind:?}: refusal text {tail:?} never rendered; R would look like a dead key"
