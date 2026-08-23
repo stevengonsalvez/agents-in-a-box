@@ -3695,17 +3695,21 @@ impl EventHandler {
                 let rows = state.daemons_state.snapshot().rows;
                 match state.daemons_state.selected_kind(&rows) {
                     None => {}
-                    Some(kind) => match crate::components::daemons::DaemonsState::restart_support(kind) {
-                        // Only notifyd has an in-process restart; the broker
-                        // rides its runtime. Anything else says why, so the key
-                        // never silently no-ops or hits a different daemon.
-                        Ok(_) => state.spawn_daemon_restart(crate::app::state::DaemonRow::Notifyd),
-                        Err(why) => {
-                            if let Some(o) = state.daemons_overlay.as_mut() {
-                                o.restart_status = Some(why);
+                    Some(kind) => {
+                        match crate::components::daemons::DaemonsState::restart_support(kind) {
+                            // Only notifyd has an in-process restart; the broker
+                            // rides its runtime. Anything else says why, so the key
+                            // never silently no-ops or hits a different daemon.
+                            Ok(_) => {
+                                state.spawn_daemon_restart(crate::app::state::DaemonRow::Notifyd)
+                            }
+                            Err(why) => {
+                                if let Some(o) = state.daemons_overlay.as_mut() {
+                                    o.restart_status = Some(why);
+                                }
                             }
                         }
-                    },
+                    }
                 }
             }
             AppEvent::DaemonsOverlayRestartSelected => {

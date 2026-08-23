@@ -605,9 +605,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
             Row::new(vec![
                 Cell::from(format!("{marker}{}", d.kind.display_name())).style(
                     if index == cursor {
-                        Style::default()
-                            .fg(SELECTION_GREEN)
-                            .add_modifier(Modifier::BOLD)
+                        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
                     },
@@ -867,13 +865,11 @@ mod tests {
             state.selected = 0;
             state.move_selection(want as isize, rows.len());
 
-            let target = state
-                .selected_kind(&rows)
-                .expect("a populated table always has a selected row");
+            let target =
+                state.selected_kind(&rows).expect("a populated table always has a selected row");
 
             let lines = render_to_lines(&mut state, None, 160, 30);
-            let marked: Vec<&String> =
-                lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
+            let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
             assert_eq!(
                 marked.len(),
                 1,
