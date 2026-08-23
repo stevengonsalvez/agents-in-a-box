@@ -52,6 +52,7 @@ mod perf;
 mod plugins;
 mod providers;
 mod rtk;
+mod self_exec_guard;
 mod setup;
 mod tmux;
 mod usage_cache;

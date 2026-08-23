@@ -452,6 +452,33 @@ fn respawn_args_for(exe_name: &str) -> Vec<&'static str> {
     }
 }
 
+/// Is this process a cargo-built **test** binary rather than a real daemon host?
+///
+/// Thin IO wrapper over [`is_cargo_test_exe`]; see that function for why both
+/// halves of the check are needed.
+fn running_under_cargo_test() -> bool {
+    let cargo_env =
+        std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some();
+    let exe = std::env::current_exe().ok();
+    is_cargo_test_exe(cargo_env, exe.as_deref())
+}
+
+/// Pure predicate behind [`running_under_cargo_test`], split out so the rule is
+/// testable without faking the process environment.
+///
+/// BOTH halves are load-bearing, and each one alone is wrong:
+///
+/// * `cargo` runs test binaries with `CARGO` / `CARGO_MANIFEST_DIR` set, but it
+///   sets those for `cargo run` too — and a `cargo run` of the real binary
+///   (`target/<profile>/ainb`) is a legitimate daemon host.
+/// * Test binaries live in `target/<profile>/deps/`, but so does the real bin
+///   ARTIFACT (`deps/ainb-<hash>`, hard-linked up to `target/<profile>/ainb`).
+///
+/// Only the conjunction identifies the test-harness case.
+fn is_cargo_test_exe(cargo_env: bool, exe: Option<&Path>) -> bool {
+    cargo_env && exe.and_then(Path::parent).is_some_and(|dir| dir.ends_with("deps"))
+}
+
 /// Detach-spawn a fresh daemon: null stdio + its own process group so a
 /// closing tmux pane or terminal SIGHUP can't take it down — the Rust
 /// equivalent of the hook script's `nohup ainb notifyd </dev/null
@@ -460,6 +487,21 @@ fn spawn_detached() -> anyhow::Result<u32> {
     use anyhow::Context;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
+
+    // Never re-exec a cargo test binary as the daemon. Under `cargo test`,
+    // `daemon_respawn_argv`'s `current_exe()` is the TEST harness, and libtest
+    // reads the `notifyd run` argv as two name FILTERS, not a subcommand — so
+    // the child re-runs every test matching `notifyd` or `run` (`run` matches a
+    // great many), and any of those reaching this path detaches another copy.
+    // `process_group(0)` below then shields each one from the test runner.
+    // Observed 2026-08-23 alongside the MCP variant: 135 orphans total, issue
+    // #715.
+    if running_under_cargo_test() {
+        anyhow::bail!(
+            "refusing to spawn the notifyd daemon from a cargo test binary \
+             (current_exe is a test harness, not `ainb`)"
+        );
+    }
 
     let (exe, args) = daemon_respawn_argv();
     let child = Command::new(&exe)
@@ -734,6 +776,60 @@ mod tests {
             class,
             binary_drift: false,
         }
+    }
+
+    #[test]
+    fn cargo_driven_deps_binary_is_a_test_binary() {
+        assert!(is_cargo_test_exe(
+            true,
+            Some(Path::new("/w/target/debug/deps/ainb-39a2b8"))
+        ));
+        assert!(is_cargo_test_exe(
+            true,
+            Some(Path::new("/w/target/release/deps/ainb-6b08f1"))
+        ));
+    }
+
+    /// `cargo run` sets the same env but executes the profile-root binary.
+    #[test]
+    fn cargo_run_of_the_real_binary_is_not_a_test_binary() {
+        assert!(!is_cargo_test_exe(
+            true,
+            Some(Path::new("/w/target/debug/ainb"))
+        ));
+    }
+
+    /// Running the `deps/` artifact by hand is a legitimate daemon host.
+    #[test]
+    fn deps_artifact_without_cargo_is_not_a_test_binary() {
+        assert!(!is_cargo_test_exe(
+            false,
+            Some(Path::new("/w/target/debug/deps/ainb-39a2b8"))
+        ));
+        assert!(!is_cargo_test_exe(
+            false,
+            Some(Path::new("/opt/homebrew/bin/ainb"))
+        ));
+    }
+
+    #[test]
+    fn unresolvable_exe_is_not_a_test_binary() {
+        assert!(!is_cargo_test_exe(true, None));
+    }
+
+    /// The behavioural guarantee issue #715 is about: this very process IS a
+    /// cargo test binary, so the detach-spawn must refuse rather than fork a
+    /// copy of the test harness.
+    #[test]
+    fn spawn_detached_refuses_to_self_exec_the_test_harness() {
+        if !running_under_cargo_test() {
+            return;
+        }
+        let err = spawn_detached().expect_err("must refuse to spawn from a test binary");
+        assert!(
+            err.to_string().contains("cargo test binary"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
