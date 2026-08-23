@@ -8835,7 +8835,6 @@ mod panel_back_tests {
     #[test]
     fn daemons_overlay_restarts_the_selected_row() {
         use crate::app::state::DaemonRow;
-        use crossterm::event::{KeyCode, KeyEvent};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -8866,17 +8865,11 @@ mod panel_back_tests {
         }
         assert_eq!(selected(&state), Some(DaemonRow::Notifyd));
 
-        // Arrow keys and vim keys both move the cursor.
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-        assert!(matches!(
-            route(&mut state, KeyCode::Up),
-            Some(AppEvent::DaemonsOverlaySelect(-1))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('j')),
-            Some(AppEvent::DaemonsOverlaySelect(1))
-        ));
+        // Key routing is NOT asserted here: `GoToDaemons` opens the Daemons
+        // SCREEN, whose arrows drive that screen's cursor, not this overlay's.
+        // `daemons_screen_keys_drive_the_screen_cursor_not_the_overlay` owns
+        // that contract — conflating the two is what shipped a cursor nobody
+        // could reach.
     }
 
     /// Every row is labelled, and the labels are distinct.

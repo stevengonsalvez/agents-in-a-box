@@ -569,6 +569,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, cursor: usiz
     };
 
     let header = Row::new(vec![
+        Cell::from(""),
         Cell::from("DAEMON"),
         Cell::from("STATE"),
         Cell::from("PID"),
@@ -604,15 +605,15 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, cursor: usiz
                 }
                 _ => d.reason.clone(),
             };
-            let marker = if index == cursor { "\u{25b6} " } else { "  " };
+            let selected = index == cursor;
             Row::new(vec![
-                Cell::from(format!("{marker}{}", d.kind.display_name())).style(
-                    if index == cursor {
-                        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
-                    },
-                ),
+                Cell::from(if selected { "\u{25b6}" } else { "" })
+                    .style(Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+                Cell::from(d.kind.display_name()).style(if selected {
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                }),
                 Cell::from(glyph).style(glyph_style),
                 Cell::from(pid),
                 Cell::from(uptime),
@@ -628,7 +629,11 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, cursor: usiz
         })
         .collect();
 
+    // The cursor lives in its OWN gutter column rather than being prefixed onto
+    // the name: "approve broker" is exactly the 14 columns DAEMON allows, so a
+    // 2-char marker inside that cell truncated the daemon's name.
     let widths = [
+        Constraint::Length(2),
         Constraint::Length(14),
         Constraint::Length(10),
         Constraint::Length(8),
