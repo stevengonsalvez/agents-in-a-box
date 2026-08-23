@@ -56,8 +56,10 @@ pub enum AppEvent {
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
-    /// Restart the notifyd daemon (single resume/repair) from the overlay.
-    DaemonsOverlayRestartNotifyd,
+    /// Move the overlay's row selection by a signed step (saturating).
+    DaemonsOverlaySelect(isize),
+    /// Restart whichever daemon row is selected.
+    DaemonsOverlayRestartSelected,
     DaemonsRepairHooks,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
@@ -1421,8 +1423,10 @@ impl EventHandler {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
                 }
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
                 KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
                 KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
                 _ => None,
@@ -2971,8 +2975,13 @@ impl EventHandler {
     fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
+            // `R` used to be hardcoded to notifyd. It now acts on the selected
+            // row, which is the only way to cycle an already-running daemon
+            // (the S/M/P keys below only START a stopped one).
+            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
             KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
             KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
@@ -3669,7 +3678,16 @@ impl EventHandler {
             AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
-            AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
+            AppEvent::DaemonsOverlaySelect(delta) => {
+                if let Some(o) = state.daemons_overlay.as_mut() {
+                    o.selected = o.selected.step(delta);
+                }
+            }
+            AppEvent::DaemonsOverlayRestartSelected => {
+                if let Some(kind) = state.daemons_overlay.as_ref().map(|o| o.selected) {
+                    state.spawn_daemon_restart(kind);
+                }
+            }
             AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
             AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
@@ -8778,6 +8796,87 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
+    /// `R` restarts the SELECTED daemon, and the selection is movable.
+    ///
+    /// The overlay previously hardcoded `R` to notifyd and had no cursor, so an
+    /// already-running daemon on a stale binary — the state a `brew upgrade`
+    /// leaves behind — could not be cycled from the TUI at all. Selection
+    /// saturates rather than wraps, so holding a direction parks at an end
+    /// instead of silently cycling past it.
+    #[test]
+    fn daemons_overlay_restarts_the_selected_row() {
+        use crate::app::state::DaemonRow;
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+
+        let selected = |s: &AppState| s.daemons_overlay.as_ref().map(|o| o.selected);
+        assert_eq!(
+            selected(&state),
+            Some(DaemonRow::ORDER[0]),
+            "selection starts on the first row"
+        );
+
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Headroom));
+
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
+
+        // Saturates at the top rather than wrapping to the bottom.
+        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
+        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
+
+        // ...and at the bottom.
+        for _ in 0..10 {
+            EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
+        }
+        assert_eq!(selected(&state), Some(DaemonRow::Notifyd));
+
+        // Arrow keys and vim keys both move the cursor.
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(matches!(
+            route(&mut state, KeyCode::Up),
+            Some(AppEvent::DaemonsOverlaySelect(-1))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('j')),
+            Some(AppEvent::DaemonsOverlaySelect(1))
+        ));
+    }
+
+    /// Every row is labelled, and the labels are distinct.
+    ///
+    /// Deliberately does NOT call `spawn_daemon_restart`: each arm performs
+    /// REAL daemon lifecycle work (SIGTERM the running owner, respawn, poll a
+    /// socket). Driving that from a unit test kills the daemons on whatever
+    /// machine runs the suite and hangs CI — which is exactly what it did, so
+    /// the dispatch itself is covered by the compiler instead. The match in
+    /// `spawn_daemon_restart` is exhaustive over `DaemonRow`, so a new row
+    /// cannot be added without giving it an arm.
+    #[test]
+    fn every_daemon_row_is_labelled_distinctly() {
+        use crate::app::state::DaemonRow;
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        for row in DaemonRow::ORDER {
+            let label = row.label();
+            assert!(!label.is_empty(), "{row:?} needs a label");
+            assert!(
+                seen.insert(label),
+                "{row:?} reuses the label {label:?}; the restart status line \
+                 would then name the wrong daemon"
+            );
+        }
+        assert_eq!(seen.len(), DaemonRow::ORDER.len());
+    }
+
     /// Daemons repair keys stay next to the table that reports their state.
     #[test]
     fn daemons_repair_key_routing() {
@@ -8799,7 +8898,7 @@ mod panel_back_tests {
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::DaemonsOverlayRestartNotifyd)
+            Some(AppEvent::DaemonsOverlayRestartSelected)
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('I')),
