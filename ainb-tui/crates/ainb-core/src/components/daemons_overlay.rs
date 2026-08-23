@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use crate::app::state::DaemonsOverlayState;
+use crate::app::state::{DaemonRow, DaemonsOverlayState};
 
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
@@ -71,6 +71,37 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
     render_help_bar(frame, chunks[1], state);
 }
 
+/// Row prefix marking the selected daemon.
+///
+/// Two chars wide for BOTH states so the labels stay column-aligned — a marker
+/// that changes width makes the table jitter as the selection moves.
+fn row_marker(state: &DaemonsOverlayState, kind: DaemonRow) -> Span<'static> {
+    if state.selected == kind {
+        Span::styled(
+            "\u{25b8} ",
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    }
+}
+
+/// `1.21.5 \u{26a0} drift` when an older daemon is still serving this home.
+///
+/// Drift is what makes a restart necessary after an upgrade: the running
+/// process keeps serving the OLD binary until it is replaced, so showing the
+/// version is what turns `R` from a guess into an informed action.
+fn version_span(version: Option<&str>, old: bool) -> Span<'static> {
+    match version {
+        Some(v) if old => Span::styled(
+            format!("  {v} \u{26a0} drift"),
+            Style::default().fg(CLAY).add_modifier(Modifier::BOLD),
+        ),
+        Some(v) => Span::styled(format!("  {v}"), Style::default().fg(MUTED_GRAY)),
+        None => Span::raw(""),
+    }
+}
+
 fn status_dot(running: bool) -> Span<'static> {
     if running {
         Span::styled(
@@ -110,15 +141,13 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 
     // ── MCP pool ──────────────────────────────────────────────────────────────
     let mcp_line = Line::from(vec![
+        row_marker(state, DaemonRow::Mcp),
         Span::styled(
-            "  MCP pool     ",
+            "MCP pool     ",
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
         ),
         status_dot(state.mcp_alive),
-        Span::styled(
-            "    (use `ainb mcp stop` to stop)",
-            Style::default().fg(MUTED_GRAY),
-        ),
+        version_span(state.mcp_runtime.version.as_deref(), state.mcp_runtime.old),
     ]);
     frame.render_widget(Paragraph::new(mcp_line), rows[0]);
 
@@ -139,8 +168,9 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
     let watched = state.headroom.running && !state.headroom_consumers.is_empty();
 
     let mut headroom_spans = vec![
+        row_marker(state, DaemonRow::Headroom),
         Span::styled(
-            format!("  Headroom :{port:<5}"),
+            format!("Headroom :{port:<5}"),
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
         ),
         status_dot(state.headroom.running),
@@ -178,8 +208,9 @@ fn render_cards(frame: &mut Frame, area: Rect, state: &DaemonsOverlayState) {
 
     // ── notifyd processes ───────────────────────────────────────────────────────
     let mut hangar = vec![
+        row_marker(state, DaemonRow::Hangar),
         Span::styled(
-            "  Hangar daemon ",
+            "Hangar daemon ",
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
         ),
         status_dot(state.hangar_running),
@@ -238,8 +269,9 @@ fn render_notifyd_section(frame: &mut Frame, area: Rect, state: &DaemonsOverlayS
     let lines = build_notifyd_lines(
         &state.notifyd,
         (state.approve_running, &state.approve_reason),
-        state.notifyd_restart_status.as_deref(),
+        state.restart_status.as_deref(),
         area.height as usize,
+        state.selected == DaemonRow::Notifyd,
     );
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -254,6 +286,7 @@ fn build_notifyd_lines(
     approve: (bool, &str),
     restart_status: Option<&str>,
     capacity: usize,
+    selected: bool,
 ) -> Vec<Line<'static>> {
     let orphan_count = notifyd.iter().filter(|d| !d.class.is_healthy()).count();
 
@@ -261,23 +294,35 @@ fn build_notifyd_lines(
 
     // Header: "notifyd processes (N)  · M to clean up  · R restart".
     let mut header = vec![Span::styled(
-        format!("  notifyd processes ({})", notifyd.len()),
+        format!("notifyd processes ({})", notifyd.len()),
         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
     )];
+    header.insert(
+        0,
+        if selected {
+            Span::styled(
+                "\u{25b8} ",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        },
+    );
     if orphan_count > 0 {
         header.push(Span::styled(
             format!("   · {orphan_count} to clean up (run `ainb notifyd reap`)"),
             Style::default().fg(CLAY),
         ));
     }
-    // Restart affordance sits next to the notifyd control it acts on.
+    // `R` acts on the SELECTED row now, not on notifyd specifically, so the
+    // affordance no longer claims to belong to this section.
     header.push(Span::styled("   · ", Style::default().fg(MUTED_GRAY)));
     header.push(Span::styled(
         "R",
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     ));
     header.push(Span::styled(
-        " restart (resume/repair)",
+        " restart selected",
         Style::default().fg(MUTED_GRAY),
     ));
     lines.push(Line::from(header));
@@ -411,6 +456,7 @@ mod tests {
         tokens: Option<u64>,
     ) -> DaemonsOverlayState {
         DaemonsOverlayState {
+            selected: DaemonRow::ORDER[0],
             mcp_alive: true,
             mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
@@ -426,8 +472,8 @@ mod tests {
             loading: false,
             last_refreshed: Some(std::time::Instant::now()),
             fetch_rx: None,
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_running: false,
@@ -452,6 +498,45 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    /// The cursor marks exactly one row, and it is the one `R` acts on.
+    ///
+    /// Rendered rather than asserted on state, because the marker IS the only
+    /// feedback telling the operator which daemon a restart will hit — a
+    /// selection that moves in state but not on screen is a mis-fire waiting
+    /// to happen.
+    fn daemons_overlay_marks_the_selected_row() {
+        for (row, label) in [
+            (DaemonRow::Mcp, "MCP pool"),
+            (DaemonRow::Headroom, "Headroom"),
+            (DaemonRow::Hangar, "Hangar daemon"),
+            (DaemonRow::Notifyd, "notifyd processes"),
+        ] {
+            let mut state = make_state(true, 8787, Some(12345), Some(9876));
+            state.selected = row;
+            let backend = TestBackend::new(120, 36);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|f| {
+                let area = f.size();
+                render(f, area, &state);
+            })
+            .unwrap();
+            let text = buffer_text(&term);
+
+            let marked: Vec<&str> = text.lines().filter(|line| line.contains('\u{25b8}')).collect();
+            assert_eq!(
+                marked.len(),
+                1,
+                "exactly one row must carry the cursor for {row:?}, got {marked:?}"
+            );
+            assert!(
+                marked[0].contains(label),
+                "cursor must sit on {label} when {row:?} is selected, got {:?}",
+                marked[0]
+            );
+        }
     }
 
     #[test]
@@ -535,6 +620,7 @@ mod tests {
     #[test]
     fn daemons_overlay_renders_loading_state() {
         let state = DaemonsOverlayState {
+            selected: DaemonRow::ORDER[0],
             mcp_alive: false,
             mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
@@ -550,8 +636,8 @@ mod tests {
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_running: false,
@@ -642,13 +728,13 @@ mod tests {
             })
             .collect();
         // capacity 4 → header + approve.sock + 1 row + "… +6 more"
-        let lines = build_notifyd_lines(&many, (true, "serving"), None, 4);
+        let lines = build_notifyd_lines(&many, (true, "serving"), None, 4, false);
         assert!(lines.len() <= 4, "exceeded capacity: {}", lines.len());
         let last: String = lines.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();
         assert!(last.contains("more"), "no overflow pointer in: {last}");
 
         // Ample capacity → all 7 rows, no overflow line.
-        let full = build_notifyd_lines(&many, (true, "serving"), None, 30);
+        let full = build_notifyd_lines(&many, (true, "serving"), None, 30, false);
         assert_eq!(full.len(), 9); // header + approve.sock + 7
         let full_last: String =
             full.last().unwrap().spans.iter().map(|s| s.content.clone()).collect();

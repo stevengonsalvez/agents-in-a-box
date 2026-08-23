@@ -301,7 +301,7 @@ fn render_system_services(frame: &mut Frame, area: Rect, runtime: Option<&Daemon
                         runtime.notifyd.iter().any(|daemon| daemon.class.is_healthy()),
                     )),
                     Cell::from(action_detail(
-                        runtime.notifyd_restart_status.as_ref(),
+                        runtime.restart_status.as_ref(),
                         &notify_version,
                     )),
                     Cell::from("R restart current"),
@@ -742,6 +742,7 @@ mod tests {
 
     fn system_runtime() -> DaemonsOverlayState {
         DaemonsOverlayState {
+            selected: crate::app::state::DaemonRow::ORDER[0],
             mcp_alive: true,
             mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
             headroom: ProxyStatus {
@@ -760,8 +761,8 @@ mod tests {
             loading: false,
             last_refreshed: None,
             fetch_rx: None,
-            notifyd_restart_rx: None,
-            notifyd_restart_status: None,
+            restart_rx: None,
+            restart_status: None,
             hooks_repair_rx: None,
             hooks_repair_status: None,
             hangar_start_rx: None,
