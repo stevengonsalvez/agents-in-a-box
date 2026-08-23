@@ -1,0 +1,24 @@
+# Journey 1 — the Daemons screen lists every managed daemon, and nothing on it
+# reads "collecting…".
+#
+# Before: five rows. The MCP pool, the Hangar daemon and the Headroom proxy
+# were real processes with no row, listed ad hoc in a System services panel
+# that sat on "collecting…" whenever its separate async fetch wedged.
+#
+# Placeholders are filled in by scripts/record-daemons-journeys.sh.
+Output tests/recordings/daemons-roster.gif
+Set Theme "Dracula"
+Set Width 1500
+Set Height 620
+Set FontSize 15
+Set Padding 12
+
+Hide
+Type "clear && HOME=__HOME__ AINB_HOME=__HOME__/.agents-in-a-box exec __AINB__ tui"
+Enter
+Sleep 12s
+Show
+
+Sleep 1s
+Type "d"
+Sleep 5s
