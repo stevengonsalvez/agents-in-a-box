@@ -218,6 +218,9 @@ pub fn render(
     runtime: Option<&DaemonsOverlayState>,
 ) {
     let snapshot = state.snapshot();
+    // Resolved ONCE here and handed to the table, so the highlighted row and
+    // the row `R` restarts come from the same call.
+    let cursor = state.selected_index(&snapshot.rows);
 
     let outer = Block::default()
         .title(Line::from(vec![
@@ -263,7 +266,7 @@ pub fn render(
                 Constraint::Length(7),
             ])
             .split(chunks[0]);
-        render_table(frame, sections[0], &snapshot);
+        render_table(frame, sections[0], &snapshot, cursor);
         render_system_services(frame, sections[1], runtime);
         render_hook_section(frame, sections[2], snapshot.hook_health.as_ref(), runtime);
     } else if chunks[0].height >= 18 {
@@ -271,10 +274,10 @@ pub fn render(
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(7)])
             .split(chunks[0]);
-        render_table(frame, sections[0], &snapshot);
+        render_table(frame, sections[0], &snapshot, cursor);
         render_hook_section(frame, sections[1], snapshot.hook_health.as_ref(), runtime);
     } else {
-        render_table(frame, chunks[0], &snapshot);
+        render_table(frame, chunks[0], &snapshot, cursor);
     }
     render_footer(frame, chunks[1]);
 }
@@ -555,7 +558,10 @@ fn render_hook_section(
     );
 }
 
-fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
+/// `cursor` is the row index the caller resolved via
+/// [`DaemonsState::selected_index`]. Passed in rather than re-derived here so
+/// the highlight and the restart target come from one call, not two.
+fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, cursor: usize) {
     let now = if snapshot.collected_at_ms > 0 {
         snapshot.collected_at_ms
     } else {
@@ -574,9 +580,6 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     ])
     .style(Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD));
 
-    // The highlight comes from the SAME call the restart target does, so the
-    // marked row and the row `R` acts on cannot drift apart.
-    let cursor = state.selected_index(&snapshot.rows);
     let rows: Vec<Row> = snapshot
         .rows
         .iter()
