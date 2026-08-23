@@ -58,8 +58,12 @@ pub enum AppEvent {
     DaemonsOverlayRefresh,
     /// Move the overlay's row selection by a signed step (saturating).
     DaemonsOverlaySelect(isize),
-    /// Restart whichever daemon row is selected.
+    /// Restart whichever daemon row is selected in the overlay.
     DaemonsOverlayRestartSelected,
+    /// Move the Daemons SCREEN cursor by a signed step (saturating).
+    DaemonsSelect(isize),
+    /// Restart the daemon the Daemons screen cursor is on.
+    DaemonsRestartSelected,
     DaemonsRepairHooks,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
@@ -2975,13 +2979,13 @@ impl EventHandler {
     fn handle_daemons_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsSelect(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsSelect(1)),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-            // `R` used to be hardcoded to notifyd. It now acts on the selected
-            // row, which is the only way to cycle an already-running daemon
-            // (the S/M/P keys below only START a stopped one).
-            KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
+            // Acts on the row the cursor is drawn on — see
+            // `DaemonsState::selected_kind`, which is the single authority for
+            // both the highlight and this target.
+            KeyCode::Char('R') => Some(AppEvent::DaemonsRestartSelected),
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
             KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
             KeyCode::Char('M') => Some(AppEvent::DaemonsStartMcp),
@@ -3681,6 +3685,27 @@ impl EventHandler {
             AppEvent::DaemonsOverlaySelect(delta) => {
                 if let Some(o) = state.daemons_overlay.as_mut() {
                     o.selected = o.selected.step(delta);
+                }
+            }
+            AppEvent::DaemonsSelect(delta) => {
+                let rows = state.daemons_state.snapshot().rows;
+                state.daemons_state.move_selection(delta, rows.len());
+            }
+            AppEvent::DaemonsRestartSelected => {
+                let rows = state.daemons_state.snapshot().rows;
+                match state.daemons_state.selected_kind(&rows) {
+                    None => {}
+                    Some(kind) => match crate::components::daemons::DaemonsState::restart_support(kind) {
+                        // Only notifyd has an in-process restart; the broker
+                        // rides its runtime. Anything else says why, so the key
+                        // never silently no-ops or hits a different daemon.
+                        Ok(_) => state.spawn_daemon_restart(crate::app::state::DaemonRow::Notifyd),
+                        Err(why) => {
+                            if let Some(o) = state.daemons_overlay.as_mut() {
+                                o.restart_status = Some(why);
+                            }
+                        }
+                    },
                 }
             }
             AppEvent::DaemonsOverlayRestartSelected => {
@@ -8877,6 +8902,42 @@ mod panel_back_tests {
         assert_eq!(seen.len(), DaemonRow::ORDER.len());
     }
 
+    /// `d` reaches the Daemons SCREEN, and its keys drive that screen's cursor.
+    ///
+    /// Pinned because a previous change wired the cursor into the Daemons
+    /// OVERLAY — a different component — so `R` restarted a row nobody could
+    /// see highlighted while the screen's help still advertised notifyd. The
+    /// keys the operator actually presses must map to the surface they are
+    /// looking at.
+    #[test]
+    fn daemons_screen_keys_drive_the_screen_cursor_not_the_overlay() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
+
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(
+            matches!(
+                route(&mut state, KeyCode::Char('R')),
+                Some(AppEvent::DaemonsRestartSelected)
+            ),
+            "R must restart the row the screen highlights"
+        );
+        assert!(matches!(
+            route(&mut state, KeyCode::Down),
+            Some(AppEvent::DaemonsSelect(1))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('k')),
+            Some(AppEvent::DaemonsSelect(-1))
+        ));
+    }
+
     /// Daemons repair keys stay next to the table that reports their state.
     #[test]
     fn daemons_repair_key_routing() {
@@ -8898,7 +8959,7 @@ mod panel_back_tests {
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::DaemonsOverlayRestartSelected)
+            Some(AppEvent::DaemonsRestartSelected)
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('I')),
