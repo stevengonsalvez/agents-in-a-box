@@ -269,6 +269,43 @@ pub fn config_problem() -> Option<String> {
     load_config(None).err().map(|e| format!("{e:#}"))
 }
 
+/// [`config_problem`], memoised on the config file's identity.
+///
+/// The Daemons collector asks this every couple of seconds for as long as a
+/// bridge row is down, and the answer is not cheap: parsing resolves the
+/// configured secrets, and a `keychain:<service>` ref shells out to
+/// `/usr/bin/security`. Uncached, a stopped bridge with a keychain token means
+/// a `security` subprocess every 2s — repeated unlock prompts, and a 5s stall
+/// each time the keychain is locked.
+///
+/// The verdict only changes when the file does, so key the cache on its path,
+/// mtime and length. A config that cannot be stat'd re-reads every time, which
+/// is the safe direction: it is the case where the answer is "missing", and
+/// that is the cheap branch anyway.
+pub fn config_problem_cached() -> Option<String> {
+    use std::sync::Mutex;
+    type Stamp = (std::path::PathBuf, Option<std::time::SystemTime>, u64);
+    static CACHE: Mutex<Option<(Stamp, Option<String>)>> = Mutex::new(None);
+
+    let path = crate::fleet::bridge::config::default_config_path();
+    let meta = std::fs::metadata(&path).ok();
+    let stamp: Stamp = (
+        path,
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map_or(0, std::fs::Metadata::len),
+    );
+
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((cached_stamp, verdict)) = cache.as_ref() {
+        if *cached_stamp == stamp {
+            return verdict.clone();
+        }
+    }
+    let verdict = config_problem();
+    *cache = Some((stamp, verdict.clone()));
+    verdict
+}
+
 /// Uninstall the bridge service. Returns the removed unit path, if any.
 pub fn uninstall() -> Result<Option<std::path::PathBuf>> {
     service::uninstall()

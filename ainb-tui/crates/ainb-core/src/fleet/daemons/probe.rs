@@ -1042,13 +1042,23 @@ pub fn probe_headroom_proxy() -> DaemonStatus {
 /// used — the full setup skeleton belongs in `bridge status`, not a table cell.
 ///
 /// Pure over `problem` so the annotation is testable without a config file.
+/// Which bridge rows a config problem may be appended to.
+///
+/// `Degraded` is deliberately excluded even though it is not `Running`: that
+/// state means the process IS alive but half its job is not happening. Telling
+/// the operator a live daemon "cannot start" is simply false, and it fires for
+/// real — a daemon launched with a baked-in `AINB_CONFIG_PATH` reads a config
+/// this process cannot see, so the row would read "running (connected), but …
+/// — cannot start: no bridge config".
+fn annotatable_bridge_row(row: &DaemonStatus) -> bool {
+    row.kind == DaemonKind::Bridge
+        && matches!(row.state, DaemonState::Stopped | DaemonState::Unknown)
+}
+
 pub fn annotate_bridge_config(rows: &mut [DaemonStatus], problem: Option<&str>) {
     let Some(problem) = problem else { return };
     let head = problem.lines().next().unwrap_or(problem).trim();
-    for row in rows
-        .iter_mut()
-        .filter(|r| r.kind == DaemonKind::Bridge && r.state != DaemonState::Running)
-    {
+    for row in rows.iter_mut().filter(|r| annotatable_bridge_row(r)) {
         row.reason = format!("{} — cannot start: {head}", row.reason);
     }
 }
@@ -1095,13 +1105,14 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
         .unwrap_or_else(|_| ainb_home.clone());
     let mut rows = collect_in(&ainb_home, &notifyd_base, super::heartbeat::now_ms());
     rows.extend(collect_socket_daemons());
-    // Only pay for the config read when a bridge row is actually down — this
-    // runs on the TUI's refresh loop.
-    if rows
-        .iter()
-        .any(|r| r.kind == DaemonKind::Bridge && r.state != DaemonState::Running)
-    {
-        annotate_bridge_config(&mut rows, crate::fleet::bridge::config_problem().as_deref());
+    // Only pay for the config read when a bridge row is actually down, and take
+    // the memoised verdict — this runs on the TUI's refresh loop every couple of
+    // seconds, and an uncached read shells out to the keychain each time.
+    if rows.iter().any(|r| annotatable_bridge_row(r)) {
+        annotate_bridge_config(
+            &mut rows,
+            crate::fleet::bridge::config_problem_cached().as_deref(),
+        );
     }
     Ok(rows)
 }
@@ -2145,6 +2156,36 @@ mod tests {
     /// shows up. MCP pool, the Hangar daemon and the Headroom proxy used to be
     /// real processes with no row here — visible only as ad-hoc lines in a
     /// separate panel, with no way to act on them.
+    /// A `Degraded` bridge is ALIVE — half its job is not happening, but the
+    /// process is up. Appending "cannot start" to it is simply false, and it
+    /// fires for real: a daemon launched with a baked-in `AINB_CONFIG_PATH`
+    /// reads a config this process cannot see.
+    #[test]
+    fn a_degraded_bridge_is_never_told_it_cannot_start() {
+        let mut rows = vec![DaemonStatus {
+            state: DaemonState::Degraded,
+            reason: "running (connected), but a push did not reach the human".to_string(),
+            ..DaemonStatus::stopped(DaemonKind::Bridge, String::new())
+        }];
+        annotate_bridge_config(&mut rows, Some("no bridge config: it does not exist"));
+        assert!(
+            !rows[0].reason.contains("cannot start"),
+            "a live daemon must not be told it cannot start, got {:?}",
+            rows[0].reason
+        );
+    }
+
+    /// A stopped bridge DOES get the cause appended — that is the whole point.
+    #[test]
+    fn a_stopped_bridge_gets_the_config_cause() {
+        let mut rows = vec![DaemonStatus::stopped(
+            DaemonKind::Bridge,
+            "no heartbeat".to_string(),
+        )];
+        annotate_bridge_config(&mut rows, Some("no bridge config: it does not exist"));
+        assert!(rows[0].reason.contains("cannot start: no bridge config"));
+    }
+
     #[test]
     fn the_socket_probed_daemons_complete_the_roster() {
         let kinds: Vec<DaemonKind> = collect_socket_daemons().iter().map(|r| r.kind).collect();
