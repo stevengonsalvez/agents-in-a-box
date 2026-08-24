@@ -11861,8 +11861,13 @@ impl App {
     ///
     /// Non-blocking by construction — `try_recv` never awaits, so
     /// `tick_plugin_renders` stays synchronous per its `build.rs`-enforced
-    /// contract. A receiver that is still `Empty` is put back so a slow render
-    /// is judged on the tick it actually completes, not abandoned.
+    /// contract. A receiver that is still `Empty` is put back, so a render that
+    /// outlives one tick is judged on a later tick rather than abandoned
+    /// immediately — but only until the next kick for that screen replaces it.
+    /// Superseding is deliberate: the newer kick reports the current state of
+    /// the same plugin, so a persistent failure is still caught on the very
+    /// next tick, and a failure that has since been fixed is not worth
+    /// resurrecting.
     fn collect_plugin_render_outcome(&mut self, screen_id: &str) {
         use ainb_plugin_runtime::RenderOutcome;
         use tokio::sync::oneshot::error::TryRecvError;

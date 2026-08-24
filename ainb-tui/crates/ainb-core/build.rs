@@ -50,7 +50,13 @@ const SCAN_DIRS: &[&str] = &["src/components", "src/widgets"];
 /// in false positives, so we walk the file at function granularity.
 /// Phase 7c todo: split the render-path methods into their own module
 /// and move them under `SCAN_DIRS`.
-const SCAN_FN_SCOPED: &[(&str, &[&str])] = &[("src/app/state.rs", &["tick_plugin_renders"])];
+// `collect_plugin_render_outcome` is called from inside `tick_plugin_renders`
+// and is render-path code, but the scan is function-scoped — an `.await` added
+// there would otherwise slip past the lint.
+const SCAN_FN_SCOPED: &[(&str, &[&str])] = &[(
+    "src/app/state.rs",
+    &["tick_plugin_renders", "collect_plugin_render_outcome"],
+)];
 
 fn main() {
     let crate_root =
