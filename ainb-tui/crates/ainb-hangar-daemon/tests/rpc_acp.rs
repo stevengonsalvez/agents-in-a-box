@@ -165,6 +165,17 @@ struct Harness {
 
 impl Harness {
     async fn start(script: &[(&str, &str)], tune: impl FnOnce(&mut PoolConfig)) -> Self {
+        // Install the span capture BEFORE anything spawns, not lazily from the
+        // one test that asserts on spans. `serve` tasks from earlier tests are
+        // never aborted -- they outlive POOL_LOCK and keep spans open -- so a
+        // later `set_global_default` swaps the registry underneath them. Those
+        // spans then CLOSE against a registry that never saw them opened, and
+        // tracing-subscriber's sharded registry panics `left == right` on a
+        // tokio worker, killing the daemon runtime. The socket dies and every
+        // in-flight test fails with "connection closed while awaiting frame".
+        // Installing here means the first harness wins the OnceLock and every
+        // span in the binary opens and closes against that same registry.
+        span_log();
         let guard = POOL_LOCK.lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in(dir.path()).await.expect("store");
