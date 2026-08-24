@@ -29,9 +29,148 @@
 //! booted against a brand-new home with no workspace yet has nothing to attach
 //! to, so registration is a no-op in that case (returns `false`); the boot seed
 //! lays the workspace down first, so in practice this only guards odd orderings.
+//!
+//! # Restart vs reconnect (migration 0092)
+//!
+//! Because every boot refreshes the SAME row, the registration alone could not
+//! say whether the daemon that owned it is still alive. [`daemon_instance_id`]
+//! mints one id per daemon PROCESS and [`resolve_runtime_boot`] presents it, so
+//! the store can compare it with the stored owner and answer
+//! [`RuntimeArrival`]: a different owner means this process took the runtime over
+//! and the previous one's `dispatched`/`running` tasks are orphans; an identical
+//! owner means the same live process re-registered and its work must be left
+//! alone. The boot path acts on that in
+//! [`crate::sweeper::reclaim_orphans_on_restart`].
+//!
+//! Exactly ONE call site claims the instance — [`resolve_runtime_boot`], from
+//! [`crate::boot`]. [`effective_runtime_id`] (used by the boot seed) deliberately
+//! does NOT: it runs earlier in the same process, and if it claimed first, the
+//! real boot registration would see its own id and report a reconnect, skipping
+//! the orphan reconcile the restart needs.
 
+use std::sync::OnceLock;
+
+use ainb_hangar_core::ids::InstanceId;
+use ainb_hangar_store::bootstrap::{RuntimeArrival, RuntimeRegistration};
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
+
+/// This daemon process's instance id, minted on first use.
+///
+/// Stable for the life of the process — that stability IS the signal (see the
+/// module docs), so it is deliberately never re-minted per call or per
+/// registration.
+///
+/// A ULID from the same [`ainb_hangar_core::idgen`] seam every other Hangar id
+/// comes from, so no new dependency and no second id format.
+pub fn daemon_instance_id() -> &'static InstanceId {
+    static INSTANCE: OnceLock<InstanceId> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        use ainb_hangar_core::idgen::IdGen;
+        InstanceId::from_str(ainb_hangar_core::idgen::SystemIdGen.new_ulid())
+            .expect("a freshly minted ULID is never empty")
+    })
+}
+
+/// What [`resolve_runtime_boot`] resolved: the id this daemon claims for, and
+/// whether taking it over orphaned a previous instance's in-flight work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeBoot {
+    /// The runtime id actually in use (an existing row's id wins).
+    pub runtime_id: String,
+    /// Restart or reconnect, as decided against the stored instance id.
+    pub arrival: RuntimeArrival,
+}
+
+/// [`effective_runtime_id`], plus the restart-vs-reconnect verdict: register
+/// under this PROCESS's [`daemon_instance_id`] and report what that displaced.
+///
+/// This is the daemon's boot registration and the only place that claims
+/// instance ownership (see the module docs). Infallible from the caller's view
+/// for the same reason [`effective_runtime_id`] is — a fault falls back to the
+/// configured id, and to `Restart` with no named predecessor, because "assume
+/// the previous executor is gone" is the recoverable reading of an unknown
+/// owner: requeuing a task whose process died is cheap, stranding one until the
+/// 2.5h running TTL is not.
+pub async fn resolve_runtime_boot(pool: &SqlitePool, now_ms: i64) -> RuntimeBoot {
+    let configured = ainb_hangar_store::bootstrap::default_runtime_id();
+    let instance = daemon_instance_id();
+    let registered = ainb_hangar_store::bootstrap::register_runtime_instance(
+        pool,
+        &configured,
+        instance,
+        now_ms,
+    )
+    .await;
+    match registered {
+        Ok(Some(RuntimeRegistration {
+            runtime_id,
+            arrival,
+        })) => {
+            log_settled_id(&configured, &runtime_id);
+            match &arrival {
+                RuntimeArrival::Restart {
+                    previous_instance_id,
+                } => tracing::info!(
+                    runtime_id = %runtime_id,
+                    instance_id = %instance,
+                    previous_instance_id = previous_instance_id
+                        .as_ref()
+                        .map_or("<none>", InstanceId::as_str),
+                    "runtime registered as a RESTART; the previous instance's in-flight tasks \
+                     are orphaned"
+                ),
+                RuntimeArrival::Reconnect => tracing::info!(
+                    runtime_id = %runtime_id,
+                    instance_id = %instance,
+                    "runtime registered as a RECONNECT; the same instance still owns its work"
+                ),
+            }
+            RuntimeBoot {
+                runtime_id,
+                arrival,
+            }
+        }
+        // No workspace to attach to yet: nothing registered, carry the configured
+        // id and the safe default verdict.
+        Ok(None) => {
+            tracing::info!(runtime_id = %configured, "runtime self-register skipped (no workspace yet)");
+            unknown_owner_boot(configured)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "runtime self-register/resolve failed; using the configured id");
+            unknown_owner_boot(configured)
+        }
+    }
+}
+
+/// The fallback boot verdict when the registration could not run: the configured
+/// id, and `Restart` with no predecessor (unknown owner ⇒ assume the previous
+/// executor is gone).
+const fn unknown_owner_boot(runtime_id: String) -> RuntimeBoot {
+    RuntimeBoot {
+        runtime_id,
+        arrival: RuntimeArrival::Restart {
+            previous_instance_id: None,
+        },
+    }
+}
+
+/// Log which id a registration settled on: a `warn!` naming both when an
+/// existing runtime's id overrode the configured one (a runtime cannot be
+/// renamed), an `info!` otherwise.
+fn log_settled_id(configured: &str, settled: &str) {
+    if settled == configured {
+        tracing::info!(runtime_id = %settled, "self-registered agent runtime");
+    } else {
+        tracing::warn!(
+            configured = %configured,
+            existing = %settled,
+            "HANGAR_DAEMON_RUNTIME_ID={configured} ignored; existing runtime {settled} \
+             is in use; a runtime cannot be renamed after first boot"
+        );
+    }
+}
 
 /// Resolve the runtime id this daemon registers under AND claims for.
 ///
@@ -49,20 +188,16 @@ use sqlx::SqlitePool;
 /// Infallible from the caller's view: a fault falls back to the configured id
 /// (logged), because refusing to boot over a transient error is worse than
 /// carrying on with the configured identity.
+///
+/// Does NOT claim instance ownership — this is the boot SEED's resolve, and the
+/// process that executes the runtime's tasks claims through
+/// [`resolve_runtime_boot`]. See the module docs for why claiming from both would
+/// mask the restart.
 pub async fn effective_runtime_id(pool: &SqlitePool, now_ms: i64) -> String {
     let configured = ainb_hangar_store::bootstrap::default_runtime_id();
     match ainb_hangar_store::bootstrap::ensure_runtime(pool, &configured, now_ms).await {
         Ok(Some(settled)) => {
-            if settled != configured {
-                tracing::warn!(
-                    configured = %configured,
-                    existing = %settled,
-                    "HANGAR_DAEMON_RUNTIME_ID={configured} ignored; existing runtime {settled} \
-                     is in use; a runtime cannot be renamed after first boot"
-                );
-            } else {
-                tracing::info!(runtime_id = %settled, "self-registered agent runtime");
-            }
+            log_settled_id(&configured, &settled);
             settled
         }
         // No workspace to attach to yet: nothing registered, carry the configured id.
@@ -184,6 +319,94 @@ mod tests {
             "the restart refreshed last_seen_at"
         );
         assert_eq!(row.status, "online");
+    }
+
+    /// The recorded owner of `runtime_id`, or `None` when unclaimed.
+    async fn owner(pool: &SqlitePool, runtime_id: &str) -> Option<InstanceId> {
+        ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo::instance_id(pool, runtime_id)
+            .await
+            .expect("read instance_id")
+    }
+
+    /// Booting against a runtime a DIFFERENT instance owns is a restart: the
+    /// verdict names the displaced instance, and this process takes the row over.
+    #[tokio::test]
+    async fn boot_after_another_instance_reports_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_workspace(pool).await;
+
+        // A previous daemon process owned the runtime and then died.
+        let previous = InstanceId::from_str("inst-dead").unwrap();
+        let runtime_id = ainb_hangar_store::bootstrap::default_runtime_id();
+        ainb_hangar_store::bootstrap::register_runtime_instance(
+            pool,
+            &runtime_id,
+            &previous,
+            1_000,
+        )
+        .await
+        .unwrap()
+        .expect("previous instance registered");
+
+        let boot = resolve_runtime_boot(pool, 2_000).await;
+        assert_eq!(boot.runtime_id, runtime_id);
+        assert_eq!(
+            boot.arrival,
+            RuntimeArrival::Restart {
+                previous_instance_id: Some(previous)
+            },
+            "a dead predecessor's in-flight tasks are orphans"
+        );
+        assert_eq!(
+            owner(pool, &runtime_id).await.as_ref(),
+            Some(daemon_instance_id()),
+            "this process now owns the runtime"
+        );
+    }
+
+    /// A SECOND registration by the same process is a reconnect — the instance id
+    /// is minted once per process, so the row already names us and nothing of ours
+    /// is orphaned.
+    #[tokio::test]
+    async fn resolve_runtime_boot_twice_in_one_process_is_a_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_workspace(pool).await;
+
+        assert!(
+            resolve_runtime_boot(pool, 1_000).await.arrival.is_restart(),
+            "an unowned runtime reads as a restart"
+        );
+        assert_eq!(
+            resolve_runtime_boot(pool, 2_000).await.arrival,
+            RuntimeArrival::Reconnect,
+            "the same process must not look like it displaced itself"
+        );
+    }
+
+    /// The boot SEED's resolve must not claim the instance: if it did, the real
+    /// boot registration would see its own id, report a reconnect, and skip the
+    /// orphan reconcile a genuine restart needs.
+    #[tokio::test]
+    async fn effective_runtime_id_does_not_claim_the_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_workspace(pool).await;
+
+        let runtime_id = effective_runtime_id(pool, 1_000).await;
+        assert_eq!(
+            owner(pool, &runtime_id).await,
+            None,
+            "the seed materialises the row without owning it"
+        );
+        assert!(
+            resolve_runtime_boot(pool, 2_000).await.arrival.is_restart(),
+            "so the boot registration still sees an unowned runtime"
+        );
     }
 
     #[tokio::test]

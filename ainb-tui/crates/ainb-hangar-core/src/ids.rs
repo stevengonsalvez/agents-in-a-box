@@ -112,6 +112,21 @@ id_newtype! {
     RuntimeId
 }
 id_newtype! {
+    /// Identifies one RUN of a daemon process (`agent_runtime.instance_id`).
+    ///
+    /// Unlike its neighbours this is not a table PK: it is minted once per
+    /// daemon process and stamped on the runtime row that process registers, so
+    /// the next registration can tell a RESTART (a different instance took the
+    /// runtime over — the previous process's tasks are orphans) from a
+    /// RECONNECT (the same live instance re-registering). A stored `NULL` means
+    /// no process has claimed the row and is read as "assume restart".
+    ///
+    /// Its own newtype precisely because it lives beside a [`RuntimeId`] in
+    /// every signature that carries both: the compiler refuses the swap that a
+    /// pair of bare `String`s would silently accept.
+    InstanceId
+}
+id_newtype! {
     /// Identifies an issue (the `issue` table PK).
     IssueId
 }

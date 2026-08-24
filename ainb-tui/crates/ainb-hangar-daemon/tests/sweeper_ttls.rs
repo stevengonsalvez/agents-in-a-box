@@ -20,10 +20,11 @@
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_daemon::sweeper::{
     DISPATCHED_TTL, QUEUED_TTL, RECLAIM_WINDOW, RUNNING_TTL, SweeperConfig,
-    reclaim_orphaned_on_startup, reclaim_stale_dispatched, sweep_expired_queued,
-    sweep_stale_dispatched, sweep_stale_running,
+    reclaim_orphaned_on_startup, reclaim_orphans_on_restart, reclaim_stale_dispatched,
+    sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
 };
 use ainb_hangar_store::Store;
+use ainb_hangar_store::bootstrap::RuntimeArrival;
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use sqlx::{Row, SqlitePool};
 
@@ -678,4 +679,59 @@ async fn startup_reclaim_is_runtime_scoped_and_skips_terminal() {
         sib_disp, "dispatched",
         "sibling runtime's live dispatched row untouched"
     );
+}
+
+/// A RESTART reconciles the orphans: a task left `running` by the instance this
+/// boot displaced goes back to `queued` immediately, without waiting out the
+/// 2.5h running TTL.
+#[tokio::test]
+async fn restart_arrival_reclaims_the_displaced_instances_orphans() {
+    let (_dir, store) = open_seeded().await;
+    seed_task(store.pool(), "r1", "queued", BASE_MS, None).await;
+    sqlx::query("UPDATE agent_task_queue SET status='running', started_at=? WHERE id='r1'")
+        .bind(BASE_MS)
+        .execute(store.pool())
+        .await
+        .expect("force running");
+
+    let arrival = RuntimeArrival::Restart {
+        previous_instance_id: Some(
+            ainb_hangar_core::ids::InstanceId::from_str("inst-dead").unwrap(),
+        ),
+    };
+    let reclaimed = reclaim_orphans_on_restart(store.pool(), "rt-1", &arrival)
+        .await
+        .expect("reclaim ok");
+    assert_eq!(reclaimed, 1, "the dead instance's orphan is reclaimed");
+
+    let (status, reason, attempt, _) = read_task(store.pool(), "r1").await;
+    assert_eq!(status, "queued", "orphan returned to queued");
+    assert_eq!(reason, None, "a crash redelivery is not a failure");
+    assert_eq!(attempt, 1, "attempt unchanged (redelivery, not retry)");
+}
+
+/// A RECONNECT touches NOTHING: the same instance still owns those rows, so its
+/// in-flight work is live, not orphaned, and requeuing it would double-dispatch
+/// a run that never stopped.
+#[tokio::test]
+async fn reconnect_arrival_leaves_the_live_instances_work_alone() {
+    let (_dir, store) = open_seeded().await;
+    seed_task(store.pool(), "r1", "queued", BASE_MS, None).await;
+    sqlx::query("UPDATE agent_task_queue SET status='running', started_at=? WHERE id='r1'")
+        .bind(BASE_MS)
+        .execute(store.pool())
+        .await
+        .expect("force running");
+    seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(BASE_MS)).await;
+
+    let reclaimed = reclaim_orphans_on_restart(store.pool(), "rt-1", &RuntimeArrival::Reconnect)
+        .await
+        .expect("reclaim ok");
+    assert_eq!(reclaimed, 0, "a reconnect reclaims nothing");
+
+    let (running, _, _, _) = read_task(store.pool(), "r1").await;
+    assert_eq!(running, "running", "the live run keeps executing");
+    let (dispatched, _, _, dispatched_at) = read_task(store.pool(), "d1").await;
+    assert_eq!(dispatched, "dispatched", "the live dispatch is untouched");
+    assert_eq!(dispatched_at, Some(BASE_MS), "…with its claim stamp intact");
 }

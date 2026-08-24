@@ -32,6 +32,7 @@ use sqlx::SqlitePool;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_core::ids::InstanceId;
 
 use crate::repo::agent::{Agent, AgentRepo};
 
@@ -217,6 +218,16 @@ pub async fn ensure_default_workspace(pool: &SqlitePool) -> Result<String, sqlx:
 /// race where a concurrent daemon registered a different id between the read and
 /// the insert would otherwise FK-fail the caller's insert).
 ///
+/// **This path never claims `instance_id`** (migration 0092). It exists for the
+/// callers that only need the runtime FK to be materialised — `ainb hangar agent
+/// create`, the `hangar/agent_create` RPC, the boot seed — none of which is the
+/// process that EXECUTES that runtime's tasks. Overwriting the owner from here
+/// would make a live daemon look displaced and get its running work requeued out
+/// from under it. A daemon claiming ownership calls
+/// [`register_runtime_instance`] instead; on the insert branch here the column is
+/// simply left NULL ("no process owns this row"), which the next real
+/// registration reads as a restart.
+///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if the workspace lookup or the upsert fails. It never
@@ -256,6 +267,143 @@ pub async fn ensure_runtime(
     .fetch_one(pool)
     .await?;
     Ok(Some(settled))
+}
+
+/// What a runtime registration means for the work that runtime already owns.
+///
+/// The whole point of `agent_runtime.instance_id` (migration 0092): the upsert
+/// alone cannot tell "the same daemon is still alive" from "the daemon died and
+/// came back", because both write the same row with a fresh heartbeat. Comparing
+/// the PRESENTED instance id with the STORED one does, and this is that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeArrival {
+    /// A different process instance now owns the runtime, so whatever the
+    /// previous owner left `dispatched`/`running` is an orphan: the process that
+    /// was executing it is gone.
+    ///
+    /// `previous_instance_id` is the displaced owner, or `None` when the row had
+    /// none — either a brand-new registration (nothing to reconcile) or a row
+    /// written before 0092 / by a non-daemon caller (unknown owner, which is read
+    /// as a restart because that is the recoverable assumption).
+    Restart {
+        /// The instance this registration displaced; `None` when unknown.
+        previous_instance_id: Option<InstanceId>,
+    },
+    /// The SAME live instance re-registering. Its in-flight tasks are genuinely
+    /// running and must NOT be reconciled.
+    Reconnect,
+}
+
+impl RuntimeArrival {
+    /// Whether this arrival means the previous owner's in-flight work is orphaned.
+    #[must_use]
+    pub const fn is_restart(&self) -> bool {
+        matches!(self, Self::Restart { .. })
+    }
+}
+
+/// The outcome of [`register_runtime_instance`]: the id the row settled on, plus
+/// what this registration means for that runtime's in-flight work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRegistration {
+    /// The runtime id the row ACTUALLY settled on — the pre-existing one when a
+    /// runtime is already registered (a runtime cannot be renamed; see
+    /// [`ensure_runtime`]).
+    pub runtime_id: String,
+    /// Restart or reconnect, decided against the previously stored instance id.
+    pub arrival: RuntimeArrival,
+}
+
+/// Take the write lock at `BEGIN` rather than on first write.
+///
+/// [`register_runtime_instance`] reads the stored instance id and then overwrites
+/// it, which a deferred transaction would serve from a read snapshot and then
+/// fail to upgrade with `SQLITE_BUSY_SNAPSHOT` (which `busy_timeout` does not
+/// retry). `BEGIN IMMEDIATE` has no snapshot to invalidate, so ordinary
+/// contention is covered by `busy_timeout`. Same reasoning as
+/// [`crate::repo::fleet`]'s writer.
+const IMMEDIATE_TRANSACTION: &str = "BEGIN IMMEDIATE";
+
+/// [`ensure_runtime`], plus: stamp `instance_id` with the presented daemon
+/// process instance and report whether that was a RESTART or a RECONNECT.
+///
+/// This is the daemon-boot entry point. Every invariant of [`ensure_runtime`]
+/// still holds — same conflict target, the `id` is never rewritten, an existing
+/// runtime's id wins — and additionally the row records WHICH process owns it,
+/// which is the fact a plain upsert cannot carry (see [`RuntimeArrival`]).
+///
+/// Read-then-write in ONE [`IMMEDIATE_TRANSACTION`], not one statement: `SQLite`
+/// `RETURNING` reports the row AFTER the update, so an upsert cannot hand back
+/// the instance id it just overwrote, and the pre-update value is precisely what
+/// the decision needs. The transaction is what makes the read and the overwrite
+/// atomic, so two racing daemons cannot both read the same predecessor and both
+/// conclude they displaced it.
+///
+/// Returns `Ok(None)` when there is no workspace to attach to yet (the same
+/// benign no-op as [`ensure_runtime`]).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the workspace lookup, the read, or the upsert
+/// fails. See [`ensure_runtime`] for the (production-unreachable) PK-collision
+/// case.
+pub async fn register_runtime_instance(
+    pool: &SqlitePool,
+    runtime_id: &str,
+    instance_id: &InstanceId,
+    now_ms: i64,
+) -> Result<Option<RuntimeRegistration>, sqlx::Error> {
+    let Some(workspace_id) = find_default_workspace(pool).await? else {
+        return Ok(None);
+    };
+    let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
+    // `Option<Option<String>>`: the outer `None` is "no row for this tuple yet"
+    // (a first registration), the inner `None` is "a row with no owner" (pre-0092,
+    // or written by a non-daemon caller). Both are unknown predecessors.
+    let stored: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT instance_id FROM agent_runtime \
+         WHERE workspace_id = ? AND daemon_id = ? AND provider = ?",
+    )
+    .bind(&workspace_id)
+    .bind(SELF_DAEMON_ID)
+    .bind(DEFAULT_PROVIDER)
+    .fetch_optional(&mut *tx)
+    .await?;
+    // An empty stored value cannot be a real instance (`InstanceId` forbids it),
+    // so it degrades to "unknown owner" rather than comparing as a distinct one.
+    let previous = stored.flatten().and_then(|s| InstanceId::from_str(s).ok());
+    let arrival = if previous.as_ref() == Some(instance_id) {
+        RuntimeArrival::Reconnect
+    } else {
+        RuntimeArrival::Restart {
+            previous_instance_id: previous,
+        }
+    };
+
+    let settled: String = sqlx::query_scalar(
+        "INSERT INTO agent_runtime \
+         (id, workspace_id, daemon_id, provider, runtime_mode, last_seen_at, status, instance_id) \
+         VALUES (?, ?, ?, ?, ?, ?, 'online', ?) \
+         ON CONFLICT(workspace_id, daemon_id, provider) DO UPDATE SET \
+           status = 'online', \
+           last_seen_at = excluded.last_seen_at, \
+           instance_id = excluded.instance_id \
+         RETURNING id",
+    )
+    .bind(runtime_id)
+    .bind(&workspace_id)
+    .bind(SELF_DAEMON_ID)
+    .bind(DEFAULT_PROVIDER)
+    .bind(SELF_RUNTIME_MODE)
+    .bind(now_ms)
+    .bind(instance_id.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(RuntimeRegistration {
+        runtime_id: settled,
+        arrival,
+    }))
 }
 
 /// Create one agent from scratch, filling every FK behind the scenes.
@@ -629,6 +777,246 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the agent's runtime FK still resolves (never orphaned)"
+        );
+    }
+
+    /// Mint a distinct test instance id (the shape a daemon presents at boot).
+    fn instance(id: &str) -> InstanceId {
+        InstanceId::from_str(id).expect("non-empty test instance id")
+    }
+
+    /// The recorded owner of `runtime_id`, or `None` when unclaimed.
+    async fn owner(pool: &SqlitePool, runtime_id: &str) -> Option<InstanceId> {
+        crate::repo::agent_runtime::AgentRuntimeRepo::instance_id(pool, runtime_id)
+            .await
+            .expect("read instance_id")
+    }
+
+    /// A daemon claiming a runtime NO process owns is a RESTART: an unknown
+    /// predecessor is read as "the previous executor is gone", the recoverable
+    /// assumption. The presented instance is recorded so the NEXT boot can tell.
+    #[tokio::test]
+    async fn first_instance_to_claim_an_unowned_runtime_reports_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        let reg = register_runtime_instance(pool, "default", &instance("inst-a"), 1_000)
+            .await
+            .unwrap()
+            .expect("a workspace exists, so the runtime registers");
+        assert_eq!(reg.runtime_id, "default");
+        assert_eq!(
+            reg.arrival,
+            RuntimeArrival::Restart {
+                previous_instance_id: None
+            },
+            "an unowned runtime has no predecessor to name"
+        );
+        assert_eq!(
+            owner(pool, "default").await.as_ref().map(InstanceId::as_str),
+            Some("inst-a"),
+            "the presented instance is recorded on the row"
+        );
+    }
+
+    /// The SAME instance re-registering is a RECONNECT — its in-flight work is
+    /// genuinely running, so nothing may be reconciled.
+    #[tokio::test]
+    async fn same_instance_re_registering_reports_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        register_runtime_instance(pool, "default", &instance("inst-a"), 1_000)
+            .await
+            .unwrap();
+        let again = register_runtime_instance(pool, "default", &instance("inst-a"), 2_000)
+            .await
+            .unwrap()
+            .expect("registered");
+        assert_eq!(
+            again.arrival,
+            RuntimeArrival::Reconnect,
+            "the same instance did not displace anyone"
+        );
+        assert!(!again.arrival.is_restart());
+
+        let row = crate::repo::agent_runtime::AgentRuntimeRepo::get(pool, "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.last_seen_at,
+            Some(2_000),
+            "…but the heartbeat refreshed"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "a re-registration upserts, never duplicates");
+    }
+
+    /// A DIFFERENT instance taking the runtime over is a RESTART that NAMES the
+    /// instance it displaced — the fact a bare upsert could not carry, and the
+    /// signal the daemon's orphan reconcile keys off.
+    #[tokio::test]
+    async fn a_new_instance_taking_over_reports_restart_naming_the_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        register_runtime_instance(pool, "default", &instance("inst-a"), 1_000)
+            .await
+            .unwrap();
+        let reg = register_runtime_instance(pool, "default", &instance("inst-b"), 2_000)
+            .await
+            .unwrap()
+            .expect("registered");
+        assert_eq!(
+            reg.arrival,
+            RuntimeArrival::Restart {
+                previous_instance_id: Some(instance("inst-a"))
+            },
+            "the new instance displaced inst-a"
+        );
+        assert!(reg.arrival.is_restart());
+        assert_eq!(
+            owner(pool, "default").await.as_ref().map(InstanceId::as_str),
+            Some("inst-b"),
+            "ownership moved to the new instance"
+        );
+    }
+
+    /// The instance-less path (CLI `agent create` / the boot seed) refreshes the
+    /// row WITHOUT claiming it. Clobbering the owner from there would make the
+    /// live daemon look displaced on its next registration and requeue its
+    /// running work out from under it.
+    #[tokio::test]
+    async fn ensure_runtime_refreshes_without_claiming_the_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = ensure_default_workspace(pool).await.unwrap();
+
+        register_runtime_instance(pool, "default", &instance("inst-a"), 1_000)
+            .await
+            .unwrap();
+        // The CLI create path: ensures the runtime FK, then binds it.
+        create_agent(pool, &ws, "cli-made", "claude", None).await.unwrap();
+        assert_eq!(
+            ensure_runtime(pool, "default", 3_000).await.unwrap().as_deref(),
+            Some("default")
+        );
+
+        assert_eq!(
+            owner(pool, "default").await.as_ref().map(InstanceId::as_str),
+            Some("inst-a"),
+            "a non-daemon caller never takes ownership"
+        );
+        // …and the live daemon's next registration is still a plain reconnect.
+        let reg = register_runtime_instance(pool, "default", &instance("inst-a"), 4_000)
+            .await
+            .unwrap()
+            .expect("registered");
+        assert_eq!(
+            reg.arrival,
+            RuntimeArrival::Reconnect,
+            "the CLI touch must not read as a restart"
+        );
+    }
+
+    /// A row materialised by the instance-less path carries no owner, so the
+    /// first real daemon registration reads it as a restart (unknown ⇒ assume the
+    /// executor is gone) rather than as its own reconnect.
+    #[tokio::test]
+    async fn a_runtime_created_without_an_instance_is_unowned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        ensure_runtime(pool, "default", 1_000).await.unwrap();
+        assert_eq!(owner(pool, "default").await, None, "no process owns it");
+
+        let reg = register_runtime_instance(pool, "default", &instance("inst-a"), 2_000)
+            .await
+            .unwrap()
+            .expect("registered");
+        assert_eq!(
+            reg.arrival,
+            RuntimeArrival::Restart {
+                previous_instance_id: None
+            }
+        );
+    }
+
+    /// No workspace ⇒ the same benign no-op [`ensure_runtime`] gives: nothing is
+    /// registered and nothing is claimed.
+    #[tokio::test]
+    async fn register_runtime_instance_is_a_noop_without_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        assert_eq!(
+            register_runtime_instance(pool, "default", &instance("inst-a"), 1_000)
+                .await
+                .unwrap(),
+            None,
+            "no workspace ⇒ no-op"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "no row written without a workspace");
+    }
+
+    /// A runtime still cannot be renamed: a boot with a DIFFERENT configured id
+    /// settles on the EXISTING row and stamps its instance there — the ownership
+    /// and the claim id stay on one row, never split across two.
+    #[tokio::test]
+    async fn register_runtime_instance_claims_the_existing_row_when_the_id_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = ensure_default_workspace(pool).await.unwrap();
+
+        register_runtime_instance(pool, "runtime-a", &instance("inst-a"), 1_000)
+            .await
+            .unwrap();
+        create_agent(pool, &ws, "bound", "claude", None).await.unwrap();
+
+        let reg = register_runtime_instance(pool, "runtime-b", &instance("inst-b"), 2_000)
+            .await
+            .unwrap()
+            .expect("registered");
+        assert_eq!(
+            reg.runtime_id, "runtime-a",
+            "the existing id wins (a runtime cannot be renamed)"
+        );
+        assert_eq!(
+            reg.arrival,
+            RuntimeArrival::Restart {
+                previous_instance_id: Some(instance("inst-a"))
+            }
+        );
+        assert_eq!(
+            owner(pool, "runtime-a").await.as_ref().map(InstanceId::as_str),
+            Some("inst-b"),
+            "the new instance owns the row that actually exists"
+        );
+        assert!(
+            crate::repo::agent_runtime::AgentRuntimeRepo::get(pool, "runtime-b")
+                .await
+                .unwrap()
+                .is_none(),
+            "the refused id never became a row"
         );
     }
 
