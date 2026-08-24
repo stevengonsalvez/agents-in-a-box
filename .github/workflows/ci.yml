@@ -223,11 +223,67 @@ jobs:
       # (the database layer, 74 files) and ainb-plugin-hangar (46) had never
       # run here. `--lib --tests` widened WHICH targets are built; this
       # widens WHICH crates they are built from.
+      # ══ DIAGNOSTIC ONLY, DO NOT MERGE ══════════════════════════════════════
+      # Measures the `rust-lld` SIGBUS that fails `real_plugin_axes` in THIS job
+      # and only this job (the same test passes in `contracts`, same run, same
+      # image). The nextest command below is UNCHANGED: these steps only
+      # observe. Sampling every 5s, not in a tight loop, so the probe does not
+      # perturb what it measures.
+      - name: Baseline and start resource sampler
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          echo "nproc=$(nproc)"
+          free -m
+          df -h /
+          df -i /
+          swapon --show || echo "(no swap)"
+          mount | grep -E ' / | /home| /mnt' || true
+          ( while true; do
+              printf '%s avail_kb=%s iavail=%s mem_used_mb=%s mem_free_mb=%s\n' \
+                "$(date +%T)" \
+                "$(df --output=avail / | tail -1 | tr -d ' ')" \
+                "$(df --output=iavail / | tail -1 | tr -d ' ')" \
+                "$(free -m | awk '/Mem:/{print $3}')" \
+                "$(free -m | awk '/Mem:/{print $4}')"
+              sleep 5
+            done ) > /tmp/resource-sample.log 2>&1 &
+          echo $! > /tmp/sampler.pid
+
       - run: "cargo nextest run --workspace --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         if: >-
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         working-directory: ${{ env.WORKING_DIR }}
+
+      # ══ DIAGNOSTIC ONLY, DO NOT MERGE ══════════════════════════════════════
+      # `always()` so the numbers land on the green path too: a passing run is
+      # the control for how close a failing one actually got to the ceiling.
+      - name: Post-mortem resource report
+        if: always()
+        run: |
+          if [ -f /tmp/sampler.pid ]; then kill "$(cat /tmp/sampler.pid)" 2>/dev/null || true; fi
+          echo "===== MINIMUM free disk observed during the run ====="
+          awk '{for(i=1;i<=NF;i++){split($i,kv,"=");
+                if(kv[1]=="avail_kb"){if(m==""||kv[2]<m){m=kv[2];line=$0}}}}
+               END{printf "min avail = %.1f GB\n  at %s\n", m/1048576, line}' \
+            /tmp/resource-sample.log 2>/dev/null || echo "(no samples)"
+          echo "===== MINIMUM free memory observed ====="
+          awk '{for(i=1;i<=NF;i++){split($i,kv,"=");
+                if(kv[1]=="mem_free_mb"){if(m==""||kv[2]<m){m=kv[2];line=$0}}}}
+               END{printf "min free = %s MB\n  at %s\n", m, line}' \
+            /tmp/resource-sample.log 2>/dev/null || echo "(no samples)"
+          echo "===== last 40 samples ====="
+          tail -40 /tmp/resource-sample.log 2>/dev/null || true
+          echo "===== final state ====="
+          df -h /; df -i /; free -m
+          echo "===== target tree size ====="
+          du -sh ainb-tui/target 2>/dev/null || true
+          du -sh ainb-tui/target/debug 2>/dev/null || true
+          du -sh ainb-tui/target/debug/deps 2>/dev/null || true
+          echo "===== kernel ring buffer (OOM kill? ext4 error? mmap fault?) ====="
+          sudo dmesg | tail -120 || echo "(dmesg unavailable)"
 
   # ────────────────────────────────────────────────────────────────────────────
   # Contracts: deterministic golden/mutation gates, own job, no rerun-to-green
