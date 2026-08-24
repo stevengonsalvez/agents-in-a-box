@@ -73,7 +73,7 @@ vt100 = "0.16"
 tui-term = "0.3.4"
 
 # Git operations (vendored-openssl for cross-compilation support)
-git2 = { version = "0.20", features = ["vendored-openssl"] }
+git2 = { version = "0.18", features = ["vendored-openssl"] }
 
 # Data persistence
 serde = { version = "1.0", features = ["derive"] }
