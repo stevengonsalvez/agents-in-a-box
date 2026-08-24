@@ -477,6 +477,11 @@ jobs:
         if: >-
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
+        with:
+          # This action installs with rustup's MINIMAL profile, which omits
+          # clippy. The span-guard gate below needs it, and a missing component
+          # would red the job with `no such command: clippy`.
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         if: >-
           always() && (github.event_name != 'pull_request' ||
@@ -519,6 +524,30 @@ jobs:
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo xtask ci-lint
+        working-directory: ${{ env.WORKING_DIR }}
+      # NOT a workspace clippy gate. `xtask/src/ci_lint.rs` documents why one
+      # does not exist: the workspace carries heavy pre-existing clippy debt and
+      # `-D warnings` would red CI for unrelated reasons. This denies exactly ONE
+      # lint and leaves every other finding a warning.
+      #
+      # The lint is `await_holding_invalid_type`, configured in `ainb-tui/
+      # clippy.toml` to reject a `tracing` `Entered` span guard held across an
+      # `.await`. `Entered` is `Send` (unlike `EnteredSpan`), so the mistake
+      # compiles; the guard is then dropped on whichever worker resumed the task,
+      # the entering worker keeps the span id on its stack forever, and the next
+      # contextual span opened there clones a closed span. That returns a slot to
+      # the subscriber registry's pool with a live ref count, and the next
+      # `new_span` ANYWHERE trips its refcount assertion, killing whatever task
+      # opened it. That is what made `rpc_acp` fail intermittently on this job:
+      # the victim was an RPC connection handler, so the test saw a closed socket
+      # thousands of lines away from the cause.
+      - name: No tracing span guard held across an await
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: >
+          cargo clippy -p ainb-hangar-daemon -p ainb-acp --lib
+          -- -D clippy::await_holding_invalid_type
         working-directory: ${{ env.WORKING_DIR }}
       - name: Run all hangar tripwires
         if: >-

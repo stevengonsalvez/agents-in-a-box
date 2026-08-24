@@ -1,0 +1,11 @@
+# `span.enter()` returns `Entered`, which (unlike `EnteredSpan`) is `Send` in
+# tracing 0.1. Holding one across an `.await` therefore COMPILES inside a spawned
+# task, and then the guard is dropped on whichever worker resumed the task. The
+# worker that entered keeps the span id on its thread-local stack forever; the
+# next contextual span opened there clones an already-closed span, which returns
+# a `DataInner` slot to the registry's pool with a live ref count and trips
+# `tracing-subscriber`'s `sharded.rs` refcount assertion in an unrelated task.
+#
+# Use `tracing::Instrument` on the future instead. This lint makes the mistake a
+# build failure rather than an intermittent CI panic.
+await-holding-invalid-types = ["tracing::span::Entered"]
