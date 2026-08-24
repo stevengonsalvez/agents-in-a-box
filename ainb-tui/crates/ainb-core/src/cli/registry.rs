@@ -2453,11 +2453,32 @@ impl CliCommand for FleetCommand {
                     .help("Reporting window passed to the burndown plugin"),
             );
         let daemon = Command::new("daemon")
-            .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
+            .about(
+                "DEPRECATED, superseded by `ainb fleet atc`: auto-continues API errors \
+                 without ATC's per-session retry cap",
+            )
+            .long_about(
+                "Watcher that scans every session's pane and auto-continues the ones \
+                 hitting API errors.\n\n\
+                 DEPRECATED: `ainb fleet atc` does the same job and adds a per-session \
+                 retry cap with escalation, which this daemon has never had, so a session \
+                 that keeps failing is retried forever here instead of being escalated to \
+                 you. Prefer `ainb fleet atc setup <name>`.\n\n\
+                 It refuses to start while a live ATC supervises the fleet, because both \
+                 send the same auto-continue to the same pane and each de-dups only within \
+                 its own process. Kept for unmanaged one-off recovery; use --force-race to \
+                 run both deliberately.",
+            )
             .arg(
                 clap::Arg::new("verbose")
                     .long("verbose")
                     .short('v')
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("force-race")
+                    .long("force-race")
+                    .help("Start even when a live ATC supervises the fleet (both will act)")
                     .action(clap::ArgAction::SetTrue),
             );
         let daemons = Command::new("daemons").about(

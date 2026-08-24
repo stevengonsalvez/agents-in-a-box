@@ -21,6 +21,18 @@ allowed-tools:
 
 # ainb fleet:daemon
 
+> **DEPRECATED. Use [`/ainb-fleet:atc`](../atc/SKILL.md).** `ainb fleet daemon`
+> now REFUSES to start while a live ATC supervises the fleet, because both send
+> the same auto-`continue` to the same pane and each de-dups only inside its own
+> process, so the pane gets it twice. Pass `--force-race` to run both anyway.
+>
+> The difference that matters is the **retry cap**: ATC gives up on a session
+> after a bounded number of attempts and escalates to you. This daemon has no
+> cap, so a session that keeps failing is retried forever, and running it beside
+> ATC makes ATC's cap meaningless.
+>
+> Kept for unmanaged one-off recovery, not removed.
+
 > **Superseded by [`/ainb-fleet:atc`](../atc/SKILL.md) for managed fleets.** ATC
 > absorbs this daemon's job — its ERR playbook does the same auto-`continue`, but
 > **with a per-session retry cap + escalate-on-exhaustion** that this daemon
