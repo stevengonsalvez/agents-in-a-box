@@ -53,9 +53,9 @@ pub fn ensure_daemons_current() {
         tracing::info!(daemon = %name, "cleared heartbeat for a daemon that is no longer running");
     }
 
-    let drifted = ainb_plugin_notifyd::procs::scan().into_iter().any(|d| {
-        matches!(d.class, ainb_plugin_notifyd::DaemonClass::LiveOwner) && d.binary_drift
-    });
+    let drifted = ainb_plugin_notifyd::procs::scan()
+        .into_iter()
+        .any(|d| matches!(d.class, ainb_plugin_notifyd::DaemonClass::LiveOwner) && d.binary_drift);
     if !drifted {
         return;
     }

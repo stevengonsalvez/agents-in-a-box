@@ -29,10 +29,8 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// host running many sessions.
 fn atc_holding_the_fleet() -> Option<String> {
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
-    let status = crate::fleet::daemons::probe::probe_atc(
-        &home,
-        crate::fleet::daemons::heartbeat::now_ms(),
-    );
+    let status =
+        crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
     if status.state != crate::fleet::daemons::probe::DaemonState::Running {
         return None;
     }
