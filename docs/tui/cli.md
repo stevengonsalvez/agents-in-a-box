@@ -2035,7 +2035,7 @@ Commands:
   needs          Center control panel — sessions blocked on input / errors / idle / waiting
   archived       Sessions the daemon retired out of the live roster (still browsable)
   cost           Per-session / model / day / group spend rollups + budget caps
-  daemon         Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+  daemon         DEPRECATED, superseded by `ainb fleet atc`: auto-continues API errors without ATC's per-session retry cap
   daemons        Unified runtime health of every long-running daemon (phone bridge / notifyd / ATC / fleet daemon)
   runtime        Install the standalone Fleet daemon and provider hooks
   atc            Air Traffic Control — the persistent fleet brain (setup / status / list / repair / teardown)
@@ -2681,18 +2681,33 @@ Options:
 
 ### `ainb fleet daemon`
 
-Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+Watcher that scans every session's pane and auto-continues the ones hitting API errors.
 
 ```console
 $ ainb fleet daemon --help
-Watcher: registers as ainb-fleet-cp peer, auto-continues API errors
+Watcher that scans every session's pane and auto-continues the ones hitting API errors.
+
+DEPRECATED: `ainb fleet atc` does the same job and adds a per-session retry cap with escalation, which this daemon has never had, so a session that keeps failing is retried forever here instead of being escalated to you. Prefer `ainb fleet atc setup <name>`.
+
+It refuses to start while a live ATC supervises the fleet, because both send the same auto-continue to the same pane and each de-dups only within its own process. Kept for unmanaged one-off recovery; use --force-race to run both deliberately.
 
 Usage: ainb fleet daemon [OPTIONS]
 
 Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -v, --verbose          
-  -h, --help             Print help
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -v, --verbose
+          
+
+      --force-race
+          Start even when a live ATC supervises the fleet (both will act)
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 ### `ainb fleet daemons`
