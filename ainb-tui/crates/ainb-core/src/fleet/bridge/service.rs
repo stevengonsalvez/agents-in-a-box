@@ -150,6 +150,16 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// Whether an install should `launchctl unload` before (maybe) reloading.
+///
+/// Split out so the rule is testable without launchctl. The dangerous case is
+/// `activate == false` over an unchanged unit: that is a healthy bridge being
+/// stopped because the INSTALLING shell could not resolve a secret the daemon
+/// resolves in its own environment.
+const fn should_unload(activate: bool, definition_unchanged: bool) -> bool {
+    activate || !definition_unchanged
+}
+
 fn install_launchd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     let plist_path = launchd_plist_path()?;
     if let Some(parent) = plist_path.parent() {
@@ -158,14 +168,26 @@ fn install_launchd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
     if let Some(parent) = paths.log_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&plist_path, build_plist(paths))
+    let definition = build_plist(paths);
+    let unchanged = std::fs::read_to_string(&plist_path).is_ok_and(|on_disk| on_disk == definition);
+    std::fs::write(&plist_path, &definition)
         .with_context(|| format!("writing {}", plist_path.display()))?;
-    // Idempotent reload: unload (ignore errors), then load. The unload runs
-    // even when we will not re-load, so a previously-good unit does not keep
-    // running against a definition that has since gone stale.
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist_path.to_string_lossy()])
-        .output();
+
+    // Never take down a bridge we are not going to bring back up, unless the
+    // definition it is running actually changed.
+    //
+    // `activate` is decided partly by whether the config's secrets resolve — in
+    // the INSTALLING shell. Re-running install over an unchanged unit from a
+    // shell without `$TELEGRAM_BOT_TOKEN` exported, or with the keychain
+    // locked, therefore used to unload a perfectly healthy bridge and then
+    // decline to reload it, reporting "installed but NOT started". The
+    // stale-definition case the unconditional unload existed for is still
+    // covered: a changed definition is still unloaded.
+    if should_unload(activate, unchanged) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+    }
     if activate {
         let _ = std::process::Command::new("launchctl")
             .args(["load", &plist_path.to_string_lossy()])
@@ -259,6 +281,35 @@ fn install_systemd(paths: &ServicePaths, activate: bool) -> Result<PathBuf> {
             .output();
     }
     Ok(unit_path)
+}
+
+#[cfg(test)]
+mod unload_rule_tests {
+    use super::should_unload;
+
+    /// The regression: re-installing over an unchanged unit from a shell that
+    /// cannot see the secret must NOT take the running bridge down. `install`
+    /// decides `activate` partly from whether the config's secrets resolve in
+    /// the caller's environment, so this path is reached by simply running
+    /// `ainb fleet bridge install` over SSH without the token exported.
+    #[test]
+    fn an_unchanged_unit_is_never_unloaded_when_it_will_not_be_reloaded() {
+        assert!(!should_unload(false, true));
+    }
+
+    /// A changed definition still gets unloaded even when we will not reload,
+    /// so a previously-good unit does not keep running against a stale one.
+    #[test]
+    fn a_changed_definition_is_unloaded_even_without_activation() {
+        assert!(should_unload(false, false));
+    }
+
+    /// Activation always reloads, so it always unloads first.
+    #[test]
+    fn activation_always_cycles_the_unit() {
+        assert!(should_unload(true, true));
+        assert!(should_unload(true, false));
+    }
 }
 
 fn teardown_systemd() -> Result<Option<PathBuf>> {
