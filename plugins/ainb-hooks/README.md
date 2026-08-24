@@ -132,6 +132,12 @@ enabling it, and everything looks fine until you notice turns are not being
 blocked. This was diagnosed by wiring a probe wrapper in place of the guard and
 watching it never get invoked while three sibling `Stop` hooks ran.
 
+Trust covers the hook entry itself, so editing an entry (a bare `timeout`
+change included) invalidates it and needs one more approval. Codex caps the
+`SessionEnd` hook at 3s and prints a `clamping SessionEnd hook timeout to 3s`
+error item at the top of every session for anything higher, which is why the
+template pins that one event to 3.
+
 After `ainb-notifyd install --codex`, start `codex` once and approve the
 startup hooks review (`tui/src/startup_hooks_review.rs`, shown when "hooks are
 new or changed"). That writes the `trusted_hash` entries.
