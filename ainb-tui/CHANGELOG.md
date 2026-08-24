@@ -7,6 +7,415 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.2] - 2026-08-24
+### Added
+- Merge pull request #689 from stevengonsalvez/f/bb-explore
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- Merge pull request #724 from stevengonsalvez/f/daemons-hooks-install-from-tui
+- **cli**: add uniform start/stop/restart for every daemon
+- **cli**: register ainb daemon and build its per-daemon verbs
+- **daemons**: bind selection, the action menu, and a layered Esc
+- **daemons**: make the MCP pool, Hangar daemon and Headroom proxy first-class
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: select a row, act on it, and read what failed
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+- **hangar**: recover a dead runtime's work without a reboot
+- **hangar**: tell restart from reconnect at boot
+- **headroom**: add synchronous liveness and pid accessors
+- **notifyd**: install hooks from TUI repair when none recorded
+- **plugin-runtime**: expose RuntimeHandle::render_wedged
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- Merge pull request #708 from stevengonsalvez/f/bug-fixes-01
+- Merge pull request #713 from stevengonsalvez/f/daemons-restart-feedback
+- Merge pull request #719 from stevengonsalvez/f/daemons-review-followup
+- **bridge**: make the phone bridge fail honestly instead of silently (#707)
+- **bridge**: never unload a working bridge we will not reload
+- **cli**: ATC stop passed a flag that does not exist
+- **daemons**: bound the runtime probe and always clear the loading latch
+- **daemons**: bound the socket probes behind the new daemon rows
+- **daemons**: close both overlays on act, and give up on a stuck action
+- **daemons**: drop the blind M/P/S keys and clear overlays on q
+- **daemons**: drop the title's stale key hint
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: make the R outcome visible on the screen that owns it
+- **daemons**: never self-exec a cargo test binary (#716)
+- **daemons**: paint the cursor in the colour defined for it
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop re-resolving bridge secrets every two seconds
+- **daemons**: stop reporting stopped daemons as crashed, and stop the daemon racing ATC (#723)
+- **daemons**: stop the Hangar restart printing over the TUI
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **daemons**: use rsplit for the refusal tail, not next_back
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **hangar**: make the daemon starter return before its verdict
+- **hangar**: poll the [s] start verdict instead of waiting on it
+- **hangar**: stamp daemon identity when start races the lock probe
+- **plugin-runtime**: carry the render-wedged flag on PluginHandle
+- **plugin-runtime**: enforce the render timeout that was never wired
+- **plugin-runtime**: key the render watchdog on the request it armed
+- **plugins**: keep q and Esc alive on a wedged plugin screen
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **assets**: re-record the Daemons journeys against the fixed build
+- **assets**: record the three Daemons-screen journeys
+- **cli**: regenerate the CLI reference for the daemon namespace
+- **cli**: regenerate the man page for the interview verbs
+- **man**: regenerate the man page for the daemon namespace
+- **tui**: regenerate CLI reference for --fix-daemons
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+- **cli**: declare the daemon control module
+- **scripts**: add the daemons journey recorder
+
+## [1.22.1] - 2026-08-24
+### Added
+- Merge pull request #689 from stevengonsalvez/f/bb-explore
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- **cli**: add uniform start/stop/restart for every daemon
+- **cli**: register ainb daemon and build its per-daemon verbs
+- **daemons**: bind selection, the action menu, and a layered Esc
+- **daemons**: make the MCP pool, Hangar daemon and Headroom proxy first-class
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: select a row, act on it, and read what failed
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+- **hangar**: recover a dead runtime's work without a reboot
+- **hangar**: tell restart from reconnect at boot
+- **headroom**: add synchronous liveness and pid accessors
+- **plugin-runtime**: expose RuntimeHandle::render_wedged
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- Merge pull request #708 from stevengonsalvez/f/bug-fixes-01
+- Merge pull request #713 from stevengonsalvez/f/daemons-restart-feedback
+- Merge pull request #719 from stevengonsalvez/f/daemons-review-followup
+- **bridge**: make the phone bridge fail honestly instead of silently (#707)
+- **bridge**: never unload a working bridge we will not reload
+- **cli**: ATC stop passed a flag that does not exist
+- **daemons**: bound the runtime probe and always clear the loading latch
+- **daemons**: bound the socket probes behind the new daemon rows
+- **daemons**: close both overlays on act, and give up on a stuck action
+- **daemons**: drop the blind M/P/S keys and clear overlays on q
+- **daemons**: drop the title's stale key hint
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: make the R outcome visible on the screen that owns it
+- **daemons**: never self-exec a cargo test binary (#716)
+- **daemons**: paint the cursor in the colour defined for it
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop re-resolving bridge secrets every two seconds
+- **daemons**: stop reporting stopped daemons as crashed, and stop the daemon racing ATC (#723)
+- **daemons**: stop the Hangar restart printing over the TUI
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **daemons**: use rsplit for the refusal tail, not next_back
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **hangar**: make the daemon starter return before its verdict
+- **hangar**: poll the [s] start verdict instead of waiting on it
+- **plugin-runtime**: carry the render-wedged flag on PluginHandle
+- **plugin-runtime**: enforce the render timeout that was never wired
+- **plugin-runtime**: key the render watchdog on the request it armed
+- **plugins**: keep q and Esc alive on a wedged plugin screen
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **assets**: re-record the Daemons journeys against the fixed build
+- **assets**: record the three Daemons-screen journeys
+- **cli**: regenerate the CLI reference for the daemon namespace
+- **cli**: regenerate the man page for the interview verbs
+- **man**: regenerate the man page for the daemon namespace
+- **tui**: regenerate CLI reference for --fix-daemons
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+- **cli**: declare the daemon control module
+- **scripts**: add the daemons journey recorder
+
+## [1.22.0] - 2026-08-24
+### Added
+- Merge pull request #689 from stevengonsalvez/f/bb-explore
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- **cli**: add uniform start/stop/restart for every daemon
+- **cli**: register ainb daemon and build its per-daemon verbs
+- **daemons**: bind selection, the action menu, and a layered Esc
+- **daemons**: make the MCP pool, Hangar daemon and Headroom proxy first-class
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: select a row, act on it, and read what failed
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+- **hangar**: recover a dead runtime's work without a reboot
+- **hangar**: tell restart from reconnect at boot
+- **headroom**: add synchronous liveness and pid accessors
+- **plugin-runtime**: expose RuntimeHandle::render_wedged
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- Merge pull request #708 from stevengonsalvez/f/bug-fixes-01
+- Merge pull request #713 from stevengonsalvez/f/daemons-restart-feedback
+- Merge pull request #719 from stevengonsalvez/f/daemons-review-followup
+- **bridge**: make the phone bridge fail honestly instead of silently (#707)
+- **bridge**: never unload a working bridge we will not reload
+- **cli**: ATC stop passed a flag that does not exist
+- **daemons**: bound the runtime probe and always clear the loading latch
+- **daemons**: bound the socket probes behind the new daemon rows
+- **daemons**: close both overlays on act, and give up on a stuck action
+- **daemons**: drop the blind M/P/S keys and clear overlays on q
+- **daemons**: drop the title's stale key hint
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: make the R outcome visible on the screen that owns it
+- **daemons**: never self-exec a cargo test binary (#716)
+- **daemons**: paint the cursor in the colour defined for it
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop re-resolving bridge secrets every two seconds
+- **daemons**: stop the Hangar restart printing over the TUI
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **daemons**: use rsplit for the refusal tail, not next_back
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **hangar**: make the daemon starter return before its verdict
+- **hangar**: poll the [s] start verdict instead of waiting on it
+- **plugin-runtime**: carry the render-wedged flag on PluginHandle
+- **plugin-runtime**: enforce the render timeout that was never wired
+- **plugin-runtime**: key the render watchdog on the request it armed
+- **plugins**: keep q and Esc alive on a wedged plugin screen
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **assets**: re-record the Daemons journeys against the fixed build
+- **assets**: record the three Daemons-screen journeys
+- **cli**: regenerate the CLI reference for the daemon namespace
+- **cli**: regenerate the man page for the interview verbs
+- **man**: regenerate the man page for the daemon namespace
+- **tui**: regenerate CLI reference for --fix-daemons
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+- **cli**: declare the daemon control module
+- **scripts**: add the daemons journey recorder
+
+## [1.21.9] - 2026-08-23
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- Merge pull request #713 from stevengonsalvez/f/daemons-restart-feedback
+- **bridge**: make the phone bridge fail honestly instead of silently (#707)
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: make the R outcome visible on the screen that owns it
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **daemons**: use rsplit for the refusal tail, not next_back
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+## [1.21.8] - 2026-08-23
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+## [1.21.7] - 2026-08-23
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+## [1.21.6] - 2026-08-22
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+## [1.21.5] - 2026-08-22
+### Added
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+
+### Documentation
+- **cli**: regenerate the man page for the interview verbs
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
+## [1.21.4] - 2026-08-21
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- **fleet**: address review of the blocking interview hook
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+
+### Documentation
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+
 ## [1.21.3] - 2026-08-20
 ### Added
 - Merge pull request #693 from stevengonsalvez/feat/daemon-version-health
@@ -113,6 +522,499 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **atc**: delegate the daemon beat to the CLI heartbeat
 
 
+## [1.21.2] - 2026-08-18
+### Added
+- Merge pull request #693 from stevengonsalvez/feat/daemon-version-health
+- build(daemon): add tokio test-util for the beat-timeout test
+- **atc**: accept an exhausted-session set on heartbeat
+- **atc**: list a whole instance retry ledger
+- **atc**: render the cap from the daemon ledger, report ERR rows
+- **daemons**: expose runtime version drift
+- **tui**: unify daemon health and controls
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- Merge pull request #684 from stevengonsalvez/fix/main-ci-drift
+- Merge pull request #690 from stevengonsalvez/f/scoped-codex-skills
+- Merge pull request #694 from stevengonsalvez/f/solve-interview
+- **atc**: report scan validity and escalate past the nudge filter
+- **atc**: resolve the sibling ainb and fail closed on a degraded beat
+- **daemons**: prevent stale repair downgrades
+- **fleet**: confirm mirrored multi-select pickers with Tab
+- **fleet**: match picker text across a hard mid-token wrap
+- **fleet**: raise a card when Codex blocks on an approval
+- **fleet**: scope the wrap-tolerant matcher to the mirrored picker
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- **hooks**: make hook binary paths upgrade-safe
+- **hooks**: validate pointer against metadata
+- **store**: neutralise the duplicate event_watermark migration
+- **store**: neutralise the duplicate resumable migration
+- **store**: only skip 0087 when 0089/0090 already won
+- **tui**: report daemon start outcomes
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- preserve scoped Codex skill collisions
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- share user Codex skills with Ainb
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: refresh doctor hook repair reference
+- **cli**: regenerate doctor reference
+- **cli**: regenerate reference for doctor --fix-daemons
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- **tui**: describe daemon repair controls
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- Merge pull request #682 from stevengonsalvez/f/atc-improve
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+- sync Cargo.lock to v1.20.5
+- **atc**: delegate the daemon beat to the CLI heartbeat
+
+## [1.21.1] - 2026-08-14
+### Added
+- build(daemon): add tokio test-util for the beat-timeout test
+- **atc**: accept an exhausted-session set on heartbeat
+- **atc**: list a whole instance retry ledger
+- **atc**: render the cap from the daemon ledger, report ERR rows
+- **tui**: unify daemon health and controls
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- Merge pull request #684 from stevengonsalvez/fix/main-ci-drift
+- Merge pull request #690 from stevengonsalvez/f/scoped-codex-skills
+- **atc**: report scan validity and escalate past the nudge filter
+- **atc**: resolve the sibling ainb and fail closed on a degraded beat
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- **store**: neutralise the duplicate event_watermark migration
+- **store**: neutralise the duplicate resumable migration
+- **store**: only skip 0087 when 0089/0090 already won
+- **tui**: report daemon start outcomes
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- preserve scoped Codex skill collisions
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- share user Codex skills with Ainb
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: regenerate doctor reference
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- **tui**: describe daemon repair controls
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- Merge pull request #682 from stevengonsalvez/f/atc-improve
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+- sync Cargo.lock to v1.20.5
+- **atc**: delegate the daemon beat to the CLI heartbeat
+
+## [1.21.0] - 2026-08-14
+### Added
+- **tui**: unify daemon health and controls
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- Merge pull request #684 from stevengonsalvez/fix/main-ci-drift
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- **store**: neutralise the duplicate event_watermark migration
+- **store**: neutralise the duplicate resumable migration
+- **store**: only skip 0087 when 0089/0090 already won
+- **tui**: report daemon start outcomes
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: regenerate doctor reference
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- **tui**: describe daemon repair controls
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+## [1.20.9] - 2026-08-13
+### Added
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- Merge pull request #683 from stevengonsalvez/fix/fleet-error-char-boundary
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- snap error-context slice to char boundaries
+- snap pane snippet offset to char boundary
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: regenerate doctor reference
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+## [1.20.8] - 2026-08-12
+### Added
+- expose hook health in doctor and daemon view
+
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- restore Claude Fleet interview delivery
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- start fresh Codex CLI threads
+- store claimed Codex thread
+- version Claude hook update
+
+### Documentation
+- **cli**: regenerate doctor reference
+- **explainer**: a real adapter has now run, and I13 caught it
+- **man**: regenerate doctor reference
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+## [1.20.7] - 2026-08-12
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- Merge pull request #677 from stevengonsalvez/fix/codex-permission-card
+- Merge pull request #678 from stevengonsalvez/fix/codex-remote-live-validation
+- **fleet**: raise a card when Codex blocks on an approval
+- **hangar-daemon**: read a pid's binary from /proc on Linux
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex TUI threads
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clarify codex bridge failures
+- classify managed Codex threads as user sessions
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- disable Codex apps for CLI remote sessions
+- disable Codex apps for Fleet clients
+- disable Codex apps for interactive sessions
+- disable Codex apps on shared server
+- disable apps on Ainb Codex server
+- explain Codex remote launch failures
+- force-stop unresponsive hangar daemon
+- label Codex remote session errors
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- model pending Codex thread claim
+- pass remote Codex launch settings
+- persist managed Codex threads
+- provide cwd on Codex session restart
+- reap obsolete codex proxy daemon
+- reap surviving legacy proxy child
+- recover abandoned Codex launches
+- recover legacy proxy at boot
+- recover superseded Codex migrations
+- represent pending Codex threads
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- scope Codex server ownership
+- serialize pending Codex launches
+- skip apps for remote Codex
+- skip apps in CLI remote Codex
+- start fresh Codex CLI threads
+- store claimed Codex thread
+
+### Documentation
+- **explainer**: a real adapter has now run, and I13 caught it
+- clarify Codex proxy socket scope
+- describe scoped Codex ownership
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+- refresh the lockfile to the released version
+- remove legacy reaper dead code
+
+## [1.20.6] - 2026-08-12
+### Fixed
+- Merge pull request #672 from stevengonsalvez/fix/codex-websocket-transport
+- claim TUI-created Codex threads
+- claim fresh Codex threads by cwd
+- claim fresh TUI Codex sessions
+- claim remote Codex on restart
+- claim remote Codex threads globally
+- clear stale Codex launch reservations
+- connect Codex listener by WebSocket
+- explain Codex remote launch failures
+- launch remote Codex with session settings
+- lease Codex launch reservations
+- mark active Codex threads resumable
+- migrate Codex launch cursor
+- migrate Codex thread resumability
+- pass remote Codex launch settings
+- provide cwd on Codex session restart
+- recover abandoned Codex launches
+- represent pending Codex threads
+- retain Codex model for claim
+- retain remote claim model
+- retain stopped-session Codex model
+- serialize pending Codex launches
+- start fresh Codex CLI threads
+- store claimed Codex thread
+
+### Other
+- Merge pull request #675 from stevengonsalvez/chore/release-v1.20.5
+
 ## [1.20.5] - 2026-08-12
 ### Added
 - Merge pull request #674 from stevengonsalvez/fix/daemon-start-handoff
@@ -197,6 +1099,181 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - pin reflect plugin to v5.2.5
 - **fleet-tools**: one classifier, not two
 
+
+## [1.20.3] - 2026-08-11
+### Added
+- Merge pull request #662 from stevengonsalvez/fix/tui-tripwire-hangar-home
+- Merge pull request #663 from stevengonsalvez/f/remote-control-codex
+- **cli**: channel send, and the reason each leg gave
+- **daemon**: make the confirm-card guardrail live
+- **hangar-daemon**: add fail-fast BdLock acquisition
+- **hangar-daemon**: name a session after its worktree
+- **hangar-daemon**: stand down when this daemon no longer owns its home
+- **hangar-store**: name rows written before display_name existed
+- **macos**: the Fleet chat pane
+- **proto**: carry the reason a leg did not deliver, and the gate
+- **store**: thread a reply to its origin, ordered by commit seq
+- **tui**: let an operator reopen a channel they already made
+- **tui**: make the new surfaces reachable, and say so on the bar
+- **tui**: threads and channels on the same chat surface
+- enable remote control for Hangar Codex
+- manage remote Codex threads
+
+### Fixed
+- Merge pull request #640 from stevengonsalvez/fix/reproducible-tapes
+- Merge pull request #655 from stevengonsalvez/fix/fleet-display-name
+- Merge pull request #656 from stevengonsalvez/fix/hangar-daemon-single-instance
+- Merge pull request #659 from stevengonsalvez/f/interview-in-both
+- Merge pull request #661 from stevengonsalvez/fix/acp-permission-version-race
+- Merge pull request #666 from stevengonsalvez/fix/codex-remote-enrollment
+- **fleet**: stop after single-select answer
+- **hangar**: give every fresh snapshot round its own wire ids
+- **hangar**: ship interactive Codex migration
+- **hangar-cli**: never read an unidentified live process as a free home
+- **hangar-cli**: prove a daemon by its socket, not by being an ainb
+- **hangar-cli**: resolve the running daemon from the ownership lock
+- **hangar-daemon**: answer SIGTERM for the whole of boot, not just after it
+- **hangar-daemon**: delete the pid file on drop only when it still names us
+- **hangar-daemon**: escalate on a second shutdown signal
+- **hangar-daemon**: handle SIGTERM so the supported stop is graceful
+- **hangar-daemon**: identify a lock holder by its whole command line
+- **hangar-daemon**: install crash breadcrumbs only once the home is ours
+- **hangar-daemon**: keep the contended path fail-fast, not blocking
+- **hangar-daemon**: never judge a holder a stranger without positive evidence
+- **hangar-daemon**: refuse to boot when another daemon owns the home
+- **hangar-daemon**: release the lock by compare-and-delete
+- **hangar-daemon**: sample twice before declining a contended home
+- **hangar-daemon**: stop a dead watchdog from stranding the signal handlers
+- **hangar-daemon**: stop the boot-phase race from cancelling the run loop
+- **macos**: review findings on the chat pane
+- **recordings**: make every tape reproducible
+- **test**: pass the codex session argument the signature now takes
+- contain orphaned Hangar test daemons
+- isolate Ainb Codex enrollment
+- publish structured broker updates
+- show onboarding dependency controls
+
+### Documentation
+- **explainer**: cover part 2, and name the surface for every claim
+- **hangar-daemon**: name the residual window in the lock's release path
+- **recordings**: re-record the nine journeys from the fixed tapes
+- record what part 2 proved and what it did not
+- write down how to tell infrastructure from a broken test
+
+### Other
+- Merge pull request #652 from stevengonsalvez/chore/release-v1.20.0
+- pin reflect plugin to v5.2.4
+- pin reflect plugin to v5.2.5
+- **fleet-tools**: one classifier, not two
+
+## [1.20.2] - 2026-08-10
+### Added
+- Merge pull request #663 from stevengonsalvez/f/remote-control-codex
+- **hangar-daemon**: add fail-fast BdLock acquisition
+- **hangar-daemon**: name a session after its worktree
+- **hangar-daemon**: stand down when this daemon no longer owns its home
+- **hangar-store**: name rows written before display_name existed
+- enable remote control for Hangar Codex
+- manage remote Codex threads
+
+### Fixed
+- Merge pull request #640 from stevengonsalvez/fix/reproducible-tapes
+- Merge pull request #655 from stevengonsalvez/fix/fleet-display-name
+- Merge pull request #656 from stevengonsalvez/fix/hangar-daemon-single-instance
+- Merge pull request #659 from stevengonsalvez/f/interview-in-both
+- Merge pull request #661 from stevengonsalvez/fix/acp-permission-version-race
+- **fleet**: stop after single-select answer
+- **hangar**: give every fresh snapshot round its own wire ids
+- **hangar**: ship interactive Codex migration
+- **hangar-cli**: never read an unidentified live process as a free home
+- **hangar-cli**: prove a daemon by its socket, not by being an ainb
+- **hangar-cli**: resolve the running daemon from the ownership lock
+- **hangar-daemon**: answer SIGTERM for the whole of boot, not just after it
+- **hangar-daemon**: delete the pid file on drop only when it still names us
+- **hangar-daemon**: escalate on a second shutdown signal
+- **hangar-daemon**: handle SIGTERM so the supported stop is graceful
+- **hangar-daemon**: identify a lock holder by its whole command line
+- **hangar-daemon**: install crash breadcrumbs only once the home is ours
+- **hangar-daemon**: keep the contended path fail-fast, not blocking
+- **hangar-daemon**: never judge a holder a stranger without positive evidence
+- **hangar-daemon**: refuse to boot when another daemon owns the home
+- **hangar-daemon**: release the lock by compare-and-delete
+- **hangar-daemon**: sample twice before declining a contended home
+- **hangar-daemon**: stop a dead watchdog from stranding the signal handlers
+- **hangar-daemon**: stop the boot-phase race from cancelling the run loop
+- **recordings**: make every tape reproducible
+- contain orphaned Hangar test daemons
+- publish structured broker updates
+- show onboarding dependency controls
+
+### Documentation
+- **hangar-daemon**: name the residual window in the lock's release path
+
+### Other
+- Merge pull request #652 from stevengonsalvez/chore/release-v1.20.0
+
+## [1.20.1] - 2026-08-11
+### Added
+- Merge pull request #662 from stevengonsalvez/fix/tui-tripwire-hangar-home
+- Merge pull request #663 from stevengonsalvez/f/remote-control-codex
+- **cli**: channel send, and the reason each leg gave
+- **daemon**: make the confirm-card guardrail live
+- **hangar-daemon**: add fail-fast BdLock acquisition
+- **hangar-daemon**: name a session after its worktree
+- **hangar-daemon**: stand down when this daemon no longer owns its home
+- **hangar-store**: name rows written before display_name existed
+- **macos**: the Fleet chat pane
+- **proto**: carry the reason a leg did not deliver, and the gate
+- **store**: thread a reply to its origin, ordered by commit seq
+- **tui**: let an operator reopen a channel they already made
+- **tui**: make the new surfaces reachable, and say so on the bar
+- **tui**: threads and channels on the same chat surface
+- enable remote control for Hangar Codex
+- manage remote Codex threads
+
+### Fixed
+- Merge pull request #640 from stevengonsalvez/fix/reproducible-tapes
+- Merge pull request #655 from stevengonsalvez/fix/fleet-display-name
+- Merge pull request #656 from stevengonsalvez/fix/hangar-daemon-single-instance
+- Merge pull request #659 from stevengonsalvez/f/interview-in-both
+- Merge pull request #661 from stevengonsalvez/fix/acp-permission-version-race
+- **fleet**: stop after single-select answer
+- **hangar**: give every fresh snapshot round its own wire ids
+- **hangar**: ship interactive Codex migration
+- **hangar-cli**: never read an unidentified live process as a free home
+- **hangar-cli**: prove a daemon by its socket, not by being an ainb
+- **hangar-cli**: resolve the running daemon from the ownership lock
+- **hangar-daemon**: answer SIGTERM for the whole of boot, not just after it
+- **hangar-daemon**: delete the pid file on drop only when it still names us
+- **hangar-daemon**: escalate on a second shutdown signal
+- **hangar-daemon**: handle SIGTERM so the supported stop is graceful
+- **hangar-daemon**: identify a lock holder by its whole command line
+- **hangar-daemon**: install crash breadcrumbs only once the home is ours
+- **hangar-daemon**: keep the contended path fail-fast, not blocking
+- **hangar-daemon**: never judge a holder a stranger without positive evidence
+- **hangar-daemon**: refuse to boot when another daemon owns the home
+- **hangar-daemon**: release the lock by compare-and-delete
+- **hangar-daemon**: sample twice before declining a contended home
+- **hangar-daemon**: stop a dead watchdog from stranding the signal handlers
+- **hangar-daemon**: stop the boot-phase race from cancelling the run loop
+- **macos**: review findings on the chat pane
+- **recordings**: make every tape reproducible
+- **test**: pass the codex session argument the signature now takes
+- contain orphaned Hangar test daemons
+- publish structured broker updates
+- show onboarding dependency controls
+
+### Documentation
+- **explainer**: cover part 2, and name the surface for every claim
+- **hangar-daemon**: name the residual window in the lock's release path
+- **recordings**: re-record the nine journeys from the fixed tapes
+- record what part 2 proved and what it did not
+- write down how to tell infrastructure from a broken test
+
+### Other
+- Merge pull request #652 from stevengonsalvez/chore/release-v1.20.0
+- pin reflect plugin to v5.2.4
+- **fleet-tools**: one classifier, not two
 
 ## [1.20.0] - 2026-08-10
 ### Added
@@ -560,6 +1637,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **usage**: source rates from the shared crate
 - share the daemon client and the reprime envelope
 
+
+## [1.18.1] - 2026-08-05
+### Added
+- Merge pull request #571 from stevengonsalvez/f/atc-4
+- Merge pull request #573 from stevengonsalvez/f/atc-4
+- Merge pull request #576 from stevengonsalvez/feat/pipeline-health-and-stage-prompts
+- Merge pull request #577 from stevengonsalvez/f/atc-4
+- Merge pull request #581 from stevengonsalvez/f/atc-4
+- Merge pull request #585 from stevengonsalvez/f/atc-4
+- feat(burndown)!: replace Daily and Weekly tabs with Activity
+- **burndown**: add contribution heatmap data layer
+- **burndown**: add heatmap cursor and metric state
+- **burndown**: wire heatmap navigation keys
+- **fleet**: confirm structured interview delivery
+- **fleet**: polish interview card queue
+- **fleet**: queue structured interviews
+- **fleet**: ship responsive operator board
+- **hangar**: derive pipeline health at query time and ship it on the board
+- **hangar**: layer a per-stage prompt addendum into the dispatch brief
+- **hangar**: render the pipeline health strip and add pipeline stage-prompt
+- **usage**: add shared ainb-model-rates crate
+- add Fleet interview answer queue
+- redesign Fleet priority roster
+
+### Fixed
+- Merge pull request #568 from stevengonsalvez/fix/codex-hook-trust
+- Merge pull request #572 from stevengonsalvez/f/burndown-ops
+- Merge pull request #575 from stevengonsalvez/f/minor-bugs
+- Merge pull request #578 from stevengonsalvez/f/minor-bugs
+- Merge pull request #582 from stevengonsalvez/fix/pipeline-health-review-findings
+- Merge pull request #583 from stevengonsalvez/fix/pull-pipeline-review-findings
+- Merge pull request #589 from stevengonsalvez/fix/atc-hook-bin
+- Merge pull request #590 from stevengonsalvez/fix/fleet-structured-hook-timeout
+- docs: harden buzz port plans after design review
+- **ainb-hooks**: correct the documented Codex payload delivery
+- **burndown**: show tokens for unpriced rows, not "cost n/a"
+- **fleet**: harden interview delivery proof
+- **fleet**: harden interview queue rendering
+- **fleet**: keep structured hooks alive
+- **fleet**: preserve interview cards at compact height
+- **hangar**: answer a squad dispatch with its own card's task
+- **hangar**: enqueue snapshot refreshes promptly
+- **hangar**: gate --redundant by the card's stage, and say so in the docs
+- **hangar**: ignore stale snapshot replies
+- **hangar**: make the closed-issue guard real, and stop rendering Done early
+- **hangar**: paint role dots on the stage they describe when the board scrolls
+- **hangar**: resolve the run generation on the squad-assign CLI path
+- **hangar**: ship column health only on role-gated columns
+- **hangar**: source the stage addendum from the pipeline board only
+- **hangar**: stop a pipeline stage executing twice in the finalize window
+- **hooks**: honor AINB_BIN for ATC events
+- **hooks**: reuse hook binary for lazy spawn
+- **plugin-notifyd**: warn that Codex will not run untrusted hooks
+- **release**: defer version bump to workflow
+- **session-reader**: drop price-stale cache rows on upgrade
+- **usage**: rank unpriced rows below priced ones
+- add Claude interview reprojection
+- align filtered session selection
+- avoid pane attach legend clipping
+- navigate only visible sessions
+- preserve Claude interview state
+- preserve workspace jump order
+- report Claude recovery outcome
+- retain session status filter
+- route Claude recovery live
+
+### Documentation
+- Merge pull request #574 from stevengonsalvez/f/buzz
+- Merge pull request #579 from stevengonsalvez/f/buzz
+- Merge pull request #586 from stevengonsalvez/f/buzz
+- **ainb-hooks**: document the Codex hook trust gate
+- add acp resume and steering spike report
+- add buzz acp port explainer page
+- add buzz to ainb port research
+- add coupling enforcement to part 1 plan
+- add frontmatter titles to plan pages
+- drop committed research copies in favour of discussion
+- harden buzz port plans after design review
+- move buzz port plans under docs/plans
+- plan daemon chat bus and acp adapter (part 1)
+- plan fleet chat and copilot surfaces (part 2)
+- refresh CLI reference
+
+### Other
+- Merge pull request #566 from stevengonsalvez/chore/release-v1.18.0
+- **hangar**: renumber the stage-stamp migration to 0078
+- ignore impeccable hook cache
+- **hangar**: stop paying for the health fold on every board refresh
+- **usage**: source rates from the shared crate
 
 ## [1.18.0] - 2026-08-01
 ### Added
@@ -4574,6 +5740,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of silently producing the 28th.
 - **ainb-tui**: session-duration column distinguishes `0m` from `<1m`.
 
+## [0.5.0] - 2026-01-16
+### Added
+- **audit**: add audit trail for user-initiated mutations
+- **cleanup**: add orphaned tmux shell cleanup to 'x' key
+- **git**: add checkout existing remote branch option
+- **git**: add read-through cache for repository discovery
+- **new-session**: add fuzzy filter and scroll to branch selection
+- **onboarding**: add tmux anti-flicker config and setup check
+- **session**: add session metadata persistence for reliable discovery
+- **tmux**: improve session naming with folder prefix
+- **tui**: add F2 rename for Other tmux sessions
+
+### Fixed
+- **config**: handle boolean defaults for old config files
+- **git**: handle transcrypt smudge filter in checkout existing branch
+- **git**: handle transcrypt/smudge filters in worktree creation
+- **git**: skip branch input step for CheckoutExisting mode
+- **git**: use -B flag for existing branch worktree checkout
+- **session**: wait for shell ready before starting claude in tmux
+- **session-loader**: don't mark orphaned worktrees as Boss sessions
+- **sessions**: use canonicalized path comparison on startup
+- **tmux**: add reattach-to-user-namespace for macOS services
+- **tmux**: enable clipboard integration for shell sessions (#28)
+- **tmux**: enable macOS audio/clipboard access in tmux sessions (#26)
+- **tui**: auto-select newly created sessions to prevent list clipping
+- **ui**: make branch checkout mode toggle more prominent
+
+### Documentation
+- **deps**: clarify reattach-to-user-namespace description
+- **tmux**: add clipboard integration config and setup guide
+
+### Other
+- **audit**: simplify to use standard tracing log
+
+## [0.4.0] - 2026-01-11
+### Fixed
+- **git**: credential helper support + commits tab in git view (#27)
+
+### Other
+- **homebrew**: update formula to v0.3.0
+
+
+## [0.3.0] - 2026-01-10
+### Added
+- **changelog**: add in-app changelog viewer and manual release pipeline
+- **startup**: async workspace loading with timeout
+
+### Fixed
+- **release**: correct SHA256 extraction path and add formula values
+
+### Other
+- **homebrew**: update formula to v0.2.1
+
+
+### Added
+- **startup**: Async workspace loading with 10s timeout to prevent hanging on slow Docker
+- **changelog**: In-app changelog viewer (press `v` on home screen)
+
+## [0.2.1] - 2026-01-10
+### Added
+- **release**: add manual release pipeline with changelog generation
+- **tui**: add Open in Editor feature and improve Config navigation
+- **tui**: add popup-based config editing for all settings
+
+### Fixed
+- **git-view**: handle directories in diff view
+- **release**: create CHANGELOG.md if it doesn't exist
+- **release**: update root workflow with manual trigger pipeline
+- **tui**: add 'o open' to bottom menu bar legend
+- **tui**: fix quick commit dialog bugs and styling
+- **tui**: remove redundant 'search' from menu bar
+- **tui**: return to previous view when exiting Git view
+- address PR #24 review comments
+
+### Documentation
+- **tui**: remove duplicate UI directive from project CLAUDE.md
+
+### Other
+- **config**: move Editor to its own category
+- **editors**: centralize editor logic with cross-platform detection
+- **tui**: expand menu bar to 2 lines with 'o editor' label
+
+## [0.2.0] - 2026-01-10
+
+### Added
+- **Open in Editor**: Press `o` to open sessions in your preferred editor (VS Code, Cursor, Zed, etc.)
+- **Popup-based Config Editing**: All config settings now use intuitive popup dialogs
+- **Onboarding Wizard**: First-run experience with dependency checking and setup
+- **Remote Repository Support**: Clone and work with remote git repositories
+- **Centralized Editor Module**: Cross-platform editor detection using `which` crate
+- **JSONL Log Persistence**: Session logs saved with history viewer
+- **Tmux Preview**: Preview tmux sessions before attaching
+- **Workspace Shell**: Quick shell access with `$` shortcut
+- **Delete Confirmation**: Confirmation dialogs for destructive actions
+- **Model Selection**: Choose Claude model for sessions
+- **Homebrew Formula**: Easy installation via `brew install ainb`
+- **Install Script**: One-liner installation for macOS and Linux
+
+### Changed
+- Editor moved to separate config category (not under Appearance)
+- Menu bar expanded to 2 lines for better visibility
+- Home screen refreshed with sidebar navigation and mascot
+- Config screen navigation improved (Up/Down within pane, Left/Right to switch)
+
+### Fixed
+- Git view directory handling in diff view
+- Quick commit dialog bugs and styling
+- Navigation flow with HomeScreen as hub
+- Shell sessions preserved across workspace refresh
+- Stuck navigation issues resolved
+
+## [0.1.0] - 2025-12-01
+
+### Added
+- Initial release of agents-in-a-box TUI
+- Docker container management for Claude Code agents
+- Session lifecycle management (create, attach, restart, delete)
+- Git integration with worktree isolation
+- Live log streaming from containers
+- Claude API integration for chat
+- Configuration management with TOML persistence
+- Help overlay with keyboard shortcuts
+- Agent selection (Claude models)
+- Workspace scanning for git directories
+
+### Technical
+- Built with Rust + ratatui for terminal UI
+- Tokio async runtime
+- Bollard for Docker API
+- git2 for Git operations
+- portable-pty for tmux/PTY integration
+
 ## [0.5.5-beta1] - 2026-04-14
 ### Added
 - **ainb-tui**: favorite remote repositories instead of local paths
@@ -4807,136 +6105,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 - **changelog**: remove duplicate 0.5.0 entry
 - **homebrew**: update formula to v0.5.0
-
-
-## [0.5.0] - 2026-01-16
-### Added
-- **audit**: add audit trail for user-initiated mutations
-- **cleanup**: add orphaned tmux shell cleanup to 'x' key
-- **git**: add checkout existing remote branch option
-- **git**: add read-through cache for repository discovery
-- **new-session**: add fuzzy filter and scroll to branch selection
-- **onboarding**: add tmux anti-flicker config and setup check
-- **session**: add session metadata persistence for reliable discovery
-- **tmux**: improve session naming with folder prefix
-- **tui**: add F2 rename for Other tmux sessions
-
-### Fixed
-- **config**: handle boolean defaults for old config files
-- **git**: handle transcrypt smudge filter in checkout existing branch
-- **git**: handle transcrypt/smudge filters in worktree creation
-- **git**: skip branch input step for CheckoutExisting mode
-- **git**: use -B flag for existing branch worktree checkout
-- **session**: wait for shell ready before starting claude in tmux
-- **session-loader**: don't mark orphaned worktrees as Boss sessions
-- **sessions**: use canonicalized path comparison on startup
-- **tmux**: add reattach-to-user-namespace for macOS services
-- **tmux**: enable clipboard integration for shell sessions (#28)
-- **tmux**: enable macOS audio/clipboard access in tmux sessions (#26)
-- **tui**: auto-select newly created sessions to prevent list clipping
-- **ui**: make branch checkout mode toggle more prominent
-
-### Documentation
-- **deps**: clarify reattach-to-user-namespace description
-- **tmux**: add clipboard integration config and setup guide
-
-### Other
-- **audit**: simplify to use standard tracing log
-
-## [0.4.0] - 2026-01-11
-### Fixed
-- **git**: credential helper support + commits tab in git view (#27)
-
-### Other
-- **homebrew**: update formula to v0.3.0
-
-
-## [0.3.0] - 2026-01-10
-### Added
-- **changelog**: add in-app changelog viewer and manual release pipeline
-- **startup**: async workspace loading with timeout
-
-### Fixed
-- **release**: correct SHA256 extraction path and add formula values
-
-### Other
-- **homebrew**: update formula to v0.2.1
-
-
-### Added
-- **startup**: Async workspace loading with 10s timeout to prevent hanging on slow Docker
-- **changelog**: In-app changelog viewer (press `v` on home screen)
-
-## [0.2.1] - 2026-01-10
-### Added
-- **release**: add manual release pipeline with changelog generation
-- **tui**: add Open in Editor feature and improve Config navigation
-- **tui**: add popup-based config editing for all settings
-
-### Fixed
-- **git-view**: handle directories in diff view
-- **release**: create CHANGELOG.md if it doesn't exist
-- **release**: update root workflow with manual trigger pipeline
-- **tui**: add 'o open' to bottom menu bar legend
-- **tui**: fix quick commit dialog bugs and styling
-- **tui**: remove redundant 'search' from menu bar
-- **tui**: return to previous view when exiting Git view
-- address PR #24 review comments
-
-### Documentation
-- **tui**: remove duplicate UI directive from project CLAUDE.md
-
-### Other
-- **config**: move Editor to its own category
-- **editors**: centralize editor logic with cross-platform detection
-- **tui**: expand menu bar to 2 lines with 'o editor' label
-
-## [0.2.0] - 2026-01-10
-
-### Added
-- **Open in Editor**: Press `o` to open sessions in your preferred editor (VS Code, Cursor, Zed, etc.)
-- **Popup-based Config Editing**: All config settings now use intuitive popup dialogs
-- **Onboarding Wizard**: First-run experience with dependency checking and setup
-- **Remote Repository Support**: Clone and work with remote git repositories
-- **Centralized Editor Module**: Cross-platform editor detection using `which` crate
-- **JSONL Log Persistence**: Session logs saved with history viewer
-- **Tmux Preview**: Preview tmux sessions before attaching
-- **Workspace Shell**: Quick shell access with `$` shortcut
-- **Delete Confirmation**: Confirmation dialogs for destructive actions
-- **Model Selection**: Choose Claude model for sessions
-- **Homebrew Formula**: Easy installation via `brew install ainb`
-- **Install Script**: One-liner installation for macOS and Linux
-
-### Changed
-- Editor moved to separate config category (not under Appearance)
-- Menu bar expanded to 2 lines for better visibility
-- Home screen refreshed with sidebar navigation and mascot
-- Config screen navigation improved (Up/Down within pane, Left/Right to switch)
-
-### Fixed
-- Git view directory handling in diff view
-- Quick commit dialog bugs and styling
-- Navigation flow with HomeScreen as hub
-- Shell sessions preserved across workspace refresh
-- Stuck navigation issues resolved
-
-## [0.1.0] - 2025-12-01
-
-### Added
-- Initial release of agents-in-a-box TUI
-- Docker container management for Claude Code agents
-- Session lifecycle management (create, attach, restart, delete)
-- Git integration with worktree isolation
-- Live log streaming from containers
-- Claude API integration for chat
-- Configuration management with TOML persistence
-- Help overlay with keyboard shortcuts
-- Agent selection (Claude models)
-- Workspace scanning for git directories
-
-### Technical
-- Built with Rust + ratatui for terminal UI
-- Tokio async runtime
-- Bollard for Docker API
-- git2 for Git operations
-- portable-pty for tmux/PTY integration
