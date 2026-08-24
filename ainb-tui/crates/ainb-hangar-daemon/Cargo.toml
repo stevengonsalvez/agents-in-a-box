@@ -171,7 +171,7 @@ opentelemetry = { version = "0.30", optional = true }
 # Default `BatchSpanProcessor` runs on its own dedicated OS thread (no tokio
 # runtime), so the export path never re-enters the daemon's tokio runtime — the
 # `reference_tokio_runtime_drop_trap` safe configuration. No `rt-tokio` needed.
-opentelemetry_sdk = { version = "0.30", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true }
 opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = [
     "trace",
     "http-proto",
