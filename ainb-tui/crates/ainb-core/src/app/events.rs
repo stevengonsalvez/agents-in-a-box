@@ -741,6 +741,25 @@ mod picker_local_paths_tests {
 
 pub struct EventHandler;
 
+/// Whether Esc-ing out of Configure should write this repo into
+/// `SessionDefaults::per_repo` at all.
+///
+/// Only when there is something to preserve: a typed prompt, or an entry that
+/// already exists (whose stale prompt may need clearing). Backing out of a
+/// repo that was never launched must NOT fabricate a ⌚ recent — that is how
+/// typo'd owner/repo entries ended up pinned to the top of the picker
+/// (Stevie 2026-07-05: `sdfads/ssdaf`).
+///
+/// Pulled out of the event arm so the rule is testable without driving the
+/// whole new-session flow.
+fn worth_persisting_repo_defaults(
+    prompt_text: &str,
+    defaults: &crate::config::session_defaults::SessionDefaults,
+    repo_label: &str,
+) -> bool {
+    !prompt_text.is_empty() || defaults.per_repo.contains_key(repo_label)
+}
+
 impl EventHandler {
     fn persist_sessions_pane_preferences(state: &mut AppState) {
         state.app_config.ui_preferences.sessions_sidebar_width =
@@ -3886,15 +3905,7 @@ impl EventHandler {
                 if !repo_label.is_empty() {
                     let path = SessionDefaults::default_path();
                     let mut defaults = SessionDefaults::load_from(&path);
-                    // Only touch per_repo when there is something to preserve:
-                    // a typed prompt, or an entry that already exists (whose
-                    // stale prompt may need clearing). Esc-ing straight out of
-                    // a never-launched repo must NOT fabricate a ⌚ recent —
-                    // that's how typo'd owner/repo entries ended up pinned to
-                    // the top of the picker (Stevie 2026-07-05: sdfads/ssdaf).
-                    let worth_persisting =
-                        !prompt_text.is_empty() || defaults.per_repo.contains_key(&repo_label);
-                    if worth_persisting {
+                    if worth_persisting_repo_defaults(&prompt_text, &defaults, &repo_label) {
                         let entry = defaults.per_repo.entry(repo_label.clone()).or_default();
                         entry.last_prompt = if prompt_text.is_empty() {
                             None
@@ -10226,5 +10237,37 @@ mod fleet_offline_action_tests {
                 .feedback()
                 .is_some_and(|message| message.contains("high-risk action disabled"))
         );
+    }
+}
+
+#[cfg(test)]
+mod configure_back_persist_tests {
+    use super::worth_persisting_repo_defaults;
+    use crate::config::session_defaults::SessionDefaults;
+
+    #[test]
+    fn esc_out_of_a_never_launched_repo_does_not_fabricate_a_recent() {
+        let defaults = SessionDefaults::default();
+        assert!(
+            !worth_persisting_repo_defaults("", &defaults, "sdfads/ssdaf"),
+            "a typo'd repo with no prompt must not be written into per_repo"
+        );
+    }
+
+    #[test]
+    fn a_typed_prompt_is_always_persisted() {
+        let defaults = SessionDefaults::default();
+        assert!(worth_persisting_repo_defaults(
+            "fix the thing",
+            &defaults,
+            "owner/repo"
+        ));
+    }
+
+    #[test]
+    fn an_existing_entry_is_still_updated_so_a_stale_prompt_can_be_cleared() {
+        let mut defaults = SessionDefaults::default();
+        defaults.per_repo.insert("owner/repo".to_string(), Default::default());
+        assert!(worth_persisting_repo_defaults("", &defaults, "owner/repo"));
     }
 }
