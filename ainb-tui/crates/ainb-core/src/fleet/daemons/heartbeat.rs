@@ -58,7 +58,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::plumbing::atomic::write_atomic_json;
@@ -320,7 +320,33 @@ impl DaemonHeartbeat {
         self.write_in(&crate::fleet::plumbing::paths::ainb_home()?, name)
     }
 
-    /// Read `<name>`'s heartbeat file under `home`, if present and parseable.
+    /// Delete `<name>`'s heartbeat under `home`, marking a CLEAN stop.
+    ///
+    /// The absence of a heartbeat is what distinguishes "stopped on purpose"
+    /// from "crashed": nothing used to remove these files, so a record outlived
+    /// its process forever and every deliberately-stopped daemon reported
+    /// `stale heartbeat, pid not alive (crashed)`.
+    ///
+    /// A stop that never runs (SIGKILL, power loss) leaves the record behind
+    /// and therefore still reads as a crash. That is correct: from the outside
+    /// a killed daemon and a crashed one are the same event.
+    ///
+    /// Missing file is success, so a double stop is not an error.
+    pub fn clear_in(home: &Path, name: &str) -> Result<()> {
+        let path = heartbeat_path_in(home, name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("clearing heartbeat {}", path.display())),
+        }
+    }
+
+    /// Delete `<name>`'s heartbeat under the default ainb home.
+    pub fn clear(name: &str) -> Result<()> {
+        Self::clear_in(&crate::fleet::plumbing::paths::ainb_home()?, name)
+    }
+
+    /// Read `<name>`'s heartbeat under `home`, if present and parseable.
     #[must_use]
     pub fn read_in(home: &Path, name: &str) -> Option<Self> {
         let text = std::fs::read_to_string(heartbeat_path_in(home, name)).ok()?;
@@ -407,6 +433,54 @@ pub fn process_binary(pid: u32) -> Option<PathBuf> {
 /// dead. This is the identity guard the bare `kill(pid,0)` liveness check
 /// lacked.
 #[must_use]
+/// Delete heartbeats whose process is provably gone, returning the names swept.
+///
+/// `clear_in` only helps daemons stopped AFTER it ships. Records orphaned
+/// before that (the stopping process is long gone, so nothing will ever come
+/// back for them) would report `crashed` forever. This sweep collects them.
+///
+/// ONLY `Dead` and `Recycled` are swept. `Matched` means the process is alive
+/// and owns the record; `Recycled` means the pid was reused by an unrelated
+/// process, so the record is stale in a different way but equally orphaned.
+/// A running daemon's heartbeat is never touched.
+///
+/// Best-effort per entry: one unreadable file must not abort the sweep.
+pub fn sweep_orphaned_in(home: &Path) -> Vec<String> {
+    let dir = daemons_dir_in(home);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut swept = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let Some(hb) = DaemonHeartbeat::read_in(home, &name) else {
+            continue;
+        };
+        if matches!(
+            pid_identity(hb.pid, hb.started_at),
+            PidCheck::Dead | PidCheck::Recycled
+        ) && DaemonHeartbeat::clear_in(home, &name).is_ok()
+        {
+            swept.push(name);
+        }
+    }
+    swept.sort();
+    swept
+}
+
+/// Sweep orphaned heartbeats under the default ainb home.
+pub fn sweep_orphaned() -> Vec<String> {
+    crate::fleet::plumbing::paths::ainb_home()
+        .map(|home| sweep_orphaned_in(&home))
+        .unwrap_or_default()
+}
+
 pub fn pid_identity(pid: u32, started_at_ms: i64) -> PidCheck {
     classify_pid_identity(started_at_ms, process_start_ms(pid))
 }
@@ -760,6 +834,94 @@ mod tests {
         hb.write_in(home.path(), "bridge").unwrap();
         let back = DaemonHeartbeat::read_in(home.path(), "bridge").unwrap();
         assert_eq!(back, hb);
+    }
+
+    /// A pid that cannot own a live process on any supported platform.
+    ///
+    /// pid 1 is NOT safe here: on Linux it is init and reads far from a zero
+    /// `started_at`, so it classifies dead, but on macOS launchd's start time
+    /// is not readable the same way and the comparison landed inside
+    /// `PID_IDENTITY_TOLERANCE_MS`, classifying the record as MATCHED. Both new
+    /// tests then failed on macOS only. A pid above the platform maximum has no
+    /// process to read, so `process_start_ms` returns `None` and the verdict is
+    /// `Dead` everywhere.
+    const ABSENT_PID: u32 = u32::MAX;
+
+    /// A CLEAN stop and a CRASH must stay distinguishable.
+    ///
+    /// This is the whole reason for clearing the record instead of hiding the
+    /// row: if both cases looked alike, the fix would be row-hiding with extra
+    /// steps. Clean stop removes the record so the daemon reads as stopped; a
+    /// process that died without clearing leaves it, and still reads as dead.
+    #[test]
+    fn a_clean_stop_and_a_crash_do_not_look_alike() {
+        let home = TempDir::new().unwrap();
+
+        // Clean stop: the daemon cleared its own record on the way out.
+        DaemonHeartbeat::starting().write_in(home.path(), "fleet-daemon").unwrap();
+        DaemonHeartbeat::clear_in(home.path(), "fleet-daemon").unwrap();
+        assert!(
+            DaemonHeartbeat::read_in(home.path(), "fleet-daemon").is_none(),
+            "a clean stop must leave no record, so the row reads stopped, not crashed"
+        );
+
+        // Crash (or SIGKILL): nothing ran on the way out, so the record stays
+        // and its pid is dead. pid 1 is alive but did not start when this
+        // record claims, so identity does not match: exactly the crash shape.
+        let mut crashed = DaemonHeartbeat::starting();
+        crashed.pid = ABSENT_PID;
+        crashed.started_at = 0;
+        crashed.write_in(home.path(), "notifyd").unwrap();
+        let back = DaemonHeartbeat::read_in(home.path(), "notifyd")
+            .expect("a crash leaves the record behind");
+        assert!(
+            matches!(
+                pid_identity(back.pid, back.started_at),
+                PidCheck::Dead | PidCheck::Recycled
+            ),
+            "a crashed daemon's record must still classify as not-alive"
+        );
+    }
+
+    /// The sweep collects records orphaned BEFORE the clear-on-stop shipped.
+    ///
+    /// Without it, an already-dead pid keeps reporting `crashed` forever: the
+    /// process that would have cleaned up is long gone.
+    #[test]
+    fn the_sweep_takes_orphans_and_spares_the_living() {
+        let home = TempDir::new().unwrap();
+
+        // Orphan: dead pid identity, nobody left to clean it.
+        let mut orphan = DaemonHeartbeat::starting();
+        orphan.pid = ABSENT_PID;
+        orphan.started_at = 0;
+        orphan.write_in(home.path(), "fleet-daemon").unwrap();
+
+        // Living: this very process, recorded with the start time the probe
+        // itself reports, so identity matches exactly rather than within a
+        // tolerance. If the platform cannot read our own start time there is no
+        // honest way to build a "live" record, so that half is skipped rather
+        // than faked with `now_ms()`, which would read as recycled and be swept.
+        let live_start = process_start_ms(std::process::id());
+        if let Some(start) = live_start {
+            let mut alive = DaemonHeartbeat::starting();
+            alive.pid = std::process::id();
+            alive.started_at = start;
+            alive.write_in(home.path(), "atc").unwrap();
+        }
+
+        let swept = sweep_orphaned_in(home.path());
+        assert!(
+            swept.contains(&"fleet-daemon".to_string()),
+            "the orphaned record must be swept, got {swept:?}"
+        );
+        if live_start.is_none() {
+            return;
+        }
+        assert!(
+            DaemonHeartbeat::read_in(home.path(), "atc").is_some(),
+            "a LIVE daemon's heartbeat must never be swept"
+        );
     }
 
     #[test]

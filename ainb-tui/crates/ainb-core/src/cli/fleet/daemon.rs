@@ -15,8 +15,41 @@ use crate::fleet::types::Signal;
 
 const SCAN_INTERVAL_SECS: u64 = 5;
 
+/// Refuse to start when a LIVE ATC already supervises this fleet.
+///
+/// Both watchers auto-`continue` on API errors by sending keys to the same
+/// panes, and each de-dups only within its own process, so two of them send
+/// twice. Worse, ATC's per-session retry cap becomes meaningless while an
+/// uncapped daemon keeps hammering.
+///
+/// Liveness comes from `probe_atc`, NOT from a pidfile: an ATC that is merely
+/// provisioned, disabled, or whose last heartbeat is stale is not supervising
+/// anything, and refusing on a stale record would block a legitimate start.
+/// The instance name is reported because a bare refusal is unactionable on a
+/// host running many sessions.
+fn atc_holding_the_fleet() -> Option<String> {
+    let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
+    let status =
+        crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
+    if status.state != crate::fleet::daemons::probe::DaemonState::Running {
+        return None;
+    }
+    // `probe_atc` puts the winning instance name in the channel label.
+    Some(status.channel.unwrap_or_else(|| "unnamed".to_string()))
+}
+
 pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Result<()> {
     let verbose = matches.get_flag("verbose");
+
+    if !matches.get_flag("force-race") {
+        if let Some(owner) = atc_holding_the_fleet() {
+            anyhow::bail!(
+                "ATC '{owner}' is supervising this fleet; running the daemon alongside it \
+                 sends every auto-continue twice and defeats ATC's per-session retry cap.\n\
+                 Use ATC, or pass --force-race to run both deliberately."
+            );
+        }
+    }
 
     // Heartbeat: the fleet daemon had no observability either. Record a startup
     // record and refresh it every scan so the Daemons surface can show it
