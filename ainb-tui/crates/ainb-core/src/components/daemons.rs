@@ -27,7 +27,7 @@ const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
 const HEALTHY_GREEN: Color = Color::Rgb(100, 200, 100);
 /// Cursor colour, per the TUI style guide. Same RGB as HEALTHY_GREEN but kept
-/// separate: one means "this daemon is up", the other means "R acts on this
+/// separate: one means "this daemon is up", the other means "Enter acts on this
 /// row", and they must be free to diverge.
 const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
 const STOPPED_RED: Color = Color::Rgb(220, 100, 100);
@@ -850,7 +850,7 @@ fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Daem
             };
             Row::new(vec![
                 Cell::from(if selected { "▶" } else { "" })
-                    .style(Style::default().fg(HEALTHY_GREEN)),
+                    .style(Style::default().fg(SELECTION_GREEN)),
                 Cell::from(d.kind.display_name()).style(if selected {
                     Style::default().fg(HEALTHY_GREEN).add_modifier(Modifier::BOLD)
                 } else {
