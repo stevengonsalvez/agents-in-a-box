@@ -5192,7 +5192,11 @@ impl AppState {
         match kind {
             DaemonRow::Notifyd => self.spawn_notifyd_restart(tx),
             DaemonRow::Hangar => {
-                Self::spawn_blocking_restart(tx, kind, || crate::cli::hangar::run_daemon_restart())
+                // Quiet: this runs while the TUI holds the alternate screen, so
+                // the announcing variant's stdout lands on top of the frame.
+                Self::spawn_blocking_restart(tx, kind, || {
+                    crate::cli::hangar::run_daemon_restart_quiet()
+                })
             }
             DaemonRow::Mcp => {
                 Self::spawn_blocking_restart(tx, kind, || crate::mcp_pool::client::restart_daemon())

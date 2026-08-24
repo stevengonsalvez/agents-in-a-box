@@ -9103,6 +9103,16 @@ pub(crate) fn run_daemon_restart() -> Result<()> {
     restart_daemon(true)
 }
 
+/// Restart the daemon without printing anything.
+///
+/// The TUI owns the alternate screen in raw mode, so a `println!` from a
+/// background thread does not scroll — it smears over whatever the renderer
+/// last painted, and nothing repaints it away. Every other daemon the Daemons
+/// screen restarts is already silent; this is the Hangar equivalent.
+pub(crate) fn run_daemon_restart_quiet() -> Result<()> {
+    restart_daemon(false)
+}
+
 fn restart_daemon(announce: bool) -> Result<()> {
     if let Err(e) = stop_daemon(announce) {
         if announce {
