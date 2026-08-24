@@ -836,6 +836,17 @@ mod tests {
         assert_eq!(back, hb);
     }
 
+    /// A pid that cannot own a live process on any supported platform.
+    ///
+    /// pid 1 is NOT safe here: on Linux it is init and reads far from a zero
+    /// `started_at`, so it classifies dead, but on macOS launchd's start time
+    /// is not readable the same way and the comparison landed inside
+    /// `PID_IDENTITY_TOLERANCE_MS`, classifying the record as MATCHED. Both new
+    /// tests then failed on macOS only. A pid above the platform maximum has no
+    /// process to read, so `process_start_ms` returns `None` and the verdict is
+    /// `Dead` everywhere.
+    const ABSENT_PID: u32 = u32::MAX;
+
     /// A CLEAN stop and a CRASH must stay distinguishable.
     ///
     /// This is the whole reason for clearing the record instead of hiding the
@@ -858,7 +869,7 @@ mod tests {
         // and its pid is dead. pid 1 is alive but did not start when this
         // record claims, so identity does not match: exactly the crash shape.
         let mut crashed = DaemonHeartbeat::starting();
-        crashed.pid = 1;
+        crashed.pid = ABSENT_PID;
         crashed.started_at = 0;
         crashed.write_in(home.path(), "notifyd").unwrap();
         let back = DaemonHeartbeat::read_in(home.path(), "notifyd")
@@ -882,21 +893,31 @@ mod tests {
 
         // Orphan: dead pid identity, nobody left to clean it.
         let mut orphan = DaemonHeartbeat::starting();
-        orphan.pid = 1;
+        orphan.pid = ABSENT_PID;
         orphan.started_at = 0;
         orphan.write_in(home.path(), "fleet-daemon").unwrap();
 
-        // Living: this very process, so identity matches.
-        let mut alive = DaemonHeartbeat::starting();
-        alive.pid = std::process::id();
-        alive.started_at = process_start_ms(std::process::id()).unwrap_or(now_ms());
-        alive.write_in(home.path(), "atc").unwrap();
+        // Living: this very process, recorded with the start time the probe
+        // itself reports, so identity matches exactly rather than within a
+        // tolerance. If the platform cannot read our own start time there is no
+        // honest way to build a "live" record, so that half is skipped rather
+        // than faked with `now_ms()`, which would read as recycled and be swept.
+        let live_start = process_start_ms(std::process::id());
+        if let Some(start) = live_start {
+            let mut alive = DaemonHeartbeat::starting();
+            alive.pid = std::process::id();
+            alive.started_at = start;
+            alive.write_in(home.path(), "atc").unwrap();
+        }
 
         let swept = sweep_orphaned_in(home.path());
         assert!(
             swept.contains(&"fleet-daemon".to_string()),
             "the orphaned record must be swept, got {swept:?}"
         );
+        if live_start.is_none() {
+            return;
+        }
         assert!(
             DaemonHeartbeat::read_in(home.path(), "atc").is_some(),
             "a LIVE daemon's heartbeat must never be swept"
