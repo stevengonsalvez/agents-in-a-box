@@ -454,12 +454,12 @@ pub(crate) fn plugins_disabled() -> bool {
 }
 
 /// Search a small list of candidate locations for the plugin staging
-/// directory. Returns the first one that exists.
+/// directory. Returns the first one that is a directory.
 ///
 /// Search order:
 /// 1. `$AINB_PLUGIN_ROOT` (test/CI override).
-/// 2. `<exe-dir>/plugins/`              (brew/libexec install layout).
-/// 3. `<exe-dir>/dist/plugins/`         (release tarball layout).
+/// 2. `<exe-dir>/plugins/`              (brew/libexec + release tarball layout).
+/// 3. `<exe-dir>/dist/plugins/`         (staged `dist/` beside the binary).
 /// 4. `<exe-dir>/../../dist/plugins/`   (cargo run from `target/<profile>/`).
 /// 5. `<cwd>/dist/plugins/`             (workspace dev layout).
 /// 6. `~/.agents-in-a-box/plugins/cache/` (installed plugins).
@@ -471,10 +471,23 @@ pub(crate) fn plugins_disabled() -> bool {
 /// into a long-lived shell (or a tmux server's environment) outlives the keg it
 /// names, and once `brew upgrade` deletes that Cellar directory every `ainb`
 /// launched from it came up with zero plugins and no explanation. Candidate 2
-/// covers the same layout without the env var, so a stale export now degrades
-/// to a warning instead of an empty runtime.
+/// covers both the Homebrew keg (`libexec/ainb` beside `libexec/plugins`) and
+/// the release tarball (`plugins/` beside the binary, staged by
+/// `scripts/build-plugins.sh`), so a stale export degrades to a warning instead
+/// of an empty runtime.
+///
+/// To force an EMPTY runtime, set `AINB_DISABLE_PLUGINS=1` or point
+/// `AINB_PLUGIN_ROOT` at an existing empty directory. A non-existent path is no
+/// longer a way to ask for that — it is treated as the mistake it usually is.
 pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
-    if let Ok(env_root) = std::env::var("AINB_PLUGIN_ROOT") {
+    discover_plugin_root_from(std::env::var("AINB_PLUGIN_ROOT").ok().as_deref())
+}
+
+/// [`discover_plugin_root`] with the override injected rather than read from
+/// the process environment, so tests exercise the search order without
+/// mutating global state (and racing every other test in the binary).
+fn discover_plugin_root_from(env_root: Option<&str>) -> Option<PathBuf> {
+    if let Some(env_root) = env_root {
         let trimmed = env_root.trim();
         if !trimmed.is_empty() {
             let p = PathBuf::from(trimmed);
@@ -540,9 +553,15 @@ pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// An EXISTING but empty root is how a caller asks for a plugin-free
+    /// runtime. This used to point at a non-existent path, which now falls
+    /// through to the derived candidates and would load whatever the machine
+    /// happens to have in `~/.agents-in-a-box/plugins/cache` — passing only on
+    /// a developer box whose cache is empty.
     #[test]
     fn empty_root_returns_no_loaded_plugins() {
-        std::env::set_var("AINB_PLUGIN_ROOT", "/definitely/not/a/real/path");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("AINB_PLUGIN_ROOT", dir.path());
         let (_runtime, handle, outcome) =
             init_plugin_runtime().expect("runtime init must succeed even with no plugin root");
         assert_eq!(outcome.loaded.len(), 0, "no plugins should load");
@@ -566,9 +585,7 @@ mod tests {
     fn missing_plugin_root_is_never_returned() {
         let stale = std::env::temp_dir().join("ainb-cellar-1.0.0-deleted/plugins");
         assert!(!stale.exists(), "fixture path must not exist");
-        std::env::set_var("AINB_PLUGIN_ROOT", &stale);
-        let resolved = discover_plugin_root();
-        std::env::remove_var("AINB_PLUGIN_ROOT");
+        let resolved = discover_plugin_root_from(Some(&stale.to_string_lossy()));
         assert_ne!(
             resolved.as_deref(),
             Some(stale.as_path()),
@@ -584,9 +601,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("not-a-directory");
         std::fs::write(&file, b"").expect("write fixture file");
-        std::env::set_var("AINB_PLUGIN_ROOT", &file);
-        let resolved = discover_plugin_root();
-        std::env::remove_var("AINB_PLUGIN_ROOT");
+        let resolved = discover_plugin_root_from(Some(&file.to_string_lossy()));
         assert_ne!(
             resolved.as_deref(),
             Some(file.as_path()),
@@ -599,9 +614,7 @@ mod tests {
     #[test]
     fn existing_plugin_root_still_wins() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("AINB_PLUGIN_ROOT", dir.path());
-        let resolved = discover_plugin_root();
-        std::env::remove_var("AINB_PLUGIN_ROOT");
+        let resolved = discover_plugin_root_from(Some(&dir.path().to_string_lossy()));
         assert_eq!(resolved.as_deref(), Some(dir.path()));
     }
 

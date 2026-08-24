@@ -27,6 +27,14 @@ fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
 
+/// An existing, empty plugin root — the supported way to force a plugin-free
+/// runtime. See the `AINB_PLUGIN_ROOT` note in `plugins::discover_plugin_root`.
+fn empty_plugin_root(tmp: &tempfile::TempDir) -> PathBuf {
+    let root = tmp.path().join("empty-plugin-root");
+    fs::create_dir_all(&root).expect("create empty plugin root");
+    root
+}
+
 fn write_plugin_fixture(root: &std::path::Path, name: &str, with_binary: bool) -> PathBuf {
     let dir = root.join(name);
     fs::create_dir_all(&dir).unwrap();
@@ -120,7 +128,13 @@ fn plugin_watch_unknown_plugin_exits_nonzero() {
             "--duration",
             "1",
         ])
-        .env("AINB_PLUGIN_ROOT", "/definitely/not/a/real/path")
+        // An EXISTING empty directory is how you ask for a plugin-free
+        // runtime. A non-existent path is not: discovery reports it and falls
+        // through to the binary- and cwd-relative candidates, and
+        // `scripts/build-plugins.sh` stages exactly one of those
+        // (`<cwd>/dist/plugins`), so this test would load real plugins on any
+        // checkout that had run it.
+        .env("AINB_PLUGIN_ROOT", empty_plugin_root(&tmp))
         .env("HOME", tmp.path())
         .output()
         .expect("spawn ainb");
@@ -148,7 +162,13 @@ fn plugin_tail_unknown_plugin_exits_nonzero() {
             "--duration",
             "1",
         ])
-        .env("AINB_PLUGIN_ROOT", "/definitely/not/a/real/path")
+        // An EXISTING empty directory is how you ask for a plugin-free
+        // runtime. A non-existent path is not: discovery reports it and falls
+        // through to the binary- and cwd-relative candidates, and
+        // `scripts/build-plugins.sh` stages exactly one of those
+        // (`<cwd>/dist/plugins`), so this test would load real plugins on any
+        // checkout that had run it.
+        .env("AINB_PLUGIN_ROOT", empty_plugin_root(&tmp))
         .env("HOME", tmp.path())
         .output()
         .expect("spawn ainb");
