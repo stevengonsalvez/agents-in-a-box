@@ -104,6 +104,10 @@ pub enum AppEvent {
         x: u16,
         y: u16,
     },
+    MouseRightClick {
+        x: u16,
+        y: u16,
+    },
     MouseDragStart {
         x: u16,
         y: u16,
@@ -218,6 +222,16 @@ pub enum AppEvent {
     SshSessionRenameBackspace,  // Backspace in SSH rename
     SshSessionConfirmRename,    // Confirm SSH rename (Enter)
     SshSessionCancelRename,     // Cancel SSH rename (Escape)
+    // Durable session label events (managed and SSH sessions)
+    SessionLabelStartRename,
+    SessionLabelRenameChar(char),
+    SessionLabelRenameBackspace,
+    SessionLabelConfirmRename,
+    SessionLabelCancelRename,
+    SessionContextNext,
+    SessionContextPrev,
+    SessionContextActivate,
+    SessionContextCancel,
     // AINB 2.0: Home screen events
     HomeScreenSelectTile,    // Select current tile (Enter)
     HomeScreenNavigateUp,    // Navigate up in tile grid
@@ -897,6 +911,22 @@ impl EventHandler {
             return None;
         }
         match event {
+            AppEvent::MouseRightClick { x, y } => {
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    if let Some(crate::app::state::SessionListRowTarget::Attachable(target)) =
+                        state.session_list_row_at_mouse(x, y)
+                    {
+                        if matches!(
+                            target,
+                            crate::app::state::AttachableRef::WorkspaceSession { .. }
+                                | crate::app::state::AttachableRef::SshSession { .. }
+                        ) {
+                            state.open_session_context_menu(target);
+                        }
+                    }
+                }
+                None
+            }
             AppEvent::MouseClick { x, y } => {
                 if state.current_screen == screen_ids::FLEET_PANEL
                     && state.fleet_panel_state.canonical_modal_open()
@@ -1472,6 +1502,27 @@ impl EventHandler {
                 KeyCode::Char(c) => return Some(AppEvent::SshSessionRenameChar(c)),
                 _ => return None,
             }
+        }
+
+        // Durable session-label popup captures input everywhere it is opened.
+        if state.session_label_rename_mode {
+            match key_event.code {
+                KeyCode::Enter => return Some(AppEvent::SessionLabelConfirmRename),
+                KeyCode::Esc => return Some(AppEvent::SessionLabelCancelRename),
+                KeyCode::Backspace => return Some(AppEvent::SessionLabelRenameBackspace),
+                KeyCode::Char(c) => return Some(AppEvent::SessionLabelRenameChar(c)),
+                _ => return None,
+            }
+        }
+
+        if state.session_context_menu.is_some() {
+            return match key_event.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SessionContextPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SessionContextNext),
+                KeyCode::Enter => Some(AppEvent::SessionContextActivate),
+                KeyCode::Esc => Some(AppEvent::SessionContextCancel),
+                _ => None,
+            };
         }
 
         // Handle onboarding wizard view FIRST (before any other handlers)
@@ -2145,14 +2196,14 @@ impl EventHandler {
             // so the resume affordance could own 'r'). See restart_affordance.
             KeyCode::Char('u') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
-                // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
-                if state.is_ssh_session_selected() {
-                    Some(AppEvent::SshSessionStartRename)
+                // Durable labels never rename Git branches or tmux sessions.
+                if state.selected_session().is_some() || state.is_ssh_session_selected() {
+                    Some(AppEvent::SessionLabelStartRename)
                 } else if state.is_other_tmux_selected() {
                     Some(AppEvent::OtherTmuxStartRename)
                 } else {
                     Some(AppEvent::ShowNotification(
-                        "F2 rename only works on SSH and 'Other tmux' sessions".to_string(),
+                        "F2 labels managed or SSH sessions; Other tmux keeps rename".to_string(),
                     ))
                 }
             }
@@ -3784,6 +3835,46 @@ impl EventHandler {
             AppEvent::SshSessionRenameBackspace => state.ssh_session_rename_backspace(),
             AppEvent::SshSessionCancelRename => state.cancel_ssh_session_rename(),
             AppEvent::SshSessionConfirmRename => state.confirm_ssh_session_rename(),
+            AppEvent::SessionLabelStartRename => state.start_session_label_rename(),
+            AppEvent::SessionLabelRenameChar(c) => state.session_label_rename_char(c),
+            AppEvent::SessionLabelRenameBackspace => state.session_label_rename_backspace(),
+            AppEvent::SessionLabelCancelRename => state.cancel_session_label_rename(),
+            AppEvent::SessionLabelConfirmRename => state.confirm_session_label_rename(),
+            AppEvent::SessionContextNext => state.session_context_next(1),
+            AppEvent::SessionContextPrev => state.session_context_next(-1),
+            AppEvent::SessionContextCancel => state.close_session_context_menu(),
+            AppEvent::SessionContextActivate => {
+                let event = match state.take_session_context_action() {
+                    Some(crate::app::state::SessionContextAction::Attach) => {
+                        Some(AppEvent::AttachTmuxSession)
+                    }
+                    Some(crate::app::state::SessionContextAction::Restart) => {
+                        Some(AppEvent::RestartSession)
+                    }
+                    Some(crate::app::state::SessionContextAction::EditLabel) => {
+                        Some(AppEvent::SessionLabelStartRename)
+                    }
+                    Some(crate::app::state::SessionContextAction::OpenEditor) => {
+                        Some(AppEvent::OpenInEditor)
+                    }
+                    Some(crate::app::state::SessionContextAction::OpenShell) => {
+                        Some(AppEvent::OpenQuickShell)
+                    }
+                    Some(crate::app::state::SessionContextAction::OpenGit) => {
+                        Some(AppEvent::ShowGitView)
+                    }
+                    Some(crate::app::state::SessionContextAction::QuickCommit) => {
+                        Some(AppEvent::QuickCommitStart)
+                    }
+                    Some(crate::app::state::SessionContextAction::Delete) => {
+                        Some(AppEvent::DeleteSession)
+                    }
+                    None => None,
+                };
+                if let Some(event) = event {
+                    Self::process_event(event, state);
+                }
+            }
             AppEvent::RefreshWorkspaces => {
                 // Mark for async processing to reload workspace data
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -8090,6 +8181,7 @@ impl EventHandler {
             }
             // Mouse events are handled directly in the main event loop
             AppEvent::MouseClick { .. }
+            | AppEvent::MouseRightClick { .. }
             | AppEvent::MouseDragStart { .. }
             | AppEvent::MouseDragEnd { .. }
             | AppEvent::MouseDragging { .. }
