@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.3] - 2026-08-24
+### Added
+- Merge pull request #689 from stevengonsalvez/f/bb-explore
+- Merge pull request #703 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #709 from stevengonsalvez/f/daemons-overlay-restart
+- Merge pull request #711 from stevengonsalvez/f/daemons-screen-restart
+- Merge pull request #724 from stevengonsalvez/f/daemons-hooks-install-from-tui
+- **cli**: add uniform start/stop/restart for every daemon
+- **cli**: register ainb daemon and build its per-daemon verbs
+- **daemons**: bind selection, the action menu, and a layered Esc
+- **daemons**: make the MCP pool, Hangar daemon and Headroom proxy first-class
+- **daemons**: put the restart cursor on the screen `d` actually opens
+- **daemons**: restart the selected daemon from the overlay
+- **daemons**: select a row, act on it, and read what failed
+- **daemons**: show the cursor and per-row version drift in the overlay
+- **fleet**: native interviews by default, flippable to fleet
+- **fleet-macos**: open a session in a real terminal from its card
+- **hangar**: recover a dead runtime's work without a reboot
+- **hangar**: tell restart from reconnect at boot
+- **headroom**: add synchronous liveness and pid accessors
+- **notifyd**: install hooks from TUI repair when none recorded
+- **plugin-runtime**: expose RuntimeHandle::render_wedged
+
+### Fixed
+- Merge pull request #698 from stevengonsalvez/f/fleet-receipt-honesty
+- Merge pull request #699 from stevengonsalvez/f/interview-blocking-hook
+- Merge pull request #705 from stevengonsalvez/f/native-interview-readonly
+- Merge pull request #708 from stevengonsalvez/f/bug-fixes-01
+- Merge pull request #713 from stevengonsalvez/f/daemons-restart-feedback
+- Merge pull request #719 from stevengonsalvez/f/daemons-review-followup
+- Merge pull request #732 from stevengonsalvez/fix/pickrepo-phantom-recents-rebased
+- Merge pull request #739 from stevengonsalvez/fix/rpc-acp-flake
+- **bridge**: make the phone bridge fail honestly instead of silently (#707)
+- **bridge**: never unload a working bridge we will not reload
+- **cli**: ATC stop passed a flag that does not exist
+- **daemons**: bound the runtime probe and always clear the loading latch
+- **daemons**: bound the socket probes behind the new daemon rows
+- **daemons**: close both overlays on act, and give up on a stuck action
+- **daemons**: drop the blind M/P/S keys and clear overlays on q
+- **daemons**: drop the title's stale key hint
+- **daemons**: give the cursor its own column so names stop truncating
+- **daemons**: give the test fixtures a channel string, not an integer
+- **daemons**: make the R outcome visible on the screen that owns it
+- **daemons**: never self-exec a cargo test binary (#716)
+- **daemons**: paint the cursor in the colour defined for it
+- **daemons**: pass the cursor into render_table instead of reaching for state
+- **daemons**: route the `d` screen's keys to the screen, not the overlay
+- **daemons**: stop re-resolving bridge secrets every two seconds
+- **daemons**: stop reporting stopped daemons as crashed, and stop the daemon racing ATC (#723)
+- **daemons**: stop the Hangar restart printing over the TUI
+- **daemons**: stop the row-coverage test from restarting real daemons
+- **daemons**: use rsplit for the refusal tail, not next_back
+- **fleet**: address review of the blocking interview hook
+- **fleet**: address review of the interview surface controls
+- **fleet**: answer Claude interviews over the hook, not the picker
+- **fleet**: make a native-picker interview read-only, not send-keys answerable
+- **fleet-macos**: report a refused action as refused, not delivered
+- **fleet-macos**: report refused actions on every control path
+- **fleet-macos**: show a native-picker interview read-only with a way out
+- **fleet-tui**: treat a mirrored interview as read-only in the answer queue
+- **hangar**: install the span capture before any serve task spawns
+- **hangar**: make the daemon starter return before its verdict
+- **hangar**: poll the [s] start verdict instead of waiting on it
+- **hangar**: stamp daemon identity when start races the lock probe
+- **new-session**: Esc from Configure no longer fabricates a recent
+- **plugin-runtime**: carry the render-wedged flag on PluginHandle
+- **plugin-runtime**: enforce the render timeout that was never wired
+- **plugin-runtime**: key the render watchdog on the request it armed
+- **plugins**: keep q and Esc alive on a wedged plugin screen
+- **tmux**: resolve the interview release binary instead of trusting PATH
+
+### Documentation
+- **assets**: re-record the Daemons journeys against the fixed build
+- **assets**: record the three Daemons-screen journeys
+- **cli**: regenerate the CLI reference for the daemon namespace
+- **cli**: regenerate the man page for the interview verbs
+- **man**: regenerate the man page for the daemon namespace
+- **tui**: regenerate CLI reference for --fix-daemons
+- require end-to-end validation of the Fleet macOS app
+
+### Other
+- Merge pull request #697 from stevengonsalvez/chore/release-v1.21.3
+- Merge pull request #727 from stevengonsalvez/chore/changelog-backfill
+- Merge pull request #728 from stevengonsalvez/dependabot/cargo/ainb-tui/git2-0.20.4
+- Merge pull request #729 from stevengonsalvez/dependabot/npm_and_yarn/website/site/js-yaml-4.3.1
+- Merge pull request #730 from stevengonsalvez/dependabot/cargo/ainb-tui/opentelemetry_sdk-0.32.1
+- Merge pull request #731 from stevengonsalvez/dependabot/npm_and_yarn/website/site/nanoid-3.3.18
+- Merge pull request #734 from stevengonsalvez/dependabot/npm_and_yarn/website/site/postcss-8.5.26
+- **cli**: declare the daemon control module
+- **deps**: bump git2 from 0.18.3 to 0.20.4 in /ainb-tui
+- **deps**: bump js-yaml from 4.1.1 to 4.3.1 in /website/site
+- **deps**: bump nanoid from 3.3.12 to 3.3.18 in /website/site
+- **deps**: bump opentelemetry_sdk from 0.30.0 to 0.32.1 in /ainb-tui
+- **deps**: bump postcss from 8.5.15 to 8.5.26 in /website/site
+- **release**: backfill the changelog and land main on 1.22.2
+- **scripts**: add the daemons journey recorder
+
+
 ## [1.22.2] - 2026-08-24
 ### Added
 - Merge pull request #689 from stevengonsalvez/f/bb-explore
