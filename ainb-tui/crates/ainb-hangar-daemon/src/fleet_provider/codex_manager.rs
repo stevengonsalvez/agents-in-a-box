@@ -77,6 +77,29 @@ pub struct CodexManagerConfig {
     pub request_timeout: Duration,
     /// Ordered inbound channel capacity.
     pub event_capacity: usize,
+    /// Who owns the app-server bound at [`Self::socket_path`].
+    pub server_ownership: ServerOwnership,
+}
+
+/// Whether this manager runs its own app-server or attaches to somebody else's.
+///
+/// `Owned` is the historical behaviour: spawn `codex app-server --listen` on a
+/// scoped `CODEX_HOME`, and reap/unlink the socket on the way out.
+///
+/// `External` attaches to an app-server this process must never spawn, stop, or
+/// unlink -- specifically the ChatGPT-managed daemon at
+/// `~/.codex/app-server-control/app-server-control.sock`, which is the one the
+/// Codex phone app pairs with. Sessions opened through it live in the user's
+/// real `~/.codex`, so they are visible to that app; an owned server's scoped
+/// home is not. An app-server serves many concurrent clients, so attaching
+/// alongside Codex Desktop and the tmux TUI is expected, not a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServerOwnership {
+    /// Spawn and own the app-server, on a scoped `CODEX_HOME`.
+    #[default]
+    Owned,
+    /// Attach to an app-server owned by somebody else. Never spawn or unlink.
+    External,
 }
 
 impl CodexManagerConfig {
@@ -89,7 +112,16 @@ impl CodexManagerConfig {
             startup_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
             event_capacity: 256,
+            server_ownership: ServerOwnership::Owned,
         }
+    }
+
+    /// Attach to an app-server this process does not own (see
+    /// [`ServerOwnership::External`]).
+    #[must_use]
+    pub fn attached_to_external_server(mut self) -> Self {
+        self.server_ownership = ServerOwnership::External;
+        self
     }
 }
 
@@ -664,7 +696,19 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             "installed Codex cannot generate app-server schema".into(),
         ));
     }
-    let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
+    let external = config.server_ownership == ServerOwnership::External;
+    // An external server is somebody else's process (the ChatGPT-managed
+    // daemon). Claiming ownership of its socket would let our teardown unlink a
+    // socket Codex Desktop and the phone are still using, so skip the whole
+    // prepare/spawn/adopt dance and just connect as one more client.
+    let preparation = if external {
+        SocketPreparation {
+            owns_server: false,
+            marker_repair: None,
+        }
+    } else {
+        prepare_socket(&config.socket_path, &config.codex_binary).await?
+    };
     let mut owns_server = preparation.owns_server;
     let owner_marker_path = socket_owner_marker(&config.socket_path);
     let mut server = if !owns_server {
@@ -2424,6 +2468,7 @@ mod tests {
             startup_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(10),
             event_capacity: 8,
+            server_ownership: ServerOwnership::Owned,
         };
 
         let manager = spawn(config).await.expect("initialize managed Codex listener");
@@ -3119,6 +3164,7 @@ mod tests {
             startup_timeout: Duration::from_millis(50),
             request_timeout: Duration::from_secs(1),
             event_capacity: 8,
+            server_ownership: ServerOwnership::Owned,
         }
     }
 
@@ -3431,6 +3477,44 @@ mod tests {
             socket_disposition(true, true, true),
             SocketDisposition::Adopt
         );
+    }
+
+    /// Attaching to somebody else's app-server must never unlink their socket.
+    ///
+    /// The ChatGPT-managed daemon at `~/.codex/app-server-control/` is the one
+    /// the Codex phone app pairs with, and Codex Desktop uses it too. Unlinking
+    /// it on our teardown would cut both of them off, so `External` must leave
+    /// `owned_socket_path` unset and the cleanup must be a no-op on the file.
+    #[tokio::test]
+    async fn external_server_cleanup_never_unlinks_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("someone-elses.sock");
+        let listener = UnixListener::bind(&theirs).unwrap();
+        assert!(theirs.exists(), "precondition: their socket is bound");
+
+        // Exactly what spawn() builds when owns_server is false.
+        let mut cleanup = ServerCleanup {
+            server: None,
+            owned_socket_path: None,
+            owner_marker_path: None,
+        };
+        cleanup.cleanup().await;
+
+        assert!(theirs.exists(), "cleanup unlinked a socket we do not own");
+        drop(listener);
+    }
+
+    /// The ownership flag itself: default stays Owned so existing homes are
+    /// untouched, and the builder is the only way into External.
+    #[test]
+    fn server_ownership_defaults_to_owned_and_opts_in_explicitly() {
+        let owned = CodexManagerConfig::new("codex", "/tmp/x.sock");
+        assert_eq!(owned.server_ownership, ServerOwnership::Owned);
+        assert_eq!(ServerOwnership::default(), ServerOwnership::Owned);
+
+        let external =
+            CodexManagerConfig::new("codex", "/tmp/x.sock").attached_to_external_server();
+        assert_eq!(external.server_ownership, ServerOwnership::External);
     }
 
     #[tokio::test]
