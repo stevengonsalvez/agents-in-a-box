@@ -142,8 +142,14 @@ impl TmuxPreviewPane {
         is_focused: bool,
     ) {
         let title = match self.preview_mode {
-            PreviewMode::Normal => format!("Session Preview: {}", session.name),
-            PreviewMode::Scroll => format!("Session Preview: {} [SCROLL MODE]", session.name),
+            PreviewMode::Normal => format!(
+                "Session Preview: {}",
+                session.display_name.as_deref().unwrap_or(&session.name)
+            ),
+            PreviewMode::Scroll => format!(
+                "Session Preview: {} [SCROLL MODE]",
+                session.display_name.as_deref().unwrap_or(&session.name)
+            ),
         };
 
         // Grey when unfocused; green when focused (gold while in scroll mode).
