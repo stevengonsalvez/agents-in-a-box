@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.4] - 2026-08-25
+### Fixed
+- Merge pull request #742 from stevengonsalvez/f/fix-codex
+- **ainb-hooks**: keep Codex SessionEnd under the 3s cap
+
+### Documentation
+- **ainb-hooks**: note that editing a hook drops its Codex trust
+
+### Other
+- Merge pull request #741 from stevengonsalvez/chore/release-v1.22.3
+- **ainb-hooks**: bump the plugin to 0.4.7
+
+
 ## [1.22.3] - 2026-08-24
 ### Added
 - Merge pull request #689 from stevengonsalvez/f/bb-explore
