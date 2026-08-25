@@ -91,6 +91,7 @@ use ainb_hangar_store::repo::fleet_provider_event::{
 };
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
 
@@ -959,8 +960,30 @@ impl AcpPool {
             mode = %config.permission_mode,
             provider_version = tracing::field::Empty,
         );
-        let _entered = span.enter();
+        self.spawn_provider_process(provider, config, span.clone())
+            .instrument(span)
+            .await
+    }
 
+    /// The spawn itself, running INSIDE the caller's `acp.spawn` span.
+    ///
+    /// It is a separate function so the span can be attached with `.instrument`
+    /// rather than `span.enter()`. `Entered` is `Send` in tracing 0.1 (unlike
+    /// `EnteredSpan`), so holding one across an `.await` compiles, and then the
+    /// guard is dropped on whichever worker resumed the task. The worker that
+    /// ENTERED keeps the span id on its thread-local stack forever, and the next
+    /// contextual span opened on that worker clones an already-closed span. That
+    /// leaves a `DataInner` slot back in the registry's pool with a non-zero ref
+    /// count, and the next `new_span` anywhere in the process trips
+    /// `tracing-subscriber`'s `sharded.rs` refcount assertion, killing whatever
+    /// task happened to open that span, which in the daemon is usually an RPC
+    /// connection handler.
+    async fn spawn_provider_process(
+        self: &Arc<Self>,
+        provider: &str,
+        config: AdapterConfig,
+        span: tracing::Span,
+    ) -> Result<Arc<ProviderProcess>, AcpError> {
         let (update_tx, update_rx) = mpsc::unbounded_channel();
         let (permission_tx, permission_rx) = mpsc::unbounded_channel();
         if let Ok(mut spawning) = self.spawning.lock() {
@@ -1617,8 +1640,21 @@ impl SessionActor {
             message_id = %job.message_id,
             outcome = tracing::field::Empty,
         );
-        let _entered = span.enter();
+        self.start_turn_inner(job, turn_tx, span.clone()).instrument(span).await;
+    }
 
+    /// The turn itself, running INSIDE the caller's `acp.turn` span.
+    ///
+    /// Split out for the same reason as [`AcpPool::spawn_provider_process`]: the
+    /// span is attached with `.instrument`, never with `span.enter()`, because an
+    /// `Entered` guard held across an `.await` is dropped on whichever worker
+    /// resumed the task and corrupts the registry's span-refcount pool.
+    async fn start_turn_inner(
+        &mut self,
+        job: PromptJob,
+        turn_tx: mpsc::Sender<TurnResult>,
+        span: tracing::Span,
+    ) {
         let process = match self.attach_with_one_requeue(&job.message_id).await {
             Ok(process) => process,
             Err(refusal) => {

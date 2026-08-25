@@ -1422,16 +1422,31 @@ async fn daemon_health_reports_the_acp_pool_and_the_spans_carry_their_fields() {
         let row = acp["sessions"]
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["session_key"] == *session_key));
+        // `in_flight` belongs in the WAIT, not only in the assertions below.
+        // `health()` reads the process rows under the providers lock, drops it,
+        // then awaits the sessions lock to read `turn_open`, so a snapshot is
+        // two reads with a yield between them. `start_turn` increments
+        // `in_flight_used` BEFORE it stamps `turn_started_at`, so a snapshot
+        // taken across that gap pairs a stale `in_flight: 0` with a fresh
+        // `turn_open: true` and fails an assertion about a surface that is
+        // working. Wait for the coherent snapshot instead, which is what this
+        // loop already exists to do.
+        let in_flight = acp["processes"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|process| process["in_flight"].as_u64())
+            .unwrap_or(0);
         if let Some(row) = row {
             if row["turn_open"] == serde_json::json!(true)
                 && row["queue_depth"].as_u64().unwrap_or(0) >= 1
+                && in_flight >= 1
             {
                 break (acp["processes"].clone(), row.clone());
             }
         }
         assert!(
             Instant::now() < deadline,
-            "the pool never reported an open turn with a queued prompt: {health}"
+            "the pool never reported an open turn with a queued prompt in flight: {health}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
