@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.6] - 2026-08-25
+### Fixed
+- Merge pull request #702 from stevengonsalvez/fix/hangar-stale-plugin-root
+- **install**: install the bundled plugins from the release tarball
+- **plugins**: make the plugin-free runtime an existing empty root
+- **plugins**: never trust a plugin root that no longer exists
+- **plugins**: quarantine a plugin whose binary can never be spawned
+- **plugins**: require a plugin root to be a directory
+- **plugins**: settle lifecycle state on every spawn failure
+- **plugins**: surface a failed plugin spawn instead of connecting forever
+
+### Other
+- Merge pull request #747 from stevengonsalvez/chore/release-v1.22.5
+- sync Cargo.lock with the 1.22.5 version bump
+
+
 ## [1.22.5] - 2026-08-25
 ### Fixed
 - Merge pull request #738 from stevengonsalvez/f/diagnose-rpc-acp
