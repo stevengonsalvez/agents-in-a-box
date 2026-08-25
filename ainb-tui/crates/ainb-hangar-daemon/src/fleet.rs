@@ -574,6 +574,39 @@ pub fn subscription_snapshot_wire(
     }
 }
 
+/// Provider notification that a pending server request was answered, by whoever
+/// answered it. Schema: `ServerRequestResolvedNotification { requestId, threadId }`,
+/// both required (`codex app-server generate-json-schema`, codex-cli 0.149.1).
+const METHOD_SERVER_REQUEST_RESOLVED: &str = "serverRequest/resolved";
+
+/// Does this `serverRequest/resolved` refer to the request the session is
+/// currently blocked on?
+///
+/// Returns true when there is nothing pending, so a resolution arriving after a
+/// request already cleared is still a harmless no-op rather than an error.
+async fn resolves_current_request(
+    pool: &SqlitePool,
+    session_key: &str,
+    payload: &str,
+) -> Result<bool, FleetRepoError> {
+    let Some(resolved_id) = serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|payload| payload.get("requestId").cloned())
+    else {
+        // No id to discriminate on: fall back to clearing, which is the
+        // pre-existing behaviour and still better than a stuck ASK.
+        return Ok(true);
+    };
+    let Some(current) = current_request_wire(pool, session_key).await? else {
+        return Ok(true);
+    };
+    let current_id = current
+        .get("identity")
+        .and_then(|identity| identity.get("requestId"))
+        .or_else(|| current.get("requestId"));
+    Ok(current_id.is_none_or(|current_id| *current_id == resolved_id))
+}
+
 /// Read complete payload for current structured request or approval.
 pub async fn current_request_wire(
     pool: &SqlitePool,
@@ -611,6 +644,15 @@ pub async fn apply_codex_inbound(
     let Some(mut event) = normalized else {
         return Ok(None);
     };
+    // `serverRequest/resolved` clears attention, so it must only clear the
+    // request it actually resolves. Two approvals can be outstanding at once:
+    // resolving the older one on the phone would otherwise drop ASK while the
+    // newer one is still waiting, hiding it from Ainb entirely.
+    if event.event_type == METHOD_SERVER_REQUEST_RESOLVED
+        && !resolves_current_request(pool, &event.session_key, &event.payload).await?
+    {
+        return Ok(None);
+    }
     if FleetRepo::get_session(pool, &event.session_key)
         .await?
         .is_some_and(|row| row.tmux_target.is_some() && row.transport_health == "HEALTHY")
@@ -1184,7 +1226,7 @@ fn codex_notification_state(
         // same app-server. Without this the request clears on the provider side
         // while Ainb keeps showing ASK forever, because nothing else lowers
         // attention for a request Ainb did not resolve itself.
-        "serverRequest/resolved" => (None, Some(AttentionState::None), Some(None)),
+        METHOD_SERVER_REQUEST_RESOLVED => (None, Some(AttentionState::None), Some(None)),
         "thread/closed" | "thread/archived" => (
             Some(LifecycleState::Exited),
             Some(AttentionState::None),
@@ -4515,6 +4557,92 @@ mod tests {
         assert!(
             cleared.sessions[0].current_request.is_none(),
             "the resolved request must be cleared from the snapshot"
+        );
+    }
+
+    /// Resolving one request must not clear a DIFFERENT pending one.
+    ///
+    /// Two approvals can be outstanding at once. If the phone answers the older
+    /// one, an unscoped clear would drop ASK while the newer request is still
+    /// waiting, hiding it from Ainb with no way to answer it.
+    #[tokio::test]
+    async fn resolving_a_stale_request_leaves_the_live_one_asking() {
+        use crate::fleet_provider::codex::{
+            CodexCapabilities, CodexInbound, CodexItemRequestIdentity, CodexQuestionRequest,
+            RpcRequestId,
+        };
+        use crate::fleet_provider::{QuestionOption, StructuredQuestion};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let capabilities = CodexCapabilities {
+            cli_version: "codex-test".to_string(),
+            daemon_version: None,
+            app_server: true,
+            stdio_proxy: true,
+            request_user_input: true,
+            approvals: true,
+            thread_archive: true,
+        };
+        let ask = |request_id: i64, item: &str| CodexQuestionRequest {
+            identity: CodexItemRequestIdentity {
+                request_id: RpcRequestId::new(serde_json::json!(request_id)).unwrap(),
+                thread_id: "thread-two".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: item.to_string(),
+            },
+            questions: vec![StructuredQuestion {
+                id: "q1".to_string(),
+                header: "Pick".to_string(),
+                question: "Which?".to_string(),
+                options: vec![QuestionOption {
+                    label: "A".to_string(),
+                    description: "first".to_string(),
+                }],
+                multi_select: false,
+                is_other: true,
+                is_secret: false,
+            }],
+            auto_resolution_ms: Some(60_000),
+        };
+
+        for (event_id, request_id, item, at) in [
+            ("codex:req:old", 1, "item-old", 100),
+            ("codex:req:new", 2, "item-new", 200),
+        ] {
+            apply_codex_inbound(
+                store.pool(),
+                &sink,
+                event_id.to_string(),
+                CodexInbound::RequestUserInput(ask(request_id, item)),
+                &capabilities,
+                at,
+            )
+            .await
+            .unwrap();
+        }
+
+        // The phone answers the OLDER request; the newer one is still live.
+        apply_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex:resolved:old".to_string(),
+            CodexInbound::Notification {
+                method: "serverRequest/resolved".to_string(),
+                params: serde_json::json!({"threadId": "thread-two", "requestId": 1}),
+            },
+            &capabilities,
+            300,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = snapshot_wire(store.pool()).await.unwrap();
+        assert_eq!(
+            snapshot.sessions[0].attention,
+            ainb_hangar_proto::fleet::AttentionState::Ask,
+            "resolving a stale request must not clear the live one"
         );
     }
 
