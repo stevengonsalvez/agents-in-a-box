@@ -31,7 +31,7 @@ pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
 pub use session_defaults::{PerRepoDefaults, SessionDefaults};
-pub use ssh_display_names::SshDisplayNameStore;
+pub use ssh_display_names::{SessionLabelStore, SshDisplayNameStore, normalize_session_label};
 
 /// Authentication provider for Claude API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
