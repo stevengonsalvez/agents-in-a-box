@@ -1179,6 +1179,12 @@ fn codex_notification_state(
             Some(AttentionState::None),
             Some(None),
         ),
+        // A pending approval or question can be answered somewhere other than
+        // Ainb -- the Codex phone app or Codex Desktop, both of which drive the
+        // same app-server. Without this the request clears on the provider side
+        // while Ainb keeps showing ASK forever, because nothing else lowers
+        // attention for a request Ainb did not resolve itself.
+        "serverRequest/resolved" => (None, Some(AttentionState::None), Some(None)),
         "thread/closed" | "thread/archived" => (
             Some(LifecycleState::Exited),
             Some(AttentionState::None),
@@ -4416,6 +4422,100 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(history, vec!["tmux_discovered", "session_superseded"]);
+    }
+
+    /// An approval answered on the phone must clear Ainb's ASK.
+    ///
+    /// While Ainb attaches to the ChatGPT-managed app-server, the Codex phone
+    /// app and Codex Desktop resolve the same pending requests. The provider
+    /// clears the request and emits `serverRequest/resolved`; before this
+    /// mapping existed Ainb kept showing ASK forever, because only a
+    /// locally-issued response lowered attention.
+    #[tokio::test]
+    async fn a_request_resolved_elsewhere_clears_attention() {
+        use crate::fleet_provider::codex::{
+            CodexCapabilities, CodexInbound, CodexItemRequestIdentity, CodexQuestionRequest,
+            RpcRequestId,
+        };
+        use crate::fleet_provider::{QuestionOption, StructuredQuestion};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let capabilities = CodexCapabilities {
+            cli_version: "codex-test".to_string(),
+            daemon_version: None,
+            app_server: true,
+            stdio_proxy: true,
+            request_user_input: true,
+            approvals: true,
+            thread_archive: true,
+        };
+
+        let request = CodexQuestionRequest {
+            identity: CodexItemRequestIdentity {
+                request_id: RpcRequestId::new(serde_json::json!(41)).unwrap(),
+                thread_id: "thread-phone".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+            },
+            questions: vec![StructuredQuestion {
+                id: "q1".to_string(),
+                header: "Pick".to_string(),
+                question: "Which?".to_string(),
+                options: vec![QuestionOption {
+                    label: "a".to_string(),
+                    description: "first".to_string(),
+                }],
+                multi_select: false,
+                is_other: true,
+                is_secret: false,
+            }],
+            auto_resolution_ms: Some(60_000),
+        };
+        apply_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex:req:1".to_string(),
+            CodexInbound::RequestUserInput(request),
+            &capabilities,
+            100,
+        )
+        .await
+        .unwrap();
+
+        let asking = snapshot_wire(store.pool()).await.unwrap();
+        assert_eq!(
+            asking.sessions[0].attention,
+            ainb_hangar_proto::fleet::AttentionState::Ask,
+            "precondition: the pending request raises ASK"
+        );
+
+        // Somebody answers it on the phone. Ainb never sends a response.
+        apply_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex:resolved:1".to_string(),
+            CodexInbound::Notification {
+                method: "serverRequest/resolved".to_string(),
+                params: serde_json::json!({"threadId": "thread-phone"}),
+            },
+            &capabilities,
+            200,
+        )
+        .await
+        .unwrap();
+
+        let cleared = snapshot_wire(store.pool()).await.unwrap();
+        assert_eq!(
+            cleared.sessions[0].attention,
+            ainb_hangar_proto::fleet::AttentionState::None,
+            "a request resolved elsewhere must not leave Ainb stuck on ASK"
+        );
+        assert!(
+            cleared.sessions[0].current_request.is_none(),
+            "the resolved request must be cleared from the snapshot"
+        );
     }
 
     #[tokio::test]
