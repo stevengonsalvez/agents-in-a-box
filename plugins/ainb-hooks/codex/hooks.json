@@ -1,11 +1,11 @@
 {
-  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Every Codex CLI lifecycle hook is captured into Hangar's durable provider log. The notification daemon still routes only user-facing events to OS surfaces.",
+  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Every Codex CLI lifecycle hook is captured into Hangar's durable provider log. The notification daemon still routes only user-facing events to OS surfaces. SessionEnd is capped at 3s: Codex hard-clamps that hook and prints a startup error for anything longer.",
   "hooks": {
     "SessionStart": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
     ],
     "SessionEnd": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 3 }] }
     ],
     "UserPromptSubmit": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
