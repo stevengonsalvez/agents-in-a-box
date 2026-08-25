@@ -11,7 +11,7 @@ use crate::claude::{ClaudeApiClient, ClaudeMessage};
 // boss-mode @-trigger; removed along with the prompt textarea.
 use crate::components::home_screen_v2::HomeScreenV2State;
 use crate::components::live_logs_stream::LogEntry;
-use crate::config::{AppConfig, SshDisplayNameStore};
+use crate::config::{AppConfig, SessionLabelStore};
 use crate::credentials;
 use crate::docker::LogStreamingCoordinator;
 use crate::editors;
@@ -46,6 +46,26 @@ pub enum AttachableRef {
     OtherTmux {
         other_idx: usize,
     },
+}
+
+/// Actions available from a session row's context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionContextAction {
+    Attach,
+    Restart,
+    EditLabel,
+    OpenEditor,
+    OpenShell,
+    OpenGit,
+    QuickCommit,
+    Delete,
+}
+
+/// Ephemeral state for the keyboard-accessible right-click context menu.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionContextMenu {
+    pub target: AttachableRef,
+    pub selected: usize,
 }
 
 /// Text editor with cursor support for boss mode prompts
@@ -3053,8 +3073,13 @@ pub struct AppState {
     pub ssh_session_rename_mode: bool,
     /// Buffer for the new display name being typed during rename
     pub ssh_session_rename_buffer: String,
-    /// Persistent store for SSH session display names
-    pub ssh_display_name_store: SshDisplayNameStore,
+    /// Persistent store for durable session labels.
+    pub session_label_store: SessionLabelStore,
+    /// Durable-label text popup state for managed and SSH sessions.
+    pub session_label_rename_mode: bool,
+    pub session_label_rename_buffer: String,
+    pub session_label_rename_target: Option<AttachableRef>,
+    pub session_context_menu: Option<SessionContextMenu>,
 
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
@@ -3312,8 +3337,12 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
         .map(|(i, w)| (canonical_key(&w.path), i))
         .collect();
 
+    let session_label_store = SessionLabelStore::load();
     for interactive_session in interactive_sessions {
-        let session = interactive_session.to_session_model();
+        let mut session = interactive_session.to_session_model();
+        if let Some(label) = session_label_store.get(&interactive_session.tmux_session_name) {
+            session.display_name = Some(label.clone());
+        }
         let workspace_path = interactive_session.source_repository.clone();
         let workspace_name = interactive_session.workspace_name.clone();
         let key = canonical_key(&workspace_path);
@@ -3639,7 +3668,11 @@ impl Default for AppState {
             selected_ssh_session_index: None,
             ssh_session_rename_mode: false,
             ssh_session_rename_buffer: String::new(),
-            ssh_display_name_store: SshDisplayNameStore::load(),
+            session_label_store: SessionLabelStore::load(),
+            session_label_rename_mode: false,
+            session_label_rename_buffer: String::new(),
+            session_label_rename_target: None,
+            session_context_menu: None,
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
@@ -5717,7 +5750,12 @@ impl AppState {
                 // Convert to Session models and add to workspaces
                 for interactive_session in sessions {
                     live_tmux_names.insert(interactive_session.tmux_session_name.clone());
-                    let session = interactive_session.to_session_model();
+                    let mut session = interactive_session.to_session_model();
+                    if let Some(label) =
+                        self.session_label_store.get(&interactive_session.tmux_session_name)
+                    {
+                        session.display_name = Some(label.clone());
+                    }
 
                     // Find or create workspace for this session.
                     // Use source_repository (the original git repo) not worktree_path parent.
@@ -5976,7 +6014,7 @@ impl AppState {
                     }
 
                     // Restore display_name from persistent store
-                    if let Some(preserved_name) = self.ssh_display_name_store.get(&name) {
+                    if let Some(preserved_name) = self.session_label_store.get(&name) {
                         ssh_session.display_name = Some(preserved_name.clone());
                     }
 
@@ -7118,9 +7156,9 @@ impl AppState {
 
                 // Persist to disk
                 if let Some(key) = tmux_name {
-                    self.ssh_display_name_store.set(key, session.display_name.clone());
-                    if let Err(e) = self.ssh_display_name_store.save() {
-                        warn!("Failed to save SSH display names: {}", e);
+                    self.session_label_store.set(key, session.display_name.clone());
+                    if let Err(e) = self.session_label_store.save() {
+                        warn!("Failed to save session labels: {}", e);
                     }
                 }
             }
@@ -7128,6 +7166,148 @@ impl AppState {
 
         self.ssh_session_rename_mode = false;
         self.ssh_session_rename_buffer.clear();
+    }
+
+    /// Open durable-label editing for the selected managed or SSH session.
+    pub fn start_session_label_rename(&mut self) {
+        let target = if let (Some(workspace_idx), Some(session_idx)) =
+            (self.selected_workspace_index, self.selected_session_index)
+        {
+            Some(AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            })
+        } else {
+            self.selected_ssh_session_index
+                .map(|ssh_idx| AttachableRef::SshSession { ssh_idx })
+        };
+        let Some(target) = target else {
+            return;
+        };
+
+        let current = match target {
+            AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            } => self
+                .workspaces
+                .get(workspace_idx)
+                .and_then(|workspace| workspace.sessions.get(session_idx))
+                .and_then(|session| session.display_name.clone()),
+            AttachableRef::SshSession { ssh_idx } => {
+                self.ssh_sessions.get(ssh_idx).and_then(|session| session.display_name.clone())
+            }
+            _ => None,
+        };
+        self.session_label_rename_target = Some(target);
+        self.session_label_rename_buffer = current.unwrap_or_default();
+        self.session_label_rename_mode = true;
+    }
+
+    pub fn cancel_session_label_rename(&mut self) {
+        self.session_label_rename_mode = false;
+        self.session_label_rename_buffer.clear();
+        self.session_label_rename_target = None;
+    }
+
+    pub fn session_label_rename_char(&mut self, c: char) {
+        if self.session_label_rename_mode {
+            self.session_label_rename_buffer.push(c);
+        }
+    }
+
+    pub fn session_label_rename_backspace(&mut self) {
+        if self.session_label_rename_mode {
+            self.session_label_rename_buffer.pop();
+        }
+    }
+
+    /// Validate, persist, and immediately render a durable session label.
+    pub fn confirm_session_label_rename(&mut self) {
+        let Some(target) = self.session_label_rename_target else {
+            return self.cancel_session_label_rename();
+        };
+        let label = match crate::config::normalize_session_label(&self.session_label_rename_buffer)
+        {
+            Ok(label) => label,
+            Err(error) => {
+                self.add_error_notification(error);
+                return;
+            }
+        };
+
+        let tmux_name = match target {
+            AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            } => self
+                .workspaces
+                .get_mut(workspace_idx)
+                .and_then(|workspace| workspace.sessions.get_mut(session_idx)),
+            AttachableRef::SshSession { ssh_idx } => self.ssh_sessions.get_mut(ssh_idx),
+            _ => None,
+        }
+        .and_then(|session| {
+            session.display_name = label.clone();
+            session.tmux_session_name.clone()
+        });
+
+        if let Some(tmux_name) = tmux_name {
+            self.session_label_store.set(tmux_name, label);
+            if let Err(error) = self.session_label_store.save() {
+                self.add_error_notification(format!("Failed to save session label: {error}"));
+                return;
+            }
+        }
+        self.cancel_session_label_rename();
+    }
+
+    pub fn open_session_context_menu(&mut self, target: AttachableRef) {
+        self.select_attachable(target);
+        self.session_context_menu = Some(SessionContextMenu {
+            target,
+            selected: 0,
+        });
+    }
+
+    pub fn close_session_context_menu(&mut self) {
+        self.session_context_menu = None;
+    }
+
+    pub fn session_context_actions(&self) -> &'static [SessionContextAction] {
+        const MANAGED: &[SessionContextAction] = &[
+            SessionContextAction::Attach,
+            SessionContextAction::Restart,
+            SessionContextAction::EditLabel,
+            SessionContextAction::OpenEditor,
+            SessionContextAction::OpenShell,
+            SessionContextAction::OpenGit,
+            SessionContextAction::QuickCommit,
+            SessionContextAction::Delete,
+        ];
+        const SSH: &[SessionContextAction] = &[
+            SessionContextAction::Attach,
+            SessionContextAction::EditLabel,
+            SessionContextAction::Delete,
+        ];
+        match self.session_context_menu.map(|menu| menu.target) {
+            Some(AttachableRef::SshSession { .. }) => SSH,
+            _ => MANAGED,
+        }
+    }
+
+    pub fn session_context_next(&mut self, delta: isize) {
+        let len = self.session_context_actions().len();
+        if let Some(menu) = self.session_context_menu.as_mut() {
+            menu.selected = (menu.selected as isize + delta).rem_euclid(len as isize) as usize;
+        }
+    }
+
+    pub fn take_session_context_action(&mut self) -> Option<SessionContextAction> {
+        let selected = self.session_context_menu?.selected;
+        let action = self.session_context_actions().get(selected).copied();
+        self.close_session_context_menu();
+        action
     }
 
     pub fn toggle_claude_chat(&mut self) {
@@ -8939,7 +9119,12 @@ impl AppState {
                 }
 
                 // Convert to Session model and add to workspaces
-                let session = interactive_session.to_session_model();
+                let mut session = interactive_session.to_session_model();
+                if let Some(label) =
+                    self.session_label_store.get(&interactive_session.tmux_session_name)
+                {
+                    session.display_name = Some(label.clone());
+                }
 
                 // Find or create workspace for this repo
                 if let Some((ws_idx, workspace)) =
