@@ -307,6 +307,50 @@ fn action_round_trip() {
     }
 }
 
+/// A binary that can never be exec'd (the post-`brew upgrade` state of a lazy
+/// plugin) must trip the same circuit breaker as a process that starts and
+/// dies. The spawn-failure branch used to return with the state still
+/// `Spawning` — which `ensure_running` treats as spawnable — and the
+/// quarantine check lived only on the exit path, so this case retried the
+/// exec on every kick forever and never quarantined.
+#[test]
+fn unspawnable_binary_quarantines_instead_of_retrying_forever() {
+    let (rt, handle) = build_runtime();
+    let plugin = RegisteredPlugin::new(
+        fixture_manifest(),
+        PathBuf::from("/nonexistent/plugin-binary-that-cannot-be-spawned"),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+
+    // threshold = 3 failures inside failure_window.
+    for _ in 0..3 {
+        drop(handle.render(&id, Viewport::new(10, 1), 0));
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut quarantined = false;
+    while std::time::Instant::now() < deadline {
+        if matches!(
+            handle.lifecycle_state(&id),
+            Some(LifecycleState::Quarantined)
+        ) {
+            quarantined = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        quarantined,
+        "a plugin whose binary cannot be spawned must quarantine; state = {:?}",
+        handle.lifecycle_state(&id)
+    );
+
+    rt.shutdown();
+}
+
 #[test]
 fn sigkill_triggers_respawn_then_quarantine() {
     let (rt, handle) = build_runtime();

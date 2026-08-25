@@ -176,6 +176,24 @@ main() {
         sudo chmod +x "${install_dir}/${BINARY_NAME}"
     fi
 
+    # Bundled first-party plugins. The tarball ships `plugins/` next to the
+    # binary and the runtime looks for `<exe-dir>/plugins`, so installing it
+    # alongside is all that is needed — no AINB_PLUGIN_ROOT, no wrapper. Without
+    # this the curl install has no analytics, witr, or Hangar screens at all.
+    # Best-effort and version-matched: replace wholesale so an upgrade can never
+    # leave the new binary talking to the previous release's plugin binaries.
+    # Older tarballs have no `plugins/`, so a missing directory is skipped.
+    if [ -d "${tmp_dir}/plugins" ]; then
+        if [ -w "$install_dir" ]; then
+            rm -rf "${install_dir}/plugins"
+            mv "${tmp_dir}/plugins" "${install_dir}/plugins"
+        else
+            sudo rm -rf "${install_dir}/plugins"
+            sudo mv "${tmp_dir}/plugins" "${install_dir}/plugins"
+        fi
+        info "Plugins installed to ${install_dir}/plugins"
+    fi
+
     # Man page (best-effort). Sibling of the bin dir, so /usr/local/bin gives
     # /usr/local/share/man/man1 and ~/.local/bin gives ~/.local/share/man/man1,
     # both on the default manpath. Older release tarballs have no share/, so a

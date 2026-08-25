@@ -386,7 +386,7 @@ fn click_to_viewport(
 }
 
 /// Build the placeholder paragraph shown when a plugin screen renders
-/// but no frame has arrived yet. Two cases:
+/// but no frame has arrived yet. Three cases:
 ///
 /// 1. **Plugin not registered** — runtime came up but this plugin is
 ///    absent. Either disabled (`AINB_DISABLE_PLUGINS=1`,
@@ -394,7 +394,12 @@ fn click_to_viewport(
 ///    `config.toml [plugins]` excludes it) or never installed at all.
 ///    Show actionable text so the user knows it's a deliberate state,
 ///    not a hang.
-/// 2. **Plugin registered, no frame yet** — runtime spawned the
+/// 2. **Plugin registered, render failed** — the runtime tried and could
+///    not produce a frame (most often: the subprocess cannot be spawned
+///    because its binary was removed under a running TUI by an upgrade).
+///    Show the error and how to recover. Without this the screen claimed
+///    to be connecting forever while every keystroke was dropped.
+/// 3. **Plugin registered, no frame yet** — runtime spawned the
 ///    subprocess but the first `plugin/render` hasn't completed. This
 ///    is the genuine "rendering…" case; lasts milliseconds in normal
 ///    operation.
@@ -418,6 +423,62 @@ fn build_placeholder_for_unloaded_plugin(
         }
         _ => false,
     };
+
+    // A recorded render failure outranks the loading beat: the plugin is
+    // registered, so case 3 would otherwise paint "connecting…" forever.
+    let render_error = if plugin_registered {
+        state.plugin_render_errors.get(screen_id)
+    } else {
+        None
+    };
+
+    if let Some(err) = render_error {
+        const GOLD: Color = Color::Rgb(255, 215, 0);
+        const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
+        const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
+        const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+        const ERROR_RED: Color = Color::Rgb(230, 110, 110);
+        const DARK_BG: Color = Color::Rgb(25, 25, 35);
+
+        let name = title_case_screen(screen_id);
+        let plugin_label = plugin_name.unwrap_or(screen_id).to_string();
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("The `{plugin_label}` plugin could not render this screen."),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(err.clone(), Style::default().fg(ERROR_RED))),
+            Line::from(""),
+            Line::from(Span::styled(
+                "If ainb was upgraded while this session was open, the plugin binary",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            Line::from(Span::styled(
+                "it was discovered from no longer exists. Quit and relaunch ainb.",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Logs: ~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl - search `plugin spawn failed`.",
+                Style::default().fg(MUTED_GRAY),
+            )),
+        ];
+        let block = Block::default()
+            .title(Line::from(vec![
+                Span::styled(" ⬡ ", Style::default().fg(GOLD)),
+                Span::styled(
+                    format!("{name} unavailable "),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CORNFLOWER_BLUE))
+            .style(Style::default().bg(DARK_BG));
+        return Paragraph::new(lines).alignment(Alignment::Center).block(block);
+    }
 
     if plugin_registered {
         // Genuine transient render lag: the runtime has the plugin (freshly
