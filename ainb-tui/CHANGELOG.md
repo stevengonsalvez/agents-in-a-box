@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.5] - 2026-08-25
+### Fixed
+- Merge pull request #738 from stevengonsalvez/f/diagnose-rpc-acp
+- Merge pull request #746 from stevengonsalvez/f/hangar-daemon-credit-guard
+- **hangar**: instrument acp spans instead of entering them
+- **hangar**: never credit a cargo test binary as the home's daemon
+
+### Other
+- Merge pull request #744 from stevengonsalvez/chore/release-v1.22.4
+- sync Cargo.lock with the 1.22.3 version bump
+- sync Cargo.lock with the 1.22.4 version bump
+
+
 ## [1.22.4] - 2026-08-25
 ### Fixed
 - Merge pull request #742 from stevengonsalvez/f/fix-codex
