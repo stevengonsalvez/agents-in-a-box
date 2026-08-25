@@ -87,6 +87,7 @@ impl CommandRegistry {
         let mut r = Self::new();
         r.register(RunCommand);
         r.register(ListCommand);
+        r.register(LabelCommand);
         r.register(LogsCommand);
         r.register(AttachCommand);
         r.register(StatusCommand);
@@ -223,6 +224,30 @@ impl CliCommand for ListCommand {
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::ListArgs::from_arg_matches(matches) {
             Ok(args) => Box::pin(async move { crate::cli::list::execute(args, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
+pub struct LabelCommand;
+impl CliCommand for LabelCommand {
+    fn name(&self) -> &'static str {
+        "label"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::LabelArgs as clap::Args>::augment_args(Command::new(self.name()))
+                .about("Set or clear a durable session label")
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb label my-project --set \"RPC flake\"\n  \
+                     ainb label my-project --clear",
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::LabelArgs::from_arg_matches(matches) {
+            Ok(args) => Box::pin(async move { crate::cli::label::execute(args) }),
             Err(e) => boxed_err(e),
         }
     }
@@ -3238,6 +3263,25 @@ mod tests {
         let args = crate::cli::RunArgs::from_arg_matches(sub).expect("args extract");
         assert!(args.worktree);
         assert_eq!(args.repo.as_deref(), Some(std::path::Path::new(".")));
+    }
+
+    #[test]
+    fn label_command_parses_set_and_clear() {
+        let app = CommandRegistry::built_ins().build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "label", "abc123", "--set", "RPC flake"])
+            .expect("label set parses");
+        let (_, sub) = matches.subcommand().expect("label subcommand");
+        let args = crate::cli::LabelArgs::from_arg_matches(sub).expect("label args");
+        assert_eq!(args.session, "abc123");
+        assert_eq!(args.set.as_deref(), Some("RPC flake"));
+        assert!(!args.clear);
+
+        let app = CommandRegistry::built_ins().build_clap(root());
+        assert!(
+            app.try_get_matches_from(["ainb", "label", "abc123", "--set", "x", "--clear"])
+                .is_err()
+        );
     }
 
     #[test]
