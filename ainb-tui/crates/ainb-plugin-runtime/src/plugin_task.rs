@@ -754,15 +754,55 @@ impl PluginTask {
         self.spawn_and_init().await
     }
 
+    /// Bring the subprocess up and complete `plugin/init`.
+    ///
+    /// Every failure inside settles the lifecycle state and counts against the
+    /// circuit breaker. That used to be true of no failure at all: the whole
+    /// function returned with the state still `Spawning`, which
+    /// `ensure_running` treats as spawnable, and the quarantine check lived
+    /// only on `handle_exit` — the path for a process that started and then
+    /// died. A plugin that could never start (binary deleted by an upgrade
+    /// under a running TUI) or that started but never completed init (ABI
+    /// mismatch after a half-upgrade) was therefore retried on every later
+    /// render, CLI, or action kick, forever, without ever tripping the breaker.
     async fn spawn_and_init(&mut self) -> Result<(), RuntimeError> {
         self.set_state(LifecycleState::Spawning);
-        let mut child = match spawn_plugin(&self.plugin.binary_path) {
-            Ok(c) => c,
+        match self.spawn_and_init_inner().await {
+            Ok(()) => Ok(()),
             Err(e) => {
+                warn!(
+                    plugin = %self.plugin.id,
+                    binary = %self.plugin.binary_path.display(),
+                    error = %e,
+                    "plugin spawn failed"
+                );
+                // A failure after the exec (init timeout, ABI rejection) leaves
+                // a live child behind. Reap it here rather than letting the
+                // next attempt overwrite `self.child` and strand it.
+                if let Some(cs) = self.child.take() {
+                    cs.stderr_drain.abort();
+                    cs.stdout_reader.abort();
+                }
                 self.record_failure();
-                return Err(e);
+                if self.is_quarantine_due() {
+                    self.set_state(LifecycleState::Quarantined);
+                    error!(
+                        plugin = %self.plugin.id,
+                        "quarantined after {} failed spawns",
+                        self.failures.len()
+                    );
+                } else {
+                    self.set_state(LifecycleState::Idle);
+                }
+                Err(e)
             }
-        };
+        }
+    }
+
+    /// Raw spawn + init. Returns the first error; `spawn_and_init` owns the
+    /// state transition, failure accounting, and child cleanup for all of them.
+    async fn spawn_and_init_inner(&mut self) -> Result<(), RuntimeError> {
+        let mut child = spawn_plugin(&self.plugin.binary_path)?;
         let stdin = child
             .stdin
             .take()
@@ -1537,11 +1577,16 @@ impl PluginTask {
                     plugin = %self.plugin.id,
                     "eager respawn after exit failed: {e}"
                 );
-                // spawn_and_init transitions to Spawning then either
-                // Running on success or leaves us in Spawning on
-                // failure; explicitly fall back to Idle so the next
-                // failure scheduling math doesn't confuse states.
-                self.set_state(LifecycleState::Idle);
+                // spawn_and_init now settles the state itself on failure:
+                // Quarantined once the breaker trips, else Idle. Only fill in
+                // Idle for the states it does not settle, and NEVER downgrade
+                // Quarantined — doing so re-armed `ensure_running` (which
+                // treats Idle as spawnable) and re-exec'd a binary that can
+                // never start, which is precisely the eager-plugin case
+                // (session-reader) this breaker exists to stop.
+                if !matches!(*self.state.read(), LifecycleState::Quarantined) {
+                    self.set_state(LifecycleState::Idle);
+                }
             }
         }
     }

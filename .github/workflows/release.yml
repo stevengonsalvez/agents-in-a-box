@@ -481,6 +481,23 @@ jobs:
               man1.install "share/man/man1/ainb.1" if File.exist?("share/man/man1/ainb.1")
               (bin/"ainb").write <<~WRAPPER
                 #!/bin/bash
+                # This value names a keg-versioned path, so an older install's
+                # export outlives the keg. Inherited from a long-lived shell or
+                # a tmux server environment it survives `brew upgrade` and then
+                # either points at a directory the upgrade deleted (every plugin
+                # screen comes up empty) or, until `brew cleanup` runs and
+                # removes the old keg, still resolves — pairing this binary with
+                # the PREVIOUS release's plugin binaries.
+                #
+                # Drop any inherited value naming a different ainb keg, whether
+                # or not it still exists. A genuine user override (any path not
+                # under an ainb Cellar keg) is untouched.
+                case "${AINB_PLUGIN_ROOT}" in
+                  "" ) ;;
+                  "#{libexec}/plugins" ) ;;
+                  */Cellar/ainb/* ) unset AINB_PLUGIN_ROOT ;;
+                  * ) [ -d "${AINB_PLUGIN_ROOT}" ] || unset AINB_PLUGIN_ROOT ;;
+                esac
                 export AINB_PLUGIN_ROOT="${AINB_PLUGIN_ROOT:-#{libexec}/plugins}"
                 exec "#{libexec}/ainb" "$@"
               WRAPPER
