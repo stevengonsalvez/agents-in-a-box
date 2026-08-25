@@ -350,6 +350,12 @@ pub fn log_dir() -> anyhow::Result<std::path::PathBuf> {
 /// Resolve the daemon's pid file: `<hangar_home>/hangar/daemon.pid`.
 ///
 /// The one path both the daemon (which self-registers into it at boot) and the
+/// `ainb hangar daemon status/stop/start` verbs read.
+#[must_use]
+pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("hangar").join("daemon.pid")
+}
+
 /// Socket of an externally managed Codex app-server to attach to, if opted in.
 ///
 /// `AINB_CODEX_APP_SERVER=<path>` names one explicitly.
@@ -359,10 +365,18 @@ pub fn log_dir() -> anyhow::Result<std::path::PathBuf> {
 /// Returns `None` when unset, so the default stays: spawn our own server on a
 /// scoped `CODEX_HOME`.
 pub fn codex_external_socket() -> Option<std::path::PathBuf> {
-    codex_external_socket_from(
-        std::env::var_os("AINB_CODEX_APP_SERVER"),
-        dirs::home_dir().as_deref(),
-    )
+    let raw = std::env::var_os("AINB_CODEX_APP_SERVER");
+    let opted_in = raw.as_ref().is_some_and(|value| !value.is_empty());
+    let resolved = codex_external_socket_from(raw, dirs::home_dir().as_deref());
+    if opted_in && resolved.is_none() {
+        // Silently falling back to owned mode would hand the user scoped
+        // sessions their phone cannot see, with no sign the opt-in was ignored.
+        tracing::warn!(
+            "AINB_CODEX_APP_SERVER=desktop set but the home directory could not \
+             be resolved; continuing with Ainb's own codex app-server"
+        );
+    }
+    resolved
 }
 
 /// [`codex_external_socket`] against explicit inputs, so the resolution rules are
@@ -379,12 +393,6 @@ fn codex_external_socket_from(
         return home.map(|home| home.join(".codex/app-server-control/app-server-control.sock"));
     }
     Some(std::path::PathBuf::from(raw))
-}
-
-/// `ainb hangar daemon status/stop/start` verbs read.
-#[must_use]
-pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
-    dir.join("hangar").join("daemon.pid")
 }
 
 /// This daemon's registration in `<hangar_home>/hangar/daemon.pid`, removed on
@@ -742,33 +750,33 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             // avoid, and existing scoped sessions do not carry over.
             let external = codex_external_socket();
             let attached = external.is_some();
-            let socket = external.unwrap_or_else(|| dir.join("codex-app-server.sock"));
+            // Our own server always lives here, whether or not we attach
+            // elsewhere this boot. Both reapers below are scoped to THIS path
+            // and signal only a pid proven to hold it, so they must keep running
+            // in attached mode too: otherwise a server orphaned by an earlier
+            // SIGKILL leaks forever the moment the user opts in.
+            let owned_socket = dir.join("codex-app-server.sock");
+            let socket = external.unwrap_or_else(|| owned_socket.clone());
             // Older Ainb daemons used `codex app-server proxy` against this same
             // path. A pre-lock daemon can survive an upgrade and keep sending
             // stdin JSON-RPC into the native WebSocket listener. Recover only
             // the exact orphaned parent-child legacy topology for this home.
-            // Both sweeps below signal processes around OUR socket. When we are a
-            // guest on somebody else's app-server, the proxies and servers near
-            // that socket belong to Codex Desktop and the phone, so reaping is
-            // not ours to do.
-            if !attached {
-                let legacy_reaped =
-                    crate::fleet_provider::codex_manager::reap_legacy_codex_proxy_daemons(&socket)
-                        .await;
-                if legacy_reaped > 0 {
-                    tracing::warn!(legacy_reaped, "reaped obsolete codex proxy daemon at boot");
-                }
+            let legacy_reaped =
+                crate::fleet_provider::codex_manager::reap_legacy_codex_proxy_daemons(
+                    &owned_socket,
+                )
+                .await;
+            if legacy_reaped > 0 {
+                tracing::warn!(legacy_reaped, "reaped obsolete codex proxy daemon at boot");
             }
             // Reap any app-server orphaned by a SIGKILLed/OOM-reaped prior daemon (or a
             // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
             // SIGKILL, so this boot-time sweep is the only backstop that survives it.
-            if !attached {
-                let reaped =
-                    crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket)
-                        .await;
-                if reaped > 0 {
-                    tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
-                }
+            let reaped =
+                crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&owned_socket)
+                    .await;
+            if reaped > 0 {
+                tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
             }
             if attached {
                 tracing::info!(

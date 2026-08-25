@@ -735,12 +735,10 @@ async fn reap_codex_orphans_periodic() {
     let Ok(dir) = crate::hangar_dir() else {
         return;
     };
-    // Attached mode is a guest on somebody else's app-server (the ChatGPT-managed
-    // daemon the phone pairs with). Its neighbouring processes are not ours to
-    // reap, and we never spawn one to orphan in the first place.
-    if crate::codex_external_socket().is_some() {
-        return;
-    }
+    // Always OUR socket, never the externally managed one: the sweep signals
+    // only a pid proven to hold this exact path, so it can never touch Codex
+    // Desktop's server, and it must keep running in attached mode so a server
+    // orphaned by an earlier SIGKILL still gets reaped.
     let socket = dir.join("codex-app-server.sock");
     let reaped = crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
     if reaped > 0 {
