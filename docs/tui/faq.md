@@ -145,7 +145,7 @@ Press `x` from the session list to clean up:
 | `x` | Cleanup orphaned sessions |
 | `$` | Open shell in workspace |
 | `o` | Open in editor |
-| `F2` | Rename "Other" tmux session |
+| `F2` | Edit durable Session label for managed or SSH session. Rename Other tmux sessions. |
 | `g` | Git view |
 | `l` | Logs view |
 | `c` | Config |
