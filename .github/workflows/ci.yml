@@ -170,6 +170,49 @@ jobs:
         if: >-
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
+      # Linux only: these paths and `df --output` are GNU/Linux, and the macOS
+      # leg of this matrix has never hit the wall.
+      #
+      # MEASURED, 2026-08-24, run 32785104108: this job's target tree peaks at
+      # 85G and the runner offers 86G free after the image. A ~1G margin, which
+      # is why it failed roughly one run in three rather than every time, and
+      # why it always died on `ainb-plugin-abtop`: that is the LAST of the six
+      # nested plugin builds `real_plugin_axes` runs, so it links at peak
+      # accumulation. At the failure the filesystem was 145G/145G, 8.8M free.
+      #
+      # It does NOT present as a disk error. `rust-lld` sizes the output with
+      # ftruncate, mmaps it, and only faults when a page is written to a
+      # filesystem that can no longer allocate blocks, so ENOSPC arrives as
+      # `ld terminated with signal 7 [Bus error]` under an LLVM crash report.
+      # That cost two days of it being read as a flake, then as infra.
+      #
+      # The Contracts job hit the same wall and took the same treatment; this
+      # reclaim frees 20G (59G used here against 39G there, same image), taking
+      # the margin from ~1G to ~21G.
+      - name: Reclaim runner disk
+        if: >-
+          runner.os == 'Linux' && always() &&
+          (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost
+          df -h /
+      # Fail FAST and legibly if the headroom ever goes away again, rather than
+      # 20 minutes later as a linker crash nobody can attribute.
+      - name: Assert disk headroom for the --all-features build
+        if: >-
+          runner.os == 'Linux' && always() &&
+          (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          avail=$(df --output=avail / | tail -1)
+          need=94371840   # 90G in 1K blocks; the tree measured 85G
+          if [ "$avail" -lt "$need" ]; then
+            echo "::error::only $((avail/1048576))G free, this job's build needs ~85G. Reclaim more before it links, because rust-lld reports exhaustion as SIGBUS, not as a disk error."
+            exit 1
+          fi
+          echo "$((avail/1048576))G free, need ~85G"
       - uses: dtolnay/rust-toolchain@stable
         if: >-
           always() && (github.event_name != 'pull_request' ||
