@@ -112,17 +112,6 @@ checkout you point at: it shares that branch, index and working tree with your
 editor and with every other session started there. Prefer --worktree.
 ```
 
-### Durable session labels
-
-Labels are separate from Git branches and tmux names. They stay attached when
-the agent changes branches. Use `F2` or right-click a managed or SSH session in
-the TUI, or run:
-
-```text
-ainb label my-project --set "RPC flake"
-ainb label my-project --clear
-```
-
 ## `ainb list`
 
 List all sessions (running + idle)
@@ -144,6 +133,30 @@ EXAMPLES:
   ainb list --running              Only running sessions
   ainb list --workspace my-proj    Sessions for one workspace
   ainb list --format json          Machine-readable output
+```
+
+## `ainb label`
+
+Set or clear a durable session label
+
+```console
+$ ainb label --help
+Set or clear a durable session label
+
+Usage: ainb label [OPTIONS] <--set <SET>|--clear> <SESSION>
+
+Arguments:
+  <SESSION>  Session ID, workspace name, or exact SSH tmux session name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --set <SET>        Set a durable human label
+      --clear            Remove the durable label
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb label my-project --set "RPC flake"
+  ainb label my-project --clear
 ```
 
 ## `ainb logs`
