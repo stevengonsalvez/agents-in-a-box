@@ -687,6 +687,19 @@ fn epoch_millis() -> i64 {
 
 /// Spawn shared app-server, connect its Unix WebSocket, initialize protocol, then start manager.
 pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, ProviderError> {
+    // Attached mode cannot create the socket it needs, so when Codex Desktop is
+    // not running every retry would otherwise re-run `probe_codex` -- four
+    // `codex` spawns plus a schema regeneration -- forever at the backoff cap.
+    // Fail cheaply instead; the service retry loop still recovers when Desktop
+    // comes back.
+    if config.server_ownership == ServerOwnership::External
+        && !tokio::fs::try_exists(&config.socket_path).await.unwrap_or(false)
+    {
+        return Err(ProviderError::Transport(format!(
+            "external Codex app-server socket is absent: {}",
+            config.socket_path.display()
+        )));
+    }
     let probe_binary = config.codex_binary.clone();
     let capabilities = tokio::task::spawn_blocking(move || probe_codex(&probe_binary))
         .await
@@ -796,11 +809,12 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
                 )));
             }
         };
-    let cleanup: Box<dyn ProcessCleanup> = Box::new(ServerCleanup {
+    let cleanup: Box<dyn ProcessCleanup> = Box::new(server_cleanup(
         server,
-        owned_socket_path: owns_server.then(|| config.socket_path.clone()),
-        owner_marker_path: owns_server.then_some(owner_marker_path),
-    });
+        owns_server,
+        &config.socket_path,
+        owner_marker_path,
+    ));
 
     spawn_connection(
         WebSocketTransport { websocket },
@@ -2260,6 +2274,25 @@ trait ProcessCleanup: Send {
     fn cleanup(&mut self) -> CleanupFuture<'_>;
 }
 
+/// Build the teardown for a connection, given whether we own the server.
+///
+/// Extracted so the "never unlink a socket we do not own" rule is testable
+/// against the SAME construction [`spawn`] uses. Asserting on a hand-built
+/// `ServerCleanup` only restates the assumption, and would stay green if this
+/// rule were ever inverted here.
+fn server_cleanup(
+    server: Option<Child>,
+    owns_server: bool,
+    socket_path: &Path,
+    owner_marker_path: PathBuf,
+) -> ServerCleanup {
+    ServerCleanup {
+        server,
+        owned_socket_path: owns_server.then(|| socket_path.to_path_buf()),
+        owner_marker_path: owns_server.then_some(owner_marker_path),
+    }
+}
+
 struct ServerCleanup {
     server: Option<Child>,
     owned_socket_path: Option<PathBuf>,
@@ -3492,15 +3525,19 @@ mod tests {
         let listener = UnixListener::bind(&theirs).unwrap();
         assert!(theirs.exists(), "precondition: their socket is bound");
 
-        // Exactly what spawn() builds when owns_server is false.
-        let mut cleanup = ServerCleanup {
-            server: None,
-            owned_socket_path: None,
-            owner_marker_path: None,
-        };
+        // The SAME constructor spawn() uses, with owns_server = false.
+        let mut cleanup = server_cleanup(None, false, &theirs, socket_owner_marker(&theirs));
         cleanup.cleanup().await;
-
         assert!(theirs.exists(), "cleanup unlinked a socket we do not own");
+        drop(listener);
+
+        // And the other half of the rule: a socket we DO own is still cleaned
+        // up, so the guard above cannot be satisfied by never unlinking at all.
+        let ours = dir.path().join("ours.sock");
+        let listener = UnixListener::bind(&ours).unwrap();
+        let mut cleanup = server_cleanup(None, true, &ours, socket_owner_marker(&ours));
+        cleanup.cleanup().await;
+        assert!(!ours.exists(), "an owned socket must still be removed");
         drop(listener);
     }
 
