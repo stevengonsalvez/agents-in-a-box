@@ -1559,6 +1559,28 @@ mod tests {
     }
 
     #[test]
+    fn codex_template_respects_codex_hook_timeout_caps() {
+        // Codex hard-clamps the SessionEnd hook to 3s and surfaces the clamp
+        // as an error item on every session start. Anything above the cap is a
+        // user-visible startup error, not a silent adjustment.
+        let template: serde_json::Value = serde_json::from_str(CODEX_HOOKS_TEMPLATE).unwrap();
+        let caps = [("SessionEnd", 3u64)];
+        for (event, cap) in caps {
+            let entries = template["hooks"][event].as_array().expect("event entries");
+            for entry in entries {
+                for hook in entry["hooks"].as_array().expect("hook list") {
+                    let timeout = hook["timeout"].as_u64().expect("timeout");
+                    assert!(
+                        timeout <= cap,
+                        "{event} hook timeout {timeout}s exceeds Codex's {cap}s cap; \
+                         Codex clamps it and prints a startup error"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn claude_manifest_registers_every_documented_hook() {
         let manifest: serde_json::Value = serde_json::from_str(CLAUDE_PLUGIN_JSON).unwrap();
         let hooks = manifest["hooks"].as_object().expect("hooks object");
