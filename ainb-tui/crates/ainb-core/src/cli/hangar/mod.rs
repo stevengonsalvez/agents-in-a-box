@@ -8027,8 +8027,40 @@ fn pid_owns_a_home(pid: u32, socket: &std::path::Path) -> bool {
     }
     i32::try_from(pid).is_ok_and(|pid| {
         ainb_hangar_daemon::single_instance::process_argv(pid)
-            .is_some_and(|args| ainb_hangar_daemon::single_instance::is_hangar_daemon_args(&args))
+            .is_some_and(|args| argv_credits_a_daemon(&args))
     })
+}
+
+/// The argv half of [`pid_owns_a_home`], as a pure function so the boot-window
+/// fallback's exact credit rule is testable without spawning a process.
+///
+/// A recognised daemon shape counts, EXCEPT from a `cargo test` binary.
+fn argv_credits_a_daemon(args: &str) -> bool {
+    !is_cargo_test_binary(args) && ainb_hangar_daemon::single_instance::is_hangar_daemon_args(args)
+}
+
+/// Is this argv a `cargo test` binary (`.../target/<profile>/deps/<name>-<hash>`)?
+///
+/// A test binary that self-exec'd as `... hangar daemon run` (#715) writes the
+/// REAL `daemon.pid` but never binds the socket. The argv fallback above would
+/// then credit it as this home's daemon on shape alone, autostart would decline
+/// to start anything, and every socket client would get ECONNREFUSED for as
+/// long as that pid lived -- a home wedged with ZERO daemons, which is exactly
+/// what the fallback exists to avoid.
+///
+/// Deliberately NOT applied to `single_instance::holder_is_live_daemon`: that
+/// caller has the opposite asymmetry (a false negative there steals a live
+/// holder's lock and puts two daemons on one home) and already respects an
+/// in-process `boot()` inside a test binary via `shares_our_command_line`.
+fn is_cargo_test_binary(args: &str) -> bool {
+    let Some(argv0) = args.split_whitespace().next() else {
+        return false;
+    };
+    let path = std::path::Path::new(argv0);
+    path.parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|dir| dir == "deps")
+        && path.components().any(|part| part.as_os_str() == "target")
 }
 
 /// Is `pid` a live process? `kill(pid, 0)` succeeds iff it exists (and we may
@@ -10858,6 +10890,50 @@ mod tests {
             None,
             "a live non-daemon in the lock must not be read as the home's owner"
         );
+    }
+
+    /// A self-exec'd cargo TEST binary must not be credited as this home's daemon.
+    ///
+    /// The incident: a test run left `.../target/debug/deps/ainb-<hash> hangar
+    /// daemon run` detached against the user's REAL home and writing its
+    /// `daemon.pid`. It matched the argv fallback on shape, so
+    /// `ensure_hangar_daemon` read the home as already served and started
+    /// nothing, while the socket it never bound sat orphaned. Every Codex
+    /// resume then failed with ECONNREFUSED, surfaced to the user as "Codex
+    /// remote control unavailable".
+    ///
+    /// Asserted on `argv_credits_a_daemon` rather than end to end: this test
+    /// binary's own argv does not contain the `hangar daemon run` token window,
+    /// so seeding our pid would pass with or without the guard.
+    #[test]
+    fn a_cargo_test_binary_is_never_credited_as_this_homes_daemon() {
+        let test_binary = "/w/ainb-tui/target/debug/deps/ainb-39a2b880848dbfd5 hangar daemon run";
+
+        // Shape recognition alone still says "daemon". That is the trap.
+        assert!(
+            ainb_hangar_daemon::single_instance::is_hangar_daemon_args(test_binary),
+            "argv shape matches, which is why the extra guard exists"
+        );
+        assert!(
+            !argv_credits_a_daemon(test_binary),
+            "a target/**/deps/ binary must never be credited as the home's daemon"
+        );
+
+        // The shapes that must keep counting, or autostart would spawn a second
+        // daemon on top of a live one.
+        for live in [
+            "/opt/homebrew/bin/ainb hangar daemon run",
+            "/w/ainb-tui/target/debug/ainb hangar daemon run",
+            "/opt/homebrew/bin/ainb-hangar-daemon",
+        ] {
+            assert!(argv_credits_a_daemon(live), "must still credit: {live}");
+        }
+
+        // And the ordinary CLI verbs stay uncredited.
+        assert!(!argv_credits_a_daemon(
+            "/opt/homebrew/bin/ainb hangar daemon status"
+        ));
+        assert!(!argv_credits_a_daemon(""));
     }
 
     /// The skew helper flags a differing recorded version, and stays quiet for
