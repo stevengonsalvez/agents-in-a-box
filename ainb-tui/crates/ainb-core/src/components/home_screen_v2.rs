@@ -27,6 +27,7 @@ const PANEL_BG: Color = Color::Rgb(30, 30, 40);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
+const DISPLAY_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const SIDEBAR_EDGE_HIT_SLOP: u16 = 1;
 pub const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
@@ -522,7 +523,7 @@ impl HomeScreenV2Component {
                 Style::default().fg(MUTED_GRAY),
             ),
             Span::styled("                    ", Style::default()),
-            Span::styled("v2.0.0", Style::default().fg(MUTED_GRAY)),
+            Span::styled(DISPLAY_VERSION, Style::default().fg(MUTED_GRAY)),
         ]))
         .style(Style::default().bg(PANEL_BG));
 
@@ -561,7 +562,7 @@ impl HomeScreenV2Component {
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" - Agents in a Box", Style::default().fg(SOFT_WHITE)),
-            Span::styled("  v2.0.0", Style::default().fg(MUTED_GRAY)),
+            Span::styled(format!("  {DISPLAY_VERSION}"), Style::default().fg(MUTED_GRAY)),
         ]))
         .style(Style::default().bg(PANEL_BG));
 
@@ -682,6 +683,31 @@ impl Default for HomeScreenV2Component {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_to_string(width: u16, height: u16) -> String {
+        let component = HomeScreenV2Component::new();
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut state = HomeScreenV2State::new();
+
+        terminal
+            .draw(|frame| component.render(frame, frame.area(), &mut state, &[]))
+            .unwrap();
+
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn headers_render_the_package_version() {
+        assert!(render_to_string(120, 40).contains(DISPLAY_VERSION));
+        assert!(render_to_string(80, 24).contains(DISPLAY_VERSION));
+    }
 
     #[test]
     fn test_layout_mode_detection() {
