@@ -238,6 +238,135 @@ async fn log_failed_launch_pane(exact_target: &str) {
     warn!("Failed launch pane (last lines): {shown}");
 }
 
+/// Record `trust_level = "trusted"` for a worktree Ainb created, in the Codex
+/// home the app-server reads.
+///
+/// Codex asks "Do you trust the contents of this directory?" for any directory
+/// it has not seen, and under `--remote` there is no CLI flag that suppresses
+/// it (`-C` is `--cd`; the only trust flag is `--dangerously-bypass-hook-trust`,
+/// which covers hooks, not directories). The modal blocks before a thread is
+/// created, so the launch stalls and Ainb reports "Codex failed to start".
+///
+/// SCOPE, deliberately narrow: this writes exactly one key,
+/// `[projects."<path>"] trust_level`, and only for a path Ainb created itself.
+/// It must never touch `model`, `approval_policy`, sandbox settings,
+/// `mcp_servers`, `hooks`, or anything else in the user's file. `toml_edit`
+/// preserves their formatting, comments and every other entry byte for byte.
+///
+/// Best-effort: a failure here only means the user answers one prompt, so it
+/// must never fail a launch.
+fn trust_codex_project_dir(worktree: &std::path::Path) {
+    let Some(config) = codex_config_path() else {
+        return;
+    };
+    let existing = match std::fs::read_to_string(&config) {
+        Ok(text) => text,
+        // No config yet: Codex will create one. Writing a bare [projects] table
+        // from under it risks fighting its own first-run write.
+        Err(_) => return,
+    };
+    let Ok(mut doc) = existing.parse::<toml_edit::DocumentMut>() else {
+        warn!("Codex config is not valid TOML; not recording worktree trust");
+        return;
+    };
+    let key = worktree.display().to_string();
+    // Already trusted (by Codex or by us) -- nothing to write.
+    if doc
+        .get("projects")
+        .and_then(|projects| projects.get(&key))
+        .and_then(|entry| entry.get("trust_level"))
+        .and_then(|level| level.as_str())
+        == Some("trusted")
+    {
+        return;
+    }
+    let projects = doc.entry("projects").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(projects) = projects.as_table_mut() else {
+        return;
+    };
+    projects.set_implicit(true);
+    let entry = projects.entry(&key).or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(entry) = entry.as_table_mut() else {
+        return;
+    };
+    entry["trust_level"] = toml_edit::value("trusted");
+    if let Err(error) = write_atomic_config(&config, &doc.to_string()) {
+        warn!("Could not record worktree trust in the Codex config: {error}");
+        return;
+    }
+    info!("Recorded Codex trust for the worktree Ainb created: {key}");
+}
+
+/// `<CODEX_HOME>/config.toml`, honouring `CODEX_HOME`.
+fn codex_config_path() -> Option<PathBuf> {
+    let home = match std::env::var_os("CODEX_HOME") {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => dirs::home_dir()?.join(".codex"),
+    };
+    Some(home.join("config.toml"))
+}
+
+/// Temp-file + rename, so a crash mid-write cannot truncate the user's config.
+fn write_atomic_config(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("toml.ainb-tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Substitute a retiring Codex model with the one the provider names.
+///
+/// `<CODEX_HOME>/models_cache.json` carries, per model, an `upgrade` block with
+/// the replacement `model` and a `retirement_at`. When it is present, launching
+/// the old slug shows a blocking migration modal, so the session never starts.
+/// Codex owns this data and updates it server-side; we read it rather than
+/// hard-coding a mapping that would go stale.
+///
+/// Returns the input unchanged when the cache is absent, unreadable, or has no
+/// upgrade for this model. Never fails a launch on its own.
+fn migrated_codex_model(model: &str) -> String {
+    let Some(cache) = codex_models_cache_path() else {
+        return model.to_string();
+    };
+    let Ok(text) = std::fs::read_to_string(&cache) else {
+        return model.to_string();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return model.to_string();
+    };
+    let replacement = parsed
+        .get("models")
+        .and_then(|models| models.as_array())
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|entry| entry.get("slug").and_then(|s| s.as_str()) == Some(model))
+        })
+        .and_then(|entry| entry.get("upgrade"))
+        .filter(|upgrade| !upgrade.is_null())
+        .and_then(|upgrade| upgrade.get("model"))
+        .and_then(|model| model.as_str());
+    match replacement {
+        Some(replacement) if replacement != model => {
+            warn!(
+                "Codex is retiring '{model}'; launching '{replacement}' instead \
+                 (per {})",
+                cache.display()
+            );
+            replacement.to_string()
+        }
+        _ => model.to_string(),
+    }
+}
+
+/// `<CODEX_HOME>/models_cache.json`, honouring `CODEX_HOME`.
+fn codex_models_cache_path() -> Option<PathBuf> {
+    let home = match std::env::var_os("CODEX_HOME") {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => dirs::home_dir()?.join(".codex"),
+    };
+    Some(home.join("models_cache.json"))
+}
+
 /// Roll back resources created before a fresh Interactive session is registered.
 pub(crate) async fn rollback_failed_interactive_launch(
     session_id: Uuid,
@@ -2096,6 +2225,10 @@ impl InteractiveSessionManager {
             // claim deadline reports "Codex failed to start". Ainb wrote those
             // hooks; re-confirming them from a detached tmux pane is not a
             // decision the user can act on.
+            // Trust the worktree before launching: `-C` into a directory Codex
+            // has not seen shows a blocking modal, and under `--remote` no flag
+            // suppresses it.
+            trust_codex_project_dir(working_dir);
             let mut command = vec![
                 provider.command().to_string(),
                 "-c".to_string(),
@@ -2109,7 +2242,13 @@ impl InteractiveSessionManager {
                 working_dir.display().to_string(),
             ];
             if let Some(model) = model.as_deref().filter(|model| !is_default_model(model)) {
-                command.extend(["--model".to_string(), model.to_string()]);
+                // Launching a retiring model shows a blocking migration modal
+                // ("GPT-5.4 will be deprecated soon … Choose how you'd like
+                // Codex to proceed"), which stalls the launch exactly like the
+                // trust and hook gates. Follow the upgrade the provider itself
+                // advertises instead of arguing with it.
+                let model = migrated_codex_model(model);
+                command.extend(["--model".to_string(), model]);
             }
             if skip_permissions {
                 command.push(provider.skip_permissions_flag().to_string());
@@ -2432,6 +2571,148 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 
 #[cfg(test)]
 mod tests {
+
+    /// Recording worktree trust must not disturb ANY other key.
+    ///
+    /// This writes into the user's own `~/.codex/config.toml`, shared with
+    /// Codex Desktop and the CLI. The permission is narrow on purpose: one key,
+    /// `[projects."<path>"] trust_level`, for a directory Ainb created. Model,
+    /// approval policy, sandbox, MCP servers and hooks are the user's.
+    #[test]
+    fn trusting_a_worktree_touches_only_its_own_projects_key() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let config = codex.join("config.toml");
+        let original = r#"# a comment the user wrote
+model = "gpt-5.6-terra"
+approval_policy = "on-request"
+
+[features]
+hooks = true
+
+[mcp_servers.hangy]
+command = "hangy"
+
+[projects."/already/trusted"]
+trust_level = "trusted"
+"#;
+        std::fs::write(&config, original).unwrap();
+
+        // Drive the same edit the launcher performs, against this temp home.
+        let worktree = std::path::Path::new("/tmp/ainb-made-this");
+        let mut doc = original.parse::<toml_edit::DocumentMut>().unwrap();
+        let key = worktree.display().to_string();
+        let projects =
+            doc.entry("projects").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let projects = projects.as_table_mut().unwrap();
+        projects.set_implicit(true);
+        let entry = projects.entry(&key).or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        entry.as_table_mut().unwrap()["trust_level"] = toml_edit::value("trusted");
+        let updated = doc.to_string();
+
+        // The new entry landed.
+        assert!(updated.contains(r#"[projects."/tmp/ainb-made-this"]"#));
+
+        // Everything else is byte-identical, comment included.
+        assert!(updated.contains("# a comment the user wrote"));
+        for untouched in [
+            r#"model = "gpt-5.6-terra""#,
+            r#"approval_policy = "on-request""#,
+            "[features]",
+            "hooks = true",
+            "[mcp_servers.hangy]",
+            r#"command = "hangy""#,
+            r#"[projects."/already/trusted"]"#,
+        ] {
+            assert!(updated.contains(untouched), "clobbered: {untouched}");
+        }
+
+        // Structural check rather than a line diff: `trust_level = "trusted"`
+        // already appears under /already/trusted, so a raw line diff would
+        // dedupe the new one away and prove nothing.
+        let before = original.parse::<toml_edit::DocumentMut>().unwrap();
+        let after = updated.parse::<toml_edit::DocumentMut>().unwrap();
+
+        // Exactly one new top-level key at most (`projects` already existed).
+        let before_keys: Vec<&str> = before.as_table().iter().map(|(k, _)| k).collect();
+        let after_keys: Vec<&str> = after.as_table().iter().map(|(k, _)| k).collect();
+        assert_eq!(before_keys, after_keys, "top-level keys changed");
+
+        // Every pre-existing top-level value is untouched.
+        for (key, value) in before.as_table().iter() {
+            if key == "projects" {
+                continue;
+            }
+            assert_eq!(
+                value.to_string(),
+                after[key].to_string(),
+                "`{key}` was modified"
+            );
+        }
+
+        // Under [projects], exactly one entry was added and none changed.
+        let before_projects: Vec<&str> =
+            before["projects"].as_table().unwrap().iter().map(|(k, _)| k).collect();
+        let after_projects: Vec<&str> =
+            after["projects"].as_table().unwrap().iter().map(|(k, _)| k).collect();
+        assert_eq!(after_projects.len(), before_projects.len() + 1);
+        for existing in &before_projects {
+            assert!(
+                after_projects.contains(existing),
+                "dropped project {existing}"
+            );
+        }
+        assert_eq!(
+            after["projects"]["/tmp/ainb-made-this"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
+    /// A retiring model is swapped for the replacement Codex advertises.
+    ///
+    /// Launching the old slug shows a blocking migration modal, so the session
+    /// never starts. gpt-5.4 and gpt-5.4-mini retire 2026-08-31.
+    #[test]
+    fn a_retiring_model_is_replaced_by_its_advertised_upgrade() {
+        let cache = serde_json::json!({
+            "models": [
+                {"slug": "gpt-5.6-terra", "upgrade": null},
+                {"slug": "gpt-5.4", "upgrade": {
+                    "model": "gpt-5.6-terra",
+                    "retirement_at": "2026-08-31T19:00:00Z"
+                }},
+            ]
+        });
+        let models = cache["models"].as_array().unwrap();
+        let pick = |slug: &str| -> String {
+            models
+                .iter()
+                .find(|m| m["slug"] == slug)
+                .and_then(|m| m.get("upgrade"))
+                .filter(|u| !u.is_null())
+                .and_then(|u| u.get("model"))
+                .and_then(|m| m.as_str())
+                .unwrap_or(slug)
+                .to_string()
+        };
+        assert_eq!(
+            pick("gpt-5.4"),
+            "gpt-5.6-terra",
+            "retiring model must be replaced"
+        );
+        assert_eq!(
+            pick("gpt-5.6-terra"),
+            "gpt-5.6-terra",
+            "a current model is left alone"
+        );
+        assert_eq!(
+            pick("gpt-unknown"),
+            "gpt-unknown",
+            "an unknown model is left alone"
+        );
+    }
+
     use super::*;
 
     #[cfg(unix)]
