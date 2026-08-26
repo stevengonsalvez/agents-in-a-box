@@ -46,6 +46,22 @@ fn signed_manifest_requires_the_matching_ed25519_public_key() {
 }
 
 #[test]
+fn signed_manifest_rejects_unsafe_asset_metadata() {
+    let signing_key = SigningKey::from_bytes(&[9; 32]);
+    let bytes = br#"{"version":"1.23.0","assets":[{"target":"x86_64-unknown-linux-gnu","archive":"../ainb.tar.gz","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+    let signature = signing_key.sign(bytes);
+
+    assert!(
+        verify_manifest_with_key(
+            bytes,
+            &STANDARD.encode(signature.to_bytes()),
+            &STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn local_newer_than_manifest_never_downgrades() {
     let manifest = ReleaseManifest::for_test("1.22.5");
     let state = ReleaseState::from_manifest("1.23.0", &manifest, 1_700_000_000_000).unwrap();

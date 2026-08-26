@@ -40,6 +40,26 @@ pub struct ReleaseAsset {
     pub sha256: String,
 }
 
+impl ReleaseAsset {
+    fn validate(&self) -> Result<()> {
+        let archive_is_file_name = std::path::Path::new(&self.archive)
+            .file_name()
+            .is_some_and(|name| name == self.archive.as_str());
+        if !archive_is_file_name
+            || !self
+                .archive
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        {
+            bail!("release archive name is unsafe: {}", self.archive);
+        }
+        if self.sha256.len() != 64 || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("release archive checksum is invalid for {}", self.archive);
+        }
+        Ok(())
+    }
+}
+
 impl ReleaseManifest {
     /// Small constructor retained for integration tests and fixture builders.
     #[must_use]
@@ -95,6 +115,9 @@ pub fn verify_manifest_with_key(
     let manifest: ReleaseManifest =
         serde_json::from_slice(bytes).context("decoding signed release manifest")?;
     manifest.stable_version()?;
+    for asset in &manifest.assets {
+        asset.validate()?;
+    }
     Ok(manifest)
 }
 
@@ -501,9 +524,19 @@ async fn apply_direct_release(manifest: &ReleaseManifest) -> Result<()> {
     make_executable(&replacement)?;
     re_sign_macos_binary(&replacement)?;
     verify_candidate_binary(&replacement)?;
-    std::fs::rename(&replacement, &destination)
-        .with_context(|| format!("replacing {}", destination.display()))?;
-    replace_direct_plugins(temp.path(), parent)?;
+    let mut plugins = DirectPluginSwap::stage(temp.path(), parent)?;
+    if let Some(swap) = plugins.as_mut() {
+        swap.activate()?;
+    }
+    if let Err(error) = std::fs::rename(&replacement, &destination) {
+        if let Some(swap) = plugins.as_mut() {
+            swap.rollback().context("rolling back bundled plugins")?;
+        }
+        return Err(error).with_context(|| format!("replacing {}", destination.display()));
+    }
+    if let Some(swap) = plugins {
+        swap.commit()?;
+    }
     Ok(())
 }
 
@@ -556,43 +589,74 @@ fn re_sign_macos_binary(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn replace_direct_plugins(staging_root: &Path, install_dir: &Path) -> Result<()> {
-    let staged = staging_root.join("plugins");
-    if !staged.is_dir() {
-        return Ok(());
-    }
-    let next = install_dir.join(".ainb-plugins-next");
-    if next.exists() {
-        std::fs::remove_dir_all(&next).with_context(|| format!("clearing {}", next.display()))?;
-    }
-    let copy = Command::new("cp")
-        .args(["-R"])
-        .arg(&staged)
-        .arg(&next)
-        .status()
-        .context("staging bundled plugins")?;
-    if !copy.success() {
-        bail!("staging bundled plugins exited {copy}");
-    }
-    let current = install_dir.join("plugins");
-    let backup = install_dir.join(".ainb-plugins-previous");
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)
-            .with_context(|| format!("clearing {}", backup.display()))?;
-    }
-    if current.exists() {
-        std::fs::rename(&current, &backup).context("backing up bundled plugins")?;
-    }
-    if let Err(error) = std::fs::rename(&next, &current) {
-        if backup.exists() {
-            let _ = std::fs::rename(&backup, &current);
+struct DirectPluginSwap {
+    current: PathBuf,
+    next: PathBuf,
+    backup: PathBuf,
+}
+
+impl DirectPluginSwap {
+    fn stage(staging_root: &Path, install_dir: &Path) -> Result<Option<Self>> {
+        let staged = staging_root.join("plugins");
+        if !staged.is_dir() {
+            return Ok(None);
         }
-        return Err(error).context("activating bundled plugins");
+        let next = install_dir.join(".ainb-plugins-next");
+        if next.exists() {
+            std::fs::remove_dir_all(&next)
+                .with_context(|| format!("clearing {}", next.display()))?;
+        }
+        let copy = Command::new("cp")
+            .args(["-R"])
+            .arg(&staged)
+            .arg(&next)
+            .status()
+            .context("staging bundled plugins")?;
+        if !copy.success() {
+            bail!("staging bundled plugins exited {copy}");
+        }
+        Ok(Some(Self {
+            current: install_dir.join("plugins"),
+            next,
+            backup: install_dir.join(".ainb-plugins-previous"),
+        }))
     }
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup).context("removing previous bundled plugins")?;
+
+    fn activate(&mut self) -> Result<()> {
+        if self.backup.exists() {
+            std::fs::remove_dir_all(&self.backup)
+                .with_context(|| format!("clearing {}", self.backup.display()))?;
+        }
+        if self.current.exists() {
+            std::fs::rename(&self.current, &self.backup).context("backing up bundled plugins")?;
+        }
+        if let Err(error) = std::fs::rename(&self.next, &self.current) {
+            if self.backup.exists() {
+                let _ = std::fs::rename(&self.backup, &self.current);
+            }
+            return Err(error).context("activating bundled plugins");
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn rollback(&mut self) -> Result<()> {
+        if self.current.exists() {
+            std::fs::remove_dir_all(&self.current)
+                .with_context(|| format!("removing replacement {}", self.current.display()))?;
+        }
+        if self.backup.exists() {
+            std::fs::rename(&self.backup, &self.current).context("restoring bundled plugins")?;
+        }
+        Ok(())
+    }
+
+    fn commit(self) -> Result<()> {
+        if self.backup.exists() {
+            std::fs::remove_dir_all(&self.backup)
+                .with_context(|| format!("removing previous {}", self.backup.display()))?;
+        }
+        Ok(())
+    }
 }
 
 fn canonical_eq(left: &Path, right: &Path) -> bool {
@@ -700,4 +764,34 @@ pub fn disable_schedule() -> Result<()> {
 #[must_use]
 pub fn cached_state() -> Option<ReleaseState> {
     state_path().ok().and_then(|path| ReleaseState::load_from(&path).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_swap_rolls_back_when_binary_activation_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let install = temp.path().join("install");
+        std::fs::create_dir_all(staging.join("plugins")).unwrap();
+        std::fs::create_dir_all(install.join("plugins")).unwrap();
+        std::fs::write(staging.join("plugins/new-plugin"), "new").unwrap();
+        std::fs::write(install.join("plugins/old-plugin"), "old").unwrap();
+
+        let mut swap = DirectPluginSwap::stage(&staging, &install).unwrap().unwrap();
+        swap.activate().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(install.join("plugins/new-plugin")).unwrap(),
+            "new"
+        );
+
+        swap.rollback().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(install.join("plugins/old-plugin")).unwrap(),
+            "old"
+        );
+        assert!(!install.join("plugins/new-plugin").exists());
+    }
 }
