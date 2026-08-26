@@ -22,7 +22,7 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            ainb TUI host                                │
 │                                                                         │
-│   Rust · ratatui · tokio · 115 modules · Unix-only                      │
+│   Rust · ratatui · tokio · 34 crates · Unix-only                        │
 │                                                                         │
 │   ┌──────────────┐  ┌──────────────┐  ┌─────────────────────────────┐  │
 │   │   tmux/PTY   │  │  git/worktree│  │  plugin runtime (v2 ABI)    │  │
@@ -57,8 +57,8 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
    │   https://github.com/stevengonsalvez/ainb-toolkit                  │
    │                                                                     │
    │   Source of truth (flattened layout):                               │
-   │   ├── skills/      86 skills                                        │
-   │   ├── agents/      37 agents (universal, engineering, orchestrator) │
+   │   ├── skills/      94 skills                                        │
+   │   ├── agents/      16 agents (universal, engineering, swarm, meta)  │
    │   ├── workflows/   structured delivery workflows                    │
    │   └── utilities/   shared hooks, config, output styles              │
    │                                                                     │
