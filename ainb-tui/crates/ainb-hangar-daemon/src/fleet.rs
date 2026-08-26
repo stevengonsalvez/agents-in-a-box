@@ -593,9 +593,12 @@ async fn resolves_current_request(
         .ok()
         .and_then(|payload| payload.get("requestId").cloned())
     else {
-        // No id to discriminate on: fall back to clearing, which is the
-        // pre-existing behaviour and still better than a stuck ASK.
-        return Ok(true);
+        // `ServerRequestResolvedNotification` REQUIRES requestId, so a
+        // notification without one is malformed. Clearing on it would let a
+        // single bad frame drop a live approval -- and with several controllers
+        // on one app-server (phone, Desktop, Ainb) that is exactly the case the
+        // id exists to disambiguate. Ignore it instead.
+        return Ok(false);
     };
     let Some(current) = current_request_wire(pool, session_key).await? else {
         return Ok(true);
@@ -4540,7 +4543,9 @@ mod tests {
             "codex:resolved:1".to_string(),
             CodexInbound::Notification {
                 method: "serverRequest/resolved".to_string(),
-                params: serde_json::json!({"threadId": "thread-phone"}),
+                // requestId is REQUIRED by the schema and matches the pending
+                // request; see `resolves_current_request`.
+                params: serde_json::json!({"threadId": "thread-phone", "requestId": 41}),
             },
             &capabilities,
             200,
@@ -4557,6 +4562,84 @@ mod tests {
         assert!(
             cleared.sessions[0].current_request.is_none(),
             "the resolved request must be cleared from the snapshot"
+        );
+    }
+
+    /// A resolution with no `requestId` is malformed and must be ignored.
+    ///
+    /// The schema requires the id. With several controllers on one app-server
+    /// (phone, Codex Desktop, Ainb), clearing on an id-less frame would let one
+    /// bad message drop somebody else's live approval.
+    #[tokio::test]
+    async fn a_resolution_without_a_request_id_is_ignored() {
+        use crate::fleet_provider::codex::{
+            CodexCapabilities, CodexInbound, CodexItemRequestIdentity, CodexQuestionRequest,
+            RpcRequestId,
+        };
+        use crate::fleet_provider::{QuestionOption, StructuredQuestion};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let capabilities = CodexCapabilities {
+            cli_version: "codex-test".to_string(),
+            daemon_version: None,
+            app_server: true,
+            stdio_proxy: true,
+            request_user_input: true,
+            approvals: true,
+            thread_archive: true,
+        };
+        apply_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex:req:1".to_string(),
+            CodexInbound::RequestUserInput(CodexQuestionRequest {
+                identity: CodexItemRequestIdentity {
+                    request_id: RpcRequestId::new(serde_json::json!(7)).unwrap(),
+                    thread_id: "thread-malformed".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "item-1".to_string(),
+                },
+                questions: vec![StructuredQuestion {
+                    id: "q1".to_string(),
+                    header: "Pick".to_string(),
+                    question: "Which?".to_string(),
+                    options: vec![QuestionOption {
+                        label: "A".to_string(),
+                        description: "first".to_string(),
+                    }],
+                    multi_select: false,
+                    is_other: true,
+                    is_secret: false,
+                }],
+                auto_resolution_ms: Some(60_000),
+            }),
+            &capabilities,
+            100,
+        )
+        .await
+        .unwrap();
+
+        apply_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex:resolved:malformed".to_string(),
+            CodexInbound::Notification {
+                method: "serverRequest/resolved".to_string(),
+                params: serde_json::json!({"threadId": "thread-malformed"}),
+            },
+            &capabilities,
+            200,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = snapshot_wire(store.pool()).await.unwrap();
+        assert_eq!(
+            snapshot.sessions[0].attention,
+            ainb_hangar_proto::fleet::AttentionState::Ask,
+            "an id-less resolution must not clear a live approval"
         );
     }
 

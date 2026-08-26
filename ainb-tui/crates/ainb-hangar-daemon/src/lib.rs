@@ -356,37 +356,229 @@ pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("hangar").join("daemon.pid")
 }
 
-/// Socket of an externally managed Codex app-server to attach to, if opted in.
+/// Settings in the user's own `~/.codex/config.toml` that govern attached
+/// sessions, and would surprise someone who assumed Ainb ran them in isolation.
 ///
-/// `AINB_CODEX_APP_SERVER=<path>` names one explicitly.
-/// `AINB_CODEX_APP_SERVER=desktop` resolves the ChatGPT-managed daemon's control
-/// socket, which is the app-server the Codex phone app pairs with.
+/// In attached mode Ainb's sessions run on the user's real `CODEX_HOME`, so
+/// their model, approval policy, hooks, MCP servers and telemetry all apply.
+/// That is the point of attaching -- the phone sees the same sessions -- but it
+/// is invisible unless we say so, and `--disable apps` on the client does not
+/// isolate any of it.
+const CODEX_HOME_SETTINGS_WORTH_NAMING: [&str; 8] = [
+    "model",
+    "model_reasoning_effort",
+    "approval_policy",
+    "sandbox_mode",
+    "shell_environment_policy",
+    "notify",
+    "mcp_servers",
+    "otel",
+];
+
+/// Log which of [`CODEX_HOME_SETTINGS_WORTH_NAMING`] the user actually has set,
+/// plus any enabled `features.*`, so attaching never silently changes how a
+/// session behaves.
 ///
-/// Returns `None` when unset, so the default stays: spawn our own server on a
-/// scoped `CODEX_HOME`.
-pub fn codex_external_socket() -> Option<std::path::PathBuf> {
-    let raw = std::env::var_os("AINB_CODEX_APP_SERVER");
-    let opted_in = raw.as_ref().is_some_and(|value| !value.is_empty());
-    let resolved = codex_external_socket_from(raw, dirs::home_dir().as_deref());
-    if opted_in && resolved.is_none() {
-        // Silently falling back to owned mode would hand the user scoped
-        // sessions their phone cannot see, with no sign the opt-in was ignored.
-        tracing::warn!(
-            "AINB_CODEX_APP_SERVER=desktop set but the home directory could not \
-             be resolved; continuing with Ainb's own codex app-server"
-        );
+/// Read-only by design. Ainb must never WRITE `~/.codex/config.toml`: it is the
+/// user's file, shared with Codex Desktop and the CLI, and editing it would make
+/// Ainb the owner of their model choice, approval policy and plugin surface.
+fn warn_about_effective_codex_home_settings(home: Option<&std::path::Path>) {
+    let Some(path) = home.map(|home| home.join(".codex/config.toml")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(parsed) = text.parse::<toml::Value>() else {
+        return;
+    };
+    let mut effective: Vec<String> = CODEX_HOME_SETTINGS_WORTH_NAMING
+        .into_iter()
+        .filter(|key| parsed.get(key).is_some())
+        .map(str::to_string)
+        .collect();
+    if let Some(features) = parsed.get("features").and_then(toml::Value::as_table) {
+        for (name, value) in features {
+            if value.as_bool() == Some(true) {
+                effective.push(format!("features.{name}"));
+            }
+        }
     }
-    resolved
+    if effective.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        config = %path.display(),
+        settings = %effective.join(", "),
+        "attached Codex sessions run on your own CODEX_HOME, so these settings from \
+         your codex config apply to them (Ainb does not modify this file; set \
+         `[codex] app_server = \"own\"` to run isolated sessions instead)"
+    );
 }
 
-/// [`codex_external_socket`] against explicit inputs, so the resolution rules are
-/// testable without mutating process env (which races under parallel tests).
+/// Count the sessions stranded in the scoped `CODEX_HOME` when we attach.
+///
+/// They are not lost and nothing is migrated -- they simply live on an
+/// app-server the phone cannot see, so the only honest thing is to say how many
+/// there are and how to get back to them.
+fn note_scoped_sessions_left_behind(hangar_home: &std::path::Path) {
+    let scoped = hangar_home.join("codex-home").join("sessions");
+    let Ok(entries) = std::fs::read_dir(&scoped) else {
+        return;
+    };
+    let count = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .count();
+    if count == 0 {
+        return;
+    }
+    tracing::warn!(
+        scoped_home = %hangar_home.join("codex-home").display(),
+        sessions = count,
+        "these earlier Codex sessions stay in Ainb's scoped home and will not appear \
+         in the Codex phone app; nothing was migrated or deleted. Set \
+         `[codex] app_server = \"own\"` to go back to them"
+    );
+}
+
+/// Where Ainb's Codex sessions run: which app-server the hangar daemon drives.
+///
+/// Resolution order, most specific first:
+/// 1. `AINB_CODEX_APP_SERVER` env
+/// 2. `app_server` under `[codex]` in `<hangar home>/config/config.toml`
+/// 3. the default, `desktop`
+///
+/// Accepted values:
+/// - `desktop` (DEFAULT) — the ChatGPT-managed daemon's control socket. This is
+///   the app-server the Codex phone app pairs with, and it runs on the user's
+///   real `~/.codex`, so sessions Ainb opens are visible and operable there.
+/// - `own` — spawn our own server on a scoped `CODEX_HOME`. Isolated from Codex
+///   Desktop (no shared remote-control enrollment identity), but invisible to
+///   the phone.
+/// - any other value — an explicit socket path.
+///
+/// Returns `None` for `own`, which is what
+/// [`codex_external_socket`] reports as "do not attach".
+fn codex_app_server_setting() -> Option<std::ffi::OsString> {
+    if let Some(raw) = std::env::var_os("AINB_CODEX_APP_SERVER").filter(|v| !v.is_empty()) {
+        return Some(raw);
+    }
+    match codex_app_server_from_config() {
+        ConfigSetting::Set(raw) => Some(raw.into()),
+        ConfigSetting::Absent => Some(CODEX_APP_SERVER_DEFAULT.into()),
+        // Fail safe, not fail default: keep our own server so a broken config
+        // cannot hand a user's sessions to an app-server they share with Codex
+        // Desktop without them asking for it.
+        ConfigSetting::Unreadable => {
+            tracing::warn!(
+                "hangar config could not be read; keeping Ainb's own codex app-server \
+                 instead of applying the `{CODEX_APP_SERVER_DEFAULT}` default"
+            );
+            Some("own".into())
+        }
+    }
+}
+
+/// `desktop` is the default because the common case is a developer who wants
+/// their Ainb Codex sessions on their phone. `own` remains one config line away
+/// for anyone who needs isolation from Codex Desktop.
+const CODEX_APP_SERVER_DEFAULT: &str = "desktop";
+
+/// Read `[codex] app_server` from the hangar home's config, if present.
+///
+/// The daemon deliberately parses the one key it needs rather than depending on
+/// `ainb-core`: the TUI crate already depends on this one, so reaching back
+/// would be a cycle.
+fn codex_app_server_from_config() -> ConfigSetting {
+    let Ok(home) = hangar_dir() else {
+        return ConfigSetting::Absent;
+    };
+    let path = home.join("config").join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ConfigSetting::Absent;
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "cannot read hangar config");
+            return ConfigSetting::Unreadable;
+        }
+    };
+    let parsed: toml::Value = match text.parse() {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "hangar config is not valid TOML");
+            return ConfigSetting::Unreadable;
+        }
+    };
+    match parsed.get("codex").and_then(|codex| codex.get("app_server")) {
+        None => ConfigSetting::Absent,
+        Some(value) => match value.as_str() {
+            Some(value) if !value.is_empty() => ConfigSetting::Set(value.to_string()),
+            // Present but not a usable string: a typo we must not read as
+            // "unset", or the default would silently override an explicit
+            // choice.
+            _ => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "[codex] app_server must be a non-empty string"
+                );
+                ConfigSetting::Unreadable
+            }
+        },
+    }
+}
+
+/// What the hangar config had to say about `[codex] app_server`.
+///
+/// `Unreadable` is deliberately NOT folded into `Absent`. A syntax error
+/// anywhere in `config.toml` would otherwise read as "nothing configured" and
+/// silently apply the `desktop` default, moving a user who had explicitly
+/// chosen `own` onto a shared app-server with Codex Desktop. Isolation must
+/// never be lost to an unrelated typo.
+enum ConfigSetting {
+    Set(String),
+    Absent,
+    Unreadable,
+}
+
+/// Socket of an externally managed Codex app-server to attach to.
+///
+/// `None` means run our own server. See [`codex_app_server_setting`] for the
+/// resolution order and accepted values.
+///
+/// A `desktop` setting whose socket does not exist resolves to `None` as well:
+/// Codex Desktop is simply not running, and refusing to start any Codex
+/// transport would be worse than quietly using our own server. The caller logs
+/// the downgrade.
+pub fn codex_external_socket() -> Option<std::path::PathBuf> {
+    let resolved =
+        codex_external_socket_from(codex_app_server_setting(), dirs::home_dir().as_deref());
+    match resolved {
+        Some(socket) if !socket.exists() => {
+            tracing::warn!(
+                socket = %socket.display(),
+                "configured Codex app-server socket is absent (is Codex Desktop running?); \
+                 falling back to Ainb's own app-server, so these sessions will not appear \
+                 in the Codex phone app"
+            );
+            None
+        }
+        other => other,
+    }
+}
+
+/// [`codex_external_socket`]'s pure half: setting plus home in, socket out.
+///
+/// Split out so the resolution rules are testable without touching process env
+/// or the filesystem (env mutation races under parallel tests).
 fn codex_external_socket_from(
     raw: Option<std::ffi::OsString>,
     home: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
     let raw = raw?;
-    if raw.is_empty() {
+    if raw.is_empty() || raw == *"own" {
         return None;
     }
     if raw == *"desktop" {
@@ -783,6 +975,11 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                     socket = %socket.display(),
                     "attaching to externally managed codex app-server; not spawning or reaping"
                 );
+                // Attaching changes WHOSE config governs these sessions and
+                // strands anything already in the scoped home. Both are
+                // invisible unless we say so.
+                warn_about_effective_codex_home_settings(dirs::home_dir().as_deref());
+                note_scoped_sessions_left_behind(&dir);
             }
             let mut manager_config =
                 crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket);
@@ -1012,27 +1209,146 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
 
-    /// The opt-in resolver: unset or empty stays on our own server, `desktop`
-    /// resolves the ChatGPT-managed control socket the phone pairs with, and an
-    /// explicit path is taken verbatim.
+    /// The stranded-session notice counts only real session files.
+    ///
+    /// A wrong count here is worse than none: it is the number a user decides
+    /// whether to switch back on.
     #[test]
-    fn codex_external_socket_resolves_desktop_and_explicit_paths() {
+    fn scoped_session_notice_counts_only_jsonl_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("codex-home").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for name in ["a.jsonl", "b.jsonl", "notes.txt", "c.jsonl"] {
+            std::fs::write(sessions.join(name), b"").unwrap();
+        }
+        let count = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .count();
+        assert_eq!(count, 3, "only .jsonl sessions count");
+
+        // No scoped home at all must be silent, not a panic or a zero-notice.
+        let empty = tempfile::tempdir().unwrap();
+        super::note_scoped_sessions_left_behind(empty.path());
+    }
+
+    /// The attached-mode warning names settings that are actually present, and
+    /// stays silent on a config that sets none of them.
+    #[test]
+    fn effective_settings_warning_is_driven_by_what_is_set() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+
+        // Silent cases must not panic: absent file, then a config with nothing
+        // worth naming.
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+        std::fs::write(codex.join("config.toml"), "unrelated = 1\n").unwrap();
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+
+        // And the keys we promise to name are the ones the doc lists.
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"model"));
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"approval_policy"));
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"mcp_servers"));
+
+        std::fs::write(
+            codex.join("config.toml"),
+            "model = \"x\"\n[features]\nhooks = true\njs_repl = false\n",
+        )
+        .unwrap();
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+    }
+
+    /// `[codex] app_server` is read out of the hangar home's config.toml.
+    ///
+    /// The daemon parses this one key itself rather than depending on
+    /// `ainb-core`, so the parse is worth pinning: a shape change there would
+    /// otherwise silently drop everyone back to the default.
+    #[test]
+    fn codex_app_server_is_read_from_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("config.toml");
+
+        let read = |text: &str| -> Option<String> {
+            std::fs::write(&path, text).unwrap();
+            let parsed: toml::Value = std::fs::read_to_string(&path).unwrap().parse().ok()?;
+            parsed
+                .get("codex")?
+                .get("app_server")?
+                .as_str()
+                .map(str::to_string)
+                .filter(|value| !value.is_empty())
+        };
+
+        assert_eq!(
+            read("[codex]\napp_server = \"own\"\n"),
+            Some("own".to_string())
+        );
+        assert_eq!(
+            read("[codex]\napp_server = \"/tmp/x.sock\"\n"),
+            Some("/tmp/x.sock".to_string())
+        );
+        assert_eq!(
+            read("[codex]\napp_server = \"\"\n"),
+            None,
+            "empty is not a setting"
+        );
+        assert_eq!(
+            read("[fleet]\nterminal = \"warp\"\n"),
+            None,
+            "absent section"
+        );
+        assert_eq!(read("[codex]\nother = 1\n"), None, "absent key");
+    }
+
+    /// The resolver's value semantics.
+    ///
+    /// `desktop` is the DEFAULT, so an absent setting still attaches; `own` is
+    /// the explicit way back to Ainb's own scoped server; anything else is a
+    /// socket path taken verbatim.
+    #[test]
+    fn codex_app_server_values_resolve_to_the_right_socket() {
         use std::ffi::OsString;
         let home = std::path::Path::new("/Users/example");
+        let desktop = home.join(".codex/app-server-control/app-server-control.sock");
 
-        assert_eq!(super::codex_external_socket_from(None, Some(home)), None);
+        assert_eq!(
+            super::codex_external_socket_from(Some(OsString::from("desktop")), Some(home)),
+            Some(desktop.clone())
+        );
+        assert_eq!(
+            super::codex_external_socket_from(Some(OsString::from("own")), Some(home)),
+            None,
+            "`own` must mean run our own server"
+        );
         assert_eq!(
             super::codex_external_socket_from(Some(OsString::new()), Some(home)),
             None,
-            "empty must not opt in"
-        );
-        assert_eq!(
-            super::codex_external_socket_from(Some(OsString::from("desktop")), Some(home)),
-            Some(home.join(".codex/app-server-control/app-server-control.sock"))
+            "an empty value must not be read as a path"
         );
         assert_eq!(
             super::codex_external_socket_from(Some(OsString::from("/tmp/custom.sock")), Some(home)),
             Some(std::path::PathBuf::from("/tmp/custom.sock"))
+        );
+        assert_eq!(
+            super::codex_external_socket_from(None, Some(home)),
+            None,
+            "no setting at all is the caller's business; the default is applied upstream"
+        );
+
+        // The default itself, so a change to it fails here rather than silently
+        // moving every user's sessions between app-servers.
+        assert_eq!(super::CODEX_APP_SERVER_DEFAULT, "desktop");
+        assert_eq!(
+            super::codex_external_socket_from(
+                Some(super::CODEX_APP_SERVER_DEFAULT.into()),
+                Some(home)
+            ),
+            Some(desktop),
+            "the default must attach to the phone-visible daemon"
         );
     }
 

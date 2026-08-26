@@ -3590,6 +3590,7 @@ Commands:
   start    Bring it up
   restart  Take it down and bring it back up
   stop     Take it down
+  pair     Print a Codex remote-control pairing code for the phone app
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3636,6 +3637,21 @@ $ ainb daemon hangar-daemon stop --help
 Take it down
 
 Usage: ainb daemon hangar-daemon stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon hangar-daemon pair`
+
+Print a Codex remote-control pairing code for the phone app
+
+```console
+$ ainb daemon hangar-daemon pair --help
+Print a Codex remote-control pairing code for the phone app
+
+Usage: ainb daemon hangar-daemon pair [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]

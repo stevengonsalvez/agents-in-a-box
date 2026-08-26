@@ -25,6 +25,13 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+    /// Mint a Codex remote-control pairing code for the phone app.
+    ///
+    /// Not a lifecycle verb: it neither starts nor stops anything. It is here
+    /// because the Hangar daemon owns the Codex transport, so the Daemons
+    /// screen is where a user already goes to reason about it. Offered only for
+    /// [`DaemonKind::HangarDaemon`]; see `Action::for_kind`.
+    Pair,
 }
 
 impl Action {
@@ -35,6 +42,7 @@ impl Action {
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Restart => "restart",
+            Self::Pair => "pair",
         }
     }
 
@@ -45,12 +53,27 @@ impl Action {
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
+            "pair" => Some(Self::Pair),
             _ => None,
         }
     }
 
-    /// Every verb, in menu order.
+    /// Every lifecycle verb, in menu order.
     pub const ALL: [Self; 3] = [Self::Start, Self::Restart, Self::Stop];
+
+    /// The verbs a given daemon offers.
+    ///
+    /// Pairing is Codex-specific, so it appears only on the daemon that owns
+    /// the Codex transport. Offering it on the bridge or the MCP pool would be
+    /// an action that cannot mean anything there.
+    #[must_use]
+    pub fn for_kind(kind: DaemonKind) -> Vec<Self> {
+        let mut verbs = Self::ALL.to_vec();
+        if matches!(kind, DaemonKind::HangarDaemon) {
+            verbs.push(Self::Pair);
+        }
+        verbs
+    }
 }
 
 /// Every controllable daemon, in the order the Daemons table lists them.
@@ -97,6 +120,15 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
 /// Errors carry the underlying failure verbatim — the TUI shows them in the
 /// row's error view, so a vague message here is a vague message on screen.
 pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
+    // Pairing is not a lifecycle verb and only the Codex transport has one, so
+    // it never reaches the per-daemon handlers below.
+    if action == Action::Pair {
+        return if matches!(kind, DaemonKind::HangarDaemon) {
+            codex_pair()
+        } else {
+            bail!("`pair` is only available on the hangar daemon, which owns the Codex transport")
+        };
+    }
     match kind {
         DaemonKind::McpPool => mcp_pool(action),
         DaemonKind::HeadroomProxy => headroom(action).await,
@@ -106,6 +138,32 @@ pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
         DaemonKind::Bridge => bridge(action),
         DaemonKind::FleetDaemon => fleet_daemon(action),
     }
+}
+
+/// Mint a Codex remote-control pairing code for the phone app.
+///
+/// Shells `codex remote-control pair` rather than reimplementing it: the code
+/// is minted by, and only meaningful to, Codex's own relay. We surface its
+/// output verbatim so the user reads the real code and the real failure.
+///
+/// Deliberately NOT run at startup. The code is a short-lived credential;
+/// minting one on every boot is noise, and pairing is a human handshake —
+/// the code has to be typed into the phone while it is still valid.
+fn codex_pair() -> Result<String> {
+    let out = std::process::Command::new("codex")
+        .args(["remote-control", "pair"])
+        .output()
+        .context("run `codex remote-control pair` (is the codex CLI installed?)")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        bail!("codex remote-control pair failed: {detail}");
+    }
+    if stdout.is_empty() {
+        bail!("codex remote-control pair produced no pairing code");
+    }
+    Ok(stdout)
 }
 
 // ── MCP pool ────────────────────────────────────────────────────────────────
@@ -128,6 +186,8 @@ fn mcp_pool(action: Action) -> Result<String> {
             client::restart_daemon().context("restart the MCP pool")?;
             Ok("mcp pool restarted".to_string())
         }
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
@@ -155,6 +215,8 @@ async fn headroom(action: Action) -> Result<String> {
                 .context("restart the Headroom proxy")?;
             Ok("headroom proxy restarted".to_string())
         }
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
@@ -173,6 +235,8 @@ fn notifyd(kind: DaemonKind, action: Action) -> Result<String> {
         // resume/repair command, and a correct bring-up from stopped.
         Action::Start | Action::Restart => "restart",
         Action::Stop => "stop",
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     };
     delegate(&["notifyd", verb]).map(|out| format!("{out}{note}"))
 }
@@ -208,6 +272,8 @@ fn atc(action: Action) -> Result<String> {
         // --purge. Passing --yes made clap reject the whole invocation, so
         // `stop` failed every time.
         Action::Stop => delegate(&["fleet", "atc", "teardown", &name]),
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
@@ -223,6 +289,8 @@ fn bridge(action: Action) -> Result<String> {
             delegate(&["fleet", "bridge", "uninstall"])?;
             delegate(&["fleet", "bridge", "install"])
         }
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
@@ -246,6 +314,8 @@ fn fleet_daemon(action: Action) -> Result<String> {
                 None => "fleet daemon started".to_string(),
             })
         }
+        // Unreachable: `control` intercepts Pair before any handler.
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
@@ -335,6 +405,36 @@ fn detach(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `pair` is offered only by the daemon that owns the Codex transport.
+    ///
+    /// Every other daemon would be advertising an action that cannot mean
+    /// anything there, and the CLI would accept a verb its handler rejects.
+    #[test]
+    fn pair_is_offered_only_by_the_hangar_daemon() {
+        for kind in super::CONTROLLABLE {
+            let verbs = super::Action::for_kind(kind);
+            let has_pair = verbs.contains(&super::Action::Pair);
+            assert_eq!(
+                has_pair,
+                matches!(kind, super::DaemonKind::HangarDaemon),
+                "{} offered pair = {has_pair}",
+                kind.id()
+            );
+            // The lifecycle verbs stay on every daemon regardless.
+            for verb in super::Action::ALL {
+                assert!(verbs.contains(&verb), "{} lost {}", kind.id(), verb.id());
+            }
+        }
+    }
+
+    /// The verb spelling round-trips, so the TUI's shell-out and the CLI agree.
+    #[test]
+    fn pair_round_trips_through_its_cli_spelling() {
+        assert_eq!(super::Action::Pair.id(), "pair");
+        assert_eq!(super::Action::from_id("pair"), Some(super::Action::Pair));
+    }
+
     use super::*;
 
     /// Every daemon in the view is addressable by a stable CLI id, and the ids

@@ -119,7 +119,10 @@ impl ActionMenu {
     /// The entries for this menu. `view last error` only appears when there IS
     /// one — an always-present entry that usually does nothing is noise.
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
-        let mut entries: Vec<MenuEntry> = Action::ALL.into_iter().map(MenuEntry::Act).collect();
+        // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
+        // transport offers `pair`.
+        let mut entries: Vec<MenuEntry> =
+            Action::for_kind(self.kind).into_iter().map(MenuEntry::Act).collect();
         if has_error {
             entries.push(MenuEntry::ViewError);
         }
