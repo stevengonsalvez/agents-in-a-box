@@ -45,8 +45,8 @@ The `ainb` terminal app and its CLI.
 Portable AI-coding agent toolkit. Skills, agents, workflows — deployed to 9 AI tools. The canonical source is the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb consumes it as a pinned external source.
 
 - [Overview](toolkit/overview.md)
-- [Skills (86)](toolkit/skills.md)
-- [Agents (37)](toolkit/agents.md)
+- [Skills (94)](toolkit/skills.md)
+- [Agents (16)](toolkit/agents.md)
 - [Bootstrap engine](toolkit/bootstrap.md)
 
 ## Plugins

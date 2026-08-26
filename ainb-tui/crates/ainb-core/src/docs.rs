@@ -1,25 +1,35 @@
-// ABOUTME: Canonical docsite (GitHub Pages) links surfaced in the TUI/CLI so
-// users can jump from a tool to the page that shows what it does. Rendered as
-// plain full URLs — modern terminals auto-linkify them (Cmd/Ctrl-click) and the
-// text stays mouse-selectable; never truncate them.
+// ABOUTME: Canonical docsite links surfaced in the TUI/CLI so users can jump
+// from a tool to the page that shows what it does. Rendered as plain full URLs
+// — modern terminals auto-linkify them (Cmd/Ctrl-click) and the text stays
+// mouse-selectable; never truncate them.
+//
+// The origin lives in exactly one place, `doc_url!`. It used to be pasted into
+// every const, which is how the old GitHub Pages URL ended up duplicated across
+// this file and two plugin crates. Change it here and everything follows.
+
+/// Build a docsite URL from a path relative to the site root.
+macro_rules! doc_url {
+    ($path:literal) => {
+        concat!("https://ainb.app/", $path)
+    };
+}
 
 /// Docsite root.
-pub const SITE: &str = "https://stevengonsalvez.github.io/agents-in-a-box/";
+pub const SITE: &str = doc_url!("");
 /// OpenTelemetry → Grafana Cloud guide (with example dashboards).
-pub const OTEL: &str = "https://stevengonsalvez.github.io/agents-in-a-box/reference/otel-grafana/";
+pub const OTEL: &str = doc_url!("reference/otel-grafana/");
 /// witr process-causality plugin.
-pub const WITR: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/witr/";
+pub const WITR: &str = doc_url!("plugins/witr/");
 /// abtop agent-process monitor plugin.
-pub const ABTOP: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/";
+pub const ABTOP: &str = doc_url!("plugins/abtop/");
 /// burndown usage/cost analytics plugin.
-pub const BURNDOWN: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/burndown/";
+pub const BURNDOWN: &str = doc_url!("plugins/burndown/");
 /// Token-optimization tools (rtk + headroom).
-pub const TOKEN_OPT: &str =
-    "https://stevengonsalvez.github.io/agents-in-a-box/tui/token-optimization/";
+pub const TOKEN_OPT: &str = doc_url!("tui/token-optimization/");
 /// reflect long-term memory.
-pub const REFLECT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/knowledge/overview/";
+pub const REFLECT: &str = doc_url!("knowledge/overview/");
 /// ainb-toolkit (skills + agents).
-pub const TOOLKIT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/toolkit/overview/";
+pub const TOOLKIT: &str = doc_url!("toolkit/overview/");
 
 // Official vendor auth guides, surfaced on the onboarding Authentication step.
 /// Claude Code authentication guide.

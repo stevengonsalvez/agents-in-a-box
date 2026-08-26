@@ -65,7 +65,7 @@ const README_URL: &str = "https://github.com/pranshuparmar/witr#installation";
 /// ainb docsite page for the witr plugin — shows what it looks like inside ainb
 /// (screenshots). Full bare URL so terminals auto-linkify it and it stays
 /// copyable; left-aligned painting keeps it from truncating at >=80 cols.
-const DOCSITE_URL: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/witr/";
+pub(crate) const DOCSITE_URL: &str = "https://ainb.app/plugins/witr/";
 
 /// Resolve an [`InstallHint`] for the current build target.
 ///

@@ -38,7 +38,7 @@ Every TUI operation is also a CLI subcommand. `--format json` on every command. 
 
 ### A portable toolkit that follows you across tools
 
-86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, 11 targets. The toolkit lives in the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb's skill manager syncs from it as a pinned external source.
+94 skills (plan, implement, validate, commit, swarm-create, …) and 16 specialised agents (backend-developer, code-reviewer, security-agent, deep-reasoner, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, and Claude Desktop. One source, 9 targets. The toolkit lives in the standalone [`stevengonsalvez/ainb-toolkit`](https://github.com/stevengonsalvez/ainb-toolkit) repo; ainb's skill manager syncs from it as a pinned external source.
 
 ### A plugin system you can actually use
 

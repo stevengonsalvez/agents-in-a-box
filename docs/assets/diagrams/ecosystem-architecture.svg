@@ -68,13 +68,13 @@
   <text x="1066.5" y="323" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">process</text>
   <text x="1066.5" y="339" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">causality</text>
   <rect x="684" y="386" width="432" height="44" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="900.0" y="411" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="600">SDK + conformance: protocol - sdk-rust - testkit - cts-v2 (14 axes)</text>
+  <text x="900.0" y="411" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="600">SDK + conformance: protocol - sdk-rust - testkit - cts-v2 (21 axes)</text>
   <rect x="1200" y="100" width="480" height="350" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
   <text x="1224" y="132" fill="#141413" font-size="16.5" font-weight="700">3 - Toolkit - write once, deploy to 9+ tools</text>
   <text x="1224" y="151" fill="#6B655B" font-size="11.5">ainb-toolkit (external repo) — github.com/stevengonsalvez/ainb-toolkit</text>
   <rect x="1224" y="156" width="432" height="64" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
   <text x="1440.0" y="183" text-anchor="middle" fill="#141413" font-size="14" font-weight="700">ainb-toolkit: skills/ agents/ …</text>
-  <text x="1440.0" y="203" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">91 skills - 37 agents - 22 hooks - workflows - knowledge</text>
+  <text x="1440.0" y="203" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">94 skills - 16 agents - 16 hooks - workflows - knowledge</text>
   <path d="M 1340,220 V 248" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
   <rect x="1224" y="252" width="300" height="70" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
   <text x="1374" y="276" text-anchor="middle" fill="#141413" font-size="14" font-weight="700">bootstrap.js</text>

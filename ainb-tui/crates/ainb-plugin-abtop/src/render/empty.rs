@@ -54,7 +54,7 @@ const REPO_URL: &str = "https://github.com/graykode/abtop";
 /// ainb docsite page for the abtop plugin — shows what it looks like inside
 /// ainb (screenshots). Full bare URL so terminals auto-linkify it and it stays
 /// copyable; left-aligned painting keeps it from truncating at >=80 cols.
-const DOCSITE_URL: &str = "https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/";
+pub(crate) const DOCSITE_URL: &str = "https://ainb.app/plugins/abtop/";
 
 /// One install-command hint, resolved for the current platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
