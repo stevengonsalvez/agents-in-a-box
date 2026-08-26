@@ -16,6 +16,14 @@ on:
   # is how an operator asks for it without labelling a PR.
   workflow_dispatch:
 
+# Superseded pushes used to run to completion: four pushes to one branch in
+# half an hour queued four full runs, and the last one spent 190 minutes
+# waiting for a runner rather than working. Group per ref and cancel only on
+# pull_request — a push to main must still get its own complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   WORKING_DIR: ainb-tui
