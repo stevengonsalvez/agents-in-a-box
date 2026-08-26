@@ -120,6 +120,7 @@ impl CommandRegistry {
         r.register(NotifydCommand); // ainb-hooks daemon: status/restart/install
         r.register(HangarCommand); // Hangar control plane (issue / task / beads / daemon)
         r.register(RtkCommand); // RTK token-killer: install/uninstall/status
+        r.register(UpdateCommand); // signed stable release checker + updater
         r
     }
 
@@ -2867,6 +2868,58 @@ impl CliCommand for HeadroomCommand {
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         let matches = matches.clone();
         Box::pin(async move { crate::cli::headroom::execute(&matches, ctx.format).await })
+    }
+}
+
+/// `ainb update` — signed stable release check, install, and scheduler controls.
+pub struct UpdateCommand;
+impl CliCommand for UpdateCommand {
+    fn name(&self) -> &'static str {
+        "update"
+    }
+
+    fn build(&self, app: Command) -> Command {
+        let check = Command::new("check")
+            .about("Check GitHub for the latest stable ainb release")
+            .arg(
+                clap::Arg::new("scheduled")
+                    .long("scheduled")
+                    .hide(true)
+                    .action(clap::ArgAction::SetTrue),
+            );
+        let schedule = Command::new("schedule")
+            .about("Enable, disable, or inspect daily release checks")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(Command::new("enable").about("Install the daily OS timer"))
+            .subcommand(Command::new("disable").about("Remove the daily OS timer"))
+            .subcommand(Command::new("status").about("Show timer installation state"));
+        app.subcommand(
+            Command::new(self.name())
+                .about("Update ainb to the latest signed stable release")
+                .arg(
+                    clap::Arg::new("yes")
+                        .long("yes")
+                        .short('y')
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Install without ainb's confirmation prompt"),
+                )
+                .subcommand(check)
+                .subcommand(Command::new("status").about("Show cached update state"))
+                .subcommand(schedule)
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb update                    Check and install after confirmation\n  \
+                     ainb update --yes              Install without confirmation\n  \
+                     ainb update check              Refresh latest stable release state\n  \
+                     ainb update schedule enable    Enable the daily background check",
+                ),
+        )
+    }
+
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::update::execute(&matches, ctx.format).await })
     }
 }
 

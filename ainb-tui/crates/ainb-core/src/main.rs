@@ -179,6 +179,9 @@ async fn tokio_main() -> Result<()> {
                 // binary. Without it an upgraded ainb kept talking to the
                 // pre-upgrade notifyd until someone restarted it by hand.
                 fleet::daemons::ensure_daemons_current();
+                if let Err(error) = cli::update::ensure_schedule() {
+                    tracing::warn!(error = %error, "failed to install daily release checker");
+                }
             }
 
             // Best-effort: drop shipped default presets into
@@ -201,6 +204,13 @@ async fn tokio_main() -> Result<()> {
 
             let mut app_state = App::new();
             app_state.init().await;
+            if let Some(state) = cli::update::cached_state() {
+                if let Some(version) = state.available_version {
+                    app_state.state.add_info_notification(format!(
+                        "ainb {version} available. Run `ainb update --yes`, then restart."
+                    ));
+                }
+            }
 
             // Migrate legacy local-path favorites to their remote indicator. A
             // star is always a remote pointer now; local-path entries from

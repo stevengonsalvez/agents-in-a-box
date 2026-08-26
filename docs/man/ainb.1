@@ -205,7 +205,7 @@ Subcommands: status, stop
 Start, stop, or restart any ainb daemon
 .br
 Subcommands: list, bridge, notifyd, approve\-broker, atc, fleet\-daemon,
-mcp\-pool, hangar\-daemon, headroom\-proxy
+mcp\-pool, hangar\-daemon, headroom\-proxy, release\-checker
 .TP
 .B ainb mcp
 Shared MCP server pool: daemon / proxy / status / stop / import / install
@@ -230,6 +230,11 @@ RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse
 hook
 .br
 Subcommands: status, install, uninstall
+.TP
+.B ainb update
+Update ainb to the latest signed stable release
+.br
+Subcommands: check, status, schedule
 .TP
 .B ainb skill
 Install / remove units across one or more target tools

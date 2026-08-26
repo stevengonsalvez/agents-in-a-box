@@ -1,0 +1,703 @@
+//! Release discovery and self-update state.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use ainb_plugin_notifyd::osnotify::Transport;
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::cli::OutputFormat;
+
+const RELEASE_DOWNLOAD_ROOT: &str =
+    "https://github.com/stevengonsalvez/agents-in-a-box/releases/latest/download";
+const RELEASE_SIGNING_PUBLIC_KEY_B64: &str = "2diG6eoKmUWKOk3XULwefjwKb5IIYTZA4xmNNA8Z6uk=";
+const LAUNCHD_LABEL: &str = "com.agentsinabox.release-check";
+const SYSTEMD_STEM: &str = "com.agentsinabox.release-check";
+
+/// Signed release metadata fetched from the current stable GitHub release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseManifest {
+    /// Stable semantic version without a leading `v`.
+    pub version: String,
+    /// Immutable archive metadata for each supported target.
+    #[serde(default)]
+    pub assets: Vec<ReleaseAsset>,
+}
+
+/// One signed release archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseAsset {
+    /// Rust target triple for the archive.
+    pub target: String,
+    /// Release asset file name.
+    pub archive: String,
+    /// SHA-256 of the archive, lowercase hexadecimal.
+    pub sha256: String,
+}
+
+impl ReleaseManifest {
+    /// Small constructor retained for integration tests and fixture builders.
+    #[must_use]
+    pub fn for_test(version: &str) -> Self {
+        Self {
+            version: version.to_string(),
+            assets: Vec::new(),
+        }
+    }
+
+    fn stable_version(&self) -> Result<Version> {
+        let version = Version::parse(self.version.trim_start_matches('v'))
+            .with_context(|| format!("invalid release version `{}`", self.version))?;
+        if !version.pre.is_empty() {
+            bail!("prerelease `{version}` is not eligible for stable updates");
+        }
+        Ok(version)
+    }
+
+    fn asset_for_current_platform(&self) -> Result<&ReleaseAsset> {
+        let target = current_target()?;
+        self.assets
+            .iter()
+            .find(|asset| asset.target == target)
+            .with_context(|| format!("release {} has no archive for {target}", self.version))
+    }
+}
+
+/// Verify a detached base64 Ed25519 signature and decode its JSON manifest.
+pub fn verify_manifest(bytes: &[u8], signature_b64: &str) -> Result<ReleaseManifest> {
+    verify_manifest_with_key(bytes, signature_b64, RELEASE_SIGNING_PUBLIC_KEY_B64)
+}
+
+/// Test seam for verifying a manifest under an explicit encoded public key.
+pub fn verify_manifest_with_key(
+    bytes: &[u8],
+    signature_b64: &str,
+    public_key_b64: &str,
+) -> Result<ReleaseManifest> {
+    let key_bytes = STANDARD
+        .decode(public_key_b64.trim())
+        .context("decoding Ed25519 release public key")?;
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("release public key must be 32 bytes"))?;
+    let key = VerifyingKey::from_bytes(&key_bytes).context("parsing Ed25519 release public key")?;
+    let signature_bytes =
+        STANDARD.decode(signature_b64.trim()).context("decoding release signature")?;
+    let signature =
+        Signature::from_slice(&signature_bytes).context("parsing Ed25519 release signature")?;
+    key.verify(bytes, &signature)
+        .context("release manifest signature does not match")?;
+    let manifest: ReleaseManifest =
+        serde_json::from_slice(bytes).context("decoding signed release manifest")?;
+    manifest.stable_version()?;
+    Ok(manifest)
+}
+
+/// Release availability relative to the running Ainb binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateAvailability {
+    /// A strictly newer stable release is available.
+    Available,
+    /// The running release equals or exceeds the latest stable release.
+    CurrentOrNewer,
+}
+
+/// Durable result of the last successful release check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseState {
+    /// Epoch milliseconds of the successful check.
+    pub checked_at_ms: i64,
+    /// Latest stable version returned by the release source.
+    pub latest_version: String,
+    /// Availability relative to the running binary.
+    pub availability: UpdateAvailability,
+    /// Latest version when an update may safely be installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_version: Option<String>,
+}
+
+impl ReleaseState {
+    /// Derive durable availability from the running version and release manifest.
+    pub fn from_manifest(
+        local_version: &str,
+        manifest: &ReleaseManifest,
+        checked_at_ms: i64,
+    ) -> Result<Self> {
+        let local = Version::parse(local_version.trim_start_matches('v'))
+            .with_context(|| format!("invalid local version `{local_version}`"))?;
+        let latest = manifest.stable_version()?;
+        let availability = if latest > local {
+            UpdateAvailability::Available
+        } else {
+            UpdateAvailability::CurrentOrNewer
+        };
+        Ok(Self {
+            checked_at_ms,
+            latest_version: latest.to_string(),
+            available_version: (availability == UpdateAvailability::Available)
+                .then(|| latest.to_string()),
+            availability,
+        })
+    }
+
+    /// Persist this complete release-check result without exposing torn JSON to readers.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        crate::fleet::plumbing::atomic::write_atomic_json(path, self)
+    }
+
+    /// Read one previously persisted release-check result.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading update state {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing update state {}", path.display()))
+    }
+}
+
+/// OS timer definition for the daily, short-lived release checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateSchedule {
+    interval_secs: u64,
+}
+
+impl UpdateSchedule {
+    /// Daily release check cadence.
+    #[must_use]
+    pub const fn daily() -> Self {
+        Self {
+            interval_secs: 24 * 60 * 60,
+        }
+    }
+
+    /// Render the macOS LaunchAgent job. The shell resolves `ainb` at each run.
+    #[must_use]
+    pub fn launchd_plist(self, ainb_bin: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentsinabox.release-check</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string><string>-c</string><string>exec {ainb_bin} update check --scheduled</string>
+  </array>
+  <key>StartInterval</key><integer>{}</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict>
+</dict></plist>
+"#,
+            self.interval_secs,
+            crate::fleet::unit_program::unit_path_env(),
+        )
+    }
+
+    /// Render the Linux systemd user timer. Persistent catch-up handles sleep.
+    #[must_use]
+    pub fn systemd_timer(self) -> String {
+        format!(
+            "[Unit]\nDescription=ainb release check timer\n\n[Timer]\nOnUnitActiveSec={}\nPersistent=true\nUnit=com.agentsinabox.release-check.service\n\n[Install]\nWantedBy=timers.target\n",
+            self.interval_secs
+        )
+    }
+
+    /// Render the Linux systemd user oneshot service.
+    #[must_use]
+    pub fn systemd_service(self, ainb_bin: &str) -> String {
+        format!(
+            "[Unit]\nDescription=ainb release check\n\n[Service]\nType=oneshot\nEnvironment=\"PATH={}\"\nExecStart=/bin/sh -c 'exec {} update check --scheduled'\n",
+            crate::fleet::unit_program::unit_path_env(),
+            ainb_bin,
+        )
+    }
+}
+
+/// Dispatch `ainb update` and its release-check scheduler controls.
+pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    match matches.subcommand() {
+        Some(("check", sub)) => check_command(sub.get_flag("scheduled"), format).await,
+        Some(("status", _)) => status_command(format),
+        Some(("schedule", sub)) => schedule_command(sub),
+        None => apply_command(matches.get_flag("yes")).await,
+        _ => unreachable!("clap constrains update subcommands"),
+    }
+}
+
+async fn check_command(scheduled: bool, format: OutputFormat) -> Result<()> {
+    let state = fetch_release_state().await?;
+    state.save_to(&state_path()?)?;
+    if scheduled {
+        notify_once_for_available(&state)?;
+    }
+    render_state(&state, format);
+    Ok(())
+}
+
+fn status_command(format: OutputFormat) -> Result<()> {
+    let path = state_path()?;
+    match ReleaseState::load_from(&path) {
+        Ok(state) => render_state(&state, format),
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            match format {
+                OutputFormat::Json => println!(
+                    r#"{{"checked":false,"scheduler_enabled":{}}}"#,
+                    schedule_is_enabled()
+                ),
+                _ => println!("No release check yet. Run `ainb update check`."),
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
+fn schedule_command(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("enable", _)) => enable_schedule(),
+        Some(("disable", _)) => disable_schedule(),
+        Some(("status", _)) => {
+            println!(
+                "release checker: {}",
+                if schedule_is_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            Ok(())
+        }
+        _ => unreachable!("clap constrains schedule subcommands"),
+    }
+}
+
+async fn apply_command(yes: bool) -> Result<()> {
+    let manifest = fetch_release_manifest().await?;
+    let state = ReleaseState::from_manifest(
+        env!("CARGO_PKG_VERSION"),
+        &manifest,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    state.save_to(&state_path()?)?;
+    if state.availability != UpdateAvailability::Available {
+        println!("ainb {} is current.", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let version = state.available_version.as_deref().expect("available version");
+    if !yes {
+        bail!("ainb {version} is available. Re-run with `ainb update --yes` to install it.");
+    }
+    let owner = InstallOwner::detect()?;
+    owner.apply(&manifest).await?;
+    println!("ainb update started for {version}; restart ainb to use it.");
+    Ok(())
+}
+
+async fn fetch_release_state() -> Result<ReleaseState> {
+    let manifest = fetch_release_manifest().await?;
+    ReleaseState::from_manifest(
+        env!("CARGO_PKG_VERSION"),
+        &manifest,
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+
+async fn fetch_release_manifest() -> Result<ReleaseManifest> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("ainb/{} update-check", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("building GitHub release client")?;
+    let manifest_url = format!("{RELEASE_DOWNLOAD_ROOT}/release-manifest.json");
+    let signature_url = format!("{RELEASE_DOWNLOAD_ROOT}/release-manifest.sig");
+    let manifest_bytes = client
+        .get(manifest_url)
+        .send()
+        .await
+        .context("downloading signed release manifest")?
+        .error_for_status()
+        .context("signed release manifest request failed")?
+        .bytes()
+        .await
+        .context("reading signed release manifest")?;
+    let signature = client
+        .get(signature_url)
+        .send()
+        .await
+        .context("downloading release manifest signature")?
+        .error_for_status()
+        .context("release manifest signature request failed")?
+        .text()
+        .await
+        .context("reading release manifest signature")?;
+    verify_manifest(&manifest_bytes, &signature)
+}
+
+fn state_path() -> Result<PathBuf> {
+    Ok(crate::fleet::plumbing::paths::ainb_home()?.join("update-state.json"))
+}
+
+fn notified_version_path() -> Result<PathBuf> {
+    Ok(crate::fleet::plumbing::paths::ainb_home()?.join("update-notified-version"))
+}
+
+fn notify_once_for_available(state: &ReleaseState) -> Result<()> {
+    let Some(version) = state.available_version.as_deref() else {
+        return Ok(());
+    };
+    let path = notified_version_path()?;
+    if std::fs::read_to_string(&path).ok().as_deref().map(str::trim) == Some(version) {
+        return Ok(());
+    }
+    ainb_plugin_notifyd::osnotify::NativeTransport.emit(
+        "ainb update available",
+        &format!("ainb {version} is ready. Run ainb update --yes, then restart."),
+    );
+    crate::fleet::plumbing::atomic::write_atomic(&path, version.as_bytes())
+}
+
+fn render_state(state: &ReleaseState, format: OutputFormat) {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string(state).expect("serializable update state")
+        ),
+        _ => match state.availability {
+            UpdateAvailability::Available => println!(
+                "ainb {} available (running {})",
+                state.available_version.as_deref().unwrap_or(&state.latest_version),
+                env!("CARGO_PKG_VERSION")
+            ),
+            UpdateAvailability::CurrentOrNewer => {
+                println!("ainb {} is current.", env!("CARGO_PKG_VERSION"))
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallOwner {
+    Homebrew,
+    Cargo,
+    Direct,
+}
+
+impl InstallOwner {
+    fn detect() -> Result<Self> {
+        let exe = std::env::current_exe().context("resolving ainb executable")?;
+        if Command::new("brew")
+            .args(["list", "--versions", "ainb"])
+            .output()
+            .ok()
+            .is_some_and(|out| out.status.success())
+        {
+            return Ok(Self::Homebrew);
+        }
+        if exe.parent().is_some_and(|parent| parent.ends_with(".cargo/bin")) {
+            return Ok(Self::Cargo);
+        }
+        let home = dirs::home_dir();
+        let direct = [
+            PathBuf::from("/usr/local/bin/ainb"),
+            home.unwrap_or_default().join(".local/bin/ainb"),
+        ];
+        if direct.iter().any(|path| canonical_eq(path, &exe)) {
+            return Ok(Self::Direct);
+        }
+        bail!(
+            "ainb installation is unmanaged; reinstall with the curl installer or use your package manager"
+        )
+    }
+
+    async fn apply(self, manifest: &ReleaseManifest) -> Result<()> {
+        if self == Self::Direct {
+            return apply_direct_release(manifest).await;
+        }
+        let version = manifest.stable_version()?.to_string();
+        let mut command = match self {
+            Self::Homebrew => {
+                let mut c = Command::new("brew");
+                c.args(["upgrade", "ainb"]);
+                c
+            }
+            Self::Cargo => {
+                let mut c = Command::new("cargo");
+                c.args([
+                    "install",
+                    "--git",
+                    "https://github.com/stevengonsalvez/agents-in-a-box",
+                    "--tag",
+                    &format!("v{version}"),
+                    "--locked",
+                    "--force",
+                    "ainb",
+                ]);
+                c
+            }
+            Self::Direct => unreachable!("handled above"),
+        };
+        let status = command.status().context("running ainb installer")?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("ainb update command exited {status}")
+        }
+    }
+}
+
+async fn apply_direct_release(manifest: &ReleaseManifest) -> Result<()> {
+    let asset = manifest.asset_for_current_platform()?;
+    let url = format!(
+        "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v{}/{}",
+        manifest.stable_version()?,
+        asset.archive,
+    );
+    let bytes = reqwest::Client::builder()
+        .user_agent(format!("ainb/{} updater", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .context("building archive download client")?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("downloading {}", asset.archive))?
+        .error_for_status()
+        .with_context(|| format!("release archive request failed for {}", asset.archive))?
+        .bytes()
+        .await
+        .context("reading release archive")?;
+    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    if !actual_sha.eq_ignore_ascii_case(asset.sha256.trim()) {
+        bail!("release archive checksum mismatch for {}", asset.archive);
+    }
+
+    let temp = tempfile::tempdir().context("creating release staging directory")?;
+    let archive = temp.path().join(&asset.archive);
+    std::fs::write(&archive, &bytes).context("staging verified release archive")?;
+    let unpack = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(temp.path())
+        .status()
+        .context("extracting verified release archive")?;
+    if !unpack.success() {
+        bail!("extracting verified release archive exited {unpack}");
+    }
+
+    let staged_binary = temp.path().join("ainb");
+    verify_candidate_binary(&staged_binary)?;
+    let destination = std::env::current_exe().context("resolving installed ainb binary")?;
+    let parent = destination.parent().context("resolving ainb install directory")?;
+    let replacement = parent.join(".ainb-update-next");
+    std::fs::copy(&staged_binary, &replacement)
+        .with_context(|| format!("staging replacement at {}", replacement.display()))?;
+    make_executable(&replacement)?;
+    re_sign_macos_binary(&replacement)?;
+    verify_candidate_binary(&replacement)?;
+    std::fs::rename(&replacement, &destination)
+        .with_context(|| format!("replacing {}", destination.display()))?;
+    replace_direct_plugins(temp.path(), parent)?;
+    Ok(())
+}
+
+fn current_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        (os, arch) => bail!("no signed ainb release archive for {arch}-{os}"),
+    }
+}
+
+fn verify_candidate_binary(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        bail!("verified release archive did not contain ainb binary");
+    }
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("running candidate {}", path.display()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!("candidate ainb binary failed its version check")
+    }
+}
+
+fn make_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+fn re_sign_macos_binary(path: &Path) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        let status = Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path)
+            .status()
+            .context("ad-hoc signing replacement ainb binary")?;
+        if !status.success() {
+            bail!("codesign replacement binary exited {status}");
+        }
+    }
+    Ok(())
+}
+
+fn replace_direct_plugins(staging_root: &Path, install_dir: &Path) -> Result<()> {
+    let staged = staging_root.join("plugins");
+    if !staged.is_dir() {
+        return Ok(());
+    }
+    let next = install_dir.join(".ainb-plugins-next");
+    if next.exists() {
+        std::fs::remove_dir_all(&next).with_context(|| format!("clearing {}", next.display()))?;
+    }
+    let copy = Command::new("cp")
+        .args(["-R"])
+        .arg(&staged)
+        .arg(&next)
+        .status()
+        .context("staging bundled plugins")?;
+    if !copy.success() {
+        bail!("staging bundled plugins exited {copy}");
+    }
+    let current = install_dir.join("plugins");
+    let backup = install_dir.join(".ainb-plugins-previous");
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup)
+            .with_context(|| format!("clearing {}", backup.display()))?;
+    }
+    if current.exists() {
+        std::fs::rename(&current, &backup).context("backing up bundled plugins")?;
+    }
+    if let Err(error) = std::fs::rename(&next, &current) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, &current);
+        }
+        return Err(error).context("activating bundled plugins");
+    }
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup).context("removing previous bundled plugins")?;
+    }
+    Ok(())
+}
+
+fn canonical_eq(left: &Path, right: &Path) -> bool {
+    std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+}
+
+fn launchd_path() -> Option<PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join("Library/LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
+}
+
+fn systemd_paths() -> Option<(PathBuf, PathBuf)> {
+    dirs::home_dir().map(|home| {
+        let dir = home.join(".config/systemd/user");
+        (
+            dir.join(format!("{SYSTEMD_STEM}.service")),
+            dir.join(format!("{SYSTEMD_STEM}.timer")),
+        )
+    })
+}
+
+/// Whether the operating-system daily release checker is installed.
+#[must_use]
+pub fn schedule_is_enabled() -> bool {
+    if cfg!(target_os = "macos") {
+        launchd_path().is_some_and(|path| path.exists())
+    } else {
+        systemd_paths().is_some_and(|(_, timer)| timer.exists())
+    }
+}
+
+/// Install the daily release checker if it is not already installed.
+pub fn ensure_schedule() -> Result<()> {
+    if schedule_is_enabled() {
+        return Ok(());
+    }
+    let schedule = UpdateSchedule::daily();
+    if cfg!(target_os = "macos") {
+        let path = launchd_path().context("resolving LaunchAgents path")?;
+        crate::fleet::plumbing::atomic::write_atomic(
+            &path,
+            schedule.launchd_plist("ainb").as_bytes(),
+        )?;
+        let _ = Command::new("launchctl").args(["unload", &path.display().to_string()]).output();
+        let _ = Command::new("launchctl").args(["load", &path.display().to_string()]).output();
+    } else {
+        let (service, timer) = systemd_paths().context("resolving systemd user directory")?;
+        crate::fleet::plumbing::atomic::write_atomic(
+            &service,
+            schedule.systemd_service("ainb").as_bytes(),
+        )?;
+        crate::fleet::plumbing::atomic::write_atomic(&timer, schedule.systemd_timer().as_bytes())?;
+        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
+        let _ = Command::new("systemctl")
+            .args([
+                "--user",
+                "enable",
+                "--now",
+                &format!("{SYSTEMD_STEM}.timer"),
+            ])
+            .output();
+        let _ = Command::new("systemctl")
+            .args(["--user", "start", &format!("{SYSTEMD_STEM}.service")])
+            .output();
+    }
+    Ok(())
+}
+
+fn enable_schedule() -> Result<()> {
+    ensure_schedule()?;
+    println!("Daily ainb release check enabled.");
+    Ok(())
+}
+
+/// Remove the daily release checker and its OS registration.
+pub fn disable_schedule() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        if let Some(path) = launchd_path().filter(|path| path.exists()) {
+            let _ =
+                Command::new("launchctl").args(["unload", &path.display().to_string()]).output();
+            std::fs::remove_file(path).context("removing release-check LaunchAgent")?;
+        }
+    } else if let Some((service, timer)) = systemd_paths() {
+        let _ = Command::new("systemctl")
+            .args([
+                "--user",
+                "disable",
+                "--now",
+                &format!("{SYSTEMD_STEM}.timer"),
+            ])
+            .output();
+        for path in [timer, service] {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
+    }
+    println!("Daily ainb release check disabled.");
+    Ok(())
+}
+
+/// Read the last verified update result when one exists.
+#[must_use]
+pub fn cached_state() -> Option<ReleaseState> {
+    state_path().ok().and_then(|path| ReleaseState::load_from(&path).ok())
+}
