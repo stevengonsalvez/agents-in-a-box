@@ -96,7 +96,7 @@ The waiting side is built to survive every failure mode without silently green-l
 
 - **Timeout ladder** — the broker holds an AWAIT for up to 600 s; the waiting hook re-dials until 640 s; Claude's own hook timeout is registered at 660 s. Each layer answers before the one above kills it, and an unanswered wait falls back to **deny** — never auto-approve.
 - **Dead or restarted socket** — the blocked hook re-dials `approve.sock` every 500 ms until its deadline. If notifyd dies mid-wait, the prompt isn't lost: the moment a fresh daemon binds the socket, every still-waiting hook re-registers itself.
-- **Single resume/repair command** — `ainb notifyd restart` (CLI) or **`R`** in the [Daemons overlay](daemons.md) stops the owner, reaps strays, respawns, and waits for `approve.sock` to bind. Because of the re-dial loop, that one command repairs the socket *and* resumes every pending prompt.
+- **Single resume/repair command** — `ainb notifyd restart` (CLI) or **`R`** in the [Daemons overlay](daemons.mdx) stops the owner, reaps strays, respawns, and waits for `approve.sock` to bind. Because of the re-dial loop, that one command repairs the socket *and* resumes every pending prompt.
 - **Observability** — the approve broker is a first-class row in `ainb fleet daemons`, with the live pending-waiter count in its health reason (`serving — 2 pending requests`), and notifyd's processes are listed in the `d` overlay.
 
 ## Host resources it touches

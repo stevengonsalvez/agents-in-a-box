@@ -43,7 +43,7 @@
   </defs>
   <rect width="960.0" height="700.0" fill="#ffffff"/>
   <text x="480.0" y="56" text-anchor="middle" class="title">reflect — Claude Code plugin</text>
-  <text x="480.0" y="82" text-anchor="middle" class="subtitle">Lifecycle hooks capture corrections &amp; inject prior learnings · v3.6.0</text>
+  <text x="480.0" y="82" text-anchor="middle" class="subtitle">Lifecycle hooks capture corrections &amp; inject prior learnings · v5.2.5</text>
   <path d="M 135.0,300.0 L 135.0,138.0 L 300.0,138.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
   <path d="M 210.0,345.0 L 230.4,345.0 L 279.6,268.0 L 300.0,268.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
   <path d="M 210.0,345.0 L 230.4,345.0 L 279.6,398.0 L 300.0,398.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>

@@ -7,15 +7,20 @@ Hangar gives `ainb` a **managed-agent control plane**: file work as *issues*, as
 
 It is deliberately **loosely coupled**. A standalone `ainb-hangar-daemon` owns the data plane (SQLite, the task FSM, the cron scheduler, the agent runner). The TUI is a **plugin** (`hangar-tui`) that the host `ainb` binary loads and that talks to the daemon over a unix-socket JSON-RPC contract. The plugin holds *zero* domain logic — it subscribes, pulls snapshots, renders, and forwards key intents. So the control plane keeps running (autopilots fire, tasks dispatch) whether or not a TUI is attached.
 
-| | |
-|---|---|
-| **Crates** | 4 Rust crates + 1 plugin |
-| **TUI screens** | 9 |
-| **CLI noun-groups** | 10 (`ainb hangar …`) |
-| **JSON-RPC methods** | 17 |
-| **Migrations** | 0001–0010 (16 tables) |
-| **Features** | 35 — 22 e2e-tripwired, 12 acceptance-only, 0 untested |
-| **Build phases** | P0–P9 |
+| | | How to re-derive |
+|---|---|---|
+| **Crates** | 7 Rust crates + 1 plugin | `ls -d ainb-tui/crates/ainb-hangar-*` |
+| **CLI noun-groups** | 18 (`ainb hangar …`) | `HangarCommand` in `cli/hangar/mod.rs` |
+| **JSON-RPC methods** | 144 | `ALL_METHODS` in `ainb-hangar-proto/src/methods.rs` |
+| **Migrations** | 0001–0092 | `ls ainb-hangar-store/migrations/` |
+| **Build phases** | P0–P9 (complete) | `docs/hangar/phases/` |
+
+> These were last checked on 2026-08-26 and each carries the command that
+> produces it, because the previous set (4 crates, 17 RPC methods, migrations
+> 0001–0010) was a pre-e38 snapshot that stayed on the page long after the
+> code moved. The reconciliation in
+> [`proofs/multica-comparison.md`](proofs/multica-comparison.md) is itself
+> now behind: it records 39 RPC methods and 23 migrations.
 
 ## System architecture
 

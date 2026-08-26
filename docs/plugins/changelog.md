@@ -15,7 +15,7 @@ Tracks how the plugin contract (`./spec-v2.md`) evolves.
 
 Subprocess plugin contract. Plugins are native executables exchanging JSON-RPC 2.0 over LSP-style Content-Length framed stdio. Replaces the v1 wasm contract entirely.
 
-Surface area (full reference in [v2.md](./v2.md)):
+Surface area (full reference in [v2.md](./spec-v2.md)):
 
 - **Six host → plugin methods**: `plugin/init`, `plugin/shutdown`, `plugin/render`, `plugin/handle_event`, `plugin/handle_key`, `plugin/cli_dispatch`.
 - **Eight plugin → host methods**: `host/snapshot/get`, `host/snapshot/publish`, `host/snapshot/subscribe`, `host/action/invoke`, `host/log`, `host/fs/read_dir`, `host/fs/read_file`, `host/network/fetch`.

@@ -4,7 +4,7 @@ title: "ainb plugin contract — v2 (subprocess)"
 
 **Status:** stable.
 **Host versions covered:** `2.x.y` (additive minor bumps stay in v2).
-**Successor:** tracked in [CHANGELOG.md](./CHANGELOG.md). A new contract version (`v3`) ships only when an existing signature changes incompatibly.
+**Successor:** tracked in [CHANGELOG.md](./changelog.md). A new contract version (`v3`) ships only when an existing signature changes incompatibly.
 
 A plugin **conforms to v2** if it satisfies every MUST clause below. The `ainb-plugin-cts-v2` crate is the executable form of this document; a plugin author runs it via `cargo test` to get a per-axis pass/fail report.
 
