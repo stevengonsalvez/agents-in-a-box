@@ -1,36 +1,29 @@
 ---
-title: "Agents (37)"
+title: "Agents (16)"
 ---
 
-37 specialised AI agents organised by domain.
+16 specialised AI agents organised by domain. Each has a defined persona, tool
+access, and area of expertise.
 
 ## By category
 
-37 agents across 6 nested categories plus 2 root-level agents.
+16 agents across 4 nested categories plus 2 root-level agents.
 
-### Universal (3)
+### Universal (5)
 
-`backend-developer` `frontend-developer` `superstar-engineer`
+`backend-developer` `deep-reasoner` `fast-worker` `frontend-developer` `superstar-engineer`
 
-### Orchestrators (3)
+### Engineering (6)
 
-`tech-lead-orchestrator` `project-analyst` `team-configurator`
-
-### Engineering (24)
-
-`api-architect` `architecture-reviewer` `code-archaeologist` `code-reviewer` `dev-cleanup-wizard` `devops-automator` `documentation-specialist` `focused-repository-analyzer` `gatekeeper` `integration-tests` `lead-orchestrator` `migration` `performance-optimizer` `planner` `playwright-test-validator` `property-mutation` `release-manager` `security-agent` `service-codegen` `solution-architect` `supabase-security-reviewer` `tailwind-css-expert` `test-analyser` `test-writer-fixer`
-
-### Design (1)
-
-`ui-designer`
+`code-archaeologist` `code-reviewer` `documentation-specialist` `performance-optimizer` `security-agent` `test-engineer`
 
 ### Swarm (2)
 
-`worker` `leader`
+`leader` `worker`
 
-### Meta (2)
+### Meta (1)
 
-`agentmaker` `reflect`
+`agentmaker`
 
 ### Root (2)
 
