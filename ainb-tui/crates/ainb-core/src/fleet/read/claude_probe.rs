@@ -16,6 +16,7 @@
 // status→[`Resolution`] mapping all take their inputs as data. The only I/O is
 // [`load_dir`], a thin directory listing.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -24,7 +25,7 @@ use crate::fleet::read::needs::make_row;
 use crate::fleet::read::{
     AskUserQuestionData, IdleContext, NeedsContext, Resolution, RouteHint, WaitContext,
 };
-use crate::fleet::types::Session;
+use crate::fleet::types::{Session, SessionSource};
 
 /// Provenance stamp for probe-sourced rows, alongside the materializer's
 /// `"hook"` and the fallback's `"tmux"`.
@@ -51,13 +52,23 @@ pub struct ClaudeProbe {
     /// Epoch-ms of the last status flip. Ages an `idle` into an IDLE row.
     #[serde(default)]
     pub status_updated_at: i64,
-    /// Epoch-ms start time of `pid`, as Claude recorded it. Defeats pid
-    /// recycling: a recycled pid is alive but started at a different instant.
-    /// (The sibling `procStart` string is NOT used: it is a UTC asctime while
-    /// `ps lstart` prints local time, so string comparison breaks across
-    /// zones/DST. Epoch numbers compare unambiguously.)
+    /// Claude's own display name for the session, when it has one.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// When the SESSION began, epoch-ms. Deliberately NOT the liveness gate:
+    /// measured against three live sessions it runs up to 353s later than the
+    /// process itself, because a session starts after the process hosting it.
     #[serde(default)]
     pub started_at: i64,
+    /// The PROCESS start time as a UTC asctime (`"Fri Aug  7 10:35:33 2026"`).
+    /// This is the pid-recycling gate: parsed as UTC it matches `ps lstart`
+    /// (parsed as local) to the second on every session measured.
+    ///
+    /// Compared as EPOCHS, never as strings — the two formats differ in both
+    /// zone and field order (`"Fri Aug  7"` vs `"Fri  7 Aug"`), so a string
+    /// compare fails on every host that is not UTC.
+    #[serde(default)]
+    pub proc_start: String,
 }
 
 /// Parse one probe file's contents. Corrupt/foreign JSON is `None`, never an
@@ -65,7 +76,19 @@ pub struct ClaudeProbe {
 /// simply means the session falls through to the next tier.
 #[must_use]
 pub fn parse_probe(json: &str) -> Option<ClaudeProbe> {
-    serde_json::from_str(json).ok()
+    // Take the FIRST JSON value and ignore anything after it, rather than
+    // `from_str`, which rejects trailing bytes outright. A real probe on the
+    // host this was written against ends `...}}` — one brace too many — and a
+    // strict parse threw away a whole session's state over a stray byte the
+    // record itself did not need. The leading object is complete and
+    // self-describing, so honouring it is strictly better than abstaining.
+    //
+    // Still `Option`: a genuinely truncated or foreign file yields `None` and
+    // the session falls through to the tiers below.
+    serde_json::Deserializer::from_str(json)
+        .into_iter::<ClaudeProbe>()
+        .next()
+        .and_then(Result::ok)
 }
 
 /// What the host observed about the probe's pid, gathered by the caller (the
@@ -79,9 +102,9 @@ pub struct PidObservation {
     pub started_epoch_ms: Option<i64>,
 }
 
-/// Tolerance when comparing the probe's recorded start instant against the
-/// observed one. `ps` reports whole seconds while the probe records
-/// milliseconds, so sub-second rounding alone spans up to a second.
+/// Tolerance when comparing the recorded process start against the observed
+/// one. Both sides are whole seconds, so this only absorbs rounding; a recycled
+/// pid misses by minutes at least.
 pub const START_MATCH_TOLERANCE_MS: i64 = 2_000;
 
 /// The liveness gate: trust a probe only when its pid is alive AND the running
@@ -95,11 +118,13 @@ pub const START_MATCH_TOLERANCE_MS: i64 = 2_000;
 /// distrusting one is a fall-through to the tiers that run today anyway.
 #[must_use]
 pub fn probe_is_live(probe: &ClaudeProbe, observed: &PidObservation) -> bool {
+    let Some(recorded) = parse_proc_start_utc(&probe.proc_start) else {
+        return false;
+    };
     observed.alive
-        && probe.started_at > 0
         && observed
             .started_epoch_ms
-            .is_some_and(|obs| (obs - probe.started_at).abs() <= START_MATCH_TOLERANCE_MS)
+            .is_some_and(|obs| (obs - recorded).abs() <= START_MATCH_TOLERANCE_MS)
 }
 
 /// Observe `pid` on the host: one `LC_ALL=C ps` call answers both liveness
@@ -122,6 +147,17 @@ pub fn observe_pid(pid: u32) -> PidObservation {
         alive: true,
         started_epoch_ms: parse_lstart_local(&text),
     }
+}
+
+/// Parse Claude's `procStart` asctime as UTC into epoch-ms.
+///
+/// Same layout `ps` prints, different zone: Claude records UTC, `ps` prints
+/// host-local. Both are normalised to epoch here so the gate compares instants
+/// rather than text.
+#[must_use]
+fn parse_proc_start_utc(s: &str) -> Option<i64> {
+    let naive = chrono::NaiveDateTime::parse_from_str(s.trim(), "%a %b %e %H:%M:%S %Y").ok()?;
+    Some(naive.and_utc().timestamp_millis())
 }
 
 /// Parse a `LC_ALL=C ps -o lstart` value ("Thu Aug 20 19:53:18 2026") as host
@@ -194,19 +230,30 @@ pub fn resolve_probe(
         }
         "waiting" => {
             if let Some(aq) = ask {
-                Some(stamped(session, NeedsContext::Ask(aq)))
-            } else {
-                Some(stamped(
-                    session,
-                    NeedsContext::Wait(WaitContext {
-                        marker: "waitingFor:".to_string(),
-                        text: probe
-                            .waiting_for
-                            .clone()
-                            .unwrap_or_else(|| "input needed".to_string()),
-                    }),
-                ))
+                return Some(stamped(session, NeedsContext::Ask(aq)));
             }
+            let reason = probe.waiting_for.clone().unwrap_or_else(|| "input needed".to_string());
+            // Carry HOW LONG it has been blocked, not just that it is.
+            //
+            // Deliberately NOT a staleness cutoff. Dropping an aged `waiting`
+            // row would discard exactly the case this tier exists to catch: a
+            // session on this machine has been blocked for 18 days and never
+            // appeared in `fleet needs` once. A wedged-but-alive Claude is
+            // indistinguishable from a genuinely patient one, and the pid gate
+            // already removes the crashed case, so the honest move is to
+            // surface the age and let the reader judge rather than silently
+            // suppress a real request for input.
+            let text = match blocked_for(probe, now_ms) {
+                Some(mins) => format!("{reason} (blocked {})", humanize_minutes(mins)),
+                None => reason,
+            };
+            Some(stamped(
+                session,
+                NeedsContext::Wait(WaitContext {
+                    marker: "waitingFor:".to_string(),
+                    text,
+                }),
+            ))
         }
         _ => None,
     }
@@ -231,6 +278,162 @@ pub fn load_dir(dir: &Path) -> Vec<ClaudeProbe> {
     // share a cwd (newest status flip wins in the P3 index).
     probes.sort_by_key(|p| (p.cwd.clone(), std::cmp::Reverse(p.status_updated_at)));
     probes
+}
+
+/// Minutes a probe has held its current status, or `None` when the stamp is
+/// unusable (absent, or in the future — a clock skew we will not reason about).
+#[must_use]
+fn blocked_for(probe: &ClaudeProbe, now_ms: i64) -> Option<i64> {
+    if probe.status_updated_at <= 0 || probe.status_updated_at > now_ms {
+        return None;
+    }
+    Some((now_ms - probe.status_updated_at) / 60_000)
+}
+
+/// Compact human duration for a nudge body: `12m`, `3h`, `18d`.
+#[must_use]
+#[allow(clippy::missing_const_for_fn)] // formats, cannot be const
+fn humanize_minutes(mins: i64) -> String {
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 60 * 24 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{}d", mins / (60 * 24))
+    }
+}
+
+/// Tier-A index: every LIVE probe on this host, keyed by working directory.
+///
+/// Built once per `fleet needs` run so the pid observations (one `ps` each)
+/// happen a bounded number of times rather than per session. A probe whose pid
+/// fails [`probe_is_live`] never enters the index, so a stale file from a
+/// long-dead session cannot answer for a session running in the same cwd today.
+#[derive(Debug, Default)]
+pub struct ProbeIndex {
+    by_cwd: HashMap<String, ClaudeProbe>,
+}
+
+impl ProbeIndex {
+    /// Load and gate every probe under `dir`.
+    ///
+    /// When two live probes share a cwd (two Claude sessions in one directory)
+    /// the most recently updated wins: it is the one whose status was last
+    /// observed to change, so it is the freshest claim about that directory.
+    #[must_use]
+    pub fn load_from(dir: &Path) -> Self {
+        let mut by_cwd: HashMap<String, ClaudeProbe> = HashMap::new();
+        for probe in load_dir(dir) {
+            if probe.cwd.is_empty() || !probe_is_live(&probe, &observe_pid(probe.pid)) {
+                continue;
+            }
+            match by_cwd.get(&probe.cwd) {
+                Some(existing) if existing.status_updated_at >= probe.status_updated_at => {}
+                _ => {
+                    by_cwd.insert(probe.cwd.clone(), probe);
+                }
+            }
+        }
+        Self { by_cwd }
+    }
+
+    /// Load from the default `~/.claude/sessions`. An unresolvable home yields
+    /// an empty index, so every session falls through to the lower tiers.
+    #[must_use]
+    pub fn load() -> Self {
+        dirs::home_dir()
+            .map(|h| Self::load_from(&h.join(".claude").join("sessions")))
+            .unwrap_or_default()
+    }
+
+    /// Whether any live probe was found. Drives the tier-liveness reporting.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_cwd.is_empty()
+    }
+
+    /// Number of live probes indexed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_cwd.len()
+    }
+
+    /// Every live probe in the index.
+    pub fn probes(&self) -> impl Iterator<Item = &ClaudeProbe> {
+        self.by_cwd.values()
+    }
+
+    /// The raw status a live probe reports for `cwd`, without resolving it.
+    ///
+    /// Exists so the caller can read the transcript for an open question ONLY
+    /// for a session tier A is about to call `waiting`, rather than paying a
+    /// JSONL read for every session on the host.
+    #[must_use]
+    pub fn peek_status(&self, cwd: &str) -> Option<&str> {
+        self.by_cwd.get(cwd).map(|p| p.status.as_str())
+    }
+
+    /// Resolve one session against tier A, or `None` to abstain to tier B.
+    ///
+    /// Correlation is by `cwd`, the fleet's existing cross-source dedupe key —
+    /// the same key `CurrentStateIndex` uses, so the two tiers agree about what
+    /// a session IS even when they disagree about its state.
+    #[must_use]
+    pub fn resolve(
+        &self,
+        session: &Session,
+        ask: Option<AskUserQuestionData>,
+        idle_threshold_min: i64,
+        now_ms: i64,
+    ) -> Option<Resolution> {
+        if session.cwd.is_empty() {
+            return None;
+        }
+        let probe = self.by_cwd.get(&session.cwd)?;
+        resolve_probe(probe, session.clone(), ask, idle_threshold_min, now_ms)
+    }
+}
+
+/// Discover Claude sessions that ainb did not launch.
+///
+/// Every other discovery source enumerates sessions ainb (or a peer, or tmux)
+/// already knows about. A Claude session started by hand, or a background
+/// (`kind: "bg"`) job, appears in NONE of them — it has no ainb record, no
+/// broker row, and may have no tmux pane. Its probe file is the only trace it
+/// leaves, so this is the only way such a session can ever reach `fleet needs`.
+///
+/// This matters concretely: on the host this was written against, one session
+/// had been sitting on `status: "waiting"` for eighteen days without once
+/// appearing in the fleet, because nothing discovered it.
+///
+/// Returns only LIVE probes (pid + start-instant gated). The session id is the
+/// probe's own `sessionId` so it stays stable across runs, and `summary`
+/// carries Claude's session name when it has one, giving the row something a
+/// human can recognise.
+#[must_use]
+pub fn discover_from_probes(index: &ProbeIndex) -> Vec<Session> {
+    index
+        .probes()
+        .map(|p| Session {
+            id: if p.session_id.is_empty() {
+                format!("claude-probe-{}", p.pid)
+            } else {
+                p.session_id.clone()
+            },
+            cwd: p.cwd.clone(),
+            pid: Some(p.pid),
+            git_root: None,
+            tmux_session: None,
+            workspace_name: None,
+            worktree_path: None,
+            peer_id: None,
+            bg_job_id: None,
+            transcript_path: None,
+            sources: vec![SessionSource::Probe],
+            summary: p.name.clone().filter(|n| !n.is_empty()),
+            last_seen_ms: Some(p.status_updated_at).filter(|t| *t > 0),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -266,25 +469,146 @@ mod tests {
         }
     }
 
+    fn session_at(cwd: &str) -> Session {
+        let mut s = session(None);
+        s.cwd = cwd.to_string();
+        s
+    }
+
     fn probe(status: &str, updated_at: i64) -> ClaudeProbe {
         ClaudeProbe {
             pid: 100,
             session_id: "cs1".into(),
             cwd: "/w/s1".into(),
             status: status.into(),
+            name: None,
             waiting_for: None,
             status_updated_at: updated_at,
             started_at: 1_786_098_934_524,
+            proc_start: "Fri Aug  7 10:35:33 2026".into(),
         }
     }
 
     fn live() -> PidObservation {
         PidObservation {
             alive: true,
-            // 900ms off the recorded instant: inside the 2s tolerance, the
-            // sub-second rounding ps introduces.
-            started_epoch_ms: Some(1_786_098_935_424),
+            // "Fri Aug  7 10:35:33 2026" as UTC, +900ms of rounding.
+            started_epoch_ms: Some(1_786_098_933_900),
         }
+    }
+
+    #[test]
+    fn wait_row_carries_how_long_it_has_been_blocked() {
+        // The real case: a session blocked for 18 days that never once showed
+        // up in `fleet needs`. It must surface, WITH its age.
+        let now = 1_786_106_681_993 + 18 * 24 * 60 * 60_000;
+        let mut p = probe("waiting", 1_786_106_681_993);
+        p.waiting_for = Some("input needed".into());
+        let Some(Resolution::Hook(row)) = resolve_probe(&p, session(None), None, 5, now) else {
+            panic!("an aged waiting probe must still produce a row");
+        };
+        let NeedsContext::Wait(w) = &row.context else {
+            panic!("wrong context: {:?}", row.context);
+        };
+        assert_eq!(w.text, "input needed (blocked 18d)");
+    }
+
+    #[test]
+    fn unusable_or_future_stamps_drop_the_age_but_keep_the_row() {
+        let mut p = probe("waiting", 0);
+        p.waiting_for = Some("input needed".into());
+        let Some(Resolution::Hook(row)) = resolve_probe(&p, session(None), None, 5, 60_000) else {
+            panic!("row must survive an unusable stamp");
+        };
+        assert!(matches!(&row.context, NeedsContext::Wait(w) if w.text == "input needed"));
+        // A stamp from the future is clock skew, not a negative age.
+        let future = probe("waiting", 900_000);
+        assert!(blocked_for(&future, 60_000).is_none());
+    }
+
+    #[test]
+    fn humanize_covers_minutes_hours_days() {
+        assert_eq!(humanize_minutes(12), "12m");
+        assert_eq!(humanize_minutes(59), "59m");
+        assert_eq!(humanize_minutes(60), "1h");
+        assert_eq!(humanize_minutes(60 * 24), "1d");
+        assert_eq!(humanize_minutes(18 * 24 * 60), "18d");
+    }
+
+    #[test]
+    fn index_keys_by_cwd_and_drops_dead_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let started_str = chrono::DateTime::from_timestamp_millis(
+            observe_pid(me).started_epoch_ms.expect("own start"),
+        )
+        .expect("valid instant")
+        .format("%a %b %e %H:%M:%S %Y")
+        .to_string();
+        // Live: our own pid, so the gate genuinely passes.
+        std::fs::write(
+            dir.path().join("live.json"),
+            format!(
+                r#"{{"pid":{me},"cwd":"/w/live","status":"busy","procStart":"{started_str}","statusUpdatedAt":5}}"#
+            ),
+        )
+        .unwrap();
+        // Dead: a pid far above pid_max can never be alive.
+        std::fs::write(
+            dir.path().join("dead.json"),
+            r#"{"pid":1073741824,"cwd":"/w/dead","status":"waiting","procStart":"Fri Aug  7 10:35:33 2026","statusUpdatedAt":5}"#,
+        )
+        .unwrap();
+        // Malformed: the shape 6728.json really has on this box.
+        std::fs::write(
+            dir.path().join("bad.json"),
+            r#"{"pid":1,"cwd":"/w/x"} trailing"#,
+        )
+        .unwrap();
+
+        let index = ProbeIndex::load_from(dir.path());
+        assert_eq!(index.len(), 1, "only the live probe is indexed");
+        assert!(index.resolve(&session_at("/w/live"), None, 5, 60_000).is_some());
+        assert!(
+            index.resolve(&session_at("/w/dead"), None, 5, 60_000).is_none(),
+            "a dead pid must not answer for its cwd"
+        );
+        assert!(index.resolve(&session_at("/w/x"), None, 5, 60_000).is_none());
+        assert!(index.resolve(&session_at(""), None, 5, 60_000).is_none());
+    }
+
+    #[test]
+    fn newest_status_wins_when_two_live_probes_share_a_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let started_str = chrono::DateTime::from_timestamp_millis(
+            observe_pid(me).started_epoch_ms.expect("own start"),
+        )
+        .expect("valid instant")
+        .format("%a %b %e %H:%M:%S %Y")
+        .to_string();
+        for (name, status, stamp) in [("old.json", "idle", 1_000), ("new.json", "busy", 9_000)] {
+            std::fs::write(
+                dir.path().join(name),
+                format!(
+                    r#"{{"pid":{me},"cwd":"/w/same","status":"{status}","procStart":"{started_str}","statusUpdatedAt":{stamp}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let index = ProbeIndex::load_from(dir.path());
+        assert_eq!(index.len(), 1);
+        // busy (the newer stamp) short-circuits Healthy; idle would have made a row.
+        assert!(matches!(
+            index.resolve(&session_at("/w/same"), None, 5, 10_000_000),
+            Some(Resolution::Healthy)
+        ));
+    }
+
+    #[test]
+    fn a_missing_sessions_dir_yields_an_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ProbeIndex::load_from(&dir.path().join("nope")).is_empty());
     }
 
     #[test]
@@ -294,6 +618,9 @@ mod tests {
         assert_eq!(p.status, "waiting");
         assert_eq!(p.waiting_for.as_deref(), Some("input needed"));
         assert_eq!(p.started_at, 1786098934524);
+        assert_eq!(p.proc_start, "Fri Aug  7 10:35:33 2026");
+        // procStart is UTC; startedAt is the later SESSION start.
+        assert_eq!(parse_proc_start_utc(&p.proc_start), Some(1_786_098_933_000));
         assert_eq!(p.status_updated_at, 1786106681993);
     }
 
@@ -301,6 +628,23 @@ mod tests {
     fn corrupt_and_foreign_json_abstain_instead_of_erroring() {
         assert!(parse_probe("not json").is_none());
         assert!(parse_probe(r#"{"unrelated":true}"#).is_none()); // no pid
+        assert!(parse_probe("").is_none());
+        assert!(
+            parse_probe(r#"{"pid":1,"cwd":"/w"#).is_none(),
+            "truncated must abstain"
+        );
+    }
+
+    #[test]
+    fn a_trailing_brace_does_not_discard_the_whole_probe() {
+        // The exact shape of ~/.claude/sessions/6728.json on the host this was
+        // written against: a complete object followed by one stray `}`. Strict
+        // parsing dropped the session entirely and it fell through to a pane
+        // scan that reported IDLE for a session that was in fact busy.
+        let p = parse_probe(r#"{"pid":6728,"cwd":"/w/x","status":"busy","startedAt":7}}"#)
+            .expect("leading object must be honoured");
+        assert_eq!(p.pid, 6728);
+        assert_eq!(p.status, "busy");
     }
 
     #[test]
@@ -333,7 +677,7 @@ mod tests {
         ));
         // A probe with no recorded start can never pass the gate.
         let mut blank = p;
-        blank.started_at = 0;
+        blank.proc_start = String::new();
         assert!(!probe_is_live(
             &blank,
             &PidObservation {
@@ -362,7 +706,12 @@ mod tests {
         let started = obs.started_epoch_ms.expect("own lstart must parse");
         let mut p = probe("busy", 1);
         p.pid = me;
-        p.started_at = started;
+        // Round-trip our observed local start back out as the UTC asctime
+        // Claude would have written, so the gate is exercised end to end.
+        p.proc_start = chrono::DateTime::from_timestamp_millis(started)
+            .expect("valid instant")
+            .format("%a %b %e %H:%M:%S %Y")
+            .to_string();
         assert!(probe_is_live(&p, &obs));
         // And a dead pid observes as such (pid 2^30 is far above pid_max).
         assert!(!observe_pid(1_073_741_824).alive);
@@ -445,7 +794,8 @@ mod tests {
         let NeedsContext::Wait(w) = &row.context else {
             panic!("wrong context: {:?}", row.context);
         };
-        assert_eq!(w.text, "input needed");
+        // Carries the probe's own reason, plus how long it has held it.
+        assert_eq!(w.text, "input needed (blocked 0m)");
         assert!(matches!(row.route_hint, RouteHint::Broker));
     }
 
