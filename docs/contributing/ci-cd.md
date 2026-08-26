@@ -35,7 +35,7 @@ Jobs:
 
 ## `deploy-pages.yml` — docs site to GitHub Pages
 
-Runs on push to `main` touching `website/site/**`, `docs/**`, or the workflow itself (also `workflow_dispatch`). Builds the Astro + Starlight site under `website/site` with Node 22 and `npm ci` + `npm run build`, then deploys to GitHub Pages (`https://stevengonsalvez.github.io/agents-in-a-box/`). Uses a `pages` concurrency group so an in-flight deploy finishes while queued runs are cancelled.
+Runs on push to `main` touching `website/site/**`, `docs/**`, or the workflow itself (also `workflow_dispatch`). Builds the Astro + Starlight site under `website/site` with Node 22 and `npm ci` + `npm run build`, then deploys to GitHub Pages, served at the custom domain `https://ainb.app/` via `website/site/public/CNAME`. Uses a `pages` concurrency group so an in-flight deploy finishes while queued runs are cancelled.
 
 ## See also
 
