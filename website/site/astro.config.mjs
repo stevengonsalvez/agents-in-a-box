@@ -47,7 +47,14 @@ export default defineConfig({
       plugins: [starlightImageZoom()],
       customCss: ['./src/styles/tokens.css', './src/styles/crt.css', './src/styles/reflect-viz.css'],
       editLink: {
-        baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/',
+        // Starlight builds this as `new URL(baseUrl + entry.filePath)`. The docs
+        // collection is loaded from `../../docs`, so `entry.filePath` carries a
+        // leading `../../`, and `new URL()` resolves it by popping two segments.
+        // Pointing the base at this site's own directory gives it two segments
+        // it can afford to lose: `../../` eats `website/site/` and lands on
+        // `edit/main/docs/...`. Without the suffix it ate `edit/main/` instead,
+        // and every "Edit page" link 404'd.
+        baseUrl: 'https://github.com/stevengonsalvez/agents-in-a-box/edit/main/website/site/',
       },
       lastUpdated: true,
       pagination: true,
