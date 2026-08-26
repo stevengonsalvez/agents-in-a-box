@@ -3,7 +3,7 @@ title: "reflect"
 description: "Claude Code plugin for agent self-improvement: captures corrections as learnings, indexes them, and auto-recalls the relevant ones into every new session."
 ---
 
-`reflect` is a **Claude Code plugin** — it is loaded by Claude Code (Anthropic's plugin system: skills + hooks + commands), not by the ainb TUI. It captures the corrections and design decisions you make in a session as structured learnings, indexes them into a hybrid GraphRAG + BM25 knowledge base, and auto-injects the most relevant prior learnings into every new session. Philosophy: *correct once, never again; recall everything next time.* Current version: **3.6.0**.
+`reflect` is a **Claude Code plugin** — it is loaded by Claude Code (Anthropic's plugin system: skills + hooks + commands), not by the ainb TUI. It captures the corrections and design decisions you make in a session as structured learnings, indexes them into a hybrid GraphRAG + BM25 knowledge base, and auto-injects the most relevant prior learnings into every new session. Philosophy: *correct once, never again; recall everything next time.* Current version: **5.2.5** (the ref pinned in `.claude-plugin/marketplace.json`).
 
 ## How it works
 
