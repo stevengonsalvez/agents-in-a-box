@@ -57,7 +57,9 @@
 //! * **A blocked permission is answerable.** `session/request_permission` parks
 //!   its responder here and raises an attention row; the answer arrives through
 //!   `fleet/action` and reaches the adapter's pending JSON-RPC id. A permission
-//!   whose adapter dies is resolved by convergence, never left as a ghost row.
+//!   whose adapter dies is retired the moment its turn ends, and by convergence
+//!   when no turn was open to end, never left as a ghost row for an operator to
+//!   click at a delivery they can already see resolved.
 //!   EVERY parked ask is answerable, not just the newest: an adapter running
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
@@ -1992,6 +1994,19 @@ impl SessionActor {
                 body,
                 created_at: now,
             });
+        // A permission still parked when the turn ENDS has no answerable
+        // responder left: the adapter either died holding it (the `Err` leg) or
+        // finished the turn without waiting for it. It is retired HERE, BEFORE
+        // the receipt lands, because the receipt is what every reader treats as
+        // "this turn is over": left to convergence, the attention list keeps
+        // advertising an approval to click for a delivery the operator can
+        // already see resolved (R8/I7's ghost row). Convergence still does this
+        // and must, for a session with no open turn and for a daemon that died
+        // mid-turn; this is that same `cancel_parked` pulled forward to the
+        // first moment the turn is known to be over, not a second copy of the
+        // repair. The process-exit route gets here an `EXIT_QUIESCE` later at
+        // best, and only once this actor finishes the write set below.
+        self.cancel_parked().await;
         // ONE transaction (I4): the reply, its receipt and the released session
         // land together or not at all. Four separate commits left a daemon
         // death between them showing an answer with no receipt, or a receipt
