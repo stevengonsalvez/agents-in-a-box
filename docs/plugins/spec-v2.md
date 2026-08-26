@@ -289,7 +289,7 @@ Denied capability → `RpcError { code: -32001, message: "capability denied: <ca
 
 ## 10. Conformance test suite
 
-`ainb-plugin-cts-v2` covers 14 axes: manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot pub/sub, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, chunked publish ordering. Each axis has a canary plugin at `crates/ainb-plugin-cts-v2/tests/canaries/<axis>/` and a host-side `#[test]` in `tests/axes.rs`.
+`ainb-plugin-cts-v2` covers 21 axes: manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot get-after-publish, snapshot subscribe, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, event-stream subscribe, managed-subprocess spawn, unix-socket dial, secret-store get, mouse forwarding, read_paths config, redraw hint. Each axis has a canary plugin at `crates/ainb-plugin-cts-v2/tests/canaries/<axis>/` and a host-side `#[test]` in `tests/axes.rs`.
 
 Plugins MUST pass every axis their manifest's capability + provides surface implies. Axes for surface a plugin doesn't expose are skipped.
 
