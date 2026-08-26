@@ -11,7 +11,7 @@ There are **two** independent versions and they are easy to confuse:
 | Component | Package / manifest | Version | Source of truth |
 |---|---|---|---|
 | `reflect` **CLI** | Python package `reflect-kb` | `0.3.0` | [`pyproject.toml`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/pyproject.toml) (ainb-reflect-memory root) |
-| `reflect` **plugin** (Claude Code wiring) | [`plugin/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin) | `3.6.0` | [`plugin/.claude-plugin/plugin.json`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/.claude-plugin/plugin.json) |
+| `reflect` **plugin** (Claude Code wiring) | [`plugin/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin) | `5.2.5` | [`plugin/.claude-plugin/plugin.json`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/.claude-plugin/plugin.json) |
 
 `reflect --version` reports the CLI version (`0.3.x`). The plugin version describes the harness wiring (hooks, skills, adapters) and is documented separately in the plugin architecture docs.
 
@@ -67,7 +67,7 @@ The CLI is the data layer; it knows nothing about Claude Code. Knowledge content
 
 ## Plugin: skills, adapters and hooks
 
-The `reflect` plugin (version `3.6.0`) wires the CLI into the agent harness. It ships:
+The `reflect` plugin (version `5.2.5`) wires the CLI into the agent harness. It ships:
 
 **Six colon-namespaced skills** ([`plugin/skills/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin/skills)):
 
