@@ -442,13 +442,16 @@ impl InstallOwner {
         if self == Self::Direct {
             return apply_direct_release(manifest).await;
         }
+        if self == Self::Homebrew {
+            let status =
+                homebrew_update_command().status().context("refreshing Homebrew metadata")?;
+            if !status.success() {
+                bail!("Homebrew metadata refresh exited {status}");
+            }
+        }
         let version = manifest.stable_version()?.to_string();
         let mut command = match self {
-            Self::Homebrew => {
-                let mut c = Command::new("brew");
-                c.args(["upgrade", "ainb"]);
-                c
-            }
+            Self::Homebrew => homebrew_upgrade_command(),
             Self::Cargo => {
                 let mut c = Command::new("cargo");
                 c.args([
@@ -472,6 +475,23 @@ impl InstallOwner {
             bail!("ainb update command exited {status}")
         }
     }
+}
+
+/// Refresh the local tap checkout before Homebrew compares formula versions.
+///
+/// `brew upgrade` can otherwise report an old installed formula as current
+/// when its local tap checkout predates the signed release manifest that ainb
+/// just verified.
+fn homebrew_update_command() -> Command {
+    let mut command = Command::new("brew");
+    command.arg("update");
+    command
+}
+
+fn homebrew_upgrade_command() -> Command {
+    let mut command = Command::new("brew");
+    command.args(["upgrade", "ainb"]);
+    command
 }
 
 async fn apply_direct_release(manifest: &ReleaseManifest) -> Result<()> {
@@ -769,6 +789,20 @@ pub fn cached_state() -> Option<ReleaseState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn homebrew_update_refreshes_formula_metadata_before_upgrade() {
+        let command = homebrew_update_command();
+        assert_eq!(command.get_program(), "brew");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["update"]);
+    }
+
+    #[test]
+    fn homebrew_upgrade_targets_only_ainb() {
+        let command = homebrew_upgrade_command();
+        assert_eq!(command.get_program(), "brew");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["upgrade", "ainb"]);
+    }
 
     #[test]
     fn plugin_swap_rolls_back_when_binary_activation_fails() {
