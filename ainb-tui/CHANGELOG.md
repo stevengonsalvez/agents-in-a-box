@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.9] - 2026-08-26
+### Added
+- Merge pull request #754 from stevengonsalvez/f/ainb-hooks-interview
+- Merge pull request #755 from stevengonsalvez/f/rename-sessions
+- **hooks**: block a done claim with live watchers
+- **hooks**: block prose asks at turn-end
+- add signed self-updates
+- alias upgrade to update
+
+### Fixed
+- **hooks**: address the review of the stall guard
+- handle pairing in release checker
+- preserve direct update rollback
+
+### Documentation
+- **ainb-hooks**: document the ask mode and the block budget
+
+### Other
+- Merge pull request #753 from stevengonsalvez/chore/release-v1.22.8
+- **hooks**: release version 0.4.8
+- sync Cargo.lock with the 1.22.8 version bump
+- **hooks**: budget the stall guard's blocks
+
+
 ## [1.22.8] - 2026-08-26
 ### Added
 - Merge pull request #752 from stevengonsalvez/f/codex-app-server-config
