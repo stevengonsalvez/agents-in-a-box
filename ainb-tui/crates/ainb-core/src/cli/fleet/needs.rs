@@ -12,9 +12,12 @@ use crate::fleet::discover::{
 };
 use crate::fleet::enrich_cache;
 use crate::fleet::read::{
-    ClassifyInput, CurrentStateIndex, NeedsRow, Resolution, capture_pane, classify,
+    AskUserQuestionData, ClassifyInput, CurrentStateIndex, NeedsContext, NeedsRow, ProbeIndex,
+    Resolution, capture_pane, classify, discover_from_probes, last_ask_user_question,
+    latest_transcript_for_cwd,
 };
-use crate::fleet::types::Session;
+use crate::fleet::types::{Session, SessionSource};
+use ainb_fleet_core::fleet::read::needs::idle_threshold_from_env;
 
 /// Staleness window (ms) for a hook-sourced `current_state` row before the
 /// reader falls back to a live `classify()` scan. `0` (the default) disables
@@ -39,8 +42,14 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     let peers = discover_from_peers().unwrap_or_default();
     let jobs = jobs_res.unwrap_or_default();
 
-    let merged = merge_sessions(vec![ainb, peers, jobs]);
-    let rows = classify_all(merged, idle_override, enrich).await;
+    // Tier-A probes are BOTH a discovery source and a resolver. Load once here
+    // so a Claude session ainb never launched (hand-started, or `kind: "bg"`)
+    // can enter the fleet at all: it has no ainb record, no broker row and
+    // possibly no tmux pane, so its probe file is its only trace.
+    let probes = ProbeIndex::load();
+    let probed = discover_from_probes(&probes);
+    let merged = merge_sessions(vec![ainb, peers, jobs, probed]);
+    let rows = classify_all(merged, &probes, idle_override, enrich).await;
 
     if matches!(format, OutputFormat::Text) {
         print_text(&rows);
@@ -90,8 +99,31 @@ pub fn enrich_enabled(matches: &clap::ArgMatches) -> bool {
 /// Each session yields at most one row, so a session is never double-listed:
 /// the merged input is already cwd-deduped by `merge_sessions`, and each session
 /// takes exactly one of the three branches above.
+/// The open `AskUserQuestion` for a session, read from its transcript.
+///
+/// Tier A learns THAT a session is blocked from the probe file, but the probe
+/// carries only a reason string ("input needed"); the structured question, its
+/// header and options live in the JSONL. Reading it here keeps
+/// [`ProbeIndex::resolve`] pure and I/O-free.
+fn ask_from_transcript(session: &Session) -> Option<AskUserQuestionData> {
+    let path = session
+        .transcript_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| latest_transcript_for_cwd(&session.cwd))?;
+    last_ask_user_question(&path)
+}
+
+/// Whether the probe tier is the ONLY source that knows this session, i.e.
+/// ainb did not launch it and no peer or tmux pane backs it.
+fn is_probe_only(session: &Session) -> bool {
+    session.sources.as_slice() == [SessionSource::Probe]
+}
+
 async fn classify_all(
     sessions: Vec<Session>,
+    probes: &ProbeIndex,
     idle_override: Option<i64>,
     enrich: bool,
 ) -> Vec<NeedsRow> {
@@ -100,10 +132,46 @@ async fn classify_all(
     // Snapshot the materialized read model once (read-only Store open). Empty +
     // every session falls back when the daemon is down / not installed.
     let index = CurrentStateIndex::load();
+    // TIER A, ahead of the hook read: Claude's own per-session probe files.
+    // One `ps` per probe, once, not once per session.
+    let idle_threshold = idle_override.unwrap_or_else(idle_threshold_from_env);
 
     let mut hook_rows: Vec<NeedsRow> = Vec::new();
     let mut fallback_sessions: Vec<Session> = Vec::new();
     for session in sessions {
+        // Tier A first. It is the only source that reports RUNNING
+        // affirmatively and that sees a block the instant it happens, so where
+        // it has a live answer it outranks the materialized hook row. It
+        // abstains (`None`) on anything it cannot prove — unknown status, dead
+        // pid, un-ageable idle — and the session then takes exactly the path it
+        // takes today.
+        //
+        // The open question is read from the transcript, not the probe: the
+        // probe knows THAT a session blocked, the transcript knows WHAT it
+        // asked. Only consulted for a session tier A is about to call `waiting`.
+        let probe_ask = probes
+            .peek_status(&session.cwd)
+            .filter(|status| *status == "waiting")
+            .and_then(|_status| ask_from_transcript(&session));
+        if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
+            match resolution {
+                // A session ONLY the probe tier knows about — ainb never
+                // launched it, so it has no tmux pane and no broker peer — is
+                // listed only when it actually needs something. Idle is not
+                // actionable: the ATC playbook leaves idle sessions alone, and
+                // there is no channel to nudge this one down anyway, so
+                // listing it would add a row per stray Claude window to every
+                // heartbeat body while changing nobody's behaviour.
+                Resolution::Hook(row)
+                    if is_probe_only(&session) && matches!(row.context, NeedsContext::Idle(_)) => {}
+                Resolution::Hook(row) => hook_rows.push(*row),
+                Resolution::Healthy => {}
+                // Tier A never returns Fallback; it abstains with None instead.
+                Resolution::Fallback => fallback_sessions.push(session),
+            }
+            continue;
+        }
+
         match index.resolve(&session, now_ms, stale_ms) {
             Resolution::Hook(row) => hook_rows.push(*row),
             // Healthy hook state → not a need, and authoritative enough to skip
