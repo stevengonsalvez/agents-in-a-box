@@ -5,12 +5,15 @@ Enforces <never_idle_while_waiting> in ~/.claude/CLAUDE.md mechanically, so an
 ATC-managed session cannot silently park on a running CI job.
 
 Allow (exit 0, silent) when:
+  - the turn opened a picker             -> parked on a human, not stalling
   - a background task / Monitor / subagent is live  -> that IS the armed wake
   - the block budget is spent, or nothing moved since the last block
   - the current turn shows no stall evidence
 
 Block (decision=block) on:
   - wait  work in flight and nothing armed to wake the session back up
+  - ask   a decision handed to the human as prose, which records
+          attention=None and is therefore invisible to every fleet surface
 
 `stop_hook_active` is NOT a short-circuit: the harness re-fires Stop and
 honours a block every time, so exiting on it caps enforcement at one nudge.
@@ -58,6 +61,10 @@ SYSREM_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 ARMED_TOOLS = {"Monitor", "Task", "Agent", "Workflow", "ScheduleWakeup",
                "CronCreate"}
 
+# Asking properly. A turn that already opened a picker is not stalling: it is
+# parked on a human, which is the outcome the ask branch exists to produce.
+ASK_TOOLS = {"AskUserQuestion"}
+
 # Blocking is only useful while the model can still act on it. These caps are
 # the SOLE terminator: the harness re-fires Stop and honours `decision: block`
 # every time (measured), so `stop_hook_active` is informational and nothing
@@ -93,6 +100,28 @@ TEXT_INFLIGHT = [
                r"[^.\n]{0,30}\b(?:finish|complet|pass|green)", re.I),
 ]
 
+# The model handing a decision back as prose. Every one of these is second
+# person plus a decision noun: "the call", "you", "which". Bare topical mentions
+# ("the calling convention", "you can see") do not match, which is what keeps
+# this off ordinary explanatory prose.
+TEXT_ASK = [
+    re.compile(r"\byour call\b", re.I),
+    re.compile(r"\bup to you\b", re.I),
+    re.compile(r"\b(?:need|needs|want|wants|require|requires)\s+(?:your|a)\s+"
+               r"(?:call|decision|input|steer|sign-?off|answer)\b", re.I),
+    re.compile(r"\bwaiting (?:for|on) you\b", re.I),
+    re.compile(r"\bneeds input:", re.I),
+    re.compile(r"\blet me know\b", re.I),
+    # A question aimed at the reader. The trailing `?` is load-bearing: without
+    # it "want me to" also matches narration of what a subagent was told to do.
+    re.compile(r"\b(?:want|do you want|would you like) me to\b[^.\n?]{0,90}\?",
+               re.I),
+    re.compile(r"\bshould I\b[^.\n?]{0,90}\?", re.I),
+    re.compile(r"\bwhich (?:one |option )?(?:do|would|should) you\b", re.I),
+    re.compile(r"\bunless you\b[^.\n]{0,40}"
+               r"\b(?:redirect|say|prefer|object|want)\b", re.I),
+]
+
 HOW_CLAUDE = (
     "(1) Bash run_in_background with an `until <terminal-state>` poll loop and a "
     "hard iteration cap; (2) Monitor for per-event wakes; (3) ScheduleWakeup or "
@@ -114,6 +143,17 @@ REASON = (
     "The condition must match FAILURE states too, since silence is not success. "
     "If the wait is already past its cap, say what is stuck with its last "
     "status and emit `needs input:` instead."
+)
+
+REASON_ASK = (
+    "STALL GUARD: this turn ends by handing a decision back to the human in "
+    "prose ({what}). A prose ask is INVISIBLE: a Stop with no picker open "
+    "records attention=None, so nothing shows up in `ainb fleet needs`, the "
+    "TUI, or the macOS app, and the session parks until somebody happens to "
+    "look at the pane. Ask the SAME question through AskUserQuestion (the "
+    "/interview skill) before stopping: recommended option first, and every "
+    "option stating its concrete downside. If the question was not actually "
+    "blocking, drop it and finish the work instead."
 )
 
 
@@ -322,13 +362,30 @@ def closing_text(turn):
     return last
 
 
+def asked_properly(turn):
+    """The turn opened a picker, so it is parked on a human, not stalling."""
+    return any(name in ASK_TOOLS
+               for entry in turn for name, _ in tool_uses(entry))
+
+
 def evaluate(entries, how=HOW_CLAUDE):
     """Return (mode, reason) to block, or None to allow the stop."""
     turn = current_turn(entries)
     if not turn:
         return None
 
+    if asked_properly(turn):
+        return None
+
     last_text = closing_text(turn)
+
+    # M2 runs BEFORE the armed-wake checks below, deliberately. A turn can have
+    # a subagent in flight AND still have dumped a human decision into prose;
+    # the live task wakes the session but does nothing to make the question
+    # visible, which is the whole failure being fixed.
+    if last_text and any(p.search(last_text) for p in TEXT_ASK):
+        return ("ask", REASON_ASK.format(
+            what="the closing message asks the human to decide"))
 
     if pending_task_ids(entries):
         return None  # something live will wake the session; that is the point
@@ -665,6 +722,30 @@ CHECKS = [
         _user("explain the guide"),
         _asst("Before spawning a new agent, check if there is already a running "
               "claude-code-guide agent you can continue via SendMessage.")]),
+    # M2: a decision handed back as prose. All four are verbatim shapes from
+    # real stalled turns.
+    ("prose decision hand-back blocks", True, [
+        _user("fix the bridge pin"),
+        _asst("Two things need your call rather than mine: committing this, "
+              "and whether to open a PR on someone else's in-flight branch.")]),
+    ("unless-you-redirect blocks", True, [
+        _user("fix the bridge pin"),
+        _asst("Defect 1 is unambiguously mine to do, I'll start there unless "
+              "you redirect.")]),
+    ("offer-shaped question blocks", True, [
+        _user("what next"),
+        _asst("Want me to take #3374 next, or the card fixes?")]),
+    ("needs-input marker blocks", True, [
+        _user("land it"),
+        _asst("needs input: which branch should this land on")]),
+    ("asking properly through the picker allows", False, [
+        _user("fix the bridge pin"),
+        _use("AskUserQuestion", {"questions": [{"header": "Commit"}]}),
+        _asst("Two things need your call rather than mine.")]),
+    ("topical 'call' in ordinary prose allows", False, [
+        _user("rename it"),
+        _asst("Renamed the calling convention in 3 files; you can see the "
+              "diff above.")]),
 ]
 
 
