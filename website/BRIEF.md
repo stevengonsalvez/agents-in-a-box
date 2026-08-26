@@ -1,7 +1,8 @@
 # agents-in-a-box — website design brief
 
 > **For Claude design** (or any human/AI designer briefed off this doc).
-> **Output expected:** a complete visual + interaction design for `stevengonsalvez.github.io/agents-in-a-box`. See §12 for deliverable shape.
+> **Output expected:** a complete visual + interaction design for the ainb site. See §12 for deliverable shape.
+> **Superseded:** this brief is historical. The shipped site has grown well past it, and the site now lives at `ainb.app`, not GitHub Pages' default URL.
 > **Status:** locked via interview 2026-05-18. Treat decisions in §0 as fixed unless explicitly renegotiated.
 
 ---
@@ -19,7 +20,7 @@
 | Logo | **ASCII block art** (existing `AGENTS / IN A / BOX` lockup) |
 | Tone | **Hacker-honest blunt.** Drop articles, drop fluff. |
 | Primary CTA | **Copyable install command** (`brew install ainb`) |
-| Domain | `stevengonsalvez.github.io/agents-in-a-box` (GitHub Pages) |
+| Domain | `ainb.app` (GitHub Pages + CNAME) — *changed 2026-08-26, was `stevengonsalvez.github.io/agents-in-a-box`* |
 | Palette | **Pure TUI** — `#191923` bg, `#6495ED` border, `#FFD700` gold, `#DCDCE6` text |
 | Reference | **charm.sh** — match polish, deviate via pure-ASCII identity |
 | Flourishes | Scanlines + blinking cursor + boot sequence + vim keybinds + ASCII dividers (all behind `prefers-reduced-motion` opt-in) |
