@@ -22,6 +22,7 @@ env:
 jobs:
   prepare:
     name: Prepare Release
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -225,6 +226,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: prepare
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -313,6 +315,7 @@ jobs:
   release:
     name: Create Release
     needs: [prepare, build]
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -444,6 +447,7 @@ jobs:
   homebrew:
     name: Update Homebrew Tap
     needs: [prepare, build, release]
+    timeout-minutes: 15
     runs-on: ubuntu-latest
 
     steps:
