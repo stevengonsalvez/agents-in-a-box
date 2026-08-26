@@ -146,7 +146,11 @@ impl CommandRegistry {
     }
 
     pub fn find(&self, name: &str) -> Option<&dyn CliCommand> {
-        self.entries.iter().find(|c| c.name() == name).map(|c| &**c as &dyn CliCommand)
+        let canonical_name = if name == "upgrade" { "update" } else { name };
+        self.entries
+            .iter()
+            .find(|c| c.name() == canonical_name)
+            .map(|c| &**c as &dyn CliCommand)
     }
 
     /// Build the root `clap::Command` by folding every registered impl's
@@ -2897,6 +2901,7 @@ impl CliCommand for UpdateCommand {
         app.subcommand(
             Command::new(self.name())
                 .about("Update ainb to the latest signed stable release")
+                .visible_alias("upgrade")
                 .arg(
                     clap::Arg::new("yes")
                         .long("yes")
