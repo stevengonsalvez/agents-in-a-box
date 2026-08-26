@@ -378,10 +378,20 @@ fn codex_app_server_setting() -> Option<std::ffi::OsString> {
     if let Some(raw) = std::env::var_os("AINB_CODEX_APP_SERVER").filter(|v| !v.is_empty()) {
         return Some(raw);
     }
-    if let Some(raw) = codex_app_server_from_config() {
-        return Some(raw.into());
+    match codex_app_server_from_config() {
+        ConfigSetting::Set(raw) => Some(raw.into()),
+        ConfigSetting::Absent => Some(CODEX_APP_SERVER_DEFAULT.into()),
+        // Fail safe, not fail default: keep our own server so a broken config
+        // cannot hand a user's sessions to an app-server they share with Codex
+        // Desktop without them asking for it.
+        ConfigSetting::Unreadable => {
+            tracing::warn!(
+                "hangar config could not be read; keeping Ainb's own codex app-server \
+                 instead of applying the `{CODEX_APP_SERVER_DEFAULT}` default"
+            );
+            Some("own".into())
+        }
     }
-    Some(CODEX_APP_SERVER_DEFAULT.into())
 }
 
 /// `desktop` is the default because the common case is a developer who wants
@@ -394,16 +404,57 @@ const CODEX_APP_SERVER_DEFAULT: &str = "desktop";
 /// The daemon deliberately parses the one key it needs rather than depending on
 /// `ainb-core`: the TUI crate already depends on this one, so reaching back
 /// would be a cycle.
-fn codex_app_server_from_config() -> Option<String> {
-    let path = hangar_dir().ok()?.join("config").join("config.toml");
-    let text = std::fs::read_to_string(path).ok()?;
-    let parsed: toml::Value = text.parse().ok()?;
-    parsed
-        .get("codex")?
-        .get("app_server")?
-        .as_str()
-        .map(str::to_string)
-        .filter(|value| !value.is_empty())
+fn codex_app_server_from_config() -> ConfigSetting {
+    let Ok(home) = hangar_dir() else {
+        return ConfigSetting::Absent;
+    };
+    let path = home.join("config").join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ConfigSetting::Absent;
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "cannot read hangar config");
+            return ConfigSetting::Unreadable;
+        }
+    };
+    let parsed: toml::Value = match text.parse() {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "hangar config is not valid TOML");
+            return ConfigSetting::Unreadable;
+        }
+    };
+    match parsed.get("codex").and_then(|codex| codex.get("app_server")) {
+        None => ConfigSetting::Absent,
+        Some(value) => match value.as_str() {
+            Some(value) if !value.is_empty() => ConfigSetting::Set(value.to_string()),
+            // Present but not a usable string: a typo we must not read as
+            // "unset", or the default would silently override an explicit
+            // choice.
+            _ => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "[codex] app_server must be a non-empty string"
+                );
+                ConfigSetting::Unreadable
+            }
+        },
+    }
+}
+
+/// What the hangar config had to say about `[codex] app_server`.
+///
+/// `Unreadable` is deliberately NOT folded into `Absent`. A syntax error
+/// anywhere in `config.toml` would otherwise read as "nothing configured" and
+/// silently apply the `desktop` default, moving a user who had explicitly
+/// chosen `own` onto a shared app-server with Codex Desktop. Isolation must
+/// never be lost to an unrelated typo.
+enum ConfigSetting {
+    Set(String),
+    Absent,
+    Unreadable,
 }
 
 /// Socket of an externally managed Codex app-server to attach to.
