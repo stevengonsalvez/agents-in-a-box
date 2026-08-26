@@ -83,13 +83,86 @@ separate, standalone repo — `ainb` consumes it as a pinned external source.
 
 ## Why agents-in-a-box?
 
-Most AI coding setups are a loose collection of dotfiles. This project treats the problem as an engineering system:
+> ### Run a fleet. Lose nothing.
+>
+> Every agent gets its own worktree, its own tmux session, and a line item on your bill.
 
-- **One toolkit, many tools** — Write a skill once, deploy it to Claude Code, Codex, Gemini, Cursor, Copilot, Amazon Q, Cline, Roo, or Clawdhub
-- **Session isolation** — Each coding session gets its own git worktree and tmux session. No cross-contamination
-- **Agents that compose** — 16 specialized agents (backend-developer, security-agent, code-reviewer, deep-reasoner, etc.) plus swarm skills to coordinate them across sessions
-- **Memory that persists** — A two-tier knowledge system (GraphRAG + QMD) that captures learnings and retrieves them across sessions and projects
-- **Production Rust** — The TUI isn't a shell script. It's a 34-crate workspace of typed, tested, async Rust with clippy pedantic/nursery lints
+One agent is a chat window. Five agents is an operations problem, and that is the
+part nothing else solves. Here is every part of it.
+
+### Your agents stop fighting each other
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Two agents, one branch | Index lock races, half-committed files, work silently overwritten | One git worktree and one branch per session, cleaned up when the session is killed cleanly |
+| Laptop sleeps, SSH drops | Session gone, context gone, start the conversation again | tmux-backed. Reattach and keep typing where you left off |
+| A crash leaves sessions behind | Hunt through `tmux ls` and guess which pane was what | `ainb recover` finds the orphans and resumes them |
+
+### You stop babysitting them
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Which agent needs me *right now* | Cycle through every pane in turn, repeatedly | Press `f`. The Fleet panel lists exactly who is blocked |
+| An agent asked a question 20 minutes ago | Scroll back through output to find it | Answer it from the Fleet panel without attaching |
+| Nobody is watching while you are away | You are the event loop | ATC wakes on a timer and works the queue for you |
+
+### Work queues up without you
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Every task starts with you typing | You are the scheduler | Hangar boards hold tasks agents pull from |
+| One agent per job, in sequence | Long jobs serialise behind you | Squads fan a job out across several agents |
+| Recurring work | A cron job you maintain by hand | Autopilots fire on a schedule and report back |
+
+### You see what they actually changed
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Approving diffs on autopilot | Side effects land that you never read | Hunk-by-hunk review with syntax highlighting before you trust it |
+| Reviewing means opening the whole TUI | Context switch just to read a diff | `ainb diff-review` runs headless and emits JSON |
+
+### The bill stops surprising you
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Spend is invisible until the invoice | The provider console shows one total | Burndown by day, week, project, model and provider |
+| Which repo burned the budget? | No per-repo or per-branch split anywhere | Per-project attribution, down to the worktree |
+| Long runs blow the context window | The conversation resets and you start over | Headroom compresses context across opted-in sessions |
+
+### You stop repeating yourself
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| Re-explaining the codebase every session | Every session starts cold | Learnings captured as you work, searchable next time |
+| The same rule copied into four tools' configs | One copy gets updated, the rest quietly go stale | Write a skill once, deploy it to 9 tools from one source |
+
+### The plumbing stops leaking
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| One MCP server per session | N processes, N startups, N times the memory | One pooled server shared across every session |
+| Approvals and errors scattered across panes | You miss the one that mattered | One Inbox collects every notification from every agent |
+| Background processes die quietly | `ps aux`, grep, guess, restart by hand | The Daemons screen shows health and restarts in place |
+
+### It reaches further than your terminal
+
+| The problem | Without ainb | With ainb |
+|---|---|---|
+| You are away from your desk | Agents stall until you get back | Bridge the fleet to Telegram, Slack or Discord |
+| You want a glance without a terminal | Terminal or nothing | `ainb web` serves a read-only dashboard |
+| What did that process actually touch? | Guesswork | `witr` traces process causality |
+| Which agent is genuinely busy? | Open every pane and look | `abtop`, which is top for AI agents |
+
+### What it won't do
+
+Straight answers, so you find out here rather than twenty minutes in:
+
+- **Worktrees isolate git state, not your environment.** Two agents still share port 3000, your database, and `node_modules`. If they need different services running, you still have to arrange that.
+- **tmux is required**, not optional. Same for `git`.
+- **No native Windows.** It uses PTY and POSIX file modes. WSL2 works.
+- **`ainb otel` is a setup wizard for Grafana Alloy**, wiring up Claude Code's own telemetry. ainb does not emit telemetry of its own.
+- **Memory starts empty.** The learnings browser is only as useful as what `reflect` has written into it.
+- **ATC and headroom are opt-in** and need extra setup: a hook plugin and an external binary respectively.
 
 ---
 
