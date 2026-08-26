@@ -562,7 +562,10 @@ impl HomeScreenV2Component {
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" - Agents in a Box", Style::default().fg(SOFT_WHITE)),
-            Span::styled(format!("  {DISPLAY_VERSION}"), Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format!("  {DISPLAY_VERSION}"),
+                Style::default().fg(MUTED_GRAY),
+            ),
         ]))
         .style(Style::default().bg(PANEL_BG));
 
@@ -694,13 +697,7 @@ mod tests {
             .draw(|frame| component.render(frame, frame.area(), &mut state, &[]))
             .unwrap();
 
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect()
     }
 
     #[test]
