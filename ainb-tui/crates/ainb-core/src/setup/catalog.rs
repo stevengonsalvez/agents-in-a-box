@@ -520,7 +520,7 @@ pub fn catalog() -> Vec<Topic> {
             deps: vec![dep(
                 "toolkit",
                 "ainb-toolkit",
-                "91 skills / 37 agents for claude/codex/copilot",
+                "94 skills / 16 agents for claude/codex/copilot",
                 Recommended,
                 Custom("toolkit-deployed"),
                 Toolkit,
