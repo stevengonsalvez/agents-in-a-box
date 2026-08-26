@@ -6,7 +6,7 @@ use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 // Premium color palette (TUI Style Guide)
@@ -43,9 +43,11 @@ use ainb_plugin_notifyd::AlertKind;
 
 use crate::app::{
     AppState,
-    state::{AttachableRef, SessionListRowTarget},
+    state::{AttachableRef, SessionContextAction, SessionListRowTarget},
 };
-use crate::models::{SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace};
+use crate::models::{
+    Session, SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace,
+};
 
 /// Width of the leading badge slot rendered before every list row.
 /// Two characters: a digit (or space) and a trailing space separator.
@@ -195,7 +197,10 @@ impl SessionListComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(title_spans))
                     .title_bottom(
-                        if state.ssh_session_rename_mode || state.other_tmux_rename_mode {
+                        if state.ssh_session_rename_mode
+                            || state.other_tmux_rename_mode
+                            || state.session_label_rename_mode
+                        {
                             // Rename mode help (SSH or Other tmux)
                             Line::from(vec![
                                 Span::styled(
@@ -286,6 +291,77 @@ impl SessionListComponent {
             .highlight_symbol("▶ ");
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
+
+        if state.session_label_rename_mode {
+            let width = area.width.min(54);
+            let height = 7;
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Session label ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(GOLD))
+                .style(Style::default().bg(DARK_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            let text = format!(
+                "Durable name, Git branch unchanged\n\n{}|\n\nEnter save   Esc cancel   blank clears",
+                state.session_label_rename_buffer
+            );
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().fg(SOFT_WHITE).bg(DARK_BG)),
+                inner,
+            );
+        }
+
+        if let Some(menu) = state.session_context_menu {
+            let actions = state.session_context_actions();
+            let width = area.width.min(30);
+            let height = (actions.len() as u16 + 3).min(area.height);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Session actions ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(GOLD))
+                .style(Style::default().bg(DARK_BG));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            let lines: Vec<Line> = actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| {
+                    let selected = index == menu.selected;
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if selected { "▶" } else { " " },
+                            context_action_label(*action)
+                        ),
+                        Style::default()
+                            .fg(if selected {
+                                SELECTION_GREEN
+                            } else {
+                                SOFT_WHITE
+                            })
+                            .bg(if selected { LIST_HIGHLIGHT_BG } else { DARK_BG }),
+                    )
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
     }
 
     fn build_list_items_static(state: &AppState) -> Vec<ListItem<'static>> {
@@ -492,7 +568,7 @@ impl SessionListComponent {
                         Span::styled(pill_r, Style::default().fg(agent_color).bg(row_bg)),
                         Span::raw(" "),
                         Span::styled(
-                            session.branch_name.clone(),
+                            session_list_name(session),
                             Style::default().fg(branch_color).add_modifier(
                                 if is_selected_session {
                                     Modifier::BOLD
@@ -900,6 +976,28 @@ fn workspace_running_count(workspace: &Workspace) -> usize {
     workspace.running_sessions().len()
 }
 
+/// User label followed by the current Git branch, or only the branch when unlabeled.
+fn session_list_name(session: &Session) -> String {
+    session
+        .display_name
+        .as_ref()
+        .map(|label| format!("{label} · {}", session.branch_name))
+        .unwrap_or_else(|| session.branch_name.clone())
+}
+
+fn context_action_label(action: SessionContextAction) -> &'static str {
+    match action {
+        SessionContextAction::Attach => "Attach",
+        SessionContextAction::Restart => "Restart",
+        SessionContextAction::EditLabel => "Rename session label",
+        SessionContextAction::OpenEditor => "Open editor",
+        SessionContextAction::OpenShell => "Open shell",
+        SessionContextAction::OpenGit => "Git",
+        SessionContextAction::QuickCommit => "Quick commit",
+        SessionContextAction::Delete => "Delete",
+    }
+}
+
 /// Multi-select ballot toggle shared by the workspace-session and
 /// other-tmux rows: ☑ (green, marked) / ☐ (muted, unmarked).
 fn ballot_checkbox(checked: bool) -> Span<'static> {
@@ -963,5 +1061,14 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn durable_label_keeps_live_branch_visible() {
+        let mut session = Session::new("workspace".to_string(), "/tmp/workspace".to_string());
+        session.branch_name = "fix/rpc-acp-flake".to_string();
+        session.display_name = Some("RPC flake".to_string());
+
+        assert_eq!(session_list_name(&session), "RPC flake · fix/rpc-acp-flake");
     }
 }

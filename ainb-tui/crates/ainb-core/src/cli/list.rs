@@ -4,6 +4,7 @@
 // Shows: session ID, workspace, status (Claude running, idle, stopped), tmux session name
 
 use super::{ListArgs, OutputFormat};
+use crate::config::SessionLabelStore;
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::tmux::ClaudeProcessDetector;
 use anyhow::Result;
@@ -39,6 +40,7 @@ pub struct SessionInfo {
     pub session_id: String,
     pub tmux_session_name: String,
     pub workspace_name: String,
+    pub display_name: Option<String>,
     pub worktree_path: String,
     pub created_at: DateTime<Utc>,
     pub is_running: bool,
@@ -62,6 +64,7 @@ impl SessionInfo {
             session_id: metadata.session_id.to_string(),
             tmux_session_name: metadata.tmux_session_name.clone(),
             workspace_name: metadata.display_workspace_name(),
+            display_name: None,
             worktree_path: metadata.worktree_path.display().to_string(),
             created_at: metadata.created_at,
             is_running,
@@ -98,6 +101,7 @@ pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
 #[allow(clippy::unused_async)] // Async for consistency with other CLI commands
 pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
     let store = SessionStore::load();
+    let labels = SessionLabelStore::load();
     let detector = ClaudeProcessDetector::new();
 
     let mut sessions = Vec::new();
@@ -108,7 +112,8 @@ pub async fn list_sessions(args: &ListArgs) -> Result<Vec<SessionInfo>> {
             .get_session_health(&metadata.tmux_session_name)
             .unwrap_or((false, false));
 
-        let info = SessionInfo::from_metadata(metadata, is_running, claude_active);
+        let mut info = SessionInfo::from_metadata(metadata, is_running, claude_active);
+        info.display_name = labels.get(&metadata.tmux_session_name).cloned();
 
         // Apply filters
         if args.running && !is_running {
@@ -146,8 +151,8 @@ fn output_text(sessions: &[SessionInfo]) {
 
     // Print header
     println!(
-        "{:<36} {:<25} {:<10} TMUX SESSION",
-        "ID", "WORKSPACE", "STATUS"
+        "{:<36} {:<22} {:<22} {:<10} TMUX SESSION",
+        "ID", "WORKSPACE", "SESSION LABEL", "STATUS"
     );
     let separator = "-".repeat(100);
     println!("{separator}");
@@ -157,9 +162,10 @@ fn output_text(sessions: &[SessionInfo]) {
         let status = session.status();
         let workspace = truncate(&session.workspace_name, 25);
         println!(
-            "{:<36} {:<25} {:<10} {}",
+            "{:<36} {:<22} {:<22} {:<10} {}",
             session.session_id,
             workspace,
+            truncate(session.display_name.as_deref().unwrap_or(""), 22),
             status.icon(),
             session.tmux_session_name
         );

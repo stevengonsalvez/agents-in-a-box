@@ -51,7 +51,10 @@ impl LogsViewerComponent {
         // Build spans with colored status
         let info_spans = vec![
             Span::styled(" ", Style::default()),
-            Span::styled(&session.name, Style::default().fg(Color::White)),
+            Span::styled(
+                session.display_name.as_deref().unwrap_or(&session.name),
+                Style::default().fg(Color::White),
+            ),
             Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("{} {}", session.status.indicator(), status_text),

@@ -820,6 +820,17 @@ async fn run_tui_loop(
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
                         }
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            if let Some(app_event) = EventHandler::handle_mouse_event(
+                                AppEvent::MouseRightClick {
+                                    x: mouse_event.column,
+                                    y: mouse_event.row,
+                                },
+                                &mut app.state,
+                            ) {
+                                EventHandler::process_event(app_event, &mut app.state);
+                            }
+                        }
                         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                             // Handle mouse scroll based on current view
                             use crate::app::screens::ids as screen_ids;

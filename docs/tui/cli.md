@@ -135,6 +135,30 @@ EXAMPLES:
   ainb list --format json          Machine-readable output
 ```
 
+## `ainb label`
+
+Set or clear a durable session label
+
+```console
+$ ainb label --help
+Set or clear a durable session label
+
+Usage: ainb label [OPTIONS] <--set <SET>|--clear> <SESSION>
+
+Arguments:
+  <SESSION>  Session ID, workspace name, or exact SSH tmux session name
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+      --set <SET>        Set a durable human label
+      --clear            Remove the durable label
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb label my-project --set "RPC flake"
+  ainb label my-project --clear
+```
+
 ## `ainb logs`
 
 View session output/logs

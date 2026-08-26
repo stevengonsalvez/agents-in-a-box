@@ -20,6 +20,7 @@ pub mod git_cmd;
 pub mod hangar;
 pub mod headroom;
 pub mod init;
+pub mod label;
 pub mod list;
 pub mod logs;
 pub mod mcp;
@@ -210,6 +211,26 @@ pub struct ListArgs {
     /// Show only sessions for a specific workspace
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// Set or clear a durable session label.
+#[derive(clap::Args)]
+#[command(group(
+    clap::ArgGroup::new("label_action")
+        .required(true)
+        .args(["set", "clear"])
+))]
+pub struct LabelArgs {
+    /// Session ID, workspace name, or exact SSH tmux session name
+    pub session: String,
+
+    /// Set a durable human label
+    #[arg(long, conflicts_with = "clear")]
+    pub set: Option<String>,
+
+    /// Remove the durable label
+    #[arg(long, conflicts_with = "set")]
+    pub clear: bool,
 }
 
 /// View session output/logs. Description set in `cli/registry.rs`.
