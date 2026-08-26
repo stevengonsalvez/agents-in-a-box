@@ -232,7 +232,10 @@ impl WitrPlugin {
         let Some(path) = self.witr_path.clone() else {
             // Full docsite URL on its own line: terminals auto-linkify it, it
             // stays copyable, and it never truncates.
-            let docs = "What it does + screenshots: https://stevengonsalvez.github.io/agents-in-a-box/plugins/witr/";
+            let docs = format!(
+                "What it does + screenshots: {}",
+                crate::render::empty::DOCSITE_URL
+            );
             let hint = match &self.lifecycle {
                 Lifecycle::Outdated {
                     found_version,
