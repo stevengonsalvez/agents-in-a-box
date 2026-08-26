@@ -52,11 +52,11 @@ Definitions for the terms that recur across the agents-in-a-box docs. Where a te
 
 **Wire version** — the schema version of a snapshot/event type. Plugin types crates (e.g. `ainb-plugin-types-sessions`) carry a `pub const WIRE_VERSION: u32` (currently `3`); subscribers must check `event.version == WIRE_VERSION` and reject mismatches gracefully rather than panicking.
 
-**CTS (Conformance Test Suite)** — the executable form of the plugin spec. `ainb-plugin-cts-v2` covers **14 axes** (manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot pub/sub, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, chunked publish ordering). A plugin author runs it via `cargo test` for a per-axis pass/fail report.
+**CTS (Conformance Test Suite)** — the executable form of the plugin spec. `ainb-plugin-cts-v2` covers **21 axes** (manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot get-after-publish, snapshot subscribe, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, event-stream subscribe, managed-subprocess spawn, unix-socket dial, secret-store get, mouse forwarding, read_paths config, redraw hint). A plugin author runs it via `cargo test` for a per-axis pass/fail report.
 
 **Canary** — a minimal plugin written to exercise exactly one CTS axis, living at `crates/ainb-plugin-cts-v2/tests/canaries/<axis>/`.
 
-**`cts-v2`** — the `ainb-plugin-cts-v2` crate: the host-side conformance test runner (14 axes) plus its canary plugins.
+**`cts-v2`** — the `ainb-plugin-cts-v2` crate: the host-side conformance test runner (21 axes) plus its canary plugins.
 
 **`testkit`** — the `ainb-plugin-testkit` crate: an in-process test harness for plugin authors. A plugin author hands their `Plugin` impl to testkit to exercise it without spawning a real subprocess.
 
