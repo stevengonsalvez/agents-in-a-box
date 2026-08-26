@@ -58,22 +58,42 @@ command line.
 ## Stall guard (Claude + Codex)
 
 `hooks/stall_guard.py` runs as a second `Stop` hook, alongside `notify.sh`. It
-refuses turn-end when a session is about to park on work that is still in
-flight with nothing armed to wake it, which is how an ATC-managed session goes
-quiet with a CI job half-finished.
+refuses turn-end on two shapes of stall: a session about to park on work still
+in flight with nothing armed to wake it, and a session handing a decision back
+to the human as prose, which no fleet surface can see.
 
 ```
-┌──────────────┐  no    ┌────────────────────┐  no   ┌──────────────┐
-│ live task /  │───────▶│ in-flight evidence │──────▶│ allow stop   │
-│ Monitor?     │        │ in the final state │       └──────────────┘
-└──────┬───────┘        └─────────┬──────────┘
-       │ yes                      │ yes
-       ▼                          ▼
-┌──────────────┐          ┌──────────────────┐
-│ allow stop   │          │ block + tell it  │
-│ (wake armed) │          │ to arm a wake    │
-└──────────────┘          └──────────────────┘
+   Stop
+     │
+     ▼
+┌─────────────────┐  spent  ┌────────────┐
+│ block budget    │────────▶│ allow stop │
+│ (the terminator)│         └────────────┘
+└────────┬────────┘
+         ▼
+┌─────────────────┐  yes    ┌──────────────────────────┐
+│ closing text    │────────▶│ block: ask it through    │
+│ asks the human? │         │ AskUserQuestion instead  │
+└────────┬────────┘         └──────────────────────────┘
+         │ no
+         ▼
+┌──────────────┐  yes   ┌────────────┐
+│ live task /  │───────▶│ allow stop │
+│ Monitor?     │        │ (armed)    │
+└──────┬───────┘        └────────────┘
+       │ no
+       ▼
+┌────────────────────┐  yes   ┌──────────────────┐
+│ in-flight evidence │───────▶│ block: arm a wake│
+│ in the final state │        └──────────────────┘
+└────────────────────┘
 ```
+
+**Why the ask mode exists.** `Stop` with no background work records
+`AttentionState::None`, and only an `AskUserQuestion` event records
+`attention=Ask`. A question written as prose is therefore indistinguishable
+from a finished turn: nothing reaches `ainb fleet needs`, the TUI or the macOS
+app, and the session parks until somebody looks at the pane.
 
 Design notes, each one paid for by a false positive found in a
 120-transcript replay:
@@ -86,8 +106,28 @@ Design notes, each one paid for by a false positive found in a
 - "Armed" means **still live**. A background watcher that already completed,
   or was launched over 30 minutes ago and never reported, is not a wake. Todo
   tools (`TaskCreate`/`TaskUpdate`) are never treated as arming.
-- `stop_hook_active` short-circuits to allow, so the guard nudges once and can
-  never wedge a session.
+- Closing text is matched against a **prose surface**, with fenced code,
+  markdown table rows, blockquotes, quoted strings and `[fact]`/`[inference]`
+  evidence bullets stripped first. The `<turn_end_block>` state table CLAUDE.md
+  mandates ends turns with cells like `| repo | no files changed | your call |`,
+  which made the guard block on its own required output format. Replayed over
+  400 real turn-ends this cut blocks from 54 to 16.
+- An open picker exempts the **ask** check only, never the wait checks. The
+  picker's answer arrives as a `tool_result`, not a real user message, so the
+  turn never rolls over; exempting the whole turn silently disabled CI stall
+  detection for the rest of it.
+- `stop_hook_active` is **not** a short-circuit. Measured: the harness re-fires
+  `Stop` and honours a block every time, so exiting on the flag capped
+  enforcement at one nudge per stall. A per-session budget under
+  `$AINB_HOME/stall/` replaces it: 3 consecutive blocks, 20 per session, and no
+  re-block while the tool-call count and closing text are both unchanged.
+  Because that budget is the ONLY terminator, a state file that cannot be
+  written fails open rather than blocking forever. `AINB_STALL_GUARD=off`
+  disables the hook outright.
+- A watcher still live at turn-end is **not** treated as a leak. Turn-end is
+  not session-end, and every candidate signal for "the turn claims to be
+  finished" matched narration about watching (`catches merged/closed`) in real
+  transcripts. That check belongs on `SessionEnd`, not here.
 
 It cannot catch a watcher that was armed and later died silently; nothing at
 turn-end can see that. That case belongs to the idle-session path
@@ -147,15 +187,15 @@ runs enabled hooks without persisted trust. That is how the end-to-end
 verification below was done; it is not a substitute for trusting the hook.
 
 Verified end to end on Codex with trust bypassed: a turn closing with "The CI
-checks are still running on main." produced
-`{"decision":"block",…}` on the first Stop (`stop_hook_active: false`) and
-silence on the second (`stop_hook_active: true`), and the turn was re-run —
-exactly the one-nudge design.
+checks are still running on main." produced `{"decision":"block",…}` and the
+turn was re-run. Note that Codex's `transcript_path` is nullable, so the budget
+fingerprint folds in the closing text rather than relying on a tool-call count
+that would otherwise be pinned at zero for the whole session.
 
 Run the self-check after editing it:
 
 ```bash
-python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 28 cases
+python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 52 cases
 ```
 
 ## Install

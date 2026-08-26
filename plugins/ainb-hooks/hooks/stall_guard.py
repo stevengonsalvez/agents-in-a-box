@@ -5,12 +5,19 @@ Enforces <never_idle_while_waiting> in ~/.claude/CLAUDE.md mechanically, so an
 ATC-managed session cannot silently park on a running CI job.
 
 Allow (exit 0, silent) when:
-  - stop_hook_active is set              -> one nudge max, never wedge a session
+  - the turn opened a picker             -> parked on a human, not stalling
   - a background task / Monitor / subagent is live  -> that IS the armed wake
-  - the current turn shows no in-flight evidence
+  - the block budget is spent, or nothing moved since the last block
+  - the current turn shows no stall evidence
 
-Block (decision=block) only when the current turn shows work in flight AND
-nothing is armed to wake the session back up.
+Block (decision=block) on:
+  - wait  work in flight and nothing armed to wake the session back up
+  - ask   a decision handed to the human as prose, which records
+          attention=None and is therefore invisible to every fleet surface
+
+`stop_hook_active` is NOT a short-circuit: the harness re-fires Stop and
+honours a block every time, so exiting on it caps enforcement at one nudge.
+The per-session budget in `budget_allows` is the only terminator there is.
 
 Scanning is deliberately narrow: assistant *text* blocks and *tool_result*
 bodies only. Whole-entry matching drags in system prompts, skill listings,
@@ -26,6 +33,7 @@ import os
 import re
 import select
 import sys
+import zlib
 from datetime import datetime
 
 # A launched-but-never-terminal task stops counting as an armed wake after this.
@@ -53,6 +61,17 @@ SYSREM_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 # and treating them as armed would swallow real stalls.
 ARMED_TOOLS = {"Monitor", "Task", "Agent", "Workflow", "ScheduleWakeup",
                "CronCreate"}
+
+# Asking properly. A turn that already opened a picker is not stalling: it is
+# parked on a human, which is the outcome the ask branch exists to produce.
+ASK_TOOLS = {"AskUserQuestion"}
+
+# Blocking is only useful while the model can still act on it. These caps are
+# the SOLE terminator: the harness re-fires Stop and honours `decision: block`
+# every time (measured), so `stop_hook_active` is informational and nothing
+# outside this file stops a loop.
+MAX_CONSECUTIVE_BLOCKS = 3
+MAX_SESSION_BLOCKS = 20
 
 # A tool_result only counts as CI evidence if it actually looks like CI output.
 CI_CONTEXT = re.compile(
@@ -82,6 +101,55 @@ TEXT_INFLIGHT = [
                r"[^.\n]{0,30}\b(?:finish|complet|pass|green)", re.I),
 ]
 
+# The model handing a decision back as prose. Every one of these is second
+# person plus a decision noun: "the call", "you", "which". Bare topical mentions
+# ("the calling convention", "you can see") do not match, which is what keeps
+# this off ordinary explanatory prose.
+TEXT_ASK = [
+    # "per your call", "your call to stop": reports of a decision already made.
+    re.compile(r"(?<!per )\byour call\b(?!\s+to\b)", re.I),
+    re.compile(r"\bup to you\b", re.I),
+    re.compile(r"\b(?:need|needs|want|wants|require|requires)\s+(?:your|a)\s+"
+               r"(?:call|decision|input|steer|sign-?off|answer)\b", re.I),
+    re.compile(r"\bwaiting (?:for|on) you\b", re.I),
+    re.compile(r"\bneeds input:", re.I),
+    # A question aimed at the reader. The trailing `?` is load-bearing: without
+    # it "want me to" also matches narration of what a subagent was told to do.
+    re.compile(r"\b(?:want|do you want|would you like) me to\b[^.\n?]{0,90}\?",
+               re.I),
+    re.compile(r"\bshould I\b[^.\n?]{0,90}\?", re.I),
+    re.compile(r"\bwhich (?:one |option )?(?:do|would|should) you\b", re.I),
+    re.compile(r"\bunless you\b[^.\n]{0,40}"
+               r"\b(?:redirect|say|prefer|object|want)\b", re.I),
+]
+
+# Structured furniture the model emits ABOUT its work, not addressed to the
+# reader. The <turn_end_block> state table CLAUDE.md mandates ends every
+# substantial turn with cells like `| repo | no files changed | your call |`,
+# so matching raw text made the guard block on its own required output format.
+FENCE_RE = re.compile(r"```.*?```", re.S)
+TABLE_ROW_RE = re.compile(r"^\s*\|.*$", re.M)
+BLOCKQUOTE_RE = re.compile(r"^\s*>.*$", re.M)
+# The same state block closes with evidence bullets tagged [fact]/[inference].
+# Those report what was observed; they never address the reader.
+TAGGED_BULLET_RE = re.compile(r"^\s*[-*].*\[(?:fact|inference)\]\s*$", re.M)
+QUOTED_RE = re.compile("[\"\u201c][^\"\u201d\n]{0,200}[\"\u201d]")
+
+
+def prose_surface(text):
+    """Prose actually addressed to the reader, minus structured furniture.
+
+    Applied to EVERY closing-text check, not just the ask one. The same state
+    table that made `your call` fire also makes the pre-existing wait pattern
+    fire: `| pr | open, waiting on you | your merge |` reads as "waiting on ...
+    merge" to a matcher that cannot see the cell boundaries.
+    """
+    for pattern in (FENCE_RE, TABLE_ROW_RE, BLOCKQUOTE_RE,
+                    TAGGED_BULLET_RE, QUOTED_RE):
+        text = pattern.sub(" ", text)
+    return text
+
+
 HOW_CLAUDE = (
     "(1) Bash run_in_background with an `until <terminal-state>` poll loop and a "
     "hard iteration cap; (2) Monitor for per-event wakes; (3) ScheduleWakeup or "
@@ -103,6 +171,17 @@ REASON = (
     "The condition must match FAILURE states too, since silence is not success. "
     "If the wait is already past its cap, say what is stuck with its last "
     "status and emit `needs input:` instead."
+)
+
+REASON_ASK = (
+    "STALL GUARD: this turn ends by handing a decision back to the human in "
+    "prose ({what}). A prose ask is INVISIBLE: a Stop with no picker open "
+    "records attention=None, so nothing shows up in `ainb fleet needs`, the "
+    "TUI, or the macOS app, and the session parks until somebody happens to "
+    "look at the pane. Ask the SAME question through AskUserQuestion (the "
+    "/interview skill) before stopping: recommended option first, and every "
+    "option stating its concrete downside. If the question was not actually "
+    "blocking, drop it and finish the work instead."
 )
 
 
@@ -287,18 +366,61 @@ def is_armed(entry):
     return any(name in ARMED_TOOLS for name, _ in tool_uses(entry))
 
 
-def evaluate(entries, how=HOW_CLAUDE):
-    """Return a block reason, or None to allow the stop."""
-    if pending_task_ids(entries):
-        return None  # something live will wake the session; that is the point
-
+def current_turn(entries):
+    """Entries since the last real user message."""
     start = 0
     for i, entry in enumerate(entries):
         if is_real_user_turn(entry):
             start = i
-    turn = entries[start:]
+    return entries[start:]
+
+
+def closing_text(turn):
+    """The last non-empty prose the model wrote this turn, or None.
+
+    Only the turn's FINAL state matters anywhere in this file. A turn that
+    polled a queued job and then watched it go green is finished, not stalled,
+    so an early observation must never outvote the last one.
+    """
+    last = None
+    for entry in turn:
+        for text in assistant_texts(entry):
+            if text.strip():
+                last = text
+    return last
+
+
+def asked_properly(turn):
+    """The turn opened a picker, so it is parked on a human, not stalling."""
+    return any(name in ASK_TOOLS
+               for entry in turn for name, _ in tool_uses(entry))
+
+
+def evaluate(entries, how=HOW_CLAUDE):
+    """Return (mode, reason) to block, or None to allow the stop."""
+    turn = current_turn(entries)
     if not turn:
         return None
+
+    last_text = closing_text(turn)
+
+    # The picker exempts the ASK check ONLY. Exempting the whole turn silently
+    # disabled the wait/CI enforcement this file was written for: the picker's
+    # answer arrives as a tool_result, not a real user message, so the turn
+    # never rolls over and one early AskUserQuestion made every later stall in
+    # that turn invisible.
+    #
+    # M2 runs BEFORE the armed-wake checks below, deliberately. A turn can have
+    # a subagent in flight AND still have dumped a human decision into prose;
+    # the live task wakes the session but does nothing to make the question
+    # visible, which is the whole failure being fixed.
+    if (not asked_properly(turn) and last_text
+            and any(p.search(prose_surface(last_text)) for p in TEXT_ASK)):
+        return ("ask", REASON_ASK.format(
+            what="the closing message asks the human to decide"))
+
+    if pending_task_ids(entries):
+        return None  # something live will wake the session; that is the point
 
     latest = next((_stamp(e) for e in reversed(entries) if _stamp(e)), None)
     for entry in turn:
@@ -308,26 +430,20 @@ def evaluate(entries, how=HOW_CLAUDE):
         if latest is None or ts is None or latest - ts <= STALE_AFTER_S:
             return None
 
-    # Only the turn's FINAL state matters. A turn that polled a queued job and
-    # then watched it go green is finished, not stalled, so an early poll must
-    # not outvote the last observation.
     last_ci = None
     for entry in turn:
         for body in tool_results(entry):
             if CI_CONTEXT.search(body):
                 last_ci = body
     if last_ci and any(p.search(last_ci) for p in CI_INFLIGHT):
-        return REASON.format(how=how,
-                             what="the last CI check showed a pending or queued job")
+        return ("wait", REASON.format(
+            how=how, what="the last CI check showed a pending or queued job"))
 
-    last_text = None
-    for entry in turn:
-        for text in assistant_texts(entry):
-            if text.strip():
-                last_text = text
-    if last_text and any(p.search(last_text) for p in TEXT_INFLIGHT):
-        return REASON.format(how=how,
-                             what="the closing message says it is waiting on something")
+    if last_text and any(p.search(prose_surface(last_text))
+                        for p in TEXT_INFLIGHT):
+        return ("wait", REASON.format(
+            how=how,
+            what="the closing message says it is waiting on something"))
     return None
 
 
@@ -368,10 +484,114 @@ def _as_object(raw):
     return data if isinstance(data, dict) else None
 
 
+# --------------------------------------------------------------------------
+# block budget
+#
+# The harness re-fires Stop and honours `decision: block` every time, so
+# `stop_hook_active` is a signal TO the hook and not a cap the harness applies.
+# An unconditional blocking hook loops until the session is killed. This file
+# is therefore the only terminator there is, which is why the budget is checked
+# before the block is emitted and persisted before it is written out.
+
+def _home():
+    """The ainb home, resolved exactly as notifyd resolves it.
+
+    Order matches `ainb-plugin-notifyd/src/paths.rs:48` (`$AINB_HANGAR_HOME`,
+    else `$AINB_HOME`, else `~/.agents-in-a-box`), which is the resolver the
+    waiting Claude hook registers against.
+    """
+    for var in ("AINB_HANGAR_HOME", "AINB_HOME"):
+        value = os.environ.get(var)
+        if value:
+            return value
+    return os.path.expanduser("~/.agents-in-a-box")
+
+
+def state_key(data):
+    """A key that is stable for the life of ONE session.
+
+    `turn_id` is deliberately last and only used as a tiebreak: Codex mints a
+    fresh one per turn, so keying on it would give every turn its own budget
+    file and `MAX_SESSION_BLOCKS` would never apply. The transcript path is the
+    better fallback because it is per-session and stable.
+    """
+    for candidate in (data.get("session_id"), data.get("transcript_path")):
+        if isinstance(candidate, str) and candidate.strip():
+            return os.path.basename(candidate.strip()).removesuffix(".jsonl")
+    return "unknown"
+
+
+def state_path(session_id):
+    key = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "unknown")[:128]
+    return os.path.join(_home(), "stall", key + ".json")
+
+
+def load_state(path):
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path, state):
+    """Persist the budget. False when it could not be written.
+
+    The caller must NOT block on a False. The budget is the only terminator
+    there is, and it is read back from this file: if the write fails (read-only
+    mount, unwritable home, full disk) every later fire starts from an empty
+    state and blocks forever. Failing open costs enforcement on a broken host;
+    failing closed costs the session.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+    except OSError:
+        return False
+    return True
+
+
+def progress_marker(entries):
+    """A fingerprint of what the model has DONE and last SAID.
+
+    Blocking twice with this unchanged means the previous block produced no
+    action and no new words, so a third would not either.
+
+    The tool count alone is not enough. Codex's `transcript_path` is nullable,
+    so `entries` is often just the synthesized `last_assistant_message` and the
+    count is pinned at 0 forever: the first block would then retire the guard
+    for the whole session. Folding in the closing text keeps the marker moving
+    on any agent that produces new prose.
+    """
+    tools = sum(len(tool_uses(entry)) for entry in entries)
+    tail = (closing_text(current_turn(entries)) or "")[-400:]
+    # crc32, not hash(): PYTHONHASHSEED randomises hash() per process, so it
+    # would differ between two runs of the same hook on the same transcript.
+    return "%d:%d" % (tools, zlib.crc32(tail.encode("utf-8", "replace")))
+
+
+def budget_allows(state, marker):
+    """False when a block must be suppressed: over a cap, or nothing moved."""
+    return not (state.get("total", 0) >= MAX_SESSION_BLOCKS
+                or state.get("consecutive", 0) >= MAX_CONSECUTIVE_BLOCKS
+                or state.get("marker") == marker)
+
+
+def disabled():
+    return os.environ.get("AINB_STALL_GUARD", "").strip().lower() in (
+        "0", "off", "false", "no")
+
+
 def main():
     data = read_payload()
-    if not data or data.get("stop_hook_active"):
+    if not data or disabled():
         sys.exit(0)
+
+    # `stop_hook_active` is deliberately NOT a short-circuit. Exiting on it caps
+    # enforcement at a single nudge per stall, which is exactly why the prompt
+    # rule it enforces kept being ignored. The budget below replaces it.
 
     entries = load_entries(data.get("transcript_path") or "")
 
@@ -387,11 +607,36 @@ def main():
     # last_assistant_message, and it has no background-wake primitive to
     # recommend.
     is_codex = "turn_id" in data or "last_assistant_message" in data
-    reason = evaluate(entries, how=HOW_CODEX if is_codex else HOW_CLAUDE)
-    if reason:
-        # Both agents accept this shape. Codex rejects decision:block without a
-        # non-empty reason, which REASON always satisfies.
-        json.dump({"decision": "block", "reason": reason}, sys.stdout)
+    verdict = evaluate(entries, how=HOW_CODEX if is_codex else HOW_CLAUDE)
+
+    path = state_path(state_key(data))
+    state = load_state(path)
+
+    if verdict is None:
+        # Clearing the marker matters as much as the streak: a later stall whose
+        # marker happened to equal the stale one would otherwise be suppressed
+        # as "no progress" when the session had in fact moved on.
+        if state.get("consecutive") or state.get("marker") is not None:
+            state["consecutive"] = 0
+            state.pop("marker", None)
+            save_state(path, state)
+        sys.exit(0)
+
+    mode, reason = verdict
+    marker = progress_marker(entries)
+    if not budget_allows(state, marker):
+        sys.exit(0)
+
+    state["total"] = state.get("total", 0) + 1
+    state["consecutive"] = state.get("consecutive", 0) + 1
+    state["marker"] = marker
+    state["mode"] = mode
+    if not save_state(path, state):
+        sys.exit(0)  # cannot persist the budget, so cannot bound the loop
+
+    # Both agents accept this shape. Codex rejects decision:block without a
+    # non-empty reason, which every REASON_* always satisfies.
+    json.dump({"decision": "block", "reason": reason}, sys.stdout)
     sys.exit(0)
 
 
@@ -551,12 +796,105 @@ CHECKS = [
         _user("explain the guide"),
         _asst("Before spawning a new agent, check if there is already a running "
               "claude-code-guide agent you can continue via SendMessage.")]),
+    # M2: a decision handed back as prose. All four are verbatim shapes from
+    # real stalled turns.
+    ("prose decision hand-back blocks", True, [
+        _user("fix the bridge pin"),
+        _asst("Two things need your call rather than mine: committing this, "
+              "and whether to open a PR on someone else's in-flight branch.")]),
+    ("unless-you-redirect blocks", True, [
+        _user("fix the bridge pin"),
+        _asst("Defect 1 is unambiguously mine to do, I'll start there unless "
+              "you redirect.")]),
+    ("offer-shaped question blocks", True, [
+        _user("what next"),
+        _asst("Want me to take #3374 next, or the card fixes?")]),
+    ("needs-input marker blocks", True, [
+        _user("land it"),
+        _asst("needs input: which branch should this land on")]),
+    ("asking properly through the picker allows", False, [
+        _user("fix the bridge pin"),
+        _use("AskUserQuestion", {"questions": [{"header": "Commit"}]}),
+        _asst("Two things need your call rather than mine.")]),
+    ("topical 'call' in ordinary prose allows", False, [
+        _user("rename it"),
+        _asst("Renamed the calling convention in 3 files; you can see the "
+              "diff above.")]),
+    ("live watcher under a done claim allows: turn-end is not session-end", False, [
+        _user("ship it"),
+        _result("Command running in background with ID: bleak00001. Output ..."),
+        _asst("All checks green, merged to main.")]),
+    ("a state-table cell is not an ask", False, [
+        _user("status"),
+        _asst("Rebased and pushed.\n\n| repo | no files changed | your call |\n"
+              "| pr   | open, waiting on you | your merge |\n\nnext: merge it")]),
+    ("an evidence bullet is not an ask", False, [
+        _user("status"),
+        _asst("Rebased.\n\nnext: merge it\n\n- skill-creator excluded per "
+              "your call [fact]\n- release path is your call, not its own "
+              "[fact]")]),
+    ("a reported past decision is not an ask", False, [
+        _user("summarise"),
+        _asst("The remaining 77-skill delta is per your call to stop.")]),
+    ("a quoted question is not an ask", False, [
+        _user("what did the config say"),
+        _asst("The file reads \"ping me when 1.22.7 is out\", so it is wired.")]),
+    ("an early picker does not disable the CI check", True, [
+        _user("merge it"),
+        _use("AskUserQuestion", {"questions": [{"header": "Merge?"}]}),
+        _result('[{"name":"build","bucket":"pending","workflowName":"ci"}]'),
+        _asst("Main's CI is still running on both merge commits.")]),
+    ("watcher-armed narration is never an ask", False, [
+        _user("merge it"),
+        _result("Command running in background with ID: bwatch0001. Output ..."),
+        _asst("Watch armed on #752 (60s, 50m cap, catches merged/closed and "
+              "failure buckets).")]),
 ]
+
+
+def _with_env(name, value, fn):
+    prior = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        return fn()
+    finally:
+        if prior is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior
 
 
 def _extra_checks():
     """Regressions that are about plumbing, not the block/allow decision."""
     out = []
+
+    # The budget is the only thing that terminates a block loop, so its
+    # arithmetic is checked directly rather than through main().
+    out.append(("a fresh session may block",
+                budget_allows({}, 7)))
+    out.append(("no progress since the last block suppresses a re-block",
+                not budget_allows({"marker": 7}, 7)))
+    out.append(("progress since the last block permits another",
+                budget_allows({"marker": 7}, 9)))
+    out.append(("consecutive cap suppresses",
+                not budget_allows({"consecutive": MAX_CONSECUTIVE_BLOCKS}, 9)))
+    out.append(("session cap suppresses",
+                not budget_allows({"total": MAX_SESSION_BLOCKS}, 9)))
+    out.append(("an unwritable state path reports failure, not success",
+                not save_state("/dev/null/nope/x.json", {"total": 1})))
+    out.append(("codex-shaped entries still move the marker",
+                progress_marker([_asst("CI is still running.")])
+                != progress_marker([_asst("Deploy is still queued.")])))
+    out.append(("the marker is stable across processes",
+                progress_marker([_asst("same text")])
+                == progress_marker([_asst("same text")])))
+    out.append(("a per-turn id never becomes the budget key",
+                state_key({"turn_id": "t-1"}) == state_key({"turn_id": "t-2"})))
+    out.append(("the transcript path keys the budget per session",
+                state_key({"transcript_path": "/x/y/abc123.jsonl"}) == "abc123"))
+    out.append(("kill switch is read from the environment",
+                _with_env("AINB_STALL_GUARD", "off", disabled)
+                and not _with_env("AINB_STALL_GUARD", "", disabled)))
 
     # argv must win outright: reading stdin first hung every Codex Stop until
     # the host's hook timeout killed the process.
