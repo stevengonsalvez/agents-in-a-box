@@ -3181,9 +3181,9 @@ mod tests {
         // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
         // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
         // notifyd + hangar) + headroom + rtk + the web dashboard + the daemon
-        // lifecycle surface = 35. The TUI is NOT in the registry, main.rs
+        // lifecycle surface + signed self-updates = 36. The TUI is NOT in the registry, main.rs
         // handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 35, "expected 35 entries, got {names:?}");
+        assert_eq!(names.len(), 36, "expected 36 entries, got {names:?}");
         for required in [
             "daemon",
             "run",
@@ -3220,6 +3220,7 @@ mod tests {
             "hangar",
             "headroom",
             "rtk",
+            "update",
         ] {
             assert!(
                 names.contains(&required),
