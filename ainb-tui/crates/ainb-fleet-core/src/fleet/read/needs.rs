@@ -108,14 +108,26 @@ pub struct ClassifyInput {
     pub now_ms: i64,
 }
 
+/// Resolve the idle threshold in minutes from `AINB_FLEET_IDLE_MIN`, falling
+/// back to [`DEFAULT_IDLE_MIN`]. Non-numeric and non-positive values are
+/// ignored rather than honoured, so a typo cannot make every session idle.
+///
+/// Public because EVERY tier that ages an idle session must age it by the same
+/// rule: a probe-sourced idle and a transcript-sourced idle disagreeing about
+/// the threshold would surface as a session flickering in and out of `needs`.
+#[must_use]
+pub fn idle_threshold_from_env() -> i64 {
+    std::env::var("AINB_FLEET_IDLE_MIN")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IDLE_MIN)
+}
+
 impl ClassifyInput {
     #[must_use]
     pub fn from_env(session: Session, pane_text: Option<String>, now_ms: i64) -> Self {
-        let idle_threshold_min = std::env::var("AINB_FLEET_IDLE_MIN")
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_IDLE_MIN);
+        let idle_threshold_min = idle_threshold_from_env();
         Self {
             session,
             pane_text,
