@@ -86,12 +86,14 @@ export default defineConfig({
             { label: 'Install', slug: 'tui/install' },
             { label: 'Quickstart', slug: 'tui/quickstart' },
             { label: 'Starting a new session', slug: 'tui/start-session' },
+            { label: 'Attaching to a session', slug: 'tui/attach' },
             { label: 'Code Review (diff)', slug: 'tui/code-review' },
             { label: 'Shared MCP pool', slug: 'tui/mcp-pool' },
             { label: 'Token optimisation (Headroom · RTK)', slug: 'tui/token-optimization' },
             { label: 'Daemons overlay', slug: 'tui/daemons' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
             { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
+            { label: 'Browser dashboard (ainb web)', slug: 'tui/web' },
             { label: 'Architecture', slug: 'tui/architecture' },
             { label: 'FAQ', slug: 'tui/faq' },
           ],
@@ -100,6 +102,14 @@ export default defineConfig({
           label: 'CLI',
           items: [
             { label: 'Full CLI reference', slug: 'tui/cli' },
+          ],
+        },
+        {
+          label: 'Fleet',
+          items: [
+            { label: 'Chat bridge (Telegram · Slack · Discord)', slug: 'fleet-bridge' },
+            { label: 'ATC — the always-on watcher', slug: 'atc-plumbing' },
+            { label: 'Fleet cost rollups', slug: 'tui/fleet-cost' },
           ],
         },
         {
@@ -178,12 +188,20 @@ export default defineConfig({
             { label: 'Building', slug: 'contributing/building' },
             { label: 'CI / CD', slug: 'contributing/ci-cd' },
             { label: 'Release process', slug: 'contributing/release-process' },
+            { label: 'Verifying on a loaded box', slug: 'contributing/verifying-on-a-loaded-box' },
           ],
         },
         {
           label: 'Hangar',
           items: [
             { label: 'Architecture & features', slug: 'hangar/architecture' },
+          ],
+        },
+        {
+          label: 'Observability',
+          items: [
+            { label: 'Overview', slug: 'observability/overview' },
+            { label: 'OpenTelemetry to Grafana', slug: 'reference/otel-grafana' },
           ],
         },
         {
