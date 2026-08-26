@@ -5,12 +5,16 @@ Enforces <never_idle_while_waiting> in ~/.claude/CLAUDE.md mechanically, so an
 ATC-managed session cannot silently park on a running CI job.
 
 Allow (exit 0, silent) when:
-  - stop_hook_active is set              -> one nudge max, never wedge a session
   - a background task / Monitor / subagent is live  -> that IS the armed wake
-  - the current turn shows no in-flight evidence
+  - the block budget is spent, or nothing moved since the last block
+  - the current turn shows no stall evidence
 
-Block (decision=block) only when the current turn shows work in flight AND
-nothing is armed to wake the session back up.
+Block (decision=block) on:
+  - wait  work in flight and nothing armed to wake the session back up
+
+`stop_hook_active` is NOT a short-circuit: the harness re-fires Stop and
+honours a block every time, so exiting on it caps enforcement at one nudge.
+The per-session budget in `budget_allows` is the only terminator there is.
 
 Scanning is deliberately narrow: assistant *text* blocks and *tool_result*
 bodies only. Whole-entry matching drags in system prompts, skill listings,
@@ -53,6 +57,13 @@ SYSREM_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 # and treating them as armed would swallow real stalls.
 ARMED_TOOLS = {"Monitor", "Task", "Agent", "Workflow", "ScheduleWakeup",
                "CronCreate"}
+
+# Blocking is only useful while the model can still act on it. These caps are
+# the SOLE terminator: the harness re-fires Stop and honours `decision: block`
+# every time (measured), so `stop_hook_active` is informational and nothing
+# outside this file stops a loop.
+MAX_CONSECUTIVE_BLOCKS = 3
+MAX_SESSION_BLOCKS = 20
 
 # A tool_result only counts as CI evidence if it actually looks like CI output.
 CI_CONTEXT = re.compile(
@@ -287,18 +298,40 @@ def is_armed(entry):
     return any(name in ARMED_TOOLS for name, _ in tool_uses(entry))
 
 
-def evaluate(entries, how=HOW_CLAUDE):
-    """Return a block reason, or None to allow the stop."""
-    if pending_task_ids(entries):
-        return None  # something live will wake the session; that is the point
-
+def current_turn(entries):
+    """Entries since the last real user message."""
     start = 0
     for i, entry in enumerate(entries):
         if is_real_user_turn(entry):
             start = i
-    turn = entries[start:]
+    return entries[start:]
+
+
+def closing_text(turn):
+    """The last non-empty prose the model wrote this turn, or None.
+
+    Only the turn's FINAL state matters anywhere in this file. A turn that
+    polled a queued job and then watched it go green is finished, not stalled,
+    so an early observation must never outvote the last one.
+    """
+    last = None
+    for entry in turn:
+        for text in assistant_texts(entry):
+            if text.strip():
+                last = text
+    return last
+
+
+def evaluate(entries, how=HOW_CLAUDE):
+    """Return (mode, reason) to block, or None to allow the stop."""
+    turn = current_turn(entries)
     if not turn:
         return None
+
+    last_text = closing_text(turn)
+
+    if pending_task_ids(entries):
+        return None  # something live will wake the session; that is the point
 
     latest = next((_stamp(e) for e in reversed(entries) if _stamp(e)), None)
     for entry in turn:
@@ -308,26 +341,19 @@ def evaluate(entries, how=HOW_CLAUDE):
         if latest is None or ts is None or latest - ts <= STALE_AFTER_S:
             return None
 
-    # Only the turn's FINAL state matters. A turn that polled a queued job and
-    # then watched it go green is finished, not stalled, so an early poll must
-    # not outvote the last observation.
     last_ci = None
     for entry in turn:
         for body in tool_results(entry):
             if CI_CONTEXT.search(body):
                 last_ci = body
     if last_ci and any(p.search(last_ci) for p in CI_INFLIGHT):
-        return REASON.format(how=how,
-                             what="the last CI check showed a pending or queued job")
+        return ("wait", REASON.format(
+            how=how, what="the last CI check showed a pending or queued job"))
 
-    last_text = None
-    for entry in turn:
-        for text in assistant_texts(entry):
-            if text.strip():
-                last_text = text
     if last_text and any(p.search(last_text) for p in TEXT_INFLIGHT):
-        return REASON.format(how=how,
-                             what="the closing message says it is waiting on something")
+        return ("wait", REASON.format(
+            how=how,
+            what="the closing message says it is waiting on something"))
     return None
 
 
@@ -368,10 +394,78 @@ def _as_object(raw):
     return data if isinstance(data, dict) else None
 
 
+# --------------------------------------------------------------------------
+# block budget
+#
+# The harness re-fires Stop and honours `decision: block` every time, so
+# `stop_hook_active` is a signal TO the hook and not a cap the harness applies.
+# An unconditional blocking hook loops until the session is killed. This file
+# is therefore the only terminator there is, which is why the budget is checked
+# before the block is emitted and persisted before it is written out.
+
+def _home():
+    """Same resolution order the Rust side uses for the ainb home."""
+    for var in ("AINB_HANGAR_HOME", "AINB_HOME"):
+        value = os.environ.get(var)
+        if value:
+            return value
+    return os.path.expanduser("~/.agents-in-a-box")
+
+
+def state_path(session_id):
+    key = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "unknown")[:128]
+    return os.path.join(_home(), "stall", key + ".json")
+
+
+def load_state(path):
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path, state):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass  # a hook that cannot persist must still not wedge the session
+
+
+def progress_marker(entries):
+    """Monotonic count of tool calls: what the model has actually DONE.
+
+    Blocking twice with this unchanged means the previous block produced no
+    action, so a third would not either. The count can also shift when the
+    4MB tail window slides over a long session; that reads as progress and
+    costs at most one extra block, which the caps still bound.
+    """
+    return sum(len(tool_uses(entry)) for entry in entries)
+
+
+def budget_allows(state, marker):
+    """False when a block must be suppressed: over a cap, or nothing moved."""
+    return not (state.get("total", 0) >= MAX_SESSION_BLOCKS
+                or state.get("consecutive", 0) >= MAX_CONSECUTIVE_BLOCKS
+                or state.get("marker") == marker)
+
+
+def disabled():
+    return os.environ.get("AINB_STALL_GUARD", "").strip().lower() in (
+        "0", "off", "false", "no")
+
+
 def main():
     data = read_payload()
-    if not data or data.get("stop_hook_active"):
+    if not data or disabled():
         sys.exit(0)
+
+    # `stop_hook_active` is deliberately NOT a short-circuit. Exiting on it caps
+    # enforcement at a single nudge per stall, which is exactly why the prompt
+    # rule it enforces kept being ignored. The budget below replaces it.
 
     entries = load_entries(data.get("transcript_path") or "")
 
@@ -387,11 +481,31 @@ def main():
     # last_assistant_message, and it has no background-wake primitive to
     # recommend.
     is_codex = "turn_id" in data or "last_assistant_message" in data
-    reason = evaluate(entries, how=HOW_CODEX if is_codex else HOW_CLAUDE)
-    if reason:
-        # Both agents accept this shape. Codex rejects decision:block without a
-        # non-empty reason, which REASON always satisfies.
-        json.dump({"decision": "block", "reason": reason}, sys.stdout)
+    verdict = evaluate(entries, how=HOW_CODEX if is_codex else HOW_CLAUDE)
+
+    path = state_path(data.get("session_id") or data.get("turn_id") or "")
+    state = load_state(path)
+
+    if verdict is None:
+        if state.get("consecutive"):
+            state["consecutive"] = 0
+            save_state(path, state)
+        sys.exit(0)
+
+    mode, reason = verdict
+    marker = progress_marker(entries)
+    if not budget_allows(state, marker):
+        sys.exit(0)
+
+    state["total"] = state.get("total", 0) + 1
+    state["consecutive"] = state.get("consecutive", 0) + 1
+    state["marker"] = marker
+    state["mode"] = mode
+    save_state(path, state)
+
+    # Both agents accept this shape. Codex rejects decision:block without a
+    # non-empty reason, which every REASON_* always satisfies.
+    json.dump({"decision": "block", "reason": reason}, sys.stdout)
     sys.exit(0)
 
 
@@ -554,9 +668,37 @@ CHECKS = [
 ]
 
 
+def _with_env(name, value, fn):
+    prior = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        return fn()
+    finally:
+        if prior is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior
+
+
 def _extra_checks():
     """Regressions that are about plumbing, not the block/allow decision."""
     out = []
+
+    # The budget is the only thing that terminates a block loop, so its
+    # arithmetic is checked directly rather than through main().
+    out.append(("a fresh session may block",
+                budget_allows({}, 7)))
+    out.append(("no progress since the last block suppresses a re-block",
+                not budget_allows({"marker": 7}, 7)))
+    out.append(("progress since the last block permits another",
+                budget_allows({"marker": 7}, 9)))
+    out.append(("consecutive cap suppresses",
+                not budget_allows({"consecutive": MAX_CONSECUTIVE_BLOCKS}, 9)))
+    out.append(("session cap suppresses",
+                not budget_allows({"total": MAX_SESSION_BLOCKS}, 9)))
+    out.append(("kill switch is read from the environment",
+                _with_env("AINB_STALL_GUARD", "off", disabled)
+                and not _with_env("AINB_STALL_GUARD", "", disabled)))
 
     # argv must win outright: reading stdin first hung every Codex Stop until
     # the host's hook timeout killed the process.
