@@ -134,6 +134,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let claude_cmd = codex_remote
         .as_ref()
         .map(|remote| {
+            // Pre-launch, at the launch site rather than inside the builder:
+            // `-C` into a directory Codex has not seen shows a blocking trust
+            // modal, and under `--remote` no flag suppresses it. Kept out of
+            // `remote_codex_command` so that stays pure and its tests never
+            // write to the user's Codex config.
+            crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
             remote_codex_command(
                 remote,
                 &work_dir,
@@ -542,37 +548,31 @@ fn build_agent_command(args: &RunArgs) -> String {
         .join(" ")
 }
 
+/// Shell-ready argv for a managed Codex session. PURE: builds a string and
+/// nothing else, so tests can call it without touching the user's Codex config.
+///
+/// Delegates to [`crate::interactive::session_manager::codex_remote_command`]
+/// so this path and the TUI's cannot drift. They HAD drifted: this builder was
+/// missing `--dangerously-bypass-hook-trust` and the retiring-model
+/// substitution, so `ainb run --tool codex` still hit the hooks-need-review and
+/// deprecation modals the TUI path had already been fixed for.
 fn remote_codex_command(
     remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult,
     cwd: &std::path::Path,
     model: Option<&str>,
     skip_permissions: bool,
 ) -> String {
-    let mut parts = vec![
-        "codex".to_string(),
-        "-c".to_string(),
-        "check_for_update_on_startup=false".to_string(),
-        "--disable".to_string(),
-        "apps".to_string(),
-        "--remote".to_string(),
-        remote.endpoint.clone(),
-        "-C".to_string(),
-        cwd.display().to_string(),
-    ];
-    if let Some(model) = model.filter(|model| !model.is_empty() && *model != "default") {
-        parts.extend(["--model".to_string(), model.to_string()]);
-    }
-    if skip_permissions {
-        parts.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    }
-    if let Some(thread_id) = remote.thread_id.as_ref() {
-        parts.extend(["resume".to_string(), thread_id.clone()]);
-    }
-    parts
-        .iter()
-        .map(|part| shell_escape::escape(part.into()).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::interactive::session_manager::codex_remote_command(
+        &crate::config::CliProvider::Codex,
+        remote,
+        cwd,
+        model,
+        skip_permissions,
+    )
+    .iter()
+    .map(|part| shell_escape::escape(part.into()).into_owned())
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
@@ -819,6 +819,10 @@ mod tests {
         assert!(cmd.contains("--dangerously-skip-permissions"));
     }
 
+    /// The CLI path now shares the TUI's builder, so it also carries
+    /// `--dangerously-bypass-hook-trust`. It previously did not, which is why
+    /// `ainb run --tool codex` still hit the hooks-need-review modal after the
+    /// TUI path was fixed.
     #[test]
     fn remote_codex_command_resumes_exact_thread() {
         let command = remote_codex_command(
@@ -832,7 +836,11 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex -c check_for_update_on_startup=false --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox resume thread-123"
+            "codex -c check_for_update_on_startup=false --disable apps \
+             --dangerously-bypass-hook-trust --remote \
+             'unix:///tmp/codex-app-server.sock' -C /tmp/worktree --model gpt-5.6-luna \
+             --dangerously-bypass-approvals-and-sandbox resume thread-123"
+                .replace(" \n", " ")
         );
         assert!(!command.contains("--last"));
     }
@@ -850,7 +858,9 @@ mod tests {
         );
         assert_eq!(
             command,
-            "codex -c check_for_update_on_startup=false --disable apps --remote 'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+            "codex -c check_for_update_on_startup=false --disable apps \
+             --dangerously-bypass-hook-trust --remote \
+             'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
         );
     }
 

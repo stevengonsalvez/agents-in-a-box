@@ -212,9 +212,6 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
     Ok(())
 }
 
-/// Log what the pane was showing when a launch failed.
-///
-/// Best-effort and never fatal: this runs on a path that is already failing,
 /// Build the argv for a managed (remote app-server) Codex session.
 ///
 /// Extracted from the launcher so the flags that keep breaking are testable
@@ -230,7 +227,7 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
 ///   and any other client on that app-server (the phone) share ONE
 ///   conversation. Without it each client starts its own thread on the same
 ///   cwd and neither sees the other's turns.
-fn codex_remote_command(
+pub(crate) fn codex_remote_command(
     provider: &crate::config::CliProvider,
     remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult,
     working_dir: &std::path::Path,
@@ -264,6 +261,9 @@ fn codex_remote_command(
     command
 }
 
+/// Log what the pane was showing when a launch failed.
+///
+/// Best-effort and never fatal: this runs on a path that is already failing,
 /// so a capture error must not mask the original problem.
 async fn log_failed_launch_pane(exact_target: &str) {
     let Ok(output) = Command::new("tmux")
@@ -304,7 +304,7 @@ async fn log_failed_launch_pane(exact_target: &str) {
 ///
 /// Best-effort: a failure here only means the user answers one prompt, so it
 /// must never fail a launch.
-fn trust_codex_project_dir(worktree: &std::path::Path) {
+pub(crate) fn trust_codex_project_dir(worktree: &std::path::Path) {
     let Some(config) = codex_config_path() else {
         return;
     };
@@ -2649,6 +2649,60 @@ mod tests {
             argv.get(cd + 1).map(String::as_str),
             Some(worktree.to_str().unwrap())
         );
+
+        // skip_permissions emits the provider's own flag, not a hard-coded one.
+        let yolo = super::codex_remote_command(&provider, &without, worktree, None, true).join(" ");
+        assert!(
+            yolo.contains(provider.skip_permissions_flag()),
+            "skip flag: {yolo}"
+        );
+        let safe =
+            super::codex_remote_command(&provider, &without, worktree, None, false).join(" ");
+        assert!(
+            !safe.contains(provider.skip_permissions_flag()),
+            "leaked skip: {safe}"
+        );
+
+        // `--disable apps` travels as two adjacent tokens, not a fused string.
+        let d = argv.iter().position(|a| a == "--disable").expect("--disable missing");
+        assert_eq!(argv.get(d + 1).map(String::as_str), Some("apps"));
+    }
+
+    /// The `--model` branch: default-ish values omitted, real ones passed, and
+    /// a retiring slug rewritten rather than launched.
+    ///
+    /// Launching a retiring model shows a blocking deprecation modal, one of
+    /// the three stalls this argv exists to avoid.
+    #[test]
+    fn codex_remote_command_filters_and_migrates_the_model() {
+        use ainb_hangar_proto::fleet::CodexSessionEnsureResult;
+        let provider = crate::config::CliProvider::Codex;
+        let worktree = std::path::Path::new("/w/tree");
+        let remote = CodexSessionEnsureResult {
+            thread_id: None,
+            endpoint: "unix:///tmp/s.sock".to_string(),
+        };
+        let argv_for = |model: Option<&str>| {
+            super::codex_remote_command(&provider, &remote, worktree, model, false)
+        };
+
+        // Default-ish models must not emit --model: a literal "default" would
+        // send a slug that does not exist.
+        for omitted in [None, Some(""), Some("default")] {
+            let argv = argv_for(omitted);
+            assert!(
+                !argv.iter().any(|a| a == "--model"),
+                "--model emitted for {omitted:?}: {argv:?}"
+            );
+        }
+
+        let argv = argv_for(Some("gpt-5.6-terra"));
+        let at = argv.iter().position(|a| a == "--model").expect("--model missing");
+        assert_eq!(argv.get(at + 1).map(String::as_str), Some("gpt-5.6-terra"));
+
+        // Whatever is emitted has been through the retirement rewrite, so a
+        // retiring slug can never reach the launch as-is.
+        assert_eq!(argv[at + 1], super::migrated_codex_model("gpt-5.6-terra"));
     }
 
     /// Recording worktree trust must not disturb ANY other key.
