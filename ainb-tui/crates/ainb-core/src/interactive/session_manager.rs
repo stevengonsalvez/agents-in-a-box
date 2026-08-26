@@ -212,6 +212,32 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
     Ok(())
 }
 
+/// Log what the pane was showing when a launch failed.
+///
+/// Best-effort and never fatal: this runs on a path that is already failing,
+/// so a capture error must not mask the original problem.
+async fn log_failed_launch_pane(exact_target: &str) {
+    let Ok(output) = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", exact_target])
+        .output()
+        .await
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let pane = String::from_utf8_lossy(&output.stdout);
+    // The tail is where a modal or error sits; the head is the banner.
+    let tail: Vec<&str> = pane.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    if tail.is_empty() {
+        warn!("Failed launch pane was empty; the CLI produced no output at all");
+        return;
+    }
+    let shown = tail.iter().rev().take(12).rev().copied().collect::<Vec<_>>().join(" | ");
+    warn!("Failed launch pane (last lines): {shown}");
+}
+
 /// Roll back resources created before a fresh Interactive session is registered.
 pub(crate) async fn rollback_failed_interactive_launch(
     session_id: Uuid,
@@ -220,6 +246,12 @@ pub(crate) async fn rollback_failed_interactive_launch(
 ) {
     if let Some(tmux_name) = exact_tmux_name {
         let exact_target = format!("={tmux_name}");
+        // Read the pane BEFORE killing it. Every way a CLI can stall before it
+        // is ready -- a directory-trust modal, a hooks-need-review modal, a
+        // model-migration prompt, a login screen, a config parse error --
+        // collapses into the same "failed to start" message, and the one place
+        // the actual reason is written is the pane we are about to destroy.
+        log_failed_launch_pane(&exact_target).await;
         match Command::new("tmux").args(["kill-session", "-t", &exact_target]).output().await {
             Ok(output) if output.status.success() => {
                 info!("Rolled back failed launch tmux session: {tmux_name}");
@@ -2048,12 +2080,29 @@ impl InteractiveSessionManager {
                     "remote Codex thread used for a non-Codex session"
                 )));
             }
+            // `-C <working_dir>` is REQUIRED, not redundant. Under `--remote`
+            // the TUI ignores the pane's cwd and adopts the app-server's
+            // working directory, so dropping `-C` silently runs every session
+            // in whatever tree the daemon happens to sit in rather than the
+            // session's worktree. Verified on codex 0.149.1: a pane opened in
+            // one git repo reported the daemon's directory and branch instead.
+            //
+            // `--dangerously-bypass-hook-trust` addresses a launch stall Ainb
+            // causes itself: Codex pins each hook by POSITION
+            // (`<file>:<event>:<group>:<idx>`), and `ainb notifyd install`
+            // rewrites ~/.codex/hooks.json, so our own installer invalidates
+            // those hashes and parks the launch on a blocking "Hooks need
+            // review" modal. The TUI then never creates a thread and our 10s
+            // claim deadline reports "Codex failed to start". Ainb wrote those
+            // hooks; re-confirming them from a detached tmux pane is not a
+            // decision the user can act on.
             let mut command = vec![
                 provider.command().to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
                 "--disable".to_string(),
                 "apps".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
                 "--remote".to_string(),
                 remote.endpoint.clone(),
                 "-C".to_string(),
@@ -2119,11 +2168,19 @@ impl InteractiveSessionManager {
         // injection), we have to wrap in `sh -c '...'` since `respawn-pane`
         // takes a single command, not a shell line. Without env_setup we
         // pass argv directly for max speed and no shell-parsing surprises.
+        // `-c <working_dir>` states the cwd instead of inheriting it. The pane
+        // already carries it from `tmux new-session -c`, but the Codex launch no
+        // longer passes `-C`, so the cwd is now load-bearing rather than
+        // belt-and-braces: if a pane ever came from elsewhere, Codex would open
+        // on the wrong tree silently.
+        let working_dir = working_dir.to_string_lossy().into_owned();
         let output = if env_setup.trim().is_empty() {
             // Pure argv path — fastest, no shell.
             let mut tmux_args: Vec<String> = vec![
                 "respawn-pane".to_string(),
                 "-k".to_string(), // Kill current pane process first
+                "-c".to_string(),
+                working_dir.clone(),
                 "-t".to_string(),
                 target.clone(),
             ];
@@ -2139,7 +2196,17 @@ impl InteractiveSessionManager {
                 .join(" ");
             let full_line = format!("{env_setup}exec {escaped_cmd}");
             Command::new("tmux")
-                .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
+                .args([
+                    "respawn-pane",
+                    "-k",
+                    "-c",
+                    &working_dir,
+                    "-t",
+                    &target,
+                    "sh",
+                    "-c",
+                    &full_line,
+                ])
                 .output()
                 .await?
         };
