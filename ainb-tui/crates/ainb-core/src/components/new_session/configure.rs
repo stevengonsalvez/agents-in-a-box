@@ -266,6 +266,9 @@ pub enum ConfigureRow {
     User,
     Port,
     Key,
+    /// Per-session prefix for generated worktree branch names. This is an
+    /// ephemeral override of the configured Workspace default.
+    Prefix,
     Branch,
     Prompt,
     /// Explicit submit row. Renders as a `[ Launch ]` button at the bottom of
@@ -306,6 +309,9 @@ pub struct ConfigureState {
     /// Inline branch edit buffer — `Some(_)` when the user pressed Enter on
     /// the Branch row. Esc cancels; Enter commits to `branch_override`.
     pub branch_edit: Option<String>,
+    /// Inline prefix edit buffer. The committed value applies only to this
+    /// launch; it never changes the Workspace default in `config.toml`.
+    pub branch_prefix_edit: Option<String>,
     /// Multi-line prompt editor (Boss mode only).
     pub prompt: TextEditor,
     /// When `Some`, the save-preset modal is open and the contained string is
@@ -447,6 +453,7 @@ impl ConfigureState {
             branch_worktree,
             branch_override: None,
             branch_edit: None,
+            branch_prefix_edit: None,
             prompt,
             save_preset_modal: None,
             presets_cache,
@@ -601,6 +608,31 @@ impl ConfigureState {
         self.branch_worktree = derive_branch_name(&self.branch_prefix, &self.existing_branches);
     }
 
+    /// Apply a per-session branch prefix without mutating the Workspace
+    /// default. Keep the generated suffix stable when possible, so editing
+    /// `agents/` to `ci/` turns `agents/abcd1234` into `ci/abcd1234`.
+    fn set_branch_prefix(&mut self, prefix: String) {
+        let previous_prefix = std::mem::replace(&mut self.branch_prefix, prefix);
+        if self.branch_override.is_some() {
+            return;
+        }
+
+        let suffix = self
+            .branch_worktree
+            .strip_prefix(&previous_prefix)
+            .unwrap_or(&self.branch_worktree);
+        let candidate = format!("{}{}", self.branch_prefix, suffix);
+        let collides = self.existing_branches.iter().any(|branch| branch == &candidate)
+            || self.repo_branch_names.iter().any(|branch| branch == &candidate);
+        self.branch_worktree = if collides {
+            let mut unavailable = self.existing_branches.clone();
+            unavailable.extend(self.repo_branch_names.iter().cloned());
+            derive_branch_name(&self.branch_prefix, &unavailable)
+        } else {
+            candidate
+        };
+    }
+
     /// The list of rows visible for the current variant + preset selection.
     /// Ordering matches the render layout and Tab cycle order.
     fn visible_rows(&self) -> Vec<ConfigureRow> {
@@ -654,7 +686,10 @@ impl ConfigureState {
                 }
             }
         }
-        // Branch row visible for everything that isn't SSH.
+        // Prefix and Branch rows are visible for everything that isn't SSH.
+        // Prefix is per-session only. Global defaults remain editable from
+        // Settings → Workspace.
+        rows.push(ConfigureRow::Prefix);
         rows.push(ConfigureRow::Branch);
         // Prompt row visible only in Boss mode for non-shell agents.
         if preset.mode == SessionMode::Boss && preset.agent_provider != "shell" {
@@ -683,6 +718,9 @@ impl ConfigureState {
         // contents (the textarea state is sticky).
         if self.focused_row != ConfigureRow::Branch {
             self.branch_edit = None;
+        }
+        if self.focused_row != ConfigureRow::Prefix {
+            self.branch_prefix_edit = None;
         }
     }
 }
@@ -824,6 +862,7 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             ConfigureRow::Host | ConfigureRow::User | ConfigureRow::Port | ConfigureRow::Key => {
                 render_ssh_field(f, state, area_for_row, *row);
             }
+            ConfigureRow::Prefix => render_prefix_row(f, state, area_for_row, focused),
             ConfigureRow::Branch => render_branch_row(f, state, area_for_row, focused),
             ConfigureRow::Prompt => render_prompt_row(f, state, area_for_row, focused),
             ConfigureRow::Launch => render_launch_row(f, area_for_row, focused),
@@ -848,7 +887,11 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
     let help_chunk = *chunks.last().expect("layout always emits help row");
     let in_prompt =
         state.focused_row == ConfigureRow::Prompt && rows.contains(&ConfigureRow::Prompt);
-    let help = render_help_bar(variant, in_prompt, state.branch_edit.is_some());
+    let help = render_help_bar(
+        variant,
+        in_prompt,
+        state.branch_edit.is_some() || state.branch_prefix_edit.is_some(),
+    );
     f.render_widget(
         Paragraph::new(help).alignment(Alignment::Center),
         help_chunk,
@@ -1463,6 +1506,44 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     }
 }
 
+/// Render the per-session branch-prefix control. It applies only to generated
+/// names, so a manual Branch override stays exactly as entered.
+fn render_prefix_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    if let Some(prefix) = state.branch_prefix_edit.as_ref() {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Prefix:  "),
+            Span::styled(
+                prefix.clone(),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(MUTED_GRAY)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    let mut prefix_style = Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD);
+    if focused {
+        prefix_style = prefix_style.add_modifier(Modifier::UNDERLINED);
+    }
+    let hint = if state.branch_override.is_some() {
+        "   [manual Branch unchanged]"
+    } else {
+        "   [Enter to edit]"
+    };
+    let line = Line::from(vec![
+        focus_indicator(focused),
+        label_span("Prefix:  "),
+        Span::styled(state.branch_prefix.clone(), prefix_style),
+        Span::styled(
+            hint,
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
 fn render_prompt_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     let border_color = if focused { GOLD } else { MUTED_GRAY };
     let prompt_block = Block::default()
@@ -1981,6 +2062,13 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         return handle_branch_edit_key(state, key);
     }
 
+    // Prefix editing has the same priority. Keeping this separate from the
+    // branch editor makes the Prefix row a true per-session control instead
+    // of overloading the branch-name textarea.
+    if state.branch_prefix_edit.is_some() {
+        return handle_branch_prefix_edit_key(state, key);
+    }
+
     // Ctrl shortcuts.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
@@ -2011,6 +2099,10 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
             ConfigureOutcome::Stay
         }
         KeyCode::Enter => match state.focused_row {
+            ConfigureRow::Prefix => {
+                state.branch_prefix_edit = Some(state.branch_prefix.clone());
+                ConfigureOutcome::Stay
+            }
             ConfigureRow::Branch => match state.branch_segment {
                 // Source segment: open the base-branch picker popup. The
                 // dispatcher lists branches (git stays out of components/).
@@ -2191,6 +2283,9 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
             if state.rtk_available {
                 state.rtk_enabled = !state.rtk_enabled;
             }
+        }
+        ConfigureRow::Prefix => {
+            // Prefix is an editable text row, not a value ring.
         }
         ConfigureRow::Branch => {
             // ←/→ on the Branch row toggles the targeted segment
@@ -2396,6 +2491,33 @@ fn handle_branch_edit_key(state: &mut ConfigureState, key: KeyEvent) -> Configur
     }
 }
 
+/// Inline prefix-edit key handler. An empty prefix is valid and creates a
+/// generated branch with no leading namespace.
+fn handle_branch_prefix_edit_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome {
+    let buffer = state.branch_prefix_edit.as_mut().expect("guard checked");
+    match key.code {
+        KeyCode::Esc => {
+            state.branch_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Enter => {
+            let prefix = buffer.trim().to_string();
+            state.branch_prefix_edit = None;
+            state.set_branch_prefix(prefix);
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Backspace => {
+            buffer.pop();
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            buffer.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
 /// Base-branch popup key handler. Chars/Backspace edit the fuzzy filter,
 /// ↑/↓ move the selection, Tab toggles the action mode (base-off ⇄ checkout),
 /// Enter commits the pick, Esc closes without changes.
@@ -2560,6 +2682,7 @@ mod tests {
             branch_worktree: "agents/auto".into(),
             branch_override: None,
             branch_edit: None,
+            branch_prefix_edit: None,
             prompt: TextEditor::new(),
             save_preset_modal: None,
             presets_cache,
@@ -2840,6 +2963,72 @@ mod tests {
     }
 
     #[test]
+    fn prefix_row_rewrites_generated_branch_without_touching_default_config() {
+        let mut s = mk_state();
+        s.set_branch_prefix("ci/".into());
+
+        assert_eq!(s.branch_prefix, "ci/");
+        assert_eq!(s.branch_worktree, "ci/auto");
+        assert_eq!(s.branch_override, None);
+    }
+
+    #[test]
+    fn prefix_row_regenerates_when_candidate_already_exists() {
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["ci/auto".into()];
+        s.set_branch_prefix("ci/".into());
+
+        assert_ne!(s.branch_worktree, "ci/auto");
+        assert!(s.branch_worktree.starts_with("ci/"));
+        assert!(!s.repo_branch_names.contains(&s.branch_worktree));
+    }
+
+    #[test]
+    fn prefix_edit_is_ephemeral_and_leaves_manual_branch_unchanged() {
+        let mut s = mk_state();
+        s.branch_override = Some("feat/explicit-name".into());
+        s.focused_row = ConfigureRow::Prefix;
+
+        assert_eq!(
+            handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ConfigureOutcome::Stay
+        );
+        s.branch_prefix_edit = Some("ci/".into());
+        assert_eq!(
+            handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ConfigureOutcome::Stay
+        );
+
+        assert_eq!(s.branch_prefix, "ci/");
+        assert_eq!(s.branch_override.as_deref(), Some("feat/explicit-name"));
+        assert_eq!(s.effective_branch(), "feat/explicit-name");
+    }
+
+    #[test]
+    fn render_prefix_row_shows_editable_per_session_prefix() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let state = mk_state();
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        terminal.draw(|f| render_prefix_row(f, &state, f.size(), true)).unwrap();
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+
+        assert!(
+            rendered.contains("Prefix:"),
+            "prefix label missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("agents/"),
+            "default prefix missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Enter to edit"),
+            "edit affordance missing: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn branch_collision_true_when_override_matches_live_worktree() {
         let mut s = mk_state();
         s.existing_branches = vec!["feat/blog".into(), "agents/abc123".into()];
@@ -3043,7 +3232,7 @@ mod tests {
     fn tab_cycles_focus_through_visible_rows() {
         let mut s = mk_state();
         // Named preset, default mode = Boss, Claude/Codex provider → rows =
-        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Branch, Prompt, Launch].
+        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Prefix, Branch, Prompt, Launch].
         assert_eq!(s.focused_row, ConfigureRow::Preset);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Mode);
@@ -3053,6 +3242,8 @@ mod tests {
         assert_eq!(s.focused_row, ConfigureRow::HeadroomProxy);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Rtk);
+        s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::Prefix);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Branch);
         s.cycle_focus(1);
