@@ -3,7 +3,7 @@ title: "Claude Code plugins"
 description: "The host-agent plugins this repo ships or documents: reflect, ainb-fleet, ainb-hooks, caveman-stats, and illustration."
 ---
 
-These are **host-agent plugins** — bundles of skills, hooks, and commands that Claude Code, Codex, or Copilot load. They are a different system from [ainb v2 plugins](../../plugins/overview.md), which are subprocess plugins for the **ainb TUI**. If you're unsure which you want, read the [plugins disambiguation](../../plugins/readme.md) first.
+These are **host-agent plugins** — bundles of skills, hooks, and commands that Claude Code, Codex, or Copilot load. They are a different system from [ainb v2 plugins](../../plugins/overview.md), which are subprocess plugins for the **ainb TUI**. If you're unsure which you want, read the [plugins disambiguation](../../plugins/README.md) first.
 
 The repo publishes the in-tree Claude Code plugins through `.claude-plugin/marketplace.json` at the repo root; the source lives under `plugins/<name>/`. Add the marketplace, then install:
 
