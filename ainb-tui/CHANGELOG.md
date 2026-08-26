@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.7] - 2026-08-26
+### Added
+- Merge pull request #749 from stevengonsalvez/f/rename-sessions
+- Merge pull request #750 from stevengonsalvez/f/codex-desktop-managed
+- **cli**: add session label command
+- **cli**: define label arguments
+- **cli**: register label command
+- **cli**: show session labels
+- **codex**: let the manager attach to an app-server it does not own
+- **codex**: opt into the desktop-managed app-server via env
+- **config**: persist session labels
+- **tui**: handle session label events
+- **tui**: label session previews
+- **tui**: manage session label state
+- **tui**: render session label actions
+- **tui**: route right-click labels
+- **tui**: show label in session info
+
+### Fixed
+- Merge pull request #702 from stevengonsalvez/fix/hangar-stale-plugin-root
+- **codex**: fail cheaply when the external app-server is absent
+- **codex**: keep reaping our own orphaned app-server while attached
+- **fleet**: clear attention when a codex request is resolved elsewhere
+- **fleet**: only clear the request that was actually resolved
+- **install**: install the bundled plugins from the release tarball
+- **plugins**: make the plugin-free runtime an existing empty root
+- **plugins**: never trust a plugin root that no longer exists
+- **plugins**: quarantine a plugin whose binary can never be spawned
+- **plugins**: require a plugin root to be a directory
+- **plugins**: settle lifecycle state on every spawn failure
+- **plugins**: surface a failed plugin spawn instead of connecting forever
+
+### Documentation
+- **cli**: document session labels
+- **cli**: regenerate label reference
+- **man**: regenerate label reference
+- **tui**: document F2 labels
+
+### Other
+- Merge pull request #747 from stevengonsalvez/chore/release-v1.22.5
+- sync Cargo.lock with the 1.22.5 version bump
+- **config**: expose session label store
+
+
 ## [1.22.5] - 2026-08-25
 ### Fixed
 - Merge pull request #738 from stevengonsalvez/f/diagnose-rpc-acp
