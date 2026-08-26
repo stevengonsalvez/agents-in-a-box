@@ -14,6 +14,7 @@ Block (decision=block) on:
   - wait  work in flight and nothing armed to wake the session back up
   - ask   a decision handed to the human as prose, which records
           attention=None and is therefore invisible to every fleet surface
+  - leak  the turn claims to be finished while watchers it launched are live
 
 `stop_hook_active` is NOT a short-circuit: the harness re-fires Stop and
 honours a block every time, so exiting on it caps enforcement at one nudge.
@@ -122,6 +123,16 @@ TEXT_ASK = [
                r"\b(?:redirect|say|prefer|object|want)\b", re.I),
 ]
 
+# The turn asserting it is finished. Only used to decide whether a still-live
+# watcher is a leak or a legitimate wake, never on its own.
+TEXT_DONE = [
+    re.compile(r"\b(?:all|everything)\b[^.\n]{0,20}\b(?:green|pass(?:ing|ed)?|"
+               r"done|merged)\b", re.I),
+    re.compile(r"\b(?:merged|shipped|landed|finished|completed)\b", re.I),
+    re.compile(r"\bnothing (?:outstanding|left|else)\b", re.I),
+    re.compile(r"\btests? pass(?:ing|ed)?\b", re.I),
+]
+
 HOW_CLAUDE = (
     "(1) Bash run_in_background with an `until <terminal-state>` poll loop and a "
     "hard iteration cap; (2) Monitor for per-event wakes; (3) ScheduleWakeup or "
@@ -154,6 +165,13 @@ REASON_ASK = (
     "/interview skill) before stopping: recommended option first, and every "
     "option stating its concrete downside. If the question was not actually "
     "blocking, drop it and finish the work instead."
+)
+
+REASON_LEAK = (
+    "STALL GUARD: this turn reports the work finished, but watchers launched "
+    "in this session never reported a terminal status ({what}). Stop them with "
+    "TaskStop before ending the turn, or say plainly why they must keep "
+    "running."
 )
 
 
@@ -387,8 +405,15 @@ def evaluate(entries, how=HOW_CLAUDE):
         return ("ask", REASON_ASK.format(
             what="the closing message asks the human to decide"))
 
-    if pending_task_ids(entries):
-        return None  # something live will wake the session; that is the point
+    live = pending_task_ids(entries)
+    if live:
+        # M4. A live watcher is normally the armed wake and allows the stop.
+        # It is only a leak when the same turn also claims to be finished:
+        # nothing is going to consume that notification.
+        if last_text and any(p.search(last_text) for p in TEXT_DONE):
+            return ("leak", REASON_LEAK.format(
+                what=", ".join(sorted(live))))
+        return None
 
     latest = next((_stamp(e) for e in reversed(entries) if _stamp(e)), None)
     for entry in turn:
@@ -746,6 +771,11 @@ CHECKS = [
         _user("rename it"),
         _asst("Renamed the calling convention in 3 files; you can see the "
               "diff above.")]),
+    # M4: a watcher left running under a turn that claims to be finished.
+    ("live watcher under a done claim blocks", True, [
+        _user("ship it"),
+        _result("Command running in background with ID: bleak00001. Output ..."),
+        _asst("All checks green, merged to main.")]),
 ]
 
 
