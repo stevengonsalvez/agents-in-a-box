@@ -152,6 +152,7 @@ fn release_checker(action: Action) -> Result<String> {
             crate::cli::update::disable_schedule().context("disable daily release checker")?;
             Ok("daily release checker disabled".to_string())
         }
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 
