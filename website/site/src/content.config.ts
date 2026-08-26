@@ -22,6 +22,12 @@ export const collections = {
         // breaking every time automation drops a new file in one of them.
         '!explorations/**',
         '!solutions/**',
+        // Implementer specs and dated build plans. Same reasoning as above:
+        // written for whoever is building the thing, not for a reader of the
+        // site. They were building as pages with no sidebar entry, i.e.
+        // reachable only by guessing the URL.
+        '!contracts/**',
+        '!plans/**',
         // hangar/architecture.md is the one exception: a real, human-authored
         // site page (see astro.config.mjs sidebar entry for slug
         // 'hangar/architecture'). A plain '!hangar/**' plus a later
