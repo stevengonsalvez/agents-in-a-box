@@ -1,8 +1,8 @@
 ---
-title: "Skills (91)"
+title: "Skills (94)"
 ---
 
-All 91 skills grouped by purpose. Each links to its SKILL.md source.
+All 94 skills grouped by purpose. Each links to its SKILL.md source.
 
 ## Planning & Workflow (14)
 
@@ -12,17 +12,17 @@ All 91 skills grouped by purpose. Each links to its SKILL.md source.
 
 `coding-agent` `spawn-agent` `attach-agent-worktree` `list-agent-worktrees` `cleanup-agent-worktree` `merge-agent-work` `do-issues` `gh-issue` `make-github-issues` `find-missing-tests` `commit` `sync-learnings`
 
-## Multi-agent / Swarm (7)
+## Multi-agent / Swarm (8)
 
-`swarm-create` `swarm-join` `swarm-status` `swarm-inbox` `swarm-shutdown` `swarm-orchestration` `swarm-agent-troubleshooting`
+`swarm-create` `swarm-join` `swarm-status` `swarm-inbox` `swarm-shutdown` `swarm-orchestration` `swarm-agent-troubleshooting` `swarm-attach-watchdog`
 
-## Session & Learning (8)
+## Session & Learning (7)
 
-`session-info` `session-metrics` `session-summary` `health-check` `instincts` `reflect` `compound-docs` `research-cache`
+`session-info` `session-metrics` `session-summary` `health-check` `instincts` `research-cache` `standup`
 
-## Testing (5)
+## Testing (7)
 
-`expect-test` `webapp-testing` `browser-verify` `test-driven-development` `mobile-e2e-mcp`
+`expect-test` `webapp-testing` `browser-verify` `test-driven-development` `mobile-e2e-mcp` `test-ainb` `agentmail`
 
 ## Design & UI (13)
 
@@ -44,13 +44,13 @@ All 91 skills grouped by purpose. Each links to its SKILL.md source.
 
 `resume-formatter` `ats-resume-matcher` `retro-pdf` `skill-creator` `token-usage`
 
-## Meta / autonomous patterns (5)
+## Meta / autonomous patterns (4)
 
-`autonomous-loops` `agent-ops` `cost-aware-pipeline` `scrapling-official` `fireworks-tech-graph`
+`autonomous-loops` `agent-ops` `cost-aware-pipeline` `scrapling-official`
 
 ## Recently added (7)
 
-Not yet folded into the grouped lists above: `claude-langfuse` `explain-to-me` `git-history-surgery` `langfuse-setup` `make-a-goal` `standup` `tmux-message`
+Not yet folded into the grouped lists above: `claude-langfuse` `explain-to-me` `git-history-surgery` `langfuse-setup` `make-a-goal` `show-me` `tmux-message`
 
 ## See also
 
