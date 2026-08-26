@@ -39,7 +39,7 @@
 </p>
 
 <p align="center">
-  <code>115 Rust Modules</code> · <code>91 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
+  <code>34 Rust Crates</code> · <code>94 Skills</code> · <code>16 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
 </p>
 
 ---
@@ -55,7 +55,7 @@ separate, standalone repo — `ainb` consumes it as a pinned external source.
 |---|---|
 | **stevengonsalvez/agents-in-a-box** (this repo) | The `ainb` TUI/CLI unit manager (Rust workspace), the v2 plugin system, and the docs. |
 | **[stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory)** | `reflect` — the long-term memory engine (GraphRAG + QMD) + its Claude Code plugin, extracted from this monorepo. Engine install: `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-memory.git[graph]'`. |
-| **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 91 curated skills, 37 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
+| **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 94 curated skills, 16 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
 
 <p align="center">
   <img src="docs/assets/screenshots/dashboard-session.png" alt="ainb TUI — live session dashboard with multi-workspace sidebar" width="900">
@@ -75,8 +75,8 @@ separate, standalone repo — `ainb` consumes it as a pinned external source.
 
 | Component | What it does | Scale |
 |-----------|-------------|-------|
-| **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 115 modules |
-| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 91 skills, 37 agents |
+| **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 34 crates |
+| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 94 skills, 16 agents |
 | **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/knowledge/overview.md) |
 
 ---
@@ -87,9 +87,9 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 
 - **One toolkit, many tools** — Write a skill once, deploy it to Claude Code, Codex, Gemini, Cursor, Copilot, Amazon Q, Cline, Roo, or Clawdhub
 - **Session isolation** — Each coding session gets its own git worktree and tmux session. No cross-contamination
-- **Agents that compose** — 37 specialized agents (backend-developer, security-agent, architecture-reviewer, etc.) that can be orchestrated into swarms
+- **Agents that compose** — 16 specialized agents (backend-developer, security-agent, code-reviewer, deep-reasoner, etc.) plus swarm skills to coordinate them across sessions
 - **Memory that persists** — A two-tier knowledge system (GraphRAG + QMD) that captures learnings and retrieves them across sessions and projects
-- **Production Rust** — The TUI isn't a shell script. It's 115 modules of typed, tested, async Rust with clippy pedantic/nursery lints
+- **Production Rust** — The TUI isn't a shell script. It's a 34-crate workspace of typed, tested, async Rust with clippy pedantic/nursery lints
 
 ---
 
@@ -136,7 +136,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went — then cut it with [The Token Optimisation Playbook](https://stevengonsalvez.com/blog/token-optimisation-playbook)
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 30+ commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …) with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
+- **Scriptable CLI** — 40 commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …), with `--format json` on session state, config, git, usage, fleet, and most daemons. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
 
 ### Feature Showcase
 
@@ -200,7 +200,7 @@ ainb config set authentication.default_model opus
 ainb completion zsh > ~/.zsh/completions/_ainb
 ```
 
-**20 top-level commands** — `tui`, `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `usage`, `claudecode`, `completion`, `plugin`, `fleet`, `help` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet.
+**40 top-level commands** — `tui`, `run`, `list`, `label`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `doctor`, `reflect`, `presets`, `usage`, `statusline`, `claudecode`, `codex`, `tmux`, `otel`, `completion`, `abtop`, `web`, `witr`, `learnings`, `plugin`, `fleet`, `headroom`, `daemon`, `mcp`, `notifyd`, `hangar`, `rtk`, `diff-review`, `skill`, `source`, `search` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet / hangar / mcp / daemon / usage / skill / source.
 
 **[📘 Full CLI reference → docs/tui/cli.md](docs/tui/cli.md)**
 
@@ -351,87 +351,85 @@ A portable AI coding agent toolkit: skills, agents, workflows, and configuration
 | **Cursor** | Project root | Project directory |
 | **Cline** | Project root | Project directory |
 | **Roo** | Project root | Project directory |
-| **Clawdhub** | Project root | Project directory |
+| **Claude Desktop** | `~/Library/Application Support/Claude/` | Home directory — MCP servers only |
 
-### Skills (91)
+### Skills (94)
 
 Skills are reusable capabilities that any supported AI tool can invoke.
 
 <details>
-<summary><b>Workflow & Planning</b></summary>
+<summary><b>Workflow & Planning</b> (14)</summary>
 
-`plan` · `plan-tdd` · `plan-gh` · `implement` · `validate` · `workflow` · `brainstorm` · `critique` · `discuss` · `expose` · `interview`
+`plan` · `plan-tdd` · `plan-gh` · `implement` · `validate` · `workflow` · `brainstorm` · `critique` · `discuss` · `expose` · `interview` · `make-a-goal` · `show-me` · `enhance-prompt`
 </details>
 
 <details>
-<summary><b>Code Quality & Testing</b></summary>
+<summary><b>Code Quality & Testing</b> (11)</summary>
 
-`commit` · `find-missing-tests` · `webapp-testing` · `security-audit` · `security-scan` · `simplify`
+`commit` · `find-missing-tests` · `webapp-testing` · `security-audit` · `security-scan` · `test-driven-development` · `expect-test` · `browser-verify` · `mobile-e2e-mcp` · `test-ainb` · `agentmail`
 </details>
 
 <details>
-<summary><b>DevOps & Infrastructure</b></summary>
+<summary><b>DevOps & Infrastructure</b> (9)</summary>
 
-`start-local` · `start-ios` · `start-android` · `spawn-agent` · `tmux-monitor` · `tmux-status` · `expose` · `debug-bridge`
+`start-local` · `start-ios` · `start-android` · `spawn-agent` · `tmux-monitor` · `tmux-status` · `tmux-message` · `debug-bridge` · `coding-agent`
 </details>
 
 <details>
-<summary><b>Knowledge & Learning</b></summary>
+<summary><b>Knowledge & Learning</b> (6)</summary>
 
-`reflect` · `research` · `research-cache` · `instincts` · `compound-docs` · `prime`
+`research` · `research-cache` · `instincts` · `prime` · `notebooklm` · `explain-to-me`
 </details>
 
 <details>
-<summary><b>Session Management</b></summary>
+<summary><b>Session Management</b> (9)</summary>
 
-`health-check` · `session-info` · `session-metrics` · `session-summary` · `handover` · `recover-sessions` · `plugins`
+`health-check` · `session-info` · `session-metrics` · `session-summary` · `handover` · `recover-sessions` · `plugins` · `standup` · `token-usage`
 </details>
 
 <details>
-<summary><b>Swarm Orchestration</b></summary>
+<summary><b>Swarm Orchestration</b> (8)</summary>
 
-`swarm-create` · `swarm-join` · `swarm-inbox` · `swarm-status` · `swarm-shutdown` · `swarm-orchestration` · `swarm-agent-troubleshooting`
+`swarm-create` · `swarm-join` · `swarm-inbox` · `swarm-status` · `swarm-shutdown` · `swarm-orchestration` · `swarm-agent-troubleshooting` · `swarm-attach-watchdog`
 
 > Sizing guidance: [Progressive subagents](https://stevengonsalvez.com/tools-tips/progressive-subagents) — score the work before you spawn eight agents.
 </details>
 
 <details>
-<summary><b>GitHub & Issues</b></summary>
+<summary><b>GitHub & Issues</b> (8)</summary>
 
-`gh-issue` · `make-github-issues` · `do-issues` · `merge-agent-work` · `list-agent-worktrees` · `attach-agent-worktree` · `cleanup-agent-worktree`
+`gh-issue` · `make-github-issues` · `do-issues` · `merge-agent-work` · `list-agent-worktrees` · `attach-agent-worktree` · `cleanup-agent-worktree` · `git-history-surgery`
 </details>
 
 <details>
-<summary><b>Design & Frontend</b></summary>
+<summary><b>Design & Frontend</b> (12)</summary>
 
-`ui-ux-pro-max` · `frontend-design` · `frontend-slides` · `tui-style-guide` · `tui-screen` · `liquid-glass` · `remotion-best-practices`
+`ui-ux-pro-max` · `frontend-design` · `frontend-slides` · `tui-style-guide` · `liquid-glass` · `remotion` · `remotion-best-practices` · `design-md` · `react-components` · `shadcn-ui` · `stitch-design` · `stitch-loop`
 </details>
 
 <details>
-<summary><b>Research & Analysis</b></summary>
+<summary><b>Research & Analysis</b> (8)</summary>
 
-`crypto-research` · `oracle` · `notebooklm` · `sentry-cli` · `ats-resume-matcher` · `resume-formatter` · `retro-pdf`
+`crypto-research` · `oracle` · `sentry-cli` · `ats-resume-matcher` · `resume-formatter` · `retro-pdf` · `scrapling-official` · `posthog-replay-analysis`
 </details>
 
 <details>
-<summary><b>Agent Architecture</b></summary>
+<summary><b>Agent Architecture</b> (9)</summary>
 
-`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings`
+`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings` · `claude-langfuse` · `langfuse-setup`
 </details>
 
-### Agents (37)
+### Agents (16)
 
 Specialized AI agents organized by domain. Each agent has a defined persona, tool access, and area of expertise.
 
 | Category | Agents |
 |----------|--------|
-| **Universal** | `backend-developer` · `frontend-developer` · `superstar-engineer` |
-| **Orchestrators** | `tech-lead-orchestrator` · `project-analyst` · `team-configurator` |
-| **Engineering** | `api-architect` · `architecture-reviewer` · `code-archaeologist` · `code-reviewer` · `dev-cleanup-wizard` · `devops-automator` · `documentation-specialist` · `gatekeeper` · `integration-tests` · `lead-orchestrator` · `migration` · `performance-optimizer` · `planner` · `playwright-test-validator` · `property-mutation` · `release-manager` · `security-agent` · `service-codegen` · `solution-architect` · `tailwind-css-expert` · `test-writer-fixer` |
-| **Design** | `ui-designer` |
-| **Swarm** | `swarm-leader` · `swarm-worker` |
-| **Meta** | `agentmaker` · `reflect` |
-| **Root** | `distinguished-engineer` · `web-search-researcher` |
+| **Universal** (5) | `backend-developer` · `deep-reasoner` · `fast-worker` · `frontend-developer` · `superstar-engineer` |
+| **Engineering** (6) | `code-archaeologist` · `code-reviewer` · `documentation-specialist` · `performance-optimizer` · `security-agent` · `test-engineer` |
+| **Swarm** (2) | `leader` · `worker` |
+| **Meta** (1) | `agentmaker` |
+| **Root** (2) | `distinguished-engineer` · `web-search-researcher` |
 
 ---
 
@@ -469,7 +467,7 @@ agents-in-a-box/
 │   │   ├── ainb-plugin-burndown/       #   v2 analytics plugin
 │   │   ├── ainb-plugin-notifyd/        #   v2 notifications plugin
 │   │   ├── ainb-plugin-session-reader/ #   v2 data-backend plugin
-│   │   ├── ainb-plugin-cts-v2/         #   Conformance test suite (14 axes)
+│   │   ├── ainb-plugin-cts-v2/         #   Conformance test suite (21 axes)
 │   │   └── ainb-plugin-testkit/        #   Plugin author test harness
 │   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
@@ -482,7 +480,7 @@ agents-in-a-box/
 │   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
 │   └── ainb-hooks/             #   ainb lifecycle hooks
 │
-# The portable toolkit (91 skills, 37 agents, workflows, utilities,
+# The portable toolkit (94 skills, 16 agents, workflows, utilities,
 # bootstrap.js, external-dependencies.yaml, catalog.yaml) lives in a
 # SEPARATE repo: github.com/stevengonsalvez/ainb-toolkit — flattened at
 # its repo root. `ainb` consumes it as a pinned external source.
