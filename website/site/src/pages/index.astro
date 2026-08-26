@@ -16,11 +16,11 @@ const docs = (path: string) => `${BASE}/${path.replace(/^\//, '')}`;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0F0F18" />
-    <meta name="description" content="Run agents. Worktree per session. No bullshit. Terminal-native ecosystem for managing AI coding agents — Claude · Codex · Gemini · Copilot." />
+    <meta name="description" content="Run a fleet. Lose nothing. Every agent gets its own worktree, its own tmux session, and a line item on your bill. Claude · Codex · Gemini · Copilot." />
     <meta property="og:title" content="agents-in-a-box" />
-    <meta property="og:description" content="Run agents. Worktree per session. No bullshit." />
+    <meta property="og:description" content="Run a fleet. Lose nothing. Every agent gets its own worktree, its own tmux session, and a line item on your bill." />
     <meta property="og:type" content="website" />
-    <title>agents-in-a-box — run agents, worktree per session, no bullshit</title>
+    <title>agents-in-a-box · run a fleet, lose nothing</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -55,7 +55,11 @@ const docs = (path: string) => `${BASE}/${path.replace(/^\//, '')}`;
             IN  A  BOX</pre>
 
         <p class="hero__tag">
-          Run agents. Worktree per session. No&nbsp;bullshit.
+          Run a fleet. Lose&nbsp;nothing.
+        </p>
+        <p class="hero__sub">
+          Every agent gets its own worktree, its own tmux session,
+          and a line item on your&nbsp;bill.
         </p>
 
         <div class="install">
@@ -72,31 +76,31 @@ const docs = (path: string) => `${BASE}/${path.replace(/^\//, '')}`;
       <!-- THREE-COL VALUE PROP -->
       <section class="row3">
         <a class="card" href={docs('tui/overview')}>
-          <h3>TUI</h3>
+          <h3>ONE SCREEN</h3>
           <div class="card__body">
-            <span>34 crates</span>
-            <span>4 providers</span>
-            <span>tmux-bound</span>
+            <span>see who is blocked</span>
+            <span>answer without attaching</span>
+            <span>survives sleep</span>
           </div>
-          <span class="card__cta">docs →</span>
+          <span class="card__cta">docs &rarr;</span>
         </a>
         <a class="card" href={docs('toolkit/overview')}>
-          <h3>TOOLKIT</h3>
+          <h3>ONE SOURCE</h3>
           <div class="card__body">
-            <span>94 skills</span>
-            <span>9 tools</span>
-            <span>16 agents</span>
+            <span>write a skill once</span>
+            <span>deploy to 9 tools</span>
+            <span>no config drift</span>
           </div>
-          <span class="card__cta">docs →</span>
+          <span class="card__cta">docs &rarr;</span>
         </a>
-        <a class="card" href={docs('plugins/overview')}>
-          <h3>PLUGINS</h3>
+        <a class="card" href={docs('plugins/burndown')}>
+          <h3>ONE BILL</h3>
           <div class="card__body">
-            <span>v2 ABI</span>
-            <span>JSON-RPC</span>
-            <span>cap-gated</span>
+            <span>spend per project</span>
+            <span>per model, per day</span>
+            <span>before the invoice</span>
           </div>
-          <span class="card__cta">docs →</span>
+          <span class="card__cta">docs &rarr;</span>
         </a>
       </section>
 
@@ -378,8 +382,17 @@ cli_namespaces = ["usage"]</code></pre>
       .hero__tag {
         font-family: var(--ainb-font-display);
         font-size: clamp(1.2rem, 2.5vw, 1.6rem);
-        margin: 2.5rem 0 2rem;
+        margin: 2.5rem 0 0.75rem;
         color: var(--ainb-text-primary);
+      }
+
+      .hero__sub {
+        font-size: clamp(0.9rem, 1.6vw, 1.05rem);
+        line-height: 1.6;
+        max-width: 46ch;
+        margin: 0 auto 2rem;
+        color: var(--ainb-text-muted);
+        text-wrap: balance;
       }
 
       .install {
