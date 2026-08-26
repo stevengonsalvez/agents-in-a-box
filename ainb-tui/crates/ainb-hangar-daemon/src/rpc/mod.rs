@@ -3428,62 +3428,8 @@ async fn handle_codex_session_ensure(
                 Some(thread_id.to_string())
             }
             None => {
-                // Start the thread OURSELVES, before the TUI launches, so its
-                // id is known up front.
-                //
-                // The old path reserved a row, launched the TUI with no thread,
-                // and then tried to CLAIM whichever `thread/started` turned up
-                // matching this cwd. That has two failures we hit for real:
-                //
-                //  * any startup gate that stalls the TUI means no
-                //    `thread/started` arrives, the 10s claim deadline expires,
-                //    and the launch is reported as "Codex failed to start";
-                //  * a second client on the same app-server (the Codex phone
-                //    app continuing this work) starts its OWN thread on the same
-                //    cwd, so the CLI and the phone end up in two different
-                //    conversations that neither can see the other half of.
-                //
-                // Owning the id fixes both: the TUI is launched with
-                // `resume <id>`, and that same id is what any other client
-                // continues, so there is exactly one thread.
-                match manager
-                    .thread_start_interactive(
-                        std::path::Path::new(&cwd),
-                        params.model.as_deref(),
-                        params.skip_permissions,
-                    )
-                    .await
-                {
-                    Ok(thread_id) => {
-                        sqlx::query(
-                            "INSERT INTO interactive_codex_thread \
-                             (session_id, thread_id, cwd, model, skip_permissions, resumable) \
-                             VALUES (?, ?, ?, ?, ?, 1)",
-                        )
-                        .bind(&params.session_id)
-                        .bind(&thread_id)
-                        .bind(&cwd)
-                        .bind(&params.model)
-                        .bind(params.skip_permissions)
-                        .execute(pool)
-                        .await
-                        .map_err(|error| {
-                            internal(&format!("persist started Codex thread: {error}"))
-                        })?;
-                        Some(thread_id)
-                    }
-                    // Fall back to the reserve/claim path rather than failing the
-                    // launch: an app-server that cannot start a thread for us can
-                    // still have one claimed the old way.
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "could not start a Codex thread up front; falling back to claiming one"
-                        );
-                        reserve_pending_codex_thread(pool, &params, &cwd).await?;
-                        None
-                    }
-                }
+                reserve_pending_codex_thread(pool, &params, &cwd).await?;
+                None
             }
         },
     };
