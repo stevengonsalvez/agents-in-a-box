@@ -6,13 +6,14 @@ import starlightImageZoom from 'starlight-image-zoom';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://ainb.app',
+  site: 'https://stevengonsalvez.github.io',
+  base: '/agents-in-a-box',
   trailingSlash: 'never',
   // Old recall page moved under the dedicated reflect-memory section.
-  // The site is served from the apex domain, so there is no base path to
-  // prepend here any more.
+  // NB: static meta-refresh redirects don't get `base` prepended automatically,
+  // so the destination is written with the `/agents-in-a-box` base explicitly.
   redirects: {
-    '/knowledge/recall-by-example': '/knowledge/reflect-memory/recall',
+    '/knowledge/recall-by-example': '/agents-in-a-box/knowledge/reflect-memory/recall',
   },
   // Docs live in the repo-root `docs/` tree (outside this site dir), so MDX
   // there can't resolve `@astrojs/starlight/components` from its own folder.
