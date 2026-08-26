@@ -58,16 +58,128 @@ separate, standalone repo — `ainb` consumes it as a pinned external source.
 | **[stevengonsalvez/ainb-toolkit](https://github.com/stevengonsalvez/ainb-toolkit)** | The canonical home for the 94 curated skills, 16 agents, workflows, utilities, the `external-dependencies.yaml` manifest, the `bootstrap.js` legacy installer, and the generated `catalog.yaml`. `ainb` browses + installs from it; the release CI pins a tag of it to generate the curated `catalog-index.json`. |
 
 <p align="center">
-  <img src="docs/assets/screenshots/dashboard-session.png" alt="ainb TUI — live session dashboard with multi-workspace sidebar" width="900">
+  <img src="docs/assets/thumbs/home.png" alt="ainb home screen with sidebar navigation" width="700">
   <br>
-  <em>Live dashboard: multi-workspace sidebar, session preview pane, and tmux-backed persistent sessions</em>
+  <em>Every agent on one screen. Every agent in its own worktree.</em>
 </p>
 
-<p align="center">
-  <img src="docs/assets/screenshots/burndown.png" alt="ainb burndown dashboard — multi-panel analytics with budget, daily activity, project/model breakdowns, optimisation hints" width="900">
-  <br>
-  <em>Burndown dashboard: daily activity, per-project & per-model breakdowns, top sessions, live budget tracking, and optimisation hints — all in one view</em>
-</p>
+---
+
+## Everything it does
+
+Seventeen surfaces, one binary. Each links to its docs.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/overview.md"><img src="docs/assets/thumbs/sessions.png" alt="Session list with workspace tree and live preview" width="100%"></a>
+<b>Sessions, one worktree each</b><br>
+<sub>Every agent gets its own branch and working directory. Watch them all from one tree.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/hangar/architecture.md"><img src="docs/assets/thumbs/hangar.png" alt="Hangar control center showing sessions and a pending question" width="100%"></a>
+<b>Hangar: work queues up</b><br>
+<sub>Boards, tasks, squads and autopilots. Agents pull work instead of waiting for you to start it.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/code-review.md"><img src="docs/assets/thumbs/code-review.png" alt="Code review diff with file tree and syntax highlighting" width="100%"></a>
+<b>Read the diff before you trust it</b><br>
+<sub>File tree, per-file blocks, word-level emphasis, hunk navigation. Or <code>ainb diff-review</code>, headless.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/plugins/burndown.md"><img src="docs/assets/thumbs/burndown.png" alt="Burndown analytics dashboard" width="100%"></a>
+<b>Spend, before the invoice</b><br>
+<sub>Daily activity, per-model and per-project breakdowns, live budget tracking, optimisation hints.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/plugins/burndown.md"><img src="docs/assets/thumbs/attribution.png" alt="Per-project token attribution table" width="100%"></a>
+<b>Which repo burned the budget</b><br>
+<sub>Input, cache, output and session counts per project and per worktree.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/plugins/abtop.md"><img src="docs/assets/thumbs/abtop.png" alt="abtop live agent monitor" width="100%"></a>
+<b>abtop: top, for agents</b><br>
+<sub>Quota, tokens, projects, ports, MCP servers and every live session in one pane.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/mcp-pool.mdx"><img src="docs/assets/thumbs/mcp-pool.png" alt="Shared MCP pool overlay" width="100%"></a>
+<b>One MCP pool, not one per session</b><br>
+<sub>A single server process shared across every session, with idle reaping.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/tui/daemons.mdx"><img src="docs/assets/thumbs/daemons.png" alt="Daemons overlay showing MCP pool and headroom proxy health" width="100%"></a>
+<b>Daemons, and their health</b><br>
+<sub>Every background process ainb depends on, with restart in place when one dies.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/inbox-notifications.md"><img src="docs/assets/thumbs/inbox.png" alt="Inbox of agent notifications" width="100%"></a>
+<b>Every notification in one Inbox</b><br>
+<sub>Approvals, completions and errors from every agent, instead of scattered across panes.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/skill-manager/guide.mdx"><img src="docs/assets/thumbs/skill-manager.png" alt="Skill manager browsing a catalog" width="100%"></a>
+<b>Skills, across every tool</b><br>
+<sub>Browse, install, sync and remove units. Write once, deploy to nine tool homes.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/plugins/learnings.md"><img src="docs/assets/thumbs/learnings.png" alt="Learnings browser with search and filters" width="100%"></a>
+<b>Stop re-explaining the codebase</b><br>
+<sub>Search what past sessions learned, by entity, community or free text.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/plugins/witr.md"><img src="docs/assets/thumbs/witr.png" alt="witr process browser with ancestry" width="100%"></a>
+<b>What did that process touch</b><br>
+<sub>Process causality, ancestry, ports and locks, without leaving the TUI.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/attach.md"><img src="docs/assets/thumbs/attach.png" alt="Attached agent session" width="100%"></a>
+<b>Attach, detach, survive a sleep</b><br>
+<sub>tmux-backed. Reattach full-screen or in a pane and keep typing.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/tui/start-session.md"><img src="docs/assets/thumbs/new-session.png" alt="New session flow" width="100%"></a>
+<b>Start one any way you like</b><br>
+<sub>Local repo, clone from GitHub or GitLab, SSH to a remote box, or a favourite.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/tui/overview.md"><img src="docs/assets/thumbs/agent-picker.png" alt="Agent and model picker" width="100%"></a>
+<b>Pick the agent, pick the model</b><br>
+<sub>Claude Code, Codex, Gemini, Copilot, a raw shell or SSH. Sonnet, Opus or Haiku per session.</sub>
+</td>
+<td width="50%" valign="top">
+<a href="docs/tui/install.md"><img src="docs/assets/thumbs/setup.png" alt="Setup wizard" width="100%"></a>
+<b>Guided first run</b><br>
+<sub>Dependency checks, auth, git paths, editor. Factory reset when you want to start over.</sub>
+</td>
+</tr>
+</table>
+
+**Also in the box, no screenshot yet:**
+
+| Surface | What it gives you | Docs |
+|---|---|---|
+| **Fleet panel** (`f`) | See which agents are blocked on you and answer them without attaching | [cli.md](docs/tui/cli.md) |
+| **ATC** | An always-on watcher that works the queue while you are away (opt-in) | [atc-plumbing.md](docs/atc-plumbing.md) |
+| **Recovery** | Find sessions orphaned by a crash and resume them | [cli.md](docs/tui/cli.md) |
+| **Fleet bridge** | Drive the fleet from Telegram, Slack or Discord | [fleet-bridge.md](docs/fleet-bridge.md) |
+| **`ainb web`** | A read-only browser dashboard over the fleet | [web.md](docs/tui/web.md) |
+| **Headroom** | Context compression so long runs stop hitting the wall | [token-optimization.mdx](docs/tui/token-optimization.mdx) |
+| **`ainb claudecode statusline`** | Live rate-limit and spend inside Claude Code's own status line | [cli.md](docs/tui/cli.md) |
+| **OTel to Grafana** | A wizard that wires Claude Code's telemetry into Grafana Alloy | [otel-grafana.md](docs/reference/otel-grafana.md) |
 
 ---
 
@@ -210,54 +322,6 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
 - **Scriptable CLI** — 40 commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …), with `--format json` on session state, config, git, usage, fleet, and most daemons. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
-
-### Feature Showcase
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/home.png" alt="ainb home screen with sidebar and welcome panel" width="100%"><br>
-      <strong>📊 Unified dashboard</strong><br>
-      <em>Sidebar navigation across Agents, Catalog, Sessions, Recovery, Logs, Stats, Skills, Changelog, and Setup. Keyboard-driven throughout.</em>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/agent-picker.png" alt="AI agent picker with model selection" width="100%"><br>
-      <strong>🤖 Pick your agent, pick your model</strong><br>
-      <em>Choose between Claude Code, Shell Only, SSH, Codex CLI, Gemini CLI, GitHub Copilot, or Kiro. Model toggle — Sonnet · Opus · Haiku — right below.</em>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/new-session.png" alt="New session flow — local, remote, SSH, favorites" width="100%"><br>
-      <strong>🚀 Start a session any way you want</strong><br>
-      <em>Local repo, clone from GitHub/GitLab, SSH into a remote box, or pull from your Favorites. One-key shortcuts: L / R / S / F.</em>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/setup.png" alt="Setup wizard with dependency checks" width="100%"><br>
-      <strong>🛠️ Guided first-time setup</strong><br>
-      <em>Re-run the wizard, verify dependencies, configure git paths, set auth, pick your editor — or factory-reset in one click.</em>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/burndown.png" alt="Burndown analytics dashboard — daily activity, per-project, per-model, budget, optimisation" width="100%"><br>
-      <strong>📈 Burndown analytics, built in</strong><br>
-      <em>Multi-panel dashboard: daily activity, top sessions, per-project + per-model token attribution, live budget tracking, and inline optimisation hints. The observability layer behind <a href="https://stevengonsalvez.com/blog/token-optimisation-playbook">The Token Optimisation Playbook</a> — start with <a href="https://stevengonsalvez.com/tools-tips/token-optimisation-101">Token Optimisation 101</a>.</em>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/stats-projects.png" alt="Per-project token usage breakdown" width="100%"><br>
-      <strong>🎯 Per-project attribution</strong><br>
-      <em>See exactly which repos and worktrees consume your context budget. Input, cache, output, and session counts per project.</em>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2" valign="top">
-      <img src="docs/assets/screenshots/code-review-diff.gif" alt="Warp-style Code Review diff — file sidebar, per-file collapsible blocks, Dracula syntax highlighting, word-level emphasis, gutter with green/red change bars" width="100%"><br>
-      <strong>🔍 Warp-style Code Review diff</strong><br>
-      <em>Press <code>g</code> on a session (or run <code>ainb diff-review</code>) for a cohesive review surface — file sidebar, per-file collapsible blocks in one scroll, Dracula syntax highlighting, word-level intra-line emphasis, a line-number gutter with green/red change bars, expandable context, and <code>n</code>/<code>N</code> hunk navigation. <a href="docs/tui/code-review.md">Docs →</a></em>
-    </td>
-  </tr>
-</table>
 
 ### CLI — Scriptable Equivalent of Every TUI Feature
 
