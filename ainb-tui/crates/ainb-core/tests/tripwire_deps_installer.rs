@@ -138,7 +138,9 @@ fn deps_installer_cursor_docs_and_install_affordance() {
     let mut saw_install = false;
     for _ in 0..30 {
         let c = capture(&session);
-        if c.contains("stevengonsalvez.github.io/agents-in-a-box/") {
+        // Compare against the shipped const, not a pasted literal, so a
+        // domain change can never leave this assertion behind.
+        if c.contains(ainb::docs::SITE) {
             saw_docs = true;
         }
         if c.contains("press i to install") {
