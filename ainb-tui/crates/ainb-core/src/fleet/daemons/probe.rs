@@ -70,6 +70,8 @@ pub enum DaemonKind {
     HangarDaemon,
     /// Headroom context proxy (`headroom proxy`), when ainb manages one.
     HeadroomProxy,
+    /// Daily short-lived signed release checker.
+    ReleaseChecker,
 }
 
 impl DaemonKind {
@@ -85,6 +87,7 @@ impl DaemonKind {
             Self::McpPool => "mcp-pool",
             Self::HangarDaemon => "hangar-daemon",
             Self::HeadroomProxy => "headroom-proxy",
+            Self::ReleaseChecker => "release-checker",
         }
     }
 
@@ -100,6 +103,7 @@ impl DaemonKind {
             Self::McpPool => "mcp pool",
             Self::HangarDaemon => "hangar daemon",
             Self::HeadroomProxy => "headroom proxy",
+            Self::ReleaseChecker => "release checker",
         }
     }
 }
@@ -1031,6 +1035,42 @@ pub fn probe_headroom_proxy() -> DaemonStatus {
     }
 }
 
+/// Probe the daily OS release-check registration.
+///
+/// This row deliberately models a scheduled oneshot, not a long-running
+/// process. `Running` means the supervisor owns a daily job; the last verified
+/// check time remains visible as daemon activity.
+#[must_use]
+pub fn probe_release_checker() -> DaemonStatus {
+    let kind = DaemonKind::ReleaseChecker;
+    if !crate::cli::update::schedule_is_enabled() {
+        return DaemonStatus::stopped(kind, "daily release check is disabled".to_string());
+    }
+    let cached = crate::cli::update::cached_state();
+    DaemonStatus {
+        connected: true,
+        channel: Some(if cfg!(target_os = "macos") {
+            "launchd daily timer".to_string()
+        } else {
+            "systemd user timer".to_string()
+        }),
+        last_activity_at: cached.as_ref().map(|state| state.checked_at_ms),
+        reason: cached
+            .as_ref()
+            .map(|state| match state.availability {
+                crate::cli::update::UpdateAvailability::Available => format!(
+                    "daily signed check enabled, ainb {} available",
+                    state.available_version.as_deref().unwrap_or(&state.latest_version)
+                ),
+                crate::cli::update::UpdateAvailability::CurrentOrNewer => {
+                    "daily signed check enabled, current".to_string()
+                }
+            })
+            .unwrap_or_else(|| "daily signed check enabled, awaiting first check".to_string()),
+        ..DaemonStatus::running(kind)
+    }
+}
+
 /// Append the CAUSE to a bridge row that is not running, when the bridge could
 /// not have started at all.
 ///
@@ -1091,6 +1131,7 @@ pub fn collect_socket_daemons() -> Vec<DaemonStatus> {
         probe_mcp_pool(),
         probe_hangar_daemon(),
         probe_headroom_proxy(),
+        probe_release_checker(),
     ]
 }
 
@@ -2195,6 +2236,7 @@ mod tests {
                 DaemonKind::McpPool,
                 DaemonKind::HangarDaemon,
                 DaemonKind::HeadroomProxy,
+                DaemonKind::ReleaseChecker,
             ]
         );
     }
@@ -2212,6 +2254,7 @@ mod tests {
             DaemonKind::McpPool,
             DaemonKind::HangarDaemon,
             DaemonKind::HeadroomProxy,
+            DaemonKind::ReleaseChecker,
         ];
         let ids: std::collections::HashSet<&str> = kinds.iter().map(|k| k.id()).collect();
         assert_eq!(ids.len(), kinds.len(), "daemon ids must be unique");

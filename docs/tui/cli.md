@@ -3143,16 +3143,17 @@ Start, stop, or restart any ainb daemon
 Usage: ainb daemon [OPTIONS] <COMMAND>
 
 Commands:
-  list            List every controllable daemon
-  bridge          phone bridge
-  notifyd         notifyd
-  approve-broker  approve broker
-  atc             ATC
-  fleet-daemon    fleet daemon
-  mcp-pool        mcp pool
-  hangar-daemon   hangar daemon
-  headroom-proxy  headroom proxy
-  help            Print this message or the help of the given subcommand(s)
+  list             List every controllable daemon
+  bridge           phone bridge
+  notifyd          notifyd
+  approve-broker   approve broker
+  atc              ATC
+  fleet-daemon     fleet daemon
+  mcp-pool         mcp pool
+  hangar-daemon    hangar daemon
+  headroom-proxy   headroom proxy
+  release-checker  release checker
+  help             Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3718,6 +3719,72 @@ $ ainb daemon headroom-proxy stop --help
 Take it down
 
 Usage: ainb daemon headroom-proxy stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb daemon release-checker`
+
+release checker
+
+```console
+$ ainb daemon release-checker --help
+release checker
+
+Usage: ainb daemon release-checker [OPTIONS] <COMMAND>
+
+Commands:
+  start    Bring it up
+  restart  Take it down and bring it back up
+  stop     Take it down
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon release-checker start`
+
+Bring it up
+
+```console
+$ ainb daemon release-checker start --help
+Bring it up
+
+Usage: ainb daemon release-checker start [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon release-checker restart`
+
+Take it down and bring it back up
+
+```console
+$ ainb daemon release-checker restart --help
+Take it down and bring it back up
+
+Usage: ainb daemon release-checker restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon release-checker stop`
+
+Take it down
+
+```console
+$ ainb daemon release-checker stop --help
+Take it down
+
+Usage: ainb daemon release-checker stop [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -6768,6 +6835,130 @@ $ ainb rtk uninstall --help
 Remove the Claude Code hook from ~/.claude/settings.json (rtk init -g --uninstall). Leaves the rtk binary installed.
 
 Usage: ainb rtk uninstall [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+## `ainb update`
+
+Update ainb to the latest signed stable release
+
+```console
+$ ainb update --help
+Update ainb to the latest signed stable release
+
+Usage: ainb update [OPTIONS] [COMMAND]
+
+Commands:
+  check     Check GitHub for the latest stable ainb release
+  status    Show cached update state
+  schedule  Enable, disable, or inspect daily release checks
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -y, --yes              Install without ainb's confirmation prompt
+  -h, --help             Print help
+
+EXAMPLES:
+  ainb update                    Check and install after confirmation
+  ainb update --yes              Install without confirmation
+  ainb update check              Refresh latest stable release state
+  ainb update schedule enable    Enable the daily background check
+```
+
+### `ainb update check`
+
+Check GitHub for the latest stable ainb release
+
+```console
+$ ainb update check --help
+Check GitHub for the latest stable ainb release
+
+Usage: ainb update check [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb update status`
+
+Show cached update state
+
+```console
+$ ainb update status --help
+Show cached update state
+
+Usage: ainb update status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb update schedule`
+
+Enable, disable, or inspect daily release checks
+
+```console
+$ ainb update schedule --help
+Enable, disable, or inspect daily release checks
+
+Usage: ainb update schedule [OPTIONS] <COMMAND>
+
+Commands:
+  enable   Install the daily OS timer
+  disable  Remove the daily OS timer
+  status   Show timer installation state
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb update schedule enable`
+
+Install the daily OS timer
+
+```console
+$ ainb update schedule enable --help
+Install the daily OS timer
+
+Usage: ainb update schedule enable [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb update schedule disable`
+
+Remove the daily OS timer
+
+```console
+$ ainb update schedule disable --help
+Remove the daily OS timer
+
+Usage: ainb update schedule disable [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb update schedule status`
+
+Show timer installation state
+
+```console
+$ ainb update schedule status --help
+Show timer installation state
+
+Usage: ainb update schedule status [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]

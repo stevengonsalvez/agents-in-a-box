@@ -77,7 +77,7 @@ impl Action {
 }
 
 /// Every controllable daemon, in the order the Daemons table lists them.
-pub const CONTROLLABLE: [DaemonKind; 8] = [
+pub const CONTROLLABLE: [DaemonKind; 9] = [
     DaemonKind::Bridge,
     DaemonKind::Notifyd,
     DaemonKind::ApproveBroker,
@@ -86,6 +86,7 @@ pub const CONTROLLABLE: [DaemonKind; 8] = [
     DaemonKind::McpPool,
     DaemonKind::HangarDaemon,
     DaemonKind::HeadroomProxy,
+    DaemonKind::ReleaseChecker,
 ];
 
 /// Resolve a daemon by its stable CLI id.
@@ -137,6 +138,21 @@ pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
         DaemonKind::Atc => atc(action),
         DaemonKind::Bridge => bridge(action),
         DaemonKind::FleetDaemon => fleet_daemon(action),
+        DaemonKind::ReleaseChecker => release_checker(action),
+    }
+}
+
+fn release_checker(action: Action) -> Result<String> {
+    match action {
+        Action::Start | Action::Restart => {
+            crate::cli::update::ensure_schedule().context("enable daily release checker")?;
+            Ok("daily release checker enabled".to_string())
+        }
+        Action::Stop => {
+            crate::cli::update::disable_schedule().context("disable daily release checker")?;
+            Ok("daily release checker disabled".to_string())
+        }
+        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
     }
 }
 

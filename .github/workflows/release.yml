@@ -327,6 +327,40 @@ jobs:
         with:
           path: artifacts
 
+      - name: Sign release manifest
+        env:
+          AINB_RELEASE_SIGNING_KEY: ${{ secrets.AINB_RELEASE_SIGNING_KEY }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AINB_RELEASE_SIGNING_KEY}" ]; then
+            echo "AINB_RELEASE_SIGNING_KEY is required to publish a release"
+            exit 1
+          fi
+
+          mac_sha=$(sha256sum artifacts/aarch64-apple-darwin/*.tar.gz | awk '{print $1}')
+          intel_sha=$(sha256sum artifacts/x86_64-apple-darwin/*.tar.gz | awk '{print $1}')
+          linux_sha=$(sha256sum artifacts/x86_64-unknown-linux-gnu/*.tar.gz | awk '{print $1}')
+          if [ -z "${mac_sha}" ] || [ -z "${intel_sha}" ] || [ -z "${linux_sha}" ]; then
+            echo "release archives missing while assembling signed manifest"
+            exit 1
+          fi
+
+          cat > artifacts/release-manifest.json <<EOF
+          {"version":"${VERSION}","assets":[
+            {"target":"aarch64-apple-darwin","archive":"ainb-${VERSION}-aarch64-apple-darwin.tar.gz","sha256":"${mac_sha}"},
+            {"target":"x86_64-apple-darwin","archive":"ainb-${VERSION}-x86_64-apple-darwin.tar.gz","sha256":"${intel_sha}"},
+            {"target":"x86_64-unknown-linux-gnu","archive":"ainb-${VERSION}-x86_64-unknown-linux-gnu.tar.gz","sha256":"${linux_sha}"}
+          ]}
+          EOF
+
+          key_path="${RUNNER_TEMP}/ainb-release-signing-key.pem"
+          printf '%s' "${AINB_RELEASE_SIGNING_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          openssl pkeyutl -sign -rawin -inkey "${key_path}" \
+            -in artifacts/release-manifest.json -out "${RUNNER_TEMP}/release-manifest.sig"
+          base64 "${RUNNER_TEMP}/release-manifest.sig" | tr -d '\n' > artifacts/release-manifest.sig
+
       # Publish the curated skill catalog index as a release asset. The curated
       # skills live in the standalone stevengonsalvez/ainb-toolkit repo (Option
       # B), so we clone the PINNED ainb-toolkit ref and run the xtask against

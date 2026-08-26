@@ -36,6 +36,7 @@ pub mod status;
 pub mod statusline;
 pub mod statusline_install;
 pub mod tmux_install;
+pub mod update;
 pub mod usage;
 pub mod util;
 

@@ -220,6 +220,26 @@ brew install ainb
 
 The tap lives at [`stevengonsalvez/homebrew-agents-in-a-box`](https://github.com/stevengonsalvez/homebrew-agents-in-a-box) and is auto-updated by the release workflow on every tagged release — `brew upgrade ainb` always pulls the latest.
 
+### Updates
+
+ainb installs a short-lived daily OS timer on first TUI launch. The timer checks
+the latest signed stable release even while ainb is closed, then records the
+result and sends one native notification per version. It never installs a
+release without an explicit command.
+
+```bash
+ainb update check             # verify signed release metadata now
+ainb update status            # show cached result
+ainb update --yes             # install latest signed stable release
+ainb update schedule status   # inspect daily checker
+ainb update schedule disable  # opt out of background checks
+```
+
+The Daemons screen lists this as `release checker`. Homebrew updates through
+`brew upgrade ainb`; Cargo updates from the exact signed release tag; curl
+installs download, checksum, stage, and atomically replace only canonical
+ainb install paths.
+
 <details>
 <summary><b>Other install methods</b></summary>
 
