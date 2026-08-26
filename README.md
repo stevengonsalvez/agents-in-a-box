@@ -508,7 +508,7 @@ agents-in-a-box/
 │   └── reference/              #   Architecture deep-dive, glossary
 │
 ├── website/                    # Website source (Astro + Starlight)
-│   └── BRIEF.md                #   Design instruction for stevengonsalvez.github.io
+│   └── BRIEF.md                #   Original design brief (historical)      
 │
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
@@ -635,7 +635,7 @@ and `.agents/goals/ainb-skill-manager-v1.2-rollup-plan.md`.
 
 ## Links
 
-- [Website](https://stevengonsalvez.github.io/agents-in-a-box/)
+- [Website](https://ainb.app/)
 - [Releases](https://github.com/stevengonsalvez/agents-in-a-box/releases)
 - [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-agents-in-a-box)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
