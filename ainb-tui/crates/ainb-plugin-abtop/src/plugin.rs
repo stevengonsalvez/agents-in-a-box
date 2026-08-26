@@ -198,8 +198,9 @@ impl AbtopPlugin {
             // stays copyable, and it never truncates.
             let hint = format!(
                 "abtop not found on PATH. Install: {}  (or `cargo install abtop`)\n\
-                 What it does + screenshots: https://stevengonsalvez.github.io/agents-in-a-box/plugins/abtop/\n",
+                 What it does + screenshots: {}\n",
                 platform_install_command(),
+                crate::render::empty::DOCSITE_URL,
             );
             return CliOutput {
                 stdout: hint.into_bytes(),
