@@ -356,6 +356,92 @@ pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("hangar").join("daemon.pid")
 }
 
+/// Settings in the user's own `~/.codex/config.toml` that govern attached
+/// sessions, and would surprise someone who assumed Ainb ran them in isolation.
+///
+/// In attached mode Ainb's sessions run on the user's real `CODEX_HOME`, so
+/// their model, approval policy, hooks, MCP servers and telemetry all apply.
+/// That is the point of attaching -- the phone sees the same sessions -- but it
+/// is invisible unless we say so, and `--disable apps` on the client does not
+/// isolate any of it.
+const CODEX_HOME_SETTINGS_WORTH_NAMING: [&str; 8] = [
+    "model",
+    "model_reasoning_effort",
+    "approval_policy",
+    "sandbox_mode",
+    "shell_environment_policy",
+    "notify",
+    "mcp_servers",
+    "otel",
+];
+
+/// Log which of [`CODEX_HOME_SETTINGS_WORTH_NAMING`] the user actually has set,
+/// plus any enabled `features.*`, so attaching never silently changes how a
+/// session behaves.
+///
+/// Read-only by design. Ainb must never WRITE `~/.codex/config.toml`: it is the
+/// user's file, shared with Codex Desktop and the CLI, and editing it would make
+/// Ainb the owner of their model choice, approval policy and plugin surface.
+fn warn_about_effective_codex_home_settings(home: Option<&std::path::Path>) {
+    let Some(path) = home.map(|home| home.join(".codex/config.toml")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(parsed) = text.parse::<toml::Value>() else {
+        return;
+    };
+    let mut effective: Vec<String> = CODEX_HOME_SETTINGS_WORTH_NAMING
+        .into_iter()
+        .filter(|key| parsed.get(key).is_some())
+        .map(str::to_string)
+        .collect();
+    if let Some(features) = parsed.get("features").and_then(toml::Value::as_table) {
+        for (name, value) in features {
+            if value.as_bool() == Some(true) {
+                effective.push(format!("features.{name}"));
+            }
+        }
+    }
+    if effective.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        config = %path.display(),
+        settings = %effective.join(", "),
+        "attached Codex sessions run on your own CODEX_HOME, so these settings from \
+         your codex config apply to them (Ainb does not modify this file; set \
+         `[codex] app_server = \"own\"` to run isolated sessions instead)"
+    );
+}
+
+/// Count the sessions stranded in the scoped `CODEX_HOME` when we attach.
+///
+/// They are not lost and nothing is migrated -- they simply live on an
+/// app-server the phone cannot see, so the only honest thing is to say how many
+/// there are and how to get back to them.
+fn note_scoped_sessions_left_behind(hangar_home: &std::path::Path) {
+    let scoped = hangar_home.join("codex-home").join("sessions");
+    let Ok(entries) = std::fs::read_dir(&scoped) else {
+        return;
+    };
+    let count = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .count();
+    if count == 0 {
+        return;
+    }
+    tracing::warn!(
+        scoped_home = %hangar_home.join("codex-home").display(),
+        sessions = count,
+        "these earlier Codex sessions stay in Ainb's scoped home and will not appear \
+         in the Codex phone app; nothing was migrated or deleted. Set \
+         `[codex] app_server = \"own\"` to go back to them"
+    );
+}
+
 /// Where Ainb's Codex sessions run: which app-server the hangar daemon drives.
 ///
 /// Resolution order, most specific first:
@@ -889,6 +975,11 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                     socket = %socket.display(),
                     "attaching to externally managed codex app-server; not spawning or reaping"
                 );
+                // Attaching changes WHOSE config governs these sessions and
+                // strands anything already in the scoped home. Both are
+                // invisible unless we say so.
+                warn_about_effective_codex_home_settings(dirs::home_dir().as_deref());
+                note_scoped_sessions_left_behind(&dir);
             }
             let mut manager_config =
                 crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket);
@@ -1117,6 +1208,57 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The stranded-session notice counts only real session files.
+    ///
+    /// A wrong count here is worse than none: it is the number a user decides
+    /// whether to switch back on.
+    #[test]
+    fn scoped_session_notice_counts_only_jsonl_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("codex-home").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for name in ["a.jsonl", "b.jsonl", "notes.txt", "c.jsonl"] {
+            std::fs::write(sessions.join(name), b"").unwrap();
+        }
+        let count = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .count();
+        assert_eq!(count, 3, "only .jsonl sessions count");
+
+        // No scoped home at all must be silent, not a panic or a zero-notice.
+        let empty = tempfile::tempdir().unwrap();
+        super::note_scoped_sessions_left_behind(empty.path());
+    }
+
+    /// The attached-mode warning names settings that are actually present, and
+    /// stays silent on a config that sets none of them.
+    #[test]
+    fn effective_settings_warning_is_driven_by_what_is_set() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+
+        // Silent cases must not panic: absent file, then a config with nothing
+        // worth naming.
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+        std::fs::write(codex.join("config.toml"), "unrelated = 1\n").unwrap();
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+
+        // And the keys we promise to name are the ones the doc lists.
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"model"));
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"approval_policy"));
+        assert!(super::CODEX_HOME_SETTINGS_WORTH_NAMING.contains(&"mcp_servers"));
+
+        std::fs::write(
+            codex.join("config.toml"),
+            "model = \"x\"\n[features]\nhooks = true\njs_repl = false\n",
+        )
+        .unwrap();
+        super::warn_about_effective_codex_home_settings(Some(home.path()));
+    }
 
     /// `[codex] app_server` is read out of the hangar home's config.toml.
     ///
