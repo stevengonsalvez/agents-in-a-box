@@ -356,6 +356,45 @@ pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("hangar").join("daemon.pid")
 }
 
+/// Socket of an externally managed Codex app-server to attach to, if opted in.
+///
+/// `AINB_CODEX_APP_SERVER=<path>` names one explicitly.
+/// `AINB_CODEX_APP_SERVER=desktop` resolves the ChatGPT-managed daemon's control
+/// socket, which is the app-server the Codex phone app pairs with.
+///
+/// Returns `None` when unset, so the default stays: spawn our own server on a
+/// scoped `CODEX_HOME`.
+pub fn codex_external_socket() -> Option<std::path::PathBuf> {
+    let raw = std::env::var_os("AINB_CODEX_APP_SERVER");
+    let opted_in = raw.as_ref().is_some_and(|value| !value.is_empty());
+    let resolved = codex_external_socket_from(raw, dirs::home_dir().as_deref());
+    if opted_in && resolved.is_none() {
+        // Silently falling back to owned mode would hand the user scoped
+        // sessions their phone cannot see, with no sign the opt-in was ignored.
+        tracing::warn!(
+            "AINB_CODEX_APP_SERVER=desktop set but the home directory could not \
+             be resolved; continuing with Ainb's own codex app-server"
+        );
+    }
+    resolved
+}
+
+/// [`codex_external_socket`] against explicit inputs, so the resolution rules are
+/// testable without mutating process env (which races under parallel tests).
+fn codex_external_socket_from(
+    raw: Option<std::ffi::OsString>,
+    home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    if raw == *"desktop" {
+        return home.map(|home| home.join(".codex/app-server-control/app-server-control.sock"));
+    }
+    Some(std::path::PathBuf::from(raw))
+}
+
 /// This daemon's registration in `<hangar_home>/hangar/daemon.pid`, removed on
 /// drop (clean shutdown) so a later `ensure_hangar_daemon` does not read a dead
 /// pid.
@@ -700,14 +739,33 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                 .is_none_or(|value| value != "0")
         {
             let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
-            let socket = dir.join("codex-app-server.sock");
+            // Opt-in: attach to the ChatGPT-managed app-server instead of running
+            // our own. That daemon is the one the Codex phone app pairs with, and
+            // it runs on the user's real CODEX_HOME, so sessions Ainb opens
+            // through it are visible and operable from the phone. Our own server
+            // uses a scoped CODEX_HOME the phone cannot see.
+            //
+            // Off by default: this shares one enrollment identity with Codex
+            // Desktop, which is exactly what the scoped home was introduced to
+            // avoid, and existing scoped sessions do not carry over.
+            let external = codex_external_socket();
+            let attached = external.is_some();
+            // Our own server always lives here, whether or not we attach
+            // elsewhere this boot. Both reapers below are scoped to THIS path
+            // and signal only a pid proven to hold it, so they must keep running
+            // in attached mode too: otherwise a server orphaned by an earlier
+            // SIGKILL leaks forever the moment the user opts in.
+            let owned_socket = dir.join("codex-app-server.sock");
+            let socket = external.unwrap_or_else(|| owned_socket.clone());
             // Older Ainb daemons used `codex app-server proxy` against this same
             // path. A pre-lock daemon can survive an upgrade and keep sending
             // stdin JSON-RPC into the native WebSocket listener. Recover only
             // the exact orphaned parent-child legacy topology for this home.
             let legacy_reaped =
-                crate::fleet_provider::codex_manager::reap_legacy_codex_proxy_daemons(&socket)
-                    .await;
+                crate::fleet_provider::codex_manager::reap_legacy_codex_proxy_daemons(
+                    &owned_socket,
+                )
+                .await;
             if legacy_reaped > 0 {
                 tracing::warn!(legacy_reaped, "reaped obsolete codex proxy daemon at boot");
             }
@@ -715,12 +773,24 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
             // SIGKILL, so this boot-time sweep is the only backstop that survives it.
             let reaped =
-                crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
+                crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&owned_socket)
+                    .await;
             if reaped > 0 {
                 tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
             }
+            if attached {
+                tracing::info!(
+                    socket = %socket.display(),
+                    "attaching to externally managed codex app-server; not spawning or reaping"
+                );
+            }
+            let mut manager_config =
+                crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket);
+            if attached {
+                manager_config = manager_config.attached_to_external_server();
+            }
             Some(crate::fleet_provider::codex_manager::spawn_service(
-                crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
+                manager_config,
                 store.pool().clone(),
                 broker.sink(),
             ))
@@ -941,6 +1011,31 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The opt-in resolver: unset or empty stays on our own server, `desktop`
+    /// resolves the ChatGPT-managed control socket the phone pairs with, and an
+    /// explicit path is taken verbatim.
+    #[test]
+    fn codex_external_socket_resolves_desktop_and_explicit_paths() {
+        use std::ffi::OsString;
+        let home = std::path::Path::new("/Users/example");
+
+        assert_eq!(super::codex_external_socket_from(None, Some(home)), None);
+        assert_eq!(
+            super::codex_external_socket_from(Some(OsString::new()), Some(home)),
+            None,
+            "empty must not opt in"
+        );
+        assert_eq!(
+            super::codex_external_socket_from(Some(OsString::from("desktop")), Some(home)),
+            Some(home.join(".codex/app-server-control/app-server-control.sock"))
+        );
+        assert_eq!(
+            super::codex_external_socket_from(Some(OsString::from("/tmp/custom.sock")), Some(home)),
+            Some(std::path::PathBuf::from("/tmp/custom.sock"))
+        );
+    }
+
     use super::{PidFile, pid_path_in};
 
     /// The happy path: a clean exit takes our own registration with it, so the

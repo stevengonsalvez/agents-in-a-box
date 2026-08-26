@@ -735,6 +735,10 @@ async fn reap_codex_orphans_periodic() {
     let Ok(dir) = crate::hangar_dir() else {
         return;
     };
+    // Always OUR socket, never the externally managed one: the sweep signals
+    // only a pid proven to hold this exact path, so it can never touch Codex
+    // Desktop's server, and it must keep running in attached mode so a server
+    // orphaned by an earlier SIGKILL still gets reaped.
     let socket = dir.join("codex-app-server.sock");
     let reaped = crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
     if reaped > 0 {
