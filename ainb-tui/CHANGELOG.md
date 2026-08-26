@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.8] - 2026-08-26
+### Added
+- Merge pull request #752 from stevengonsalvez/f/codex-app-server-config
+- **codex**: attach to the desktop app-server by default, configurable
+- **codex**: say what attaching changes and what it leaves behind
+- **daemons**: pair the Codex phone app from the Daemons screen
+
+### Fixed
+- **codex**: never let an unreadable config switch app-server mode
+- **fleet**: ignore a resolution notification with no requestId
+
+### Documentation
+- **cli**: regenerate the reference for the pair verb
+
+### Other
+- Merge pull request #748 from stevengonsalvez/chore/release-v1.22.6
+- Merge pull request #751 from stevengonsalvez/chore/release-v1.22.7
+- **release**: prepare v1.22.6
+- sync Cargo.lock with the 1.22.6 version bump
+
+
 ## [1.22.7] - 2026-08-26
 ### Added
 - Merge pull request #749 from stevengonsalvez/f/rename-sessions
