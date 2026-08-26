@@ -625,7 +625,9 @@ impl ConfigureState {
         let collides = self.existing_branches.iter().any(|branch| branch == &candidate)
             || self.repo_branch_names.iter().any(|branch| branch == &candidate);
         self.branch_worktree = if collides {
-            derive_branch_name(&self.branch_prefix, &self.existing_branches)
+            let mut unavailable = self.existing_branches.clone();
+            unavailable.extend(self.repo_branch_names.iter().cloned());
+            derive_branch_name(&self.branch_prefix, &unavailable)
         } else {
             candidate
         };
@@ -2968,6 +2970,17 @@ mod tests {
         assert_eq!(s.branch_prefix, "ci/");
         assert_eq!(s.branch_worktree, "ci/auto");
         assert_eq!(s.branch_override, None);
+    }
+
+    #[test]
+    fn prefix_row_regenerates_when_candidate_already_exists() {
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["ci/auto".into()];
+        s.set_branch_prefix("ci/".into());
+
+        assert_ne!(s.branch_worktree, "ci/auto");
+        assert!(s.branch_worktree.starts_with("ci/"));
+        assert!(!s.repo_branch_names.contains(&s.branch_worktree));
     }
 
     #[test]
