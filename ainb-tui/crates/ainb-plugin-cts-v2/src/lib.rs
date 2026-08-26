@@ -1,10 +1,13 @@
 //! Conformance Test Suite v2 for the ainb plugin JSON-RPC subprocess ABI.
 //!
-//! 14 core axes covering manifest round-trip, framing, method dispatch,
-//! capability gating, render determinism, snapshot pub/sub, action
-//! timeout, log filtering, fs path guard, graceful shutdown, crash
-//! recovery, quarantine, and CLI dispatch capture — plus the
-//! `read_paths`/`[config]`, mouse-forwarding, and redraw-hint canaries.
+//! 18 numbered axes (`a01`-`a18`) covering manifest round-trip, framing,
+//! method dispatch, capability gating, render determinism, snapshot
+//! get-after-publish, snapshot subscribe, action timeout, log filtering,
+//! fs path guard, graceful shutdown, crash recovery, quarantine, CLI
+//! dispatch capture, event-stream subscribe, managed-subprocess spawn,
+//! unix-socket dial, and secret-store get — plus the
+//! `read_paths`/`[config]`, mouse-forwarding, and redraw-hint canaries,
+//! for 21 in total. Keep this list in sync with `tests/canaries/`.
 //!
 //! Each axis consists of:
 //! - A canary plugin binary under `tests/canaries/<axis>/main.rs`
