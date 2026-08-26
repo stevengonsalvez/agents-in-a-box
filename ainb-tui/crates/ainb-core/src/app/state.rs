@@ -8121,7 +8121,10 @@ impl AppState {
                 self.cancel_new_session();
             }
             Err(e) => {
-                error!("Failed to create session via configure flow: {}", e);
+                // `{:#}` walks the anyhow context chain. With `{}` the user saw
+                // only "Codex failed to start" and never the cause underneath it
+                // (e.g. "did not publish a remote thread within 10 seconds").
+                error!("Failed to create session via configure flow: {:#}", e);
                 // Surface the real failure (e.g. "branch already used by
                 // worktree", "worktree already exists", invalid name) BEFORE
                 // tearing down the modal. Without this the error only hit the
@@ -9161,7 +9164,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to create Interactive session: {}", e);
+                // See the configure-flow comment: `{:#}` keeps the cause.
+                error!("Failed to create Interactive session: {:#}", e);
                 if let Some(logs) = self.logs.get_mut(&session_id) {
                     logs.push(format!("Session creation failed: {}", e));
                 }
