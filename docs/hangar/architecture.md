@@ -150,6 +150,60 @@ An autopilot is a cron expression + an agent + instructions. A single daemon tas
 - At fire time it re-checks concurrency: if `count(autopilot_run WHERE completed_at IS NULL) >= max_concurrent_runs` it **skips** and emits `autopilot.tick_skipped`; otherwise `fire_autopilot_tick` inserts the run + enqueues the task in one transaction.
 - It recomputes the next tick anchored on *now* (not the stale tick) to avoid replay storms; no enabled autopilots → 60s re-poll.
 
+## What it looks like
+
+Three flows, captured from the real TUI. Each is reproducible from the script
+named beside it.
+
+### The board
+
+Cards move through queued, running and done. Moving a card fires a real task
+transition, so the board is the control surface, not a view of one.
+
+| | |
+|---|---|
+| ![Hangar kanban board](assets/boards-1-hangar.png) | ![Card opened](assets/boards-2-open.png) |
+| Board open | Card detail |
+| ![Card moved to done](assets/boards-3-done.png) | ![Board walkthrough](assets/boards-journey.gif) |
+| Card auto-moved to done | The whole flow |
+
+<sub>Regenerate: <code>docs/hangar/assets/record-boards-journey.sh</code></sub>
+
+### The control center
+
+Where an agent's question reaches you. The list shows who is waiting; the pane
+shows what they asked and the options you can answer with.
+
+| | |
+|---|---|
+| ![Control center with a pending question](assets/cc-1-open.png) | ![Card detail](assets/cc-2-card.png) |
+| A session needs you | Card detail |
+| ![Question answered](assets/cc-3-answered.png) | ![Control center walkthrough](assets/control-center-journey.gif) |
+| Answered, queue drains | The whole flow |
+
+<sub>Regenerate: <code>docs/hangar/assets/record-control-center.sh</code></sub>
+
+### Squads
+
+A squad fans one job out across several agents instead of running them one at a
+time.
+
+| | |
+|---|---|
+| ![Squad roster](assets/squads-1-open.png) | ![Squad detail](assets/squads-2-squad.png) |
+| Roster | Squad detail |
+| ![Squad briefed](assets/squads-3-briefed.png) | ![Squads walkthrough](assets/squads-journey.gif) |
+| Briefed and running | The whole flow |
+
+<sub>Regenerate: <code>docs/hangar/assets/record-squads-journey.sh</code></sub>
+
+> **Verification captures.** `assets/journeys/` holds ~68 more files (~16MB)
+> from the e38 parity run, indexed by
+> [`verify-converged-goal.md`](verify-converged-goal.md). They are evidence
+> that a behaviour was exercised, not illustrations: most are 2200x1000 frames
+> where the content occupies a small corner, and the `ch2`-`ch7` set has no
+> reproducer script. Use them to check a claim, not to learn the product.
+
 ## Feature catalogue — what a user does
 
 Every Hangar feature is reachable two ways: a **TUI screen** (open Hangar with `g`, then a hotkey) and/or the `ainb hangar <noun>` **CLI**.
