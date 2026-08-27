@@ -76,6 +76,25 @@ impl HeartbeatState {
 /// `last_activity_ms` of `None` is treated as "no recorded activity" → eligible
 /// to pause once the window elapses is impossible to prove, so we stay active
 /// (conservative: never pause on unknown).
+/// Render a heartbeat's epoch stamp as local wall-clock for the `[HEARTBEAT …]`
+/// tag.
+///
+/// The body is read by the ATC session, but it also lands verbatim in that
+/// session's transcript and in `task-log.md`, which is where a human
+/// reconstructs what ATC did and when. `[HEARTBEAT 1786106681993]` cannot be
+/// read at a glance, and forces epoch arithmetic to answer "was this snapshot
+/// four minutes old or four hours".
+///
+/// The machine-readable `now_ms` is unaffected: it stays in the JSON summary,
+/// which is what the daemon and the tests correlate on.
+#[must_use]
+pub fn stamp(now_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(now_ms).map_or_else(
+        || now_ms.to_string(),
+        |dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
+}
+
 #[must_use]
 pub fn should_pause_for_idle(
     needs_count: usize,
@@ -136,8 +155,9 @@ pub fn build_heartbeat_with_ledger(
 ) -> String {
     if rows.is_empty() {
         return format!(
-            "[HEARTBEAT {now_ms}] fleet quiet — 0 sessions need attention. \
-No action required; update state.json last-check and stand by."
+            "[HEARTBEAT {}] fleet quiet — 0 sessions need attention. \
+No action required; update state.json last-check and stand by.",
+            stamp(now_ms)
         );
     }
 
@@ -152,8 +172,9 @@ No action required; update state.json last-check and stand by."
     }
 
     let mut out = format!(
-        "[HEARTBEAT {now_ms}] {} session(s) need attention — \
+        "[HEARTBEAT {}] {} session(s) need attention — \
 ERR {err} · ASK {ask} · IDLE {idle} · WAIT {wait}\n",
+        stamp(now_ms),
         rows.len()
     );
 
@@ -217,8 +238,9 @@ pub fn build_heartbeat_enforcing_cap(
 
     if rows.is_empty() {
         return format!(
-            "[HEARTBEAT {now_ms}] fleet quiet — 0 sessions need attention. \
-No action required; update state.json last-check and stand by."
+            "[HEARTBEAT {}] fleet quiet — 0 sessions need attention. \
+No action required; update state.json last-check and stand by.",
+            stamp(now_ms)
         );
     }
 
@@ -237,8 +259,9 @@ No action required; update state.json last-check and stand by."
     // sit unsubmitted in the composer when the session is busy; a single line
     // renders as plain typed text and submits reliably. Rows are ";"-joined.
     let mut out = format!(
-        "[HEARTBEAT {now_ms}] {} session(s) need attention — \
+        "[HEARTBEAT {}] {} session(s) need attention — \
 ERR {err} · ASK {ask} · IDLE {idle} · WAIT {wait}.",
+        stamp(now_ms),
         rows.len()
     );
 
@@ -422,11 +445,35 @@ mod tests {
     #[test]
     fn empty_rows_produce_quiet_heartbeat() {
         let msg = build_heartbeat(&[], 1000);
-        assert!(msg.contains("[HEARTBEAT 1000]"));
+        // The tag renders wall-clock, not the raw epoch. Asserted structurally:
+        // pinning a formatted string would fail CI in another timezone.
+        assert!(msg.contains("[HEARTBEAT "), "{msg}");
+        assert!(!msg.contains("[HEARTBEAT 1000]"), "raw epoch leaked: {msg}");
         assert!(msg.contains("fleet quiet"));
         assert!(msg.contains("0 sessions"));
         // Quiet body must not nag ATC into spending tokens.
         assert!(!msg.contains("Apply ATC policy"));
+    }
+
+    #[test]
+    fn stamp_renders_wall_clock_and_never_the_raw_epoch() {
+        let out = stamp(1_786_106_681_993);
+        assert_ne!(out, "1786106681993", "must not echo the epoch");
+        // YYYY-MM-DD HH:MM:SS — 19 chars, fixed separators.
+        assert_eq!(out.len(), 19, "{out}");
+        assert_eq!(out.as_bytes()[4], b'-');
+        assert_eq!(out.as_bytes()[7], b'-');
+        assert_eq!(out.as_bytes()[10], b' ');
+        assert_eq!(out.as_bytes()[13], b':');
+        assert_eq!(out.as_bytes()[16], b':');
+        assert!(out.starts_with("2026-"), "{out}");
+    }
+
+    /// An unrepresentable instant degrades to the epoch rather than panicking
+    /// on a render path that must never fail.
+    #[test]
+    fn stamp_falls_back_to_the_epoch_when_it_cannot_render() {
+        assert_eq!(stamp(i64::MAX), i64::MAX.to_string());
     }
 
     #[test]
@@ -436,7 +483,8 @@ mod tests {
             idle_row("s2", "tmux_b", 12),
         ];
         let msg = build_heartbeat(&rows, 42);
-        assert!(msg.contains("[HEARTBEAT 42]"));
+        assert!(msg.contains("[HEARTBEAT "), "{msg}");
+        assert!(!msg.contains("[HEARTBEAT 42]"), "raw epoch leaked: {msg}");
         assert!(msg.contains("2 session(s) need attention"));
         assert!(msg.contains("ERR 1"));
         assert!(msg.contains("IDLE 1"));
