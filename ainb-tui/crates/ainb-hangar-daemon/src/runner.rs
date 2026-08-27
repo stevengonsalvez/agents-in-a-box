@@ -341,7 +341,7 @@ const ARG_SEPARATOR: &str = "--";
 /// sandbox + env allowlist remain the real confinement boundary.
 const COPILOT_ALLOW_ALL_TOOLS_FLAG: &str = "--allow-all-tools";
 /// The copilot model flag (`copilot --model <model>`), verified against Copilot
-/// CLI 1.0.68 (`$ copilot --model gpt-5.4`).
+/// CLI 1.0.68 (`$ copilot --model gpt-5.6-terra`).
 const COPILOT_MODEL_FLAG: &str = "--model";
 
 /// Static configuration for a [`Runner`].
@@ -1272,7 +1272,7 @@ impl Runner {
     ///
     /// Flags verified against GitHub Copilot CLI 1.0.68 (`copilot --help`):
     /// `--allow-all-tools` is "required for non-interactive mode", and `--model`
-    /// is a real flag (`$ copilot --model gpt-5.4`) — so, unlike the interactive
+    /// is a real flag (`$ copilot --model gpt-5.6-terra`) — so, unlike the interactive
     /// session launcher's stale "no model flag for these providers" rule, the
     /// agent's configured `model` IS threaded here. No subcommand is invented
     /// (copilot has none).

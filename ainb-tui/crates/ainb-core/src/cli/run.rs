@@ -1002,7 +1002,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -1014,8 +1014,8 @@ mod tests {
         let cmd = build_agent_command(&args);
         assert!(cmd.starts_with("codex"));
         assert!(
-            cmd.contains("--model gpt-5.4"),
-            "Codex with explicit gpt-5.4 must emit --model, got: {cmd}"
+            cmd.contains("--model gpt-5.6-terra"),
+            "Codex with explicit gpt-5.6-terra must emit --model, got: {cmd}"
         );
     }
 

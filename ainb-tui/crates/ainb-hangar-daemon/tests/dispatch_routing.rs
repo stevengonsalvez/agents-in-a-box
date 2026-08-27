@@ -300,13 +300,13 @@ fn copilot_command_carries_verified_non_interactive_flags() {
     // The agent's configured model is threaded (copilot DOES support --model).
     let invocation = ProviderInvocation {
         prompt: "do the thing".to_string(),
-        model: Some("gpt-5.4".to_string()),
+        model: Some("gpt-5.6-terra".to_string()),
         cli_args: vec!["--add-dir".to_string(), "/tmp/x".to_string()],
     };
     let (_program, argv) = runner.provider_command(Backend::Copilot, &invocation, Mode::Headless);
     let joined = argv.join(" ");
     assert!(
-        joined.contains("--model gpt-5.4"),
+        joined.contains("--model gpt-5.6-terra"),
         "model must be threaded: {argv:?}"
     );
     assert!(

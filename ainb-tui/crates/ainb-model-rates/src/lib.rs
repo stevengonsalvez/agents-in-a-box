@@ -126,6 +126,9 @@ fn openai_rates(m: &str) -> Option<(f64, f64)> {
     if m.starts_with("gpt-5.5") {
         return Some((5.0, 30.0));
     }
+    // The gpt-5.4 family retired 2026-08-31. Its rates STAY: this table prices
+    // historical transcripts, and deleting a retired model's rate does not tidy
+    // anything up: it turns every past session that used it into `cost n/a`.
     if m.starts_with("gpt-5.4-nano") {
         return Some((0.2, 1.25));
     }
