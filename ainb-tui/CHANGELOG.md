@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.14] - 2026-08-27
+### Fixed
+- **release**: lock release builds
+- **release**: resolve lockfile online
+- **release**: sync release metadata
+- **session**: retain stopped worktree branch
+
+
 ## [1.22.13] - 2026-08-27
 ### Fixed
 - **tui**: show build version on home
