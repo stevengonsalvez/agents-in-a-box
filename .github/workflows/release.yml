@@ -125,7 +125,7 @@ jobs:
 
       - name: Update Cargo.lock version
         working-directory: ${{ env.WORKING_DIR }}
-        run: cargo update --workspace --offline
+        run: cargo update --workspace
 
       - name: Update CHANGELOG.md
         working-directory: ${{ env.WORKING_DIR }}
