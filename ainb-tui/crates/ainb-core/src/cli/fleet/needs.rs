@@ -49,11 +49,18 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     let probes = ProbeIndex::load();
     let probed = discover_from_probes(&probes);
     let merged = merge_sessions(vec![ainb, peers, jobs, probed]);
-    let rows = classify_all(merged, &probes, idle_override, enrich).await;
+    let (rows, census) = classify_all(merged, &probes, idle_override, enrich).await;
 
     if matches!(format, OutputFormat::Text) {
         print_text(&rows);
+        // Always shown, including when nothing needs attention: "0 need you"
+        // means something very different when tier B answered for the whole
+        // fleet than when it answered for none of it.
+        println!("  {}", census.summary_line());
     } else {
+        // The JSON stays a BARE ARRAY of rows. The ATC heartbeat parses it as
+        // `Vec<NeedsRow>`, so wrapping it in an object to carry the census
+        // would break the one consumer this work exists to serve.
         let json = serde_json::to_string_pretty(&rows)?;
         println!("{json}");
     }
@@ -121,12 +128,50 @@ fn is_probe_only(session: &Session) -> bool {
     session.sources.as_slice() == [SessionSource::Probe]
 }
 
+/// What each evidence tier actually SAW this run, including the tiers that saw
+/// nothing.
+///
+/// A dead tier produces no rows, which is indistinguishable from a healthy tier
+/// with nothing to report — that is precisely how a broken hook pipeline ran
+/// unnoticed for 65 days while every classification silently came from pane
+/// scraping. Counting sessions per tier makes the difference legible: tier B at
+/// zero while tier D carries the whole fleet is a broken pipeline, not a quiet
+/// one.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct TierCensus {
+    /// Sessions answered by the Claude probe files (tier A).
+    pub probe: usize,
+    /// Sessions answered by the materialized hook state (tier B).
+    pub hook: usize,
+    /// Sessions that fell through to the pane/transcript scan (tier D).
+    pub scan: usize,
+    /// Sessions affirmatively reported as WORKING rather than merely silent.
+    ///
+    /// The fleet has never been able to say this before: a running session and
+    /// a stuck one both produced no row. Counted here rather than emitted as a
+    /// needs row, because a working session does not need anything.
+    pub running: usize,
+    /// Live probe files found on the host, whether or not they answered.
+    pub probes_seen: usize,
+}
+
+impl TierCensus {
+    /// One line for the text footer.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        format!(
+            "tiers — probe {} · hook {} · scan {} | {} working · {} live probe(s)",
+            self.probe, self.hook, self.scan, self.running, self.probes_seen
+        )
+    }
+}
+
 async fn classify_all(
     sessions: Vec<Session>,
     probes: &ProbeIndex,
     idle_override: Option<i64>,
     enrich: bool,
-) -> Vec<NeedsRow> {
+) -> (Vec<NeedsRow>, TierCensus) {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let stale_ms = stale_window_ms();
     // Snapshot the materialized read model once (read-only Store open). Empty +
@@ -136,6 +181,10 @@ async fn classify_all(
     // One `ps` per probe, once, not once per session.
     let idle_threshold = idle_override.unwrap_or_else(idle_threshold_from_env);
 
+    let mut census = TierCensus {
+        probes_seen: probes.len(),
+        ..TierCensus::default()
+    };
     let mut hook_rows: Vec<NeedsRow> = Vec::new();
     let mut fallback_sessions: Vec<Session> = Vec::new();
     for session in sessions {
@@ -154,6 +203,13 @@ async fn classify_all(
             .filter(|status| *status == "waiting")
             .and_then(|_status| ask_from_transcript(&session));
         if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
+            census.probe += 1;
+            // `Healthy` from tier A means the probe said busy/shell — the one
+            // place in the fleet where WORKING is asserted rather than inferred
+            // from silence.
+            if matches!(resolution, Resolution::Healthy) {
+                census.running += 1;
+            }
             match resolution {
                 // A session ONLY the probe tier knows about — ainb never
                 // launched it, so it has no tmux pane and no broker peer — is
@@ -173,15 +229,23 @@ async fn classify_all(
         }
 
         match index.resolve(&session, now_ms, stale_ms) {
-            Resolution::Hook(row) => hook_rows.push(*row),
+            Resolution::Hook(row) => {
+                census.hook += 1;
+                hook_rows.push(*row);
+            }
             // Healthy hook state → not a need, and authoritative enough to skip
-            // the pane scan.
-            Resolution::Healthy => {}
+            // the pane scan. The hooks materialize RUNNING/DONE and the
+            // classifier drops both; RUNNING is genuinely working, so count it.
+            Resolution::Healthy => {
+                census.hook += 1;
+                census.running += 1;
+            }
             Resolution::Fallback => fallback_sessions.push(session),
         }
     }
 
     // Run the live classifier only for the fallback sessions, in parallel.
+    census.scan = fallback_sessions.len();
     let mut handles = Vec::with_capacity(fallback_sessions.len());
     for session in fallback_sessions {
         let tmux = session.tmux_session.clone();
@@ -221,7 +285,7 @@ async fn classify_all(
     }
 
     out.sort_by_key(|r| signal_priority(r));
-    out
+    (out, census)
 }
 
 fn signal_priority(r: &NeedsRow) -> u8 {
@@ -297,5 +361,51 @@ fn truncate_line(s: &str, max: usize) -> String {
     } else {
         let cut: String = one.chars().take(max).collect();
         format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod census_tests {
+    use super::TierCensus;
+
+    #[test]
+    fn summary_line_names_every_tier_including_the_silent_ones() {
+        // A tier at zero MUST still print. The whole point is telling a quiet
+        // tier from a dead one, and a dead tier prints nothing by definition.
+        let line = TierCensus::default().summary_line();
+        assert!(line.contains("probe 0"), "{line}");
+        assert!(line.contains("hook 0"), "{line}");
+        assert!(line.contains("scan 0"), "{line}");
+        assert!(line.contains("0 working"), "{line}");
+    }
+
+    #[test]
+    fn census_reports_a_pipeline_carried_entirely_by_the_scan() {
+        // The shape a broken hook pipeline actually has: hook silent, scan
+        // carrying the fleet. Indistinguishable from health before this line
+        // existed, and it ran that way unnoticed for 65 days.
+        let line = TierCensus {
+            scan: 12,
+            ..TierCensus::default()
+        }
+        .summary_line();
+        assert!(line.contains("hook 0"), "{line}");
+        assert!(line.contains("scan 12"), "{line}");
+    }
+
+    #[test]
+    fn working_is_counted_not_emitted_as_a_need() {
+        // A working session is affirmative information, but it needs nothing,
+        // so it belongs in the census and never in the rows.
+        let line = TierCensus {
+            probe: 4,
+            hook: 1,
+            scan: 0,
+            running: 3,
+            probes_seen: 9,
+        }
+        .summary_line();
+        assert!(line.contains("3 working"), "{line}");
+        assert!(line.contains("9 live probe(s)"), "{line}");
     }
 }
