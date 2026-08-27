@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.13] - 2026-08-27
+### Fixed
+- **tui**: show build version on home
+
+## [1.22.12] - 2026-08-27
+### Fixed
+- **codex**: one launch argv for both spawn paths, and repair its docs
+- **codex**: own the thread id so every client shares one conversation
+- **site**: repair the Edit page link on every docs page
+
+### Documentation
+- **hangar**: say it shipped, and correct the figures
+- **site**: give the eight unreachable pages a route into the site
+- **site**: stop building implementer specs as orphan pages
+- fix 13 broken relative links
+- rebuild the index so it lists every published page
+- reflect plugin is v5.2.5, not 3.6.0
+- reflect plugin version in the CLI reference too
+- reflect version in the plugin diagram
+
+### Other
+- **codex**: make the managed launch argv testable
+
 ## [1.22.11] - 2026-08-26
 ### Added
 - Merge pull request #754 from stevengonsalvez/f/ainb-hooks-interview

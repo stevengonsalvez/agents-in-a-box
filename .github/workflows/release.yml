@@ -56,10 +56,17 @@ jobs:
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          # Release tags live on their own sync branches, so the latest tag is
+          # not necessarily reachable from main. The tagged release commit's
+          # parent is the main revision the release was prepared from.
+          LAST_TAG=$(git -c versionsort.suffix=- tag --list 'v*' --sort=-v:refname | head -n 1)
 
           if [ -n "$LAST_TAG" ]; then
-            RANGE="${LAST_TAG}..HEAD"
+            if ! RELEASE_BASE=$(git rev-parse "${LAST_TAG}^" 2>/dev/null); then
+              echo "Could not resolve the source revision for ${LAST_TAG}"
+              exit 1
+            fi
+            RANGE="${RELEASE_BASE}..HEAD"
           else
             RANGE="HEAD"
           fi
@@ -69,7 +76,7 @@ jobs:
           echo "" >> /tmp/release_notes.md
 
           # Features
-          FEATURES=$(git log ${RANGE} --pretty=format:"- %s" --grep="^feat" 2>/dev/null | sort -u || true)
+          FEATURES=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^feat" 2>/dev/null | sort -u || true)
           if [ -n "$FEATURES" ]; then
             echo "### Added" >> /tmp/release_notes.md
             echo "$FEATURES" | sed 's/^- feat(\([^)]*\)): /- **\1**: /' | sed 's/^- feat: /- /' >> /tmp/release_notes.md
@@ -77,7 +84,7 @@ jobs:
           fi
 
           # Fixes
-          FIXES=$(git log ${RANGE} --pretty=format:"- %s" --grep="^fix" 2>/dev/null | sort -u || true)
+          FIXES=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^fix" 2>/dev/null | sort -u || true)
           if [ -n "$FIXES" ]; then
             echo "### Fixed" >> /tmp/release_notes.md
             echo "$FIXES" | sed 's/^- fix(\([^)]*\)): /- **\1**: /' | sed 's/^- fix: /- /' >> /tmp/release_notes.md
@@ -85,7 +92,7 @@ jobs:
           fi
 
           # Docs
-          DOCS=$(git log ${RANGE} --pretty=format:"- %s" --grep="^docs" 2>/dev/null | sort -u || true)
+          DOCS=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^docs" 2>/dev/null | sort -u || true)
           if [ -n "$DOCS" ]; then
             echo "### Documentation" >> /tmp/release_notes.md
             echo "$DOCS" | sed 's/^- docs(\([^)]*\)): /- **\1**: /' | sed 's/^- docs: /- /' >> /tmp/release_notes.md
@@ -93,7 +100,7 @@ jobs:
           fi
 
           # Other changes (chore, refactor, perf)
-          OTHER=$(git log ${RANGE} --pretty=format:"- %s" --grep="^\(chore\|refactor\|perf\)" 2>/dev/null | sort -u || true)
+          OTHER=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^\(chore\|refactor\|perf\)" 2>/dev/null | grep -Ev '^- [[:alpha:]]+\(release\): ' | sort -u || true)
           if [ -n "$OTHER" ]; then
             echo "### Other" >> /tmp/release_notes.md
             echo "$OTHER" | sed 's/^- \(chore\|refactor\|perf\)(\([^)]*\)): /- **\2**: /' | sed 's/^- \(chore\|refactor\|perf\): /- /' >> /tmp/release_notes.md
@@ -113,8 +120,12 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          sed -i "/^\[workspace\.package\]$/,/^\[/{s/^version = \".*\"/version = \"${VERSION}\"/;}" Cargo.toml
           echo "Updated Cargo.toml to version ${VERSION}"
+
+      - name: Update Cargo.lock version
+        working-directory: ${{ env.WORKING_DIR }}
+        run: cargo update --workspace --offline
 
       - name: Update CHANGELOG.md
         working-directory: ${{ env.WORKING_DIR }}
@@ -182,7 +193,7 @@ jobs:
           BRANCH="chore/release-v${VERSION}"
 
           git checkout -b "${BRANCH}"
-          git add "${WORKING_DIR}/Cargo.toml" "${WORKING_DIR}/CHANGELOG.md"
+          git add "${WORKING_DIR}/Cargo.toml" "${WORKING_DIR}/Cargo.lock" "${WORKING_DIR}/CHANGELOG.md"
           git commit -m "chore(release): prepare v${VERSION}"
 
           # Tag FIRST: it is the artifact the rest of the pipeline consumes, so
@@ -270,7 +281,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       # Bundle the first-party plugins (session-reader / burndown / witr)
       # into the archive. Without them a brew-installed ainb has no
