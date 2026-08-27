@@ -279,10 +279,18 @@ pub enum CodexModel {
     SystemDefault,
     /// `gpt-5.5` — 1M ctx, recommended default.
     Gpt55,
-    /// `gpt-5.4` — 1M ctx, flagship alt.
-    Gpt54,
-    /// `gpt-5.4-mini` — 200K ctx, fast/cheap.
-    Gpt54Mini,
+    /// `gpt-5.6-terra`: flagship alt. Replaced `gpt-5.4`, which retired
+    /// 2026-08-31; terra sits at the same $2.50/$15.00 tier (see
+    /// `ainb-model-rates`). The `serde(alias)` keeps session metadata written
+    /// before the swap deserializable: the variant name is persisted verbatim
+    /// in `SessionMetadata::codex_model`, so dropping the old name would fail
+    /// the whole record, not just the field.
+    #[serde(alias = "Gpt54")]
+    Gpt56Terra,
+    /// `gpt-5.6-luna`: fast/cheap. Replaced `gpt-5.4-mini` (retired
+    /// 2026-08-31). See `Gpt56Terra` for why the alias is load-bearing.
+    #[serde(alias = "Gpt54Mini")]
+    Gpt56Luna,
     /// `gpt-5.3-codex` — 200K ctx, deep SWE.
     Gpt53Codex,
 }
@@ -293,8 +301,8 @@ impl CodexModel {
         match self {
             CodexModel::SystemDefault => None,
             CodexModel::Gpt55 => Some("gpt-5.5"),
-            CodexModel::Gpt54 => Some("gpt-5.4"),
-            CodexModel::Gpt54Mini => Some("gpt-5.4-mini"),
+            CodexModel::Gpt56Terra => Some("gpt-5.6-terra"),
+            CodexModel::Gpt56Luna => Some("gpt-5.6-luna"),
             CodexModel::Gpt53Codex => Some("gpt-5.3-codex"),
         }
     }
@@ -304,8 +312,8 @@ impl CodexModel {
         match self {
             CodexModel::SystemDefault => "system default",
             CodexModel::Gpt55 => "gpt-5.5 [1M]",
-            CodexModel::Gpt54 => "gpt-5.4 [1M]",
-            CodexModel::Gpt54Mini => "gpt-5.4-mini [200K]",
+            CodexModel::Gpt56Terra => "gpt-5.6-terra",
+            CodexModel::Gpt56Luna => "gpt-5.6-luna",
             CodexModel::Gpt53Codex => "gpt-5.3-codex [200K]",
         }
     }
@@ -315,21 +323,28 @@ impl CodexModel {
         vec![
             CodexModel::SystemDefault,
             CodexModel::Gpt55,
-            CodexModel::Gpt54,
-            CodexModel::Gpt54Mini,
+            CodexModel::Gpt56Terra,
+            CodexModel::Gpt56Luna,
             CodexModel::Gpt53Codex,
         ]
     }
 
     /// Parse a TOML / preset string into a `CodexModel`. Accepts canonical IDs
     /// only (Codex CLI never had short aliases) plus `""` / `"default"` for
-    /// the SystemDefault variant. Unknown values fall back to `SystemDefault`.
+    /// the SystemDefault variant, and the two retired `gpt-5.4*` ids, which map
+    /// forward to their replacements. Unknown values fall back to
+    /// `SystemDefault`.
     pub fn parse(value: &str) -> CodexModel {
         match value.trim().to_lowercase().as_str() {
             "" | "default" => CodexModel::SystemDefault,
             "gpt-5.5" => CodexModel::Gpt55,
-            "gpt-5.4" => CodexModel::Gpt54,
-            "gpt-5.4-mini" => CodexModel::Gpt54Mini,
+            "gpt-5.6-terra" => CodexModel::Gpt56Terra,
+            "gpt-5.6-luna" => CodexModel::Gpt56Luna,
+            // Retired 2026-08-31. Mapped forward rather than left to the
+            // unknown-id arm: a preset pinned to gpt-5.4 would otherwise
+            // silently revert to the Codex CLI default with only a log line.
+            "gpt-5.4" => CodexModel::Gpt56Terra,
+            "gpt-5.4-mini" => CodexModel::Gpt56Luna,
             "gpt-5.3-codex" => CodexModel::Gpt53Codex,
             other => {
                 tracing::warn!(
@@ -826,12 +841,47 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::is_default_model;
+    use super::{CodexModel, is_default_model};
 
     #[test]
     fn default_model_sentinels_are_recognized_after_trimming() {
         assert!(is_default_model(""));
         assert!(is_default_model("  DEFAULT  "));
         assert!(!is_default_model("claude-opus-4-8"));
+    }
+
+    /// The gpt-5.4 family retired 2026-08-31. Nothing may still resolve to it.
+    #[test]
+    fn no_codex_variant_still_launches_a_retired_gpt_5_4() {
+        for model in CodexModel::all() {
+            let cli = model.cli_value().unwrap_or("");
+            assert!(
+                !cli.starts_with("gpt-5.4"),
+                "{cli} retired 2026-08-31 and must not be launchable"
+            );
+        }
+    }
+
+    /// A preset pinned to a retired id maps forward instead of silently
+    /// reverting to the Codex CLI default.
+    #[test]
+    fn retired_gpt_5_4_presets_map_forward() {
+        assert_eq!(CodexModel::parse("gpt-5.4"), CodexModel::Gpt56Terra);
+        assert_eq!(CodexModel::parse("gpt-5.4-mini"), CodexModel::Gpt56Luna);
+    }
+
+    /// `SessionMetadata::codex_model` persists the VARIANT NAME, so session
+    /// records written before the rename carry `"Gpt54"`. Without the
+    /// `serde(alias)` the whole record fails to deserialize, not just the field.
+    #[test]
+    fn legacy_variant_names_still_deserialize() {
+        assert_eq!(
+            serde_json::from_str::<CodexModel>("\"Gpt54\"").unwrap(),
+            CodexModel::Gpt56Terra
+        );
+        assert_eq!(
+            serde_json::from_str::<CodexModel>("\"Gpt54Mini\"").unwrap(),
+            CodexModel::Gpt56Luna
+        );
     }
 }
