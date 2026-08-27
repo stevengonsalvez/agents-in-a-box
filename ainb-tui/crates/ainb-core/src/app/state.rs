@@ -5898,6 +5898,13 @@ impl AppState {
             metadata.launch_model(),
         );
         session.id = metadata.session_id;
+        // `Session::new_with_options` fabricates `ainb/<workspace>` for a new
+        // session. A stopped session already has a worktree, so recover the
+        // branch from that checkout instead. This retains custom prefixes in
+        // the list and also repairs metadata written before branch persistence.
+        if let Some(branch_name) = crate::git::current_branch_at(&metadata.worktree_path) {
+            session.branch_name = branch_name;
+        }
         session.tmux_session_name = Some(metadata.tmux_session_name.clone());
         session.status = SessionStatus::Stopped;
         session.created_at = metadata.created_at;
