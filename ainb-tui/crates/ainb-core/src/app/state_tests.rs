@@ -418,6 +418,40 @@ mod tests {
         assert_eq!(session.model.as_deref(), Some("claude-opus-4-8"));
     }
 
+    /// Stopped sessions must recover the branch checked out in their worktree,
+    /// rather than the `ainb/<workspace>` default used for brand-new sessions.
+    #[test]
+    fn test_stopped_session_from_metadata_preserves_worktree_branch() {
+        use crate::interactive::SessionMetadata;
+        use crate::models::SessionAgentType;
+
+        if !crate::test_support::git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = crate::test_support::real_git_fixture();
+        let metadata = SessionMetadata {
+            session_id: uuid::Uuid::new_v4(),
+            tmux_session_name: "tmux_prefixed-feature".to_string(),
+            worktree_path: fx.worktree,
+            workspace_name: "fpl".to_string(),
+            created_at: chrono::Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
+            skip_permissions: Some(true),
+            model: None,
+            model_source: Default::default(),
+            codex_model: None,
+            codex_thread_id: None,
+        };
+
+        let session = AppState::stopped_session_from_metadata(&metadata);
+
+        assert_eq!(session.branch_name, "feature");
+        assert_ne!(session.branch_name, "ainb/fpl");
+    }
+
     #[tokio::test]
     async fn idle_restart_respawns_a_dead_codex_pane_with_exact_remote_thread() {
         use crate::interactive::InteractiveSessionManager;
