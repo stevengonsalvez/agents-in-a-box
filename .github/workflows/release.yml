@@ -59,11 +59,14 @@ jobs:
           # Release tags live on their own sync branches, so the latest tag is
           # not necessarily reachable from main. The tagged release commit's
           # parent is the main revision the release was prepared from.
-          LAST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          LAST_TAG=$(git -c versionsort.suffix=- tag --list 'v*' --sort=-v:refname | head -n 1)
 
           if [ -n "$LAST_TAG" ]; then
-            RELEASE_BASE=$(git rev-parse "${LAST_TAG}^" 2>/dev/null || echo "")
-            RANGE="${RELEASE_BASE:-$LAST_TAG}..HEAD"
+            if ! RELEASE_BASE=$(git rev-parse "${LAST_TAG}^" 2>/dev/null); then
+              echo "Could not resolve the source revision for ${LAST_TAG}"
+              exit 1
+            fi
+            RANGE="${RELEASE_BASE}..HEAD"
           else
             RANGE="HEAD"
           fi
@@ -97,7 +100,7 @@ jobs:
           fi
 
           # Other changes (chore, refactor, perf)
-          OTHER=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^\(chore\|refactor\|perf\)" 2>/dev/null | grep -v '^- chore(release): ' | sort -u || true)
+          OTHER=$(git log "$RANGE" --no-merges --pretty=format:"- %s" --grep="^\(chore\|refactor\|perf\)" 2>/dev/null | grep -Ev '^- [[:alpha:]]+\(release\): ' | sort -u || true)
           if [ -n "$OTHER" ]; then
             echo "### Other" >> /tmp/release_notes.md
             echo "$OTHER" | sed 's/^- \(chore\|refactor\|perf\)(\([^)]*\)): /- **\2**: /' | sed 's/^- \(chore\|refactor\|perf\): /- /' >> /tmp/release_notes.md
@@ -117,12 +120,12 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          sed -i "/^\[workspace.package\]$/,/^\[/{s/^version = \".*\"/version = \"${VERSION}\"/;}" Cargo.toml
+          sed -i "/^\[workspace\.package\]$/,/^\[/{s/^version = \".*\"/version = \"${VERSION}\"/;}" Cargo.toml
           echo "Updated Cargo.toml to version ${VERSION}"
 
       - name: Update Cargo.lock version
         working-directory: ${{ env.WORKING_DIR }}
-        run: cargo metadata --format-version 1 --no-deps > /dev/null
+        run: cargo update --workspace --offline
 
       - name: Update CHANGELOG.md
         working-directory: ${{ env.WORKING_DIR }}
@@ -278,7 +281,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       # Bundle the first-party plugins (session-reader / burndown / witr)
       # into the archive. Without them a brew-installed ainb has no
