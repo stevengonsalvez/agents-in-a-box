@@ -168,7 +168,7 @@ Seventeen surfaces, one binary. Each links to its docs.
 </tr>
 </table>
 
-**Also in the box, no screenshot yet:**
+**Also in the box, no screenshot yet** ([#778](https://github.com/stevengonsalvez/agents-in-a-box/issues/778) tracks capturing these):
 
 | Surface | What it gives you | Docs |
 |---|---|---|
