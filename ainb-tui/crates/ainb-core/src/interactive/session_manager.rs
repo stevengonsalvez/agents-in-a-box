@@ -212,6 +212,55 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
     Ok(())
 }
 
+/// Build the argv for a managed (remote app-server) Codex session.
+///
+/// Extracted from the launcher so the flags that keep breaking are testable
+/// without spawning tmux. Every element here is load-bearing:
+///
+/// * `-C <working_dir>` — under `--remote` the TUI ignores the pane cwd and
+///   adopts the app-server's, so without this every session runs in the
+///   daemon's tree rather than its own worktree.
+/// * `--dangerously-bypass-hook-trust` — Ainb's own `notifyd install` rewrites
+///   `~/.codex/hooks.json`, invalidating Codex's positional hook hashes and
+///   parking the launch on a "Hooks need review" modal.
+/// * `resume <thread_id>` — joins the thread Ainb already started, so the CLI
+///   and any other client on that app-server (the phone) share ONE
+///   conversation. Without it each client starts its own thread on the same
+///   cwd and neither sees the other's turns.
+pub(crate) fn codex_remote_command(
+    provider: &crate::config::CliProvider,
+    remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+    working_dir: &std::path::Path,
+    model: Option<&str>,
+    skip_permissions: bool,
+) -> Vec<String> {
+    let mut command = vec![
+        provider.command().to_string(),
+        "-c".to_string(),
+        "check_for_update_on_startup=false".to_string(),
+        "--disable".to_string(),
+        "apps".to_string(),
+        "--dangerously-bypass-hook-trust".to_string(),
+        "--remote".to_string(),
+        remote.endpoint.clone(),
+        "-C".to_string(),
+        working_dir.display().to_string(),
+    ];
+    if let Some(model) = model.filter(|model| !is_default_model(model)) {
+        // A retiring model shows a blocking migration modal, which stalls the
+        // launch exactly like the trust and hook gates. Follow the upgrade the
+        // provider itself advertises rather than arguing with it.
+        command.extend(["--model".to_string(), migrated_codex_model(model)]);
+    }
+    if skip_permissions {
+        command.push(provider.skip_permissions_flag().to_string());
+    }
+    if let Some(thread_id) = remote.thread_id.as_ref() {
+        command.extend(["resume".to_string(), thread_id.clone()]);
+    }
+    command
+}
+
 /// Log what the pane was showing when a launch failed.
 ///
 /// Best-effort and never fatal: this runs on a path that is already failing,
@@ -255,7 +304,7 @@ async fn log_failed_launch_pane(exact_target: &str) {
 ///
 /// Best-effort: a failure here only means the user answers one prompt, so it
 /// must never fail a launch.
-fn trust_codex_project_dir(worktree: &std::path::Path) {
+pub(crate) fn trust_codex_project_dir(worktree: &std::path::Path) {
     let Some(config) = codex_config_path() else {
         return;
     };
@@ -2229,34 +2278,13 @@ impl InteractiveSessionManager {
             // has not seen shows a blocking modal, and under `--remote` no flag
             // suppresses it.
             trust_codex_project_dir(working_dir);
-            let mut command = vec![
-                provider.command().to_string(),
-                "-c".to_string(),
-                "check_for_update_on_startup=false".to_string(),
-                "--disable".to_string(),
-                "apps".to_string(),
-                "--dangerously-bypass-hook-trust".to_string(),
-                "--remote".to_string(),
-                remote.endpoint.clone(),
-                "-C".to_string(),
-                working_dir.display().to_string(),
-            ];
-            if let Some(model) = model.as_deref().filter(|model| !is_default_model(model)) {
-                // Launching a retiring model shows a blocking migration modal
-                // ("GPT-5.4 will be deprecated soon … Choose how you'd like
-                // Codex to proceed"), which stalls the launch exactly like the
-                // trust and hook gates. Follow the upgrade the provider itself
-                // advertises instead of arguing with it.
-                let model = migrated_codex_model(model);
-                command.extend(["--model".to_string(), model]);
-            }
-            if skip_permissions {
-                command.push(provider.skip_permissions_flag().to_string());
-            }
-            if let Some(thread_id) = remote.thread_id.as_ref() {
-                command.extend(["resume".to_string(), thread_id.clone()]);
-            }
-            command
+            codex_remote_command(
+                &provider,
+                remote,
+                working_dir,
+                model.as_deref(),
+                skip_permissions,
+            )
         } else {
             Self::build_cli_cmd_parts(
                 &provider,
@@ -2571,6 +2599,111 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 
 #[cfg(test)]
 mod tests {
+
+    /// The managed Codex argv, flag by flag.
+    ///
+    /// Each of these was a real outage today, so they are pinned rather than
+    /// trusted to survive future edits.
+    #[test]
+    fn codex_remote_command_carries_every_load_bearing_flag() {
+        use ainb_hangar_proto::fleet::CodexSessionEnsureResult;
+        let provider = crate::config::CliProvider::Codex;
+        let worktree = std::path::Path::new("/w/agents-in-a-box--f-x--abc123");
+
+        let with_thread = CodexSessionEnsureResult {
+            thread_id: Some("01a03ff4-efbb".to_string()),
+            endpoint: "unix:///tmp/app-server-control.sock".to_string(),
+        };
+        let argv = super::codex_remote_command(&provider, &with_thread, worktree, None, true);
+        let joined = argv.join(" ");
+
+        // Joins OUR thread, so the CLI and the phone share one conversation.
+        let at = argv.iter().position(|a| a == "resume").expect("resume missing");
+        assert_eq!(argv.get(at + 1).map(String::as_str), Some("01a03ff4-efbb"));
+
+        // Runs in the session's own worktree, not the daemon's tree.
+        let cd = argv.iter().position(|a| a == "-C").expect("-C missing");
+        assert_eq!(
+            argv.get(cd + 1).map(String::as_str),
+            Some(worktree.to_str().unwrap())
+        );
+
+        assert!(
+            joined.contains("--dangerously-bypass-hook-trust"),
+            "hook trust: {joined}"
+        );
+        assert!(joined.contains("--remote unix:///tmp/app-server-control.sock"));
+        assert!(joined.contains("check_for_update_on_startup=false"));
+
+        // No thread id yet (the fallback claim path) must NOT emit a bare
+        // `resume`, which would resume an arbitrary thread.
+        let without = CodexSessionEnsureResult {
+            thread_id: None,
+            endpoint: "unix:///tmp/app-server-control.sock".to_string(),
+        };
+        let argv = super::codex_remote_command(&provider, &without, worktree, None, false);
+        assert!(!argv.iter().any(|a| a == "resume"), "bare resume: {argv:?}");
+        // …and still lands in the right worktree.
+        let cd = argv.iter().position(|a| a == "-C").expect("-C missing");
+        assert_eq!(
+            argv.get(cd + 1).map(String::as_str),
+            Some(worktree.to_str().unwrap())
+        );
+
+        // skip_permissions emits the provider's own flag, not a hard-coded one.
+        let yolo = super::codex_remote_command(&provider, &without, worktree, None, true).join(" ");
+        assert!(
+            yolo.contains(provider.skip_permissions_flag()),
+            "skip flag: {yolo}"
+        );
+        let safe =
+            super::codex_remote_command(&provider, &without, worktree, None, false).join(" ");
+        assert!(
+            !safe.contains(provider.skip_permissions_flag()),
+            "leaked skip: {safe}"
+        );
+
+        // `--disable apps` travels as two adjacent tokens, not a fused string.
+        let d = argv.iter().position(|a| a == "--disable").expect("--disable missing");
+        assert_eq!(argv.get(d + 1).map(String::as_str), Some("apps"));
+    }
+
+    /// The `--model` branch: default-ish values omitted, real ones passed, and
+    /// a retiring slug rewritten rather than launched.
+    ///
+    /// Launching a retiring model shows a blocking deprecation modal, one of
+    /// the three stalls this argv exists to avoid.
+    #[test]
+    fn codex_remote_command_filters_and_migrates_the_model() {
+        use ainb_hangar_proto::fleet::CodexSessionEnsureResult;
+        let provider = crate::config::CliProvider::Codex;
+        let worktree = std::path::Path::new("/w/tree");
+        let remote = CodexSessionEnsureResult {
+            thread_id: None,
+            endpoint: "unix:///tmp/s.sock".to_string(),
+        };
+        let argv_for = |model: Option<&str>| {
+            super::codex_remote_command(&provider, &remote, worktree, model, false)
+        };
+
+        // Default-ish models must not emit --model: a literal "default" would
+        // send a slug that does not exist.
+        for omitted in [None, Some(""), Some("default")] {
+            let argv = argv_for(omitted);
+            assert!(
+                !argv.iter().any(|a| a == "--model"),
+                "--model emitted for {omitted:?}: {argv:?}"
+            );
+        }
+
+        let argv = argv_for(Some("gpt-5.6-terra"));
+        let at = argv.iter().position(|a| a == "--model").expect("--model missing");
+        assert_eq!(argv.get(at + 1).map(String::as_str), Some("gpt-5.6-terra"));
+
+        // Whatever is emitted has been through the retirement rewrite, so a
+        // retiring slug can never reach the launch as-is.
+        assert_eq!(argv[at + 1], super::migrated_codex_model("gpt-5.6-terra"));
+    }
 
     /// Recording worktree trust must not disturb ANY other key.
     ///
