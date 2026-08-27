@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.12] - 2026-08-27
+### Added
+- Merge pull request #754 from stevengonsalvez/f/ainb-hooks-interview
+- Merge pull request #755 from stevengonsalvez/f/rename-sessions
+- Merge pull request #763 from stevengonsalvez/f/rename-sessions
+- Merge pull request #764 from stevengonsalvez/f/mainsite-and-docs
+- **hooks**: block a done claim with live watchers
+- **hooks**: block prose asks at turn-end
+- **session**: add per-session branch prefix
+- **site**: cut the docsite over to ainb.app
+- **site**: lead with what the reader gets, not what is inside
+- **site**: serve the docsite from ainb.app
+- add signed self-updates
+- alias upgrade to update
+
+### Fixed
+- Merge pull request #758 from stevengonsalvez/f/codex-launch-gates
+- Merge pull request #765 from stevengonsalvez/f/rename-sessions
+- Merge pull request #768 from stevengonsalvez/f/codex-shared-thread
+- **codex**: one launch argv for both spawn paths, and repair its docs
+- **codex**: own the thread id so every client shares one conversation
+- **codex**: stop our own hook install stalling the codex launch
+- **codex**: trust worktrees Ainb creates, and follow model retirements
+- **hooks**: address the review of the stall guard
+- **session**: avoid prefix branch collisions
+- **sessions**: show why a launch failed instead of swallowing it
+- **setup**: correct toolkit counts in the setup wizard
+- **site**: repair the Edit page link on every docs page
+- **update**: refresh Homebrew metadata
+- handle pairing in release checker
+- preserve direct update rollback
+
+### Documentation
+- Merge pull request #759 from stevengonsalvez/f/mainsite-and-docs
+- Merge pull request #761 from stevengonsalvez/f/mainsite-and-docs
+- Merge pull request #770 from stevengonsalvez/f/mainsite-and-docs
+- **ainb-hooks**: document the ask mode and the block budget
+- **cts-v2**: correct axis list in the crate doc comment
+- **hangar**: say it shipped, and correct the figures
+- **site**: correct stale counts on the landing page
+- **site**: give the eight unreachable pages a route into the site
+- **site**: stop building implementer specs as orphan pages
+- add a thumbnail set for the README feature grid
+- conformance suite covers 21 axes, not 14
+- correct counts in architecture diagrams
+- correct counts in the ecosystem architecture diagram
+- correct skill and agent counts in docs index
+- correct stale counts and unit lists in README
+- correct toolkit counts and deploy targets in value prop
+- correct toolkit counts and workspace size in what-is-ainb
+- fix 13 broken relative links
+- mark the website brief superseded and record the domain change
+- note the custom domain in the deploy description
+- point the website link at ainb.app
+- rebuild the index so it lists every published page
+- reflect plugin is v5.2.5, not 3.6.0
+- reflect plugin version in the CLI reference too
+- reflect version in the plugin diagram
+- replace the two hero screenshots with a full feature grid
+- rewrite the Why section as a comprehensive problem/solution sweep
+- rewrite toolkit agents page against the catalog
+- sync toolkit skills page with the catalog
+
+### Other
+- Merge pull request #753 from stevengonsalvez/chore/release-v1.22.8
+- Merge pull request #766 from stevengonsalvez/chore/release-v1.22.11
+- **hooks**: release version 0.4.8
+- **release**: sync v1.22.11
+- sync Cargo.lock with the 1.22.8 version bump
+- **abtop**: single docsite const, repointed at ainb.app
+- **codex**: make the managed launch argv testable
+- **docs**: move the docsite origin behind a single macro
+- **hooks**: budget the stall guard's blocks
+- **witr**: single docsite const, repointed at ainb.app
+
+
 ## [1.22.11] - 2026-08-26
 ### Added
 - Merge pull request #754 from stevengonsalvez/f/ainb-hooks-interview
