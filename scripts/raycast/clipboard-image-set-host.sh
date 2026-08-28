@@ -1,14 +1,14 @@
 #!/bin/bash
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Set SSH Host
+# @raycast.title Set Clipboard Host
 # @raycast.mode silent
 # @raycast.packageName Stevie Utils
 # @raycast.icon 🎯
-# @raycast.description Choose which host "Clipboard Image -> SSH Path" copies to. Persists the choice.
+# @raycast.description Choose where "Clipboard Image -> Host Path" copies to. Persists the choice.
 #
 # Optional parameters:
-# @raycast.argument1 { "type": "dropdown", "placeholder": "Host", "data": [{ "title": "Mac (stevens-macbook-pro-5)", "value": "mac" }, { "title": "Hetzner (claude@claude-hetzner)", "value": "hetzner" }] }
+# @raycast.argument1 { "type": "dropdown", "placeholder": "Host", "data": [{ "title": "This Mac (no ssh)", "value": "this" }, { "title": "Mac (mac-lan)", "value": "mac" }, { "title": "Hetzner (claude@claude-hetzner)", "value": "hetzner" }] }
 
 set -euo pipefail
 

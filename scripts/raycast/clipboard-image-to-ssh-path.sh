@@ -1,11 +1,11 @@
 #!/bin/bash
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Clipboard Image -> SSH Path
+# @raycast.title Clipboard Image -> Host Path
 # @raycast.mode silent
 # @raycast.packageName Stevie Utils
 # @raycast.icon 📋
-# @raycast.description Copy clipboard image to the current host's /tmp over Tailscale SSH; put bare /tmp/... path on clipboard. Change host with "Set SSH Host".
+# @raycast.description Copy clipboard image to the current host's /tmp; put bare /tmp/... path on clipboard. Change host with "Set Clipboard Host".
 
 set -euo pipefail
 
@@ -25,13 +25,15 @@ fail() {
 }
 
 command -v pngpaste >/dev/null 2>&1 || fail "pngpaste missing — brew install pngpaste"
-command -v tailscale >/dev/null 2>&1 || fail "tailscale missing"
 
-if ! tailscale status --json >/dev/null 2>&1; then
-  fail "tailscale not running"
-fi
+if [ "$HOST_KEY" != "this" ]; then
+  command -v tailscale >/dev/null 2>&1 || fail "tailscale missing"
 
-if ! tailscale status --json | PEER_NAME="$PEER_NAME" /usr/bin/python3 -c '
+  if ! tailscale status --json >/dev/null 2>&1; then
+    fail "tailscale not running"
+  fi
+
+  if ! tailscale status --json | PEER_NAME="$PEER_NAME" /usr/bin/python3 -c '
 import json, os, sys
 want = os.environ["PEER_NAME"].lower()
 j = json.load(sys.stdin)
@@ -40,7 +42,8 @@ peer = next((p for p in j.get("Peer", {}).values()
              or p.get("DNSName", "").lower().startswith(want + ".")), None)
 raise SystemExit(0 if peer and peer.get("Online") else 1)
 '; then
-  fail "remote host offline: ${REMOTE_HOST}"
+    fail "remote host offline: ${REMOTE_HOST}"
+  fi
 fi
 
 local_tmp="$(mktemp "/tmp/${FILE_PREFIX}.XXXXXX.png")"
@@ -53,12 +56,17 @@ fi
 remote_name="${FILE_PREFIX}-$(date +%Y%m%d-%H%M%S)-$RANDOM.png"
 remote_path="${REMOTE_DIR}/${remote_name}"
 
-if ! tailscale ssh "$REMOTE_HOST" "cat > $(printf '%q' "$remote_path")" < "$local_tmp"; then
-  fail "Copy to remote failed"
-fi
+if [ "$HOST_KEY" = "this" ]; then
+  cp "$local_tmp" "$remote_path" || fail "Local copy failed"
+  [ -s "$remote_path" ] || fail "Local file verify failed"
+else
+  if ! ssh "$REMOTE_HOST" "cat > $(printf '%q' "$remote_path")" < "$local_tmp"; then
+    fail "Copy to remote failed"
+  fi
 
-if ! tailscale ssh "$REMOTE_HOST" "test -s $(printf '%q' "$remote_path")"; then
-  fail "Remote file verify failed"
+  if ! ssh "$REMOTE_HOST" "test -s $(printf '%q' "$remote_path")"; then
+    fail "Remote file verify failed"
+  fi
 fi
 
 printf "%s" "$remote_path" | pbcopy

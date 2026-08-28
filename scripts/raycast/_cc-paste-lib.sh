@@ -7,12 +7,14 @@
 CC_DEFAULT_HOST="mac"
 CC_STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/cc-paste-host"
 
-# Host registry. key -> "ssh-target|tailscale-peer-hostname"
-# ssh-target may include user@ ; peer-hostname is matched (case-insensitive) for the online check.
+# Host registry. key -> "destination|tailscale-peer-hostname"
+# ponytail: "this" = the local machine, "-|-" means no ssh and no online check.
+# destination may include user@ ; peer-hostname is matched (case-insensitive) for the online check.
 # Add a host = add a case line here (and a dropdown entry in clipboard-image-set-host.sh).
 cc_resolve() {
   case "$1" in
-    mac)     echo "stevens-macbook-pro-5|Stevens-MacBook-Pro-5" ;;
+    this)    echo "-|-" ;;
+    mac)     echo "mac-lan|Stevens-MacBook-Pro-5" ;;
     hetzner) echo "claude@claude-hetzner|claude-hetzner" ;;
     *)       echo "" ;;
   esac
