@@ -200,3 +200,31 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = "z"
+
+# Without this, debug builds carry `debug = 2` (full DWARF) for the workspace
+# AND for every dependency. That is what took the `--workspace --all-features`
+# test tree to 85G on a runner, the size behind `cache-targets: false` on the
+# Test and Contracts jobs in `.github/workflows/ci.yml`.
+#
+# `line-tables-only` keeps exactly the mapping a panic backtrace resolves,
+# file and line per address, and drops the type, variable and lexical-scope
+# DWARF that only an interactive debugger reads. Nothing in CI attaches one.
+#
+# MEASURED, 2026-08-26, on `-p ainb-hangar-daemon --all-features --lib --bins`
+# plus three integration targets, built twice from a clean target dir:
+# 3,574,018,649 to 2,138,170,044 bytes, 1.67x smaller overall. Linked test
+# binaries carry most of it and shrink hardest, 2.94x: `dispatch_routing` goes
+# 297M to 86M as `.debug_info` collapses 109.7M to 11.8M while `.debug_line`
+# survives at 27.7M of 29.3M. An identical `RUST_BACKTRACE=1` panic printed the
+# same `file:line:col` on every frame before and after.
+#
+# Both keys are set on purpose. `test` does inherit from `dev`, so the second
+# block is redundant today; it is written out so the intent survives anyone
+# later giving `[profile.test]` overrides of its own. `dev` is the load-bearing
+# one: it covers dependencies, and it covers the nested `cargo build` that
+# `real_plugin_axes` runs into this same target dir.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
