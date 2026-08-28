@@ -47,8 +47,22 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     // can enter the fleet at all: it has no ainb record, no broker row and
     // possibly no tmux pane, so its probe file is its only trace.
     let probes = ProbeIndex::load();
-    let probed = discover_from_probes(&probes);
-    let merged = merge_sessions(vec![ainb, peers, jobs, probed]);
+    let known = merge_sessions(vec![ainb, peers, jobs]);
+    // Probe discovery ADDS sessions, it must never duplicate one.
+    //
+    // `merge_sessions` merges on stable identity (id / peer_id / tmux_session /
+    // bg_job_id) and deliberately never on cwd. A probe Session carries
+    // Claude's own session id and none of the other keys, so it matches nothing
+    // and every already-known session was emitted twice — once as `ainb`, once
+    // as `probe`. Keep only probes for a cwd nothing else claims, which is
+    // exactly the population this discovery exists to reach.
+    let claimed: std::collections::HashSet<&str> =
+        known.iter().map(|s| s.cwd.as_str()).filter(|c| !c.is_empty()).collect();
+    let unclaimed: Vec<Session> = discover_from_probes(&probes)
+        .into_iter()
+        .filter(|s| !claimed.contains(s.cwd.as_str()))
+        .collect();
+    let merged = merge_sessions(vec![known, unclaimed]);
     let (rows, census) = classify_all(merged, &probes, idle_override, enrich).await;
 
     if matches!(format, OutputFormat::Text) {
@@ -199,33 +213,49 @@ async fn classify_all(
         // probe knows THAT a session blocked, the transcript knows WHAT it
         // asked. Only consulted for a session tier A is about to call `waiting`.
         let probe_ask = probes
-            .peek_status(&session.cwd)
+            .peek_status(&session)
             .filter(|status| *status == "waiting")
             .and_then(|_status| ask_from_transcript(&session));
-        if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
-            census.probe += 1;
-            // `Healthy` from tier A means the probe said busy/shell — the one
-            // place in the fleet where WORKING is asserted rather than inferred
-            // from silence.
-            if matches!(resolution, Resolution::Healthy) {
-                census.running += 1;
+        // Tier A ANSWERS only where it knows more than the tiers below. It does
+        // NOT get to silence them.
+        //
+        // The probe carries no error information and `resolve_probe` can never
+        // produce an ERR, but only the pane/transcript scan can see an
+        // `API Error: 500 overloaded_error`. Letting tier A short-circuit every
+        // probed session therefore made ERR unreachable on a Claude fleet and
+        // silently killed ATC's capped auto-`continue`, which is the whole
+        // reason the retry ledger exists.
+        //
+        // So: `waiting` short-circuits, because a structured ASK/WAIT read the
+        // instant it happens beats anything the lower tiers can infer. Every
+        // other status falls through and is used only to enrich the census —
+        // an idle probe has no `last_assistant_text` and no error visibility,
+        // so the transcript path is strictly better placed to classify it.
+        let probe_status = probes.peek_status(&session);
+        if probe_status == Some("busy") || probe_status == Some("shell") {
+            census.running += 1;
+        }
+        if probe_status == Some("waiting") {
+            if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
+                census.probe += 1;
+                match resolution {
+                    // A session ONLY the probe tier knows about — ainb never
+                    // launched it, so it has no tmux pane and no broker peer — is
+                    // listed only when it actually needs something. Idle is not
+                    // actionable: the ATC playbook leaves idle sessions alone, and
+                    // there is no channel to nudge this one down anyway, so
+                    // listing it would add a row per stray Claude window to every
+                    // heartbeat body while changing nobody's behaviour.
+                    Resolution::Hook(row)
+                        if is_probe_only(&session)
+                            && matches!(row.context, NeedsContext::Idle(_)) => {}
+                    Resolution::Hook(row) => hook_rows.push(*row),
+                    Resolution::Healthy => {}
+                    // Tier A never returns Fallback; it abstains with None instead.
+                    Resolution::Fallback => fallback_sessions.push(session),
+                }
+                continue;
             }
-            match resolution {
-                // A session ONLY the probe tier knows about — ainb never
-                // launched it, so it has no tmux pane and no broker peer — is
-                // listed only when it actually needs something. Idle is not
-                // actionable: the ATC playbook leaves idle sessions alone, and
-                // there is no channel to nudge this one down anyway, so
-                // listing it would add a row per stray Claude window to every
-                // heartbeat body while changing nobody's behaviour.
-                Resolution::Hook(row)
-                    if is_probe_only(&session) && matches!(row.context, NeedsContext::Idle(_)) => {}
-                Resolution::Hook(row) => hook_rows.push(*row),
-                Resolution::Healthy => {}
-                // Tier A never returns Fallback; it abstains with None instead.
-                Resolution::Fallback => fallback_sessions.push(session),
-            }
-            continue;
         }
 
         match index.resolve(&session, now_ms, stale_ms) {
