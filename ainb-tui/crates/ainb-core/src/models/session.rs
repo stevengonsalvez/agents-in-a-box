@@ -335,16 +335,25 @@ impl CodexModel {
     /// forward to their replacements. Unknown values fall back to
     /// `SystemDefault`.
     pub fn parse(value: &str) -> CodexModel {
-        match value.trim().to_lowercase().as_str() {
+        let lowered = value.trim().to_lowercase();
+        // A retired id resolves to its replacement so the Configure row names
+        // a model that still exists rather than a dead one. No warning here:
+        // `parse` runs on every frame of the Configure render, and a per-frame
+        // log line would bury the one that matters. The substitution is logged
+        // once, at the launch site, by `migrated_codex_model`.
+        //
+        // That launch site can still disagree with this row: it prefers the
+        // `upgrade` Codex publishes in `models_cache.json` and only falls back
+        // to this table. When the provider names a replacement outside
+        // `CodexModel`'s list, the row shows the table's answer and the
+        // session launches the provider's. Reading the cache here is not the
+        // fix - `parse` is a pure per-frame call and must not touch the disk.
+        let lowered = ainb_model_rates::retired_codex_replacement(&lowered).unwrap_or(&lowered);
+        match lowered {
             "" | "default" => CodexModel::SystemDefault,
             "gpt-5.5" => CodexModel::Gpt55,
             "gpt-5.6-terra" => CodexModel::Gpt56Terra,
             "gpt-5.6-luna" => CodexModel::Gpt56Luna,
-            // Retired 2026-08-31. Mapped forward rather than left to the
-            // unknown-id arm: a preset pinned to gpt-5.4 would otherwise
-            // silently revert to the Codex CLI default with only a log line.
-            "gpt-5.4" => CodexModel::Gpt56Terra,
-            "gpt-5.4-mini" => CodexModel::Gpt56Luna,
             "gpt-5.3-codex" => CodexModel::Gpt53Codex,
             other => {
                 tracing::warn!(
