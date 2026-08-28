@@ -1251,8 +1251,22 @@ impl Runner {
             argv.push(CODEX_JSON_FLAG.to_string());
         }
         if let Some(model) = &invocation.model {
+            // A retired id dispatches into Codex's blocking migration modal,
+            // and a headless run has nobody to dismiss it: the task hangs to
+            // its timeout. Agent records hold whatever was pinned when they
+            // were written, so the substitution belongs here, at the wire.
+            let model = match ainb_model_rates::retired_codex_replacement(model) {
+                Some(replacement) => {
+                    tracing::warn!(
+                        "agent model '{model}' is retired; dispatching \
+                         '{replacement}' instead"
+                    );
+                    replacement.to_string()
+                }
+                None => model.clone(),
+            };
             argv.push(CODEX_MODEL_FLAG.to_string());
-            argv.push(model.clone());
+            argv.push(model);
         }
         argv.extend(invocation.cli_args.iter().cloned());
         argv.push(ARG_SEPARATOR.to_string());

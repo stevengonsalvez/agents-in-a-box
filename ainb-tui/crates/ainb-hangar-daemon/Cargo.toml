@@ -83,6 +83,11 @@ ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd" }
 # Fleet usage contract. Swift receives only its bounded, safe DTO.
 ainb-plugin-session-reader = { path = "../ainb-plugin-session-reader" }
 ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
+# Provider model metadata shared with ainb-core. Used here for the retired-id
+# table only: an agent record pinned to a retired Codex model would otherwise
+# dispatch `codex exec -m <dead id>` straight into the provider's blocking
+# migration modal, and a headless run has nobody to dismiss it.
+ainb-model-rates = { path = "../ainb-model-rates" }
 # e38.23 OS-level agent confinement: wraps the provider spawn in a Seatbelt
 # (macOS) / Landlock (Linux) FS sandbox so the agent subprocess can only
 # read/write the task's isolated roots. Gates the non-claude providers (e38.16).

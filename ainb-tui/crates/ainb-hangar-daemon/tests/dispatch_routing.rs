@@ -515,6 +515,51 @@ fn brief_that_names_a_subcommand_does_not_hijack_it() {
     );
 }
 
+/// An agent record pinned to a retired Codex model dispatches the replacement.
+///
+/// Headless is the case that matters: launching a retired id shows Codex's
+/// blocking migration modal, and a headless run has nobody to dismiss it, so
+/// the task burns to its timeout instead of failing fast. gpt-5.4 retired
+/// 2026-08-31 and agent records still carry it.
+#[test]
+fn a_retired_codex_model_is_replaced_before_dispatch() {
+    let tmp = TempDir::new().expect("tmp");
+    let (runner, _marker) = runner_with_all(tmp.path());
+    let inv = ProviderInvocation {
+        prompt: "do the thing".to_string(),
+        model: Some("gpt-5.4".to_string()),
+        cli_args: vec![],
+    };
+    let (_p, argv) = runner.provider_command(Backend::Codex, &inv, Mode::Headless);
+    let joined = argv.join(" ");
+    assert!(
+        joined.contains("-m gpt-5.6-terra"),
+        "retired gpt-5.4 must dispatch as its replacement: {argv:?}"
+    );
+    assert!(
+        !joined.contains("gpt-5.4"),
+        "the retired id must not reach the wire: {argv:?}"
+    );
+}
+
+/// A live model id is passed through untouched: AINB does not own the Codex
+/// catalogue, and only the dated retirement table may rewrite a pin.
+#[test]
+fn a_live_codex_model_is_dispatched_verbatim() {
+    let tmp = TempDir::new().expect("tmp");
+    let (runner, _marker) = runner_with_all(tmp.path());
+    let inv = ProviderInvocation {
+        prompt: "do the thing".to_string(),
+        model: Some("gpt-5.5".to_string()),
+        cli_args: vec![],
+    };
+    let (_p, argv) = runner.provider_command(Backend::Codex, &inv, Mode::Headless);
+    assert!(
+        argv.join(" ").contains("-m gpt-5.5"),
+        "a live model must be threaded unchanged: {argv:?}"
+    );
+}
+
 /// A value-taking flag in the agent's `cli_args` must not swallow the brief.
 ///
 /// `cli_args` are appended verbatim before the prompt, so a trailing flag that
