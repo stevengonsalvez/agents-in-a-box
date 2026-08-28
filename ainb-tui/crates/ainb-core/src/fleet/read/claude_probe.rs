@@ -209,6 +209,22 @@ pub fn resolve_probe(
         Resolution::Hook(Box::new(row))
     };
 
+    // A probe older than this is not evidence about NOW. Claude rewrites the
+    // file on every status flip, so a stamp this old means the writer stopped:
+    // the process wedged, or was SIGKILLed without cleanup. The pid stays alive
+    // in both cases, so the liveness gate cannot see it.
+    //
+    // Only `busy`/`shell` need this. They are the states that SUPPRESS a
+    // session, so a frozen one would delete a live session from `fleet needs`
+    // permanently. `idle` and `waiting` produce rows that carry their own age,
+    // where staleness is visible rather than silent.
+    if matches!(probe.status.as_str(), "busy" | "shell") {
+        let fresh = blocked_for(probe, now_ms).is_some_and(|mins| mins < HEALTHY_MAX_AGE_MIN);
+        if !fresh {
+            return None; // abstain — let the tiers that can actually look decide
+        }
+    }
+
     match probe.status.as_str() {
         "busy" | "shell" => Some(Resolution::Healthy),
         "idle" => {
@@ -280,6 +296,13 @@ pub fn load_dir(dir: &Path) -> Vec<ClaudeProbe> {
     probes
 }
 
+/// How stale a `busy`/`shell` probe may be and still suppress a session.
+///
+/// Generous on purpose: a long tool call legitimately holds `busy` without a
+/// rewrite, and wrongly abstaining merely costs a pane scan, while wrongly
+/// trusting a frozen probe hides a stuck session indefinitely.
+pub const HEALTHY_MAX_AGE_MIN: i64 = 30;
+
 /// Minutes a probe has held its current status, or `None` when the stamp is
 /// unusable (absent, or in the future — a clock skew we will not reason about).
 #[must_use]
@@ -311,7 +334,19 @@ fn humanize_minutes(mins: i64) -> String {
 /// long-dead session cannot answer for a session running in the same cwd today.
 #[derive(Debug, Default)]
 pub struct ProbeIndex {
+    /// The freshest live probe per cwd, for RESOLVING a session.
     by_cwd: HashMap<String, ClaudeProbe>,
+    /// Every live probe, for DISCOVERY. Two Claude sessions can share a cwd,
+    /// and collapsing them here would delete the loser from the fleet
+    /// entirely — including a blocked one losing to a busy sibling.
+    all: Vec<ClaudeProbe>,
+    /// By Claude's own session id — the EXACT correlation, used ahead of cwd.
+    ///
+    /// cwd alone is ambiguous the moment two sessions share a directory, and
+    /// the cwd map keeps only the freshest: a session blocked on a question
+    /// would be masked by an idle sibling that merely flipped status more
+    /// recently, which is precisely the case this tier exists to surface.
+    by_session: HashMap<String, ClaudeProbe>,
 }
 
 impl ProbeIndex {
@@ -323,9 +358,15 @@ impl ProbeIndex {
     #[must_use]
     pub fn load_from(dir: &Path) -> Self {
         let mut by_cwd: HashMap<String, ClaudeProbe> = HashMap::new();
+        let mut all: Vec<ClaudeProbe> = Vec::new();
+        let mut by_session: HashMap<String, ClaudeProbe> = HashMap::new();
         for probe in load_dir(dir) {
             if probe.cwd.is_empty() || !probe_is_live(&probe, &observe_pid(probe.pid)) {
                 continue;
+            }
+            all.push(probe.clone());
+            if !probe.session_id.is_empty() {
+                by_session.insert(probe.session_id.clone(), probe.clone());
             }
             match by_cwd.get(&probe.cwd) {
                 Some(existing) if existing.status_updated_at >= probe.status_updated_at => {}
@@ -334,7 +375,11 @@ impl ProbeIndex {
                 }
             }
         }
-        Self { by_cwd }
+        Self {
+            by_cwd,
+            all,
+            by_session,
+        }
     }
 
     /// Load from the default `~/.claude/sessions`. An unresolvable home yields
@@ -355,12 +400,12 @@ impl ProbeIndex {
     /// Number of live probes indexed.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.by_cwd.len()
+        self.all.len()
     }
 
-    /// Every live probe in the index.
-    pub fn probes(&self) -> impl Iterator<Item = &ClaudeProbe> {
-        self.by_cwd.values()
+    /// Every live probe, including several sharing one cwd.
+    pub fn all_live(&self) -> impl Iterator<Item = &ClaudeProbe> {
+        self.all.iter()
     }
 
     /// The raw status a live probe reports for `cwd`, without resolving it.
@@ -369,8 +414,16 @@ impl ProbeIndex {
     /// for a session tier A is about to call `waiting`, rather than paying a
     /// JSONL read for every session on the host.
     #[must_use]
-    pub fn peek_status(&self, cwd: &str) -> Option<&str> {
-        self.by_cwd.get(cwd).map(|p| p.status.as_str())
+    pub fn peek_status(&self, session: &Session) -> Option<&str> {
+        self.probe_for(session).map(|p| p.status.as_str())
+    }
+
+    /// The probe that speaks for this session: its own id when the session came
+    /// from a probe, else the freshest probe in its directory.
+    fn probe_for(&self, session: &Session) -> Option<&ClaudeProbe> {
+        self.by_session
+            .get(&session.id)
+            .or_else(|| (!session.cwd.is_empty()).then(|| self.by_cwd.get(&session.cwd)).flatten())
     }
 
     /// Resolve one session against tier A, or `None` to abstain to tier B.
@@ -386,12 +439,23 @@ impl ProbeIndex {
         idle_threshold_min: i64,
         now_ms: i64,
     ) -> Option<Resolution> {
-        if session.cwd.is_empty() {
-            return None;
-        }
-        let probe = self.by_cwd.get(&session.cwd)?;
+        let probe = self.probe_for(session)?;
         resolve_probe(probe, session.clone(), ask, idle_threshold_min, now_ms)
     }
+}
+
+/// The exact transcript a probe names, when it exists on disk.
+fn transcript_for(p: &ClaudeProbe) -> Option<String> {
+    if p.session_id.is_empty() || p.cwd.is_empty() {
+        return None;
+    }
+    let slug = crate::fleet::read::cwd_to_project_slug(&p.cwd);
+    let path = dirs::home_dir()?
+        .join(".claude")
+        .join("projects")
+        .join(slug)
+        .join(format!("{}.jsonl", p.session_id));
+    path.exists().then(|| path.to_string_lossy().into_owned())
 }
 
 /// Discover Claude sessions that ainb did not launch.
@@ -413,7 +477,7 @@ impl ProbeIndex {
 #[must_use]
 pub fn discover_from_probes(index: &ProbeIndex) -> Vec<Session> {
     index
-        .probes()
+        .all_live()
         .map(|p| Session {
             id: if p.session_id.is_empty() {
                 format!("claude-probe-{}", p.pid)
@@ -428,7 +492,12 @@ pub fn discover_from_probes(index: &ProbeIndex) -> Vec<Session> {
             worktree_path: None,
             peer_id: None,
             bg_job_id: None,
-            transcript_path: None,
+            // Claude names transcripts `<projects>/<cwd-slug>/<sessionId>.jsonl`
+            // and the probe carries that id verbatim, so the exact transcript
+            // is known. Leaving this None made the reader fall back to "newest
+            // file in the cwd slug", which attributes one session's open
+            // question to another whenever two run in the same directory.
+            transcript_path: transcript_for(p),
             sources: vec![SessionSource::Probe],
             summary: p.name.clone().filter(|n| !n.is_empty()),
             last_seen_ms: Some(p.status_updated_at).filter(|t| *t > 0),
@@ -472,6 +541,13 @@ mod tests {
     fn session_at(cwd: &str) -> Session {
         let mut s = session(None);
         s.cwd = cwd.to_string();
+        s
+    }
+
+    /// A session carrying Claude's own id, the exact correlation key.
+    fn session_ided(id: &str, cwd: &str) -> Session {
+        let mut s = session_at(cwd);
+        s.id = id.to_string();
         s
     }
 
@@ -587,22 +663,43 @@ mod tests {
         .expect("valid instant")
         .format("%a %b %e %H:%M:%S %Y")
         .to_string();
-        for (name, status, stamp) in [("old.json", "idle", 1_000), ("new.json", "busy", 9_000)] {
+        for (name, id, status, stamp) in [
+            ("old.json", "sess-old", "idle", 1_000),
+            ("new.json", "sess-new", "busy", 9_000),
+        ] {
             std::fs::write(
                 dir.path().join(name),
                 format!(
-                    r#"{{"pid":{me},"cwd":"/w/same","status":"{status}","procStart":"{started_str}","statusUpdatedAt":{stamp}}}"#
+                    r#"{{"pid":{me},"sessionId":"{id}","cwd":"/w/same","status":"{status}","procStart":"{started_str}","statusUpdatedAt":{stamp}}}"#
                 ),
             )
             .unwrap();
         }
         let index = ProbeIndex::load_from(dir.path());
-        assert_eq!(index.len(), 1);
-        // busy (the newer stamp) short-circuits Healthy; idle would have made a row.
+        // BOTH survive for discovery — collapsing them would delete a session
+        // from the fleet entirely.
+        assert_eq!(index.len(), 2);
+        assert_eq!(discover_from_probes(&index).len(), 2);
+        // Resolving by cwd alone still takes the freshest, since cwd cannot
+        // distinguish them. busy (the newer stamp) short-circuits Healthy: at
+        // now=400_000 it is 6.5m old, inside the 30m freshness window, while
+        // the idle sibling is 6.6m old and so past the 5m idle threshold.
         assert!(matches!(
-            index.resolve(&session_at("/w/same"), None, 5, 10_000_000),
+            index.resolve(&session_at("/w/same"), None, 5, 400_000),
             Some(Resolution::Healthy)
         ));
+        // Correlating by Claude's own id reaches the OTHER probe, which cwd
+        // alone can never do — the case where a blocked session is masked by a
+        // sibling that merely flipped status more recently. `sess-old` is idle
+        // and old enough to have aged past the threshold, so it yields a row
+        // where the cwd lookup yields Healthy.
+        let by_id = index
+            .resolve(&session_ided("sess-old", "/w/same"), None, 5, 400_000)
+            .expect("the id must reach its OWN probe, not the freshest sibling");
+        assert!(
+            matches!(by_id, Resolution::Hook(ref row) if matches!(row.context, NeedsContext::Idle(_))),
+            "id correlation must resolve the idle probe, not the busy one"
+        );
     }
 
     #[test]
