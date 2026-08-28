@@ -66,7 +66,7 @@ worktrees/
 # agent-bridge/
 #   node_modules/
 #   .turbo/
-.codex/session/current-session.yaml
+.codex/session/
 __pycache__/
 *.pyc
 
