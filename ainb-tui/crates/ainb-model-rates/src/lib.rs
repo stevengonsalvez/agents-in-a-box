@@ -107,6 +107,39 @@ fn anthropic_rates(m: &str) -> Option<(f64, f64)> {
     None
 }
 
+/// The replacement for a Codex model id that has been retired, or `None` for
+/// an id that is still live.
+///
+/// Lives beside the rate table because both are provider model metadata that
+/// more than one crate needs: the TUI/CLI launcher in `ainb-core` and the
+/// hangar daemon's dispatch each have to keep a retired id off the wire, and
+/// they share no crate other than this one.
+///
+/// At those launch sites this is the LAST resort, not the first. `ainb-core`
+/// prefers the `upgrade` block Codex publishes in its own `models_cache.json`,
+/// because the provider owns that data and keeps it current. This table exists
+/// for the moments the cache cannot answer: absent on a fresh machine,
+/// unreadable, or pruned of the entry once the model is fully gone - exactly
+/// when a stale pin most needs rescuing.
+///
+/// Matching is case-insensitive. The Configure picker lowercases before it
+/// asks and the CLI launch path does not, so `--model GPT-5.4` has to resolve
+/// the same as `--model gpt-5.4`.
+///
+/// Keep it small and dated. An entry earns its place only while real on-disk
+/// presets and session records still carry the retired id.
+pub fn retired_codex_replacement(model: &str) -> Option<&'static str> {
+    // Retired 2026-08-31.
+    match model.trim().to_lowercase().as_str() {
+        "gpt-5.4" => Some("gpt-5.6-terra"),
+        // Note this is a price INCREASE, $0.75/$4.50 -> $1.00/$6.00. luna is
+        // the closest surviving cheap tier, not a like-for-like swap, so the
+        // launch-site warning is what tells a cost-sensitive user it happened.
+        "gpt-5.4-mini" => Some("gpt-5.6-luna"),
+        _ => None,
+    }
+}
+
 /// OpenAI list prices, most-specific prefix first.
 fn openai_rates(m: &str) -> Option<(f64, f64)> {
     // GPT-5.6 family: three tiers at three price points. Bare `gpt-5.6`
@@ -126,6 +159,9 @@ fn openai_rates(m: &str) -> Option<(f64, f64)> {
     if m.starts_with("gpt-5.5") {
         return Some((5.0, 30.0));
     }
+    // The gpt-5.4 family retired 2026-08-31. Its rates STAY: this table prices
+    // historical transcripts, and deleting a retired model's rate does not tidy
+    // anything up: it turns every past session that used it into `cost n/a`.
     if m.starts_with("gpt-5.4-nano") {
         return Some((0.2, 1.25));
     }
@@ -294,5 +330,40 @@ mod tests {
     fn reasoning_tokens_bill_at_the_output_rate() {
         let with_reasoning = estimate_cost_usd("gpt-5.6-sol", 0, 0, 0, 0, 1_000_000);
         assert_eq!(with_reasoning, Some(30.0));
+    }
+
+    /// The table the Configure row, the CLI launcher and the daemon dispatch
+    /// all share. A live id must return `None` so the provider keeps owning
+    /// its own catalogue.
+    #[test]
+    fn only_retired_ids_have_a_replacement() {
+        assert_eq!(retired_codex_replacement("gpt-5.4"), Some("gpt-5.6-terra"));
+        assert_eq!(
+            retired_codex_replacement("gpt-5.4-mini"),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(retired_codex_replacement("gpt-5.6-terra"), None);
+        assert_eq!(retired_codex_replacement("gpt-5.5"), None);
+        assert_eq!(retired_codex_replacement("anything-else"), None);
+    }
+
+    /// `ainb run --model GPT-5.4` reaches the table with the case the user
+    /// typed, while the Configure picker lowercases first. Both must resolve.
+    #[test]
+    fn retired_ids_match_regardless_of_case_and_padding() {
+        assert_eq!(retired_codex_replacement("GPT-5.4"), Some("gpt-5.6-terra"));
+        assert_eq!(
+            retired_codex_replacement("  Gpt-5.4-Mini  "),
+            Some("gpt-5.6-luna")
+        );
+    }
+
+    /// The gpt-5.4 family retired 2026-08-31 but its RATES stay: this table
+    /// prices historical transcripts, and dropping them turns every past
+    /// session that used the model into `cost n/a`.
+    #[test]
+    fn retired_models_keep_their_historical_rates() {
+        assert_eq!(input_per_million("gpt-5.4"), 2.5);
+        assert_eq!(input_per_million("gpt-5.4-mini"), 0.75);
     }
 }

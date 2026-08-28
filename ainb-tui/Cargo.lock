@@ -376,6 +376,7 @@ dependencies = [
  "ainb-hangar-sandbox",
  "ainb-hangar-secrets",
  "ainb-hangar-store",
+ "ainb-model-rates",
  "ainb-plugin-hangar",
  "ainb-plugin-notifyd",
  "ainb-plugin-session-reader",

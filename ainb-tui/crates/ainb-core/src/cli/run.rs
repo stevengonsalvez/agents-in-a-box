@@ -97,7 +97,11 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     });
 
     // Step 5: Keep model opaque. Provider CLI owns model validation/catalog.
-    let model = requested_model(args.model.as_deref());
+    // Resolved HERE, above step 6, not inside `build_agent_command`: the Codex
+    // remote thread is allocated from this value first, so a retired id
+    // substituted only at argv-build time would already have gone out on the
+    // app-server `newThread` and aborted the run before argv existed.
+    let model = launch_model(&args);
 
     // Step 5.5: Wire shared MCP pool (Claude only; never blocks creation).
     // Ensures the pool daemon is up and merge-writes the worktree's
@@ -493,6 +497,27 @@ fn requested_model(model: Option<&str>) -> Option<String> {
     (!is_default_model(model)).then(|| model.to_string())
 }
 
+/// The model id a launch should actually use: the requested one, with a
+/// RETIRED Codex id swapped for its replacement.
+///
+/// Retired ids reach here from persisted sessions and saved presets as opaque
+/// strings, and launching one shows Codex's blocking migration modal, so the
+/// session never starts.
+///
+/// NOT pure for Codex: `migrated_codex_model` reads `<CODEX_HOME>/
+/// models_cache.json` to prefer the replacement the provider itself
+/// advertises. Callers that must stay hermetic (`remote_codex_command` and its
+/// tests) take the model as an argument instead of calling this.
+fn launch_model(args: &RunArgs) -> Option<String> {
+    let model = requested_model(args.model.as_deref())?;
+    if args.tool.to_cli_provider() == CliProvider::Codex {
+        return Some(crate::interactive::session_manager::migrated_codex_model(
+            &model,
+        ));
+    }
+    Some(model)
+}
+
 /// Validate that the selected provider's CLI binary is installed and on PATH
 fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
     let cmd = provider.command();
@@ -526,7 +551,7 @@ fn build_agent_command(args: &RunArgs) -> String {
 
     match provider {
         CliProvider::Claude | CliProvider::Codex => {
-            if let Some(model) = requested_model(args.model.as_deref()) {
+            if let Some(model) = launch_model(args) {
                 cmd_parts.push("--model".to_string());
                 cmd_parts.push(model);
             }
@@ -1002,7 +1027,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -1014,8 +1039,44 @@ mod tests {
         let cmd = build_agent_command(&args);
         assert!(cmd.starts_with("codex"));
         assert!(
-            cmd.contains("--model gpt-5.4"),
-            "Codex with explicit gpt-5.4 must emit --model, got: {cmd}"
+            cmd.contains("--model gpt-5.6-terra"),
+            "Codex with explicit gpt-5.6-terra must emit --model, got: {cmd}"
+        );
+    }
+
+    /// A retired id must not reach the wire. Persisted sessions and saved
+    /// presets both arrive here as opaque strings, so `ainb run --model
+    /// gpt-5.4` after 2026-08-31 would otherwise launch into Codex's blocking
+    /// migration modal and never start.
+    ///
+    /// Asserted as "not the retired id" rather than "exactly terra": the
+    /// substitution prefers Codex's own `models_cache.json` when the machine
+    /// has one, and this test must not depend on that file's contents.
+    #[test]
+    fn test_build_codex_command_substitutes_a_retired_model() {
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Codex,
+            model: Some("gpt-5.4".to_string()),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+            parent: None,
+        };
+
+        let cmd = build_agent_command(&args);
+        assert!(
+            cmd.contains("--model"),
+            "the flag must still be emitted, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("gpt-5.4"),
+            "gpt-5.4 retired 2026-08-31 and must not reach the wire, got: {cmd}"
         );
     }
 

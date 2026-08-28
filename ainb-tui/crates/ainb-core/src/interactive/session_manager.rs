@@ -370,41 +370,55 @@ fn write_atomic_config(path: &std::path::Path, contents: &str) -> std::io::Resul
 /// Codex owns this data and updates it server-side; we read it rather than
 /// hard-coding a mapping that would go stale.
 ///
-/// Returns the input unchanged when the cache is absent, unreadable, or has no
-/// upgrade for this model. Never fails a launch on its own.
-fn migrated_codex_model(model: &str) -> String {
-    let Some(cache) = codex_models_cache_path() else {
-        return model.to_string();
-    };
-    let Ok(text) = std::fs::read_to_string(&cache) else {
-        return model.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return model.to_string();
-    };
-    let replacement = parsed
-        .get("models")
-        .and_then(|models| models.as_array())
-        .and_then(|models| {
-            models
-                .iter()
-                .find(|entry| entry.get("slug").and_then(|s| s.as_str()) == Some(model))
-        })
-        .and_then(|entry| entry.get("upgrade"))
-        .filter(|upgrade| !upgrade.is_null())
-        .and_then(|upgrade| upgrade.get("model"))
-        .and_then(|model| model.as_str());
-    match replacement {
-        Some(replacement) if replacement != model => {
+/// When the cache cannot answer - absent on a fresh machine, unreadable, or
+/// pruned of the entry once a model is fully gone - this falls back to
+/// [`ainb_model_rates::retired_codex_replacement`], the small dated table of ids
+/// known to be dead. Returns the input unchanged only when neither source has
+/// anything to say. Never fails a launch on its own.
+pub(crate) fn migrated_codex_model(model: &str) -> String {
+    if let Some((replacement, source)) = codex_cache_upgrade(model) {
+        warn!(
+            "Codex is retiring '{model}'; launching '{replacement}' instead \
+             (per {source})"
+        );
+        return replacement;
+    }
+
+    // The cache had nothing to say. It can be absent (fresh machine),
+    // unreadable, stale, or pruned of the entry once the model is fully gone,
+    // so fall back to the small dated table of ids we know are dead. Warn
+    // either way: the user pinned a model and is not getting it, and for
+    // gpt-5.4-mini the replacement costs more.
+    match ainb_model_rates::retired_codex_replacement(model) {
+        Some(replacement) => {
             warn!(
-                "Codex is retiring '{model}'; launching '{replacement}' instead \
-                 (per {})",
-                cache.display()
+                "'{model}' is retired and the Codex models cache offers no \
+                 upgrade; launching '{replacement}' instead"
             );
             replacement.to_string()
         }
-        _ => model.to_string(),
+        None => model.to_string(),
     }
+}
+
+/// The replacement `<CODEX_HOME>/models_cache.json` advertises for `model`,
+/// with the cache path that supplied it, or `None` when the cache is absent,
+/// unreadable, unparseable, or carries no upgrade for this model.
+fn codex_cache_upgrade(model: &str) -> Option<(String, String)> {
+    let cache = codex_models_cache_path()?;
+    let text = std::fs::read_to_string(&cache).ok()?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let replacement = parsed
+        .get("models")
+        .and_then(|models| models.as_array())?
+        .iter()
+        .find(|entry| entry.get("slug").and_then(|s| s.as_str()) == Some(model))
+        .and_then(|entry| entry.get("upgrade"))
+        .filter(|upgrade| !upgrade.is_null())
+        .and_then(|upgrade| upgrade.get("model"))
+        .and_then(|model| model.as_str())
+        .filter(|replacement| *replacement != model)?;
+    Some((replacement.to_string(), cache.display().to_string()))
 }
 
 /// `<CODEX_HOME>/models_cache.json`, honouring `CODEX_HOME`.
@@ -2123,13 +2137,23 @@ impl InteractiveSessionManager {
 
         // AINB does not own provider model catalogs. Pass any non-default raw
         // value through unchanged; provider CLI performs validation.
+        //
+        // The one exception is a RETIRED Codex id. Persisted session metadata
+        // and saved presets both reach this builder as opaque strings, so a
+        // session created before a retirement would resume straight into the
+        // provider's blocking migration modal and never start.
         if matches!(
             agent_type,
             SessionAgentType::Claude | SessionAgentType::Codex
         ) {
             if let Some(model) = model.map(str::trim).filter(|model| !is_default_model(model)) {
+                let model = if agent_type == SessionAgentType::Codex {
+                    migrated_codex_model(model)
+                } else {
+                    model.to_string()
+                };
                 cmd_parts.push("--model".to_string());
-                cmd_parts.push(model.to_string());
+                cmd_parts.push(model);
             }
         }
 
