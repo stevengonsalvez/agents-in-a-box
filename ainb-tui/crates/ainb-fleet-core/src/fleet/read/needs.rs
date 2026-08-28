@@ -208,8 +208,24 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
                 // Case-insensitive on the marker only: it is a machine-written
                 // sentinel, and a session that shouts "WAITING:" or writes
                 // "Needs input:" means the same thing either way.
-                (s.len() >= m.len() && s[..m.len()].eq_ignore_ascii_case(m))
-                    .then(|| (*m, s[m.len()..].to_string()))
+                //
+                // Compared over CHARS, never a byte slice. `s[..m.len()]`
+                // panics whenever a multi-byte character straddles that byte
+                // index, and a summary is free-form text that routinely starts
+                // with an emoji — one such session would take down every
+                // `fleet needs` call, not just its own row.
+                let mut marker = m.chars();
+                let mut text = s.chars();
+                loop {
+                    match (marker.next(), text.clone().next()) {
+                        (None, _) => break,
+                        (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b) => {
+                            text.next();
+                        }
+                        _ => return None,
+                    }
+                }
+                Some((*m, text.as_str().to_string()))
             })
         })
         .map(|(m, rest)| (m, rest.trim().to_string()));
@@ -747,5 +763,18 @@ mod wait_marker_tests {
     fn an_unmarked_summary_is_not_a_wait() {
         assert!(wait_of("just a normal summary").is_none());
         assert!(wait_of("waiting for nothing in particular").is_none());
+    }
+
+    #[test]
+    fn a_multibyte_summary_does_not_panic_the_whole_scan() {
+        // A byte-slice match panicked whenever a multi-byte char straddled
+        // byte 8 or 12. One such session took down every `fleet needs` call,
+        // not just its own row.
+        assert!(wait_of("🚀🚀🚀 shipping").is_none());
+        assert!(wait_of("日本語のサマリー").is_none());
+        assert!(wait_of("é").is_none());
+        // And a marker still matches when the TEXT is multi-byte.
+        let w = wait_of("WAITING: 承認をお願いします").expect("marker + multibyte text");
+        assert_eq!(w.text, "承認をお願いします");
     }
 }
