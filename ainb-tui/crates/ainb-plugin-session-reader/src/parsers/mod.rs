@@ -7,6 +7,7 @@
 //! returns an empty vec without error — that's how Gemini / Copilot
 //! stubs degrade cleanly when the user doesn't use those providers.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;

@@ -55,6 +55,9 @@ mod tests {
             "gpt-5.5",
             "gpt-5",
             "gpt-5-mini",
+            "gemini-3.7-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
         ] {
             assert!(
                 estimate_cost_usd(model, 1_000, 1_000, 0, 0, 0).is_some(),
