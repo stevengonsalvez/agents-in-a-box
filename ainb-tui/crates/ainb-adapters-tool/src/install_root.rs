@@ -201,16 +201,12 @@ mod tests {
         let p = install_root_for("antigravity");
         assert_eq!(
             p,
-            PathBuf::from("/tmp/fake-home-for-test")
-                .join(".gemini")
-                .join("antigravity-cli")
+            PathBuf::from("/tmp/fake-home-for-test").join(".gemini").join("antigravity-cli")
         );
         let p_agy = install_root_for("agy");
         assert_eq!(
             p_agy,
-            PathBuf::from("/tmp/fake-home-for-test")
-                .join(".gemini")
-                .join("antigravity-cli")
+            PathBuf::from("/tmp/fake-home-for-test").join(".gemini").join("antigravity-cli")
         );
     }
 

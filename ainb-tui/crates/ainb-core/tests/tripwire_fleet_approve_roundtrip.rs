@@ -167,9 +167,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
             broker::serve(listener, state).await;
         });
     }
-    bound_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("approve.sock bound");
+    bound_rx.recv_timeout(Duration::from_secs(5)).expect("approve.sock bound");
 
     // Park a REAL waiter: the same blocking call a Claude PermissionRequest
     // hook makes. It blocks until the TUI's `y` decides it (or 60s deny-falls-back,

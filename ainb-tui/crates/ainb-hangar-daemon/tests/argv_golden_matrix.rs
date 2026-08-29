@@ -165,7 +165,12 @@ fn cases_for(backend: Backend) -> Vec<Case> {
 }
 
 /// Every backend in the matrix, in golden-file order.
-const BACKENDS: [Backend; 4] = [Backend::Claude, Backend::Codex, Backend::Copilot, Backend::Antigravity];
+const BACKENDS: [Backend; 4] = [
+    Backend::Claude,
+    Backend::Codex,
+    Backend::Copilot,
+    Backend::Antigravity,
+];
 
 /// A runner whose provider paths are distinct, deterministic sentinels.
 ///

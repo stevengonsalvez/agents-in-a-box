@@ -882,10 +882,7 @@ fn install_copilot(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf>
 
 /// Path to the ainb-owned Antigravity drop-in file under an explicit home root.
 fn antigravity_dropin(home: &Path) -> PathBuf {
-    home.join(".gemini")
-        .join("antigravity-cli")
-        .join("hooks")
-        .join("ainb.json")
+    home.join(".gemini").join("antigravity-cli").join("hooks").join("ainb.json")
 }
 
 /// Install Antigravity hooks: write our drop-in verbatim to
@@ -1273,13 +1270,11 @@ fn agent_health(agent: Agent, record: &InstallRecord, script: &Path) -> HookAgen
         Agent::Copilot => {
             config_references_script(record.copilot_hooks_json.as_deref(), script, "drop-in")
         }
-        Agent::Antigravity => {
-            config_references_script(
-                record.antigravity_hooks_json.as_deref(),
-                script,
-                "antigravity drop-in",
-            )
-        }
+        Agent::Antigravity => config_references_script(
+            record.antigravity_hooks_json.as_deref(),
+            script,
+            "antigravity drop-in",
+        ),
         Agent::Unknown => (false, "unknown agent".to_string()),
     };
     HookAgentHealth {
@@ -1874,9 +1869,7 @@ mod tests {
         let p = paths_under_home(dir.path());
         let record = install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
 
-        let dropin = dir
-            .path()
-            .join(".gemini/antigravity-cli/hooks/ainb.json");
+        let dropin = dir.path().join(".gemini/antigravity-cli/hooks/ainb.json");
         assert_eq!(
             record.antigravity_hooks_json.as_deref(),
             Some(dropin.as_path())
@@ -1965,9 +1958,7 @@ mod tests {
         let p = paths_under_home(dir.path());
         install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
         install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
-        let dropin = dir
-            .path()
-            .join(".gemini/antigravity-cli/hooks/ainb.json");
+        let dropin = dir.path().join(".gemini/antigravity-cli/hooks/ainb.json");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dropin).unwrap()).unwrap();
         assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);

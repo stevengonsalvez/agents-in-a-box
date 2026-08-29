@@ -56,7 +56,6 @@ git_directories = []
     // would swallow the `h` keystroke).
     let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
-
 }
 
 fn capture_pane(session: &str) -> String {

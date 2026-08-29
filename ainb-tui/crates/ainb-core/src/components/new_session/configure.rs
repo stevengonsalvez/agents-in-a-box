@@ -1115,7 +1115,10 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
             let cur = AntigravityModel::parse(&preset.agent_model);
             (
                 cur.display_label().to_string(),
-                AntigravityModel::all().into_iter().map(|m| m.display_label().to_string()).collect(),
+                AntigravityModel::all()
+                    .into_iter()
+                    .map(|m| m.display_label().to_string())
+                    .collect(),
             )
         }
         _ => (preset.agent_model.clone(), vec![preset.agent_model.clone()]),
@@ -3623,13 +3626,22 @@ mod tests {
 
         s.focused_row = ConfigureRow::Model;
         cycle_model(&mut s, 1);
-        assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "gemini-3.7-flash");
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-3.7-flash"
+        );
 
         cycle_model(&mut s, 1);
-        assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "gemini-2.5-pro");
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-2.5-pro"
+        );
 
         cycle_model(&mut s, 1);
-        assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "gemini-2.5-flash");
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-2.5-flash"
+        );
 
         cycle_model(&mut s, 1);
         assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "default");

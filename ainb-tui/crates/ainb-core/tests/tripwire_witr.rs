@@ -180,7 +180,9 @@ fn pressing_w_embeds_witr_interactive_browser() {
         let mut ok = false;
         while Instant::now() < deadline {
             send_key(&session, "w");
-            if poll(Instant::now() + Duration::from_secs(2), || has_session(WITR_SESSION)) {
+            if poll(Instant::now() + Duration::from_secs(2), || {
+                has_session(WITR_SESSION)
+            }) {
                 ok = true;
                 break;
             }
@@ -310,7 +312,9 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
         let mut ok = false;
         while Instant::now() < deadline {
             send_key(&session, "w");
-            if poll(Instant::now() + Duration::from_secs(2), || has_session(WITR_SESSION)) {
+            if poll(Instant::now() + Duration::from_secs(2), || {
+                has_session(WITR_SESSION)
+            }) {
                 ok = true;
                 break;
             }

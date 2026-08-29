@@ -1124,7 +1124,8 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        self.run_antigravity_with_env(env, source_env, std::iter::empty(), invocation).await
+        self.run_antigravity_with_env(env, source_env, std::iter::empty(), invocation)
+            .await
     }
 
     /// [`Self::run_antigravity`], plus per-agent `extra_env` overrides layered onto the

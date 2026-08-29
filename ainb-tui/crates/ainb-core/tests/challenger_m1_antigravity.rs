@@ -8,19 +8,19 @@
 // 4. Provider Registry, Environment Variable Mapping (GEMINI_API_KEY) & Permissions Flags
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use std::path::PathBuf;
 
 use ainb::agents::SessionAgentRegistry;
 use ainb::components::inbox::AgentFilter;
 use ainb::components::new_session::configure::{
-    handle_key, render, ConfigureRow, ConfigureState, CustomOverrides, PresetSelection,
+    ConfigureRow, ConfigureState, CustomOverrides, PresetSelection, handle_key, render,
 };
+use ainb::config::CliProvider;
 use ainb::config::presets::{
-    create_default_presets, install_default_presets, PresetManager, SessionMode,
+    PresetManager, SessionMode, create_default_presets, install_default_presets,
 };
 use ainb::config::session_defaults::SessionDefaults;
-use ainb::config::CliProvider;
 use ainb::git::repo_source::RepoSource;
 use ainb::models::session::{AntigravityModel, SessionAgentType};
 use ainb::providers::{AntigravityProvider, ProviderRegistry};
@@ -125,33 +125,57 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
 
     // Claude -> Codex
     handle_key(&mut state, make_dummy_key(KeyCode::Right));
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_provider, "codex");
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_model, "default");
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_provider,
+        "codex"
+    );
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_model,
+        "default"
+    );
 
     // Set Codex model
     state.custom_overrides.as_mut().unwrap().agent_model = "gpt-5.5".to_string();
 
     // Codex -> Antigravity
     handle_key(&mut state, make_dummy_key(KeyCode::Right));
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_provider, "antigravity");
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_model, "default");
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_provider,
+        "antigravity"
+    );
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_model,
+        "default"
+    );
 
     // Set Antigravity model
     state.custom_overrides.as_mut().unwrap().agent_model = "gemini-3.7-flash".to_string();
 
     // Antigravity -> Codex (backward)
     handle_key(&mut state, make_dummy_key(KeyCode::Left));
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_provider, "codex");
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_model, "default");
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_provider,
+        "codex"
+    );
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_model,
+        "default"
+    );
 
     // Back to Antigravity
     handle_key(&mut state, make_dummy_key(KeyCode::Right));
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_provider, "antigravity");
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_provider,
+        "antigravity"
+    );
     state.custom_overrides.as_mut().unwrap().agent_model = "gemini-2.5-pro".to_string();
 
     // Antigravity -> Copilot (forward)
     handle_key(&mut state, make_dummy_key(KeyCode::Right));
-    assert_eq!(state.custom_overrides.as_ref().unwrap().agent_provider, "copilot");
+    assert_eq!(
+        state.custom_overrides.as_ref().unwrap().agent_provider,
+        "copilot"
+    );
 }
 
 #[test]
@@ -202,9 +226,18 @@ fn test_configure_render_with_antigravity_various_widths() {
 #[test]
 fn test_antigravity_model_parsing_and_variants() {
     assert_eq!(AntigravityModel::parse(""), AntigravityModel::SystemDefault);
-    assert_eq!(AntigravityModel::parse("   "), AntigravityModel::SystemDefault);
-    assert_eq!(AntigravityModel::parse("default"), AntigravityModel::SystemDefault);
-    assert_eq!(AntigravityModel::parse("DEFAULT"), AntigravityModel::SystemDefault);
+    assert_eq!(
+        AntigravityModel::parse("   "),
+        AntigravityModel::SystemDefault
+    );
+    assert_eq!(
+        AntigravityModel::parse("default"),
+        AntigravityModel::SystemDefault
+    );
+    assert_eq!(
+        AntigravityModel::parse("DEFAULT"),
+        AntigravityModel::SystemDefault
+    );
     assert_eq!(
         AntigravityModel::parse("gemini-3.7-flash"),
         AntigravityModel::Gemini37Flash
@@ -213,17 +246,38 @@ fn test_antigravity_model_parsing_and_variants() {
         AntigravityModel::parse("GEMINI-3.7-FLASH"),
         AntigravityModel::Gemini37Flash
     );
-    assert_eq!(AntigravityModel::parse("3.7-flash"), AntigravityModel::Gemini37Flash);
-    assert_eq!(AntigravityModel::parse("3.7"), AntigravityModel::Gemini37Flash);
-    assert_eq!(AntigravityModel::parse("gemini-2.5-pro"), AntigravityModel::Gemini25Pro);
-    assert_eq!(AntigravityModel::parse("2.5-pro"), AntigravityModel::Gemini25Pro);
-    assert_eq!(AntigravityModel::parse("pro"), AntigravityModel::Gemini25Pro);
+    assert_eq!(
+        AntigravityModel::parse("3.7-flash"),
+        AntigravityModel::Gemini37Flash
+    );
+    assert_eq!(
+        AntigravityModel::parse("3.7"),
+        AntigravityModel::Gemini37Flash
+    );
+    assert_eq!(
+        AntigravityModel::parse("gemini-2.5-pro"),
+        AntigravityModel::Gemini25Pro
+    );
+    assert_eq!(
+        AntigravityModel::parse("2.5-pro"),
+        AntigravityModel::Gemini25Pro
+    );
+    assert_eq!(
+        AntigravityModel::parse("pro"),
+        AntigravityModel::Gemini25Pro
+    );
     assert_eq!(
         AntigravityModel::parse("gemini-2.5-flash"),
         AntigravityModel::Gemini25Flash
     );
-    assert_eq!(AntigravityModel::parse("2.5-flash"), AntigravityModel::Gemini25Flash);
-    assert_eq!(AntigravityModel::parse("flash"), AntigravityModel::Gemini25Flash);
+    assert_eq!(
+        AntigravityModel::parse("2.5-flash"),
+        AntigravityModel::Gemini25Flash
+    );
+    assert_eq!(
+        AntigravityModel::parse("flash"),
+        AntigravityModel::Gemini25Flash
+    );
     assert_eq!(
         AntigravityModel::parse("nonexistent-model-name"),
         AntigravityModel::SystemDefault
@@ -235,7 +289,10 @@ fn test_antigravity_model_parsing_and_variants() {
         AntigravityModel::from_str("gemini-3.7-flash").unwrap(),
         AntigravityModel::Gemini37Flash
     );
-    assert_eq!(AntigravityModel::from_str("3.7").unwrap(), AntigravityModel::Gemini37Flash);
+    assert_eq!(
+        AntigravityModel::from_str("3.7").unwrap(),
+        AntigravityModel::Gemini37Flash
+    );
     assert_eq!(
         format!("{}", AntigravityModel::Gemini37Flash),
         "gemini-3.7-flash"
@@ -251,7 +308,10 @@ fn test_antigravity_model_parsing_and_variants() {
 fn test_preset_antigravity_interactive_yolo_parsing() {
     let presets = create_default_presets();
     let agy_preset = presets.iter().find(|p| p.name == "antigravity-interactive-yolo");
-    assert!(agy_preset.is_some(), "antigravity-interactive-yolo must be in default presets");
+    assert!(
+        agy_preset.is_some(),
+        "antigravity-interactive-yolo must be in default presets"
+    );
 
     let p = agy_preset.unwrap();
     assert_eq!(p.name, "antigravity-interactive-yolo");
@@ -297,7 +357,10 @@ fn test_tmux_process_name_matching_antigravity() {
             Some(SessionAgentType::Antigravity),
         ),
         ("antigravity", Some(SessionAgentType::Antigravity)),
-        ("/usr/bin/antigravity -i", Some(SessionAgentType::Antigravity)),
+        (
+            "/usr/bin/antigravity -i",
+            Some(SessionAgentType::Antigravity),
+        ),
         ("claude", Some(SessionAgentType::Claude)),
         ("codex", Some(SessionAgentType::Codex)),
         ("gemini", Some(SessionAgentType::Gemini)),
@@ -333,7 +396,10 @@ fn test_cli_provider_antigravity_constants() {
     assert_eq!(p.skip_permissions_flag(), "--dangerously-skip-permissions");
     assert_eq!(p.as_str(), "antigravity");
     assert_eq!(CliProvider::from_str("agy"), CliProvider::Antigravity);
-    assert_eq!(CliProvider::from_str("antigravity"), CliProvider::Antigravity);
+    assert_eq!(
+        CliProvider::from_str("antigravity"),
+        CliProvider::Antigravity
+    );
 }
 
 // ============================================================================
@@ -353,7 +419,10 @@ fn test_antigravity_provider_contract_and_env_var() {
         provider.skip_permissions_flag(),
         Some("--dangerously-skip-permissions")
     );
-    assert_eq!(provider.install_docs_url(), "https://github.com/google/antigravity");
+    assert_eq!(
+        provider.install_docs_url(),
+        "https://github.com/google/antigravity"
+    );
 }
 
 #[test]
@@ -362,9 +431,15 @@ fn test_provider_registry_aliases_and_builtins() {
     assert!(r.get("antigravity").is_some());
 
     // Alias testing
-    assert_eq!(r.get_with_aliases("antigravity").unwrap().id(), "antigravity");
+    assert_eq!(
+        r.get_with_aliases("antigravity").unwrap().id(),
+        "antigravity"
+    );
     assert_eq!(r.get_with_aliases("agy").unwrap().id(), "antigravity");
-    assert_eq!(r.get_with_aliases("Antigravity").unwrap().id(), "antigravity");
+    assert_eq!(
+        r.get_with_aliases("Antigravity").unwrap().id(),
+        "antigravity"
+    );
     assert_eq!(r.get_with_aliases("AGY").unwrap().id(), "antigravity");
 
     // Session Agent Registry

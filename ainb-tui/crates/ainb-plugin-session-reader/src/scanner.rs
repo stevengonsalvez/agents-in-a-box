@@ -457,7 +457,8 @@ pub(crate) fn scan_with_cache_and_progress(
     // matches the parser's per-session `note_file` cadence and can't
     // over-count on stray `.jsonl` elsewhere under the tree.
     let copilot_files = roots.copilot_sessions.as_deref().map_or(0, count_copilot_events);
-    let antigravity_files = roots.antigravity_brain.as_deref().map_or(0, count_antigravity_transcripts);
+    let antigravity_files =
+        roots.antigravity_brain.as_deref().map_or(0, count_antigravity_transcripts);
     let total = claude_files
         .saturating_add(codex_files)
         .saturating_add(copilot_files)
@@ -1147,7 +1148,9 @@ fn count_antigravity_transcripts(root: &Path) -> usize {
         let dir = entry.path();
         if dir.is_dir() {
             let logs = dir.join(".system_generated/logs");
-            if logs.join("transcript.jsonl").is_file() || logs.join("transcript_full.jsonl").is_file() {
+            if logs.join("transcript.jsonl").is_file()
+                || logs.join("transcript_full.jsonl").is_file()
+            {
                 count = count.saturating_add(1);
             }
         }

@@ -226,15 +226,11 @@ pub fn parse_source(path: &str, session_id: &str, content: &str) -> Vec<Provider
             }
         }
 
-        let project_path = current_project_path
-            .clone()
-            .unwrap_or_else(|| format!("brain-{session_id}"));
+        let project_path =
+            current_project_path.clone().unwrap_or_else(|| format!("brain-{session_id}"));
         let project = sanitize_project(&project_path);
 
-        let reasoning_tokens = entry
-            .thinking
-            .as_deref()
-            .map_or(0, |t| (t.len() / 4) as u64);
+        let reasoning_tokens = entry.thinking.as_deref().map_or(0, |t| (t.len() / 4) as u64);
 
         let content_len = entry.content.as_deref().map_or(0, |c| c.len());
         let tool_calls_json_len = entry
@@ -242,8 +238,7 @@ pub fn parse_source(path: &str, session_id: &str, content: &str) -> Vec<Provider
             .as_ref()
             .map_or(0, |tc| serde_json::to_string(tc).unwrap_or_default().len());
 
-        let input_tokens =
-            (((current_user_message.len() + tool_outputs_len) / 4).max(100)) as u64;
+        let input_tokens = (((current_user_message.len() + tool_outputs_len) / 4).max(100)) as u64;
         let output_tokens = (((content_len + tool_calls_json_len) / 4).max(50)) as u64;
 
         let cost_usd = estimate_cost_usd(
@@ -414,7 +409,10 @@ mod tests {
         assert_eq!(c0.user_message, "Fix the build");
         assert_eq!(c0.tools, vec!["Bash"]);
         assert_eq!(c0.bash_commands, vec!["git status"]);
-        assert_eq!(c0.project_path, "/Users/stevengonsalvez/d/git/ai-coder-rules");
+        assert_eq!(
+            c0.project_path,
+            "/Users/stevengonsalvez/d/git/ai-coder-rules"
+        );
         assert_eq!(c0.project, "Users-stevengonsalvez-d-git-ai-coder-rules");
         assert!(c0.reasoning_tokens > 0);
         assert!(c0.cost_usd.is_some());
@@ -457,10 +455,7 @@ mod tests {
 
         let calls = parse_dir(temp.path());
         assert_eq!(calls.len(), 2);
-        assert_eq!(
-            calls[0].session_id,
-            "03128f4e-b5f1-41f5-bc9e-7fc66b8db270"
-        );
+        assert_eq!(calls[0].session_id, "03128f4e-b5f1-41f5-bc9e-7fc66b8db270");
     }
 
     #[test]
@@ -495,7 +490,6 @@ mod tests {
         assert_eq!(calls[0].bash_commands, vec!["cargo check"]);
     }
 
-
     #[test]
     fn empty_logs_and_whitespace_only() {
         assert!(parse_source("/path/test.jsonl", "empty-1", "").is_empty());
@@ -506,13 +500,34 @@ mod tests {
     #[test]
     fn model_detection_and_fallback_stress_test() {
         // Test detect_model directly
-        assert_eq!(detect_model("Use gemini-3.7-flash please"), Some("gemini-3.7-flash".to_string()));
-        assert_eq!(detect_model("Model: Gemini 3.7 Flash"), Some("gemini-3.7-flash".to_string()));
-        assert_eq!(detect_model("Switch to 3.7-flash"), Some("gemini-3.7-flash".to_string()));
-        assert_eq!(detect_model("Use gemini-2.5-pro for reasoning"), Some("gemini-2.5-pro".to_string()));
-        assert_eq!(detect_model("Switch to 2.5-pro"), Some("gemini-2.5-pro".to_string()));
-        assert_eq!(detect_model("Use gemini-2.5-flash for speed"), Some("gemini-2.5-flash".to_string()));
-        assert_eq!(detect_model("Switch to 2.5-flash"), Some("gemini-2.5-flash".to_string()));
+        assert_eq!(
+            detect_model("Use gemini-3.7-flash please"),
+            Some("gemini-3.7-flash".to_string())
+        );
+        assert_eq!(
+            detect_model("Model: Gemini 3.7 Flash"),
+            Some("gemini-3.7-flash".to_string())
+        );
+        assert_eq!(
+            detect_model("Switch to 3.7-flash"),
+            Some("gemini-3.7-flash".to_string())
+        );
+        assert_eq!(
+            detect_model("Use gemini-2.5-pro for reasoning"),
+            Some("gemini-2.5-pro".to_string())
+        );
+        assert_eq!(
+            detect_model("Switch to 2.5-pro"),
+            Some("gemini-2.5-pro".to_string())
+        );
+        assert_eq!(
+            detect_model("Use gemini-2.5-flash for speed"),
+            Some("gemini-2.5-flash".to_string())
+        );
+        assert_eq!(
+            detect_model("Switch to 2.5-flash"),
+            Some("gemini-2.5-flash".to_string())
+        );
         assert_eq!(detect_model("Unknown model gemini-1.5-pro"), None);
 
         // Test transcript flow with model detection
@@ -532,7 +547,10 @@ mod tests {
         );
         let calls_unclosed = parse_source("/path/test.jsonl", "sess-unclosed", unclosed);
         assert_eq!(calls_unclosed.len(), 1);
-        assert_eq!(calls_unclosed[0].user_message, "<USER_REQUEST>Unclosed request");
+        assert_eq!(
+            calls_unclosed[0].user_message,
+            "<USER_REQUEST>Unclosed request"
+        );
     }
 
     #[test]
@@ -559,7 +577,11 @@ mod tests {
             "\"thinking\":\"\",",
             "\"content\":\"Done\"}\n"
         );
-        let calls_empty = parse_source("/path/test.jsonl", "sess-empty-thinking", content_empty_thinking);
+        let calls_empty = parse_source(
+            "/path/test.jsonl",
+            "sess-empty-thinking",
+            content_empty_thinking,
+        );
         assert_eq!(calls_empty.len(), 1);
         assert_eq!(calls_empty[0].reasoning_tokens, 0);
 
@@ -628,4 +650,3 @@ mod tests {
         assert_eq!(calls.len(), 4); // 2 from sess1, 2 from sess2
     }
 }
-

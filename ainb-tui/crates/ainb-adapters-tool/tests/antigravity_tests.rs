@@ -102,10 +102,7 @@ fn template_substitutions() {
         m.get("TOOL_DIR").map(String::as_str),
         Some(".gemini/antigravity-cli")
     );
-    assert_eq!(
-        m.get("TOOL_NAME").map(String::as_str),
-        Some("antigravity")
-    );
+    assert_eq!(m.get("TOOL_NAME").map(String::as_str), Some("antigravity"));
     assert_eq!(
         m.get("HOME_TOOL_DIR").map(String::as_str),
         Some("~/.gemini/antigravity-cli")

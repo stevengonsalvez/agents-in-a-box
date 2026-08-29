@@ -165,7 +165,10 @@ mod tests {
     fn registry_iter_preserves_registration_order() {
         let r = ProviderRegistry::built_ins();
         let ids: Vec<_> = r.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["claude", "codex", "gemini", "copilot", "antigravity"]);
+        assert_eq!(
+            ids,
+            vec!["claude", "codex", "gemini", "copilot", "antigravity"]
+        );
     }
 
     #[test]
@@ -175,7 +178,10 @@ mod tests {
         assert_eq!(r.get_with_aliases("google").unwrap().id(), "gemini");
         assert_eq!(r.get_with_aliases("GITHUB").unwrap().id(), "copilot");
         assert_eq!(r.get_with_aliases("agy").unwrap().id(), "antigravity");
-        assert_eq!(r.get_with_aliases("Antigravity").unwrap().id(), "antigravity");
+        assert_eq!(
+            r.get_with_aliases("Antigravity").unwrap().id(),
+            "antigravity"
+        );
         assert_eq!(r.get_with_aliases("claude").unwrap().id(), "claude");
         assert!(r.get_with_aliases("unknown").is_none());
     }

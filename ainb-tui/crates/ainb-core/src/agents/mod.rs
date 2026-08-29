@@ -250,7 +250,14 @@ mod tests {
         let r = SessionAgentRegistry::built_ins();
         assert_eq!(r.len(), 8);
         for id in [
-            "claude", "shell", "ssh", "codex", "gemini", "copilot", "antigravity", "kiro",
+            "claude",
+            "shell",
+            "ssh",
+            "codex",
+            "gemini",
+            "copilot",
+            "antigravity",
+            "kiro",
         ] {
             assert!(r.get(id).is_some(), "missing {id}");
         }
@@ -263,7 +270,14 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "claude", "shell", "ssh", "codex", "gemini", "copilot", "antigravity", "kiro"
+                "claude",
+                "shell",
+                "ssh",
+                "codex",
+                "gemini",
+                "copilot",
+                "antigravity",
+                "kiro"
             ]
         );
     }

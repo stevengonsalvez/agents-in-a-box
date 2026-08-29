@@ -297,7 +297,8 @@ async fn hook_script_into_real_daemon_persists_supported_agents() {
     // Antigravity path: JSON on stdin, hook_event_name/type, agent=antigravity.
     let antigravity_notification_json = r#"{"hook_event_name":"Notification","session_id":"sess-agy-1","cwd":"/Users/example/agy-proj"}"#;
     fire_antigravity_hook(&script, &home, antigravity_notification_json);
-    let antigravity_stop_json = r#"{"hook_event_name":"Stop","session_id":"sess-agy-2","cwd":"/Users/example/agy-proj"}"#;
+    let antigravity_stop_json =
+        r#"{"hook_event_name":"Stop","session_id":"sess-agy-2","cwd":"/Users/example/agy-proj"}"#;
     fire_antigravity_hook(&script, &home, antigravity_stop_json);
 
     // Give the daemon a tick to drain the writes.

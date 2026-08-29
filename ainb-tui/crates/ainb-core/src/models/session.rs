@@ -43,13 +43,13 @@ impl Default for SessionMode {
 pub enum SessionAgentType {
     #[default]
     Claude,
-    Shell,   // Plain shell, no AI agent
-    Ssh,     // SSH connection to remote server
-    Codex,   // OpenAI Codex CLI
-    Gemini,  // Google Gemini CLI
-    Copilot, // GitHub Copilot CLI
+    Shell,       // Plain shell, no AI agent
+    Ssh,         // SSH connection to remote server
+    Codex,       // OpenAI Codex CLI
+    Gemini,      // Google Gemini CLI
+    Copilot,     // GitHub Copilot CLI
     Antigravity, // Google Antigravity CLI
-    Kiro,    // AWS Kiro (disabled)
+    Kiro,        // AWS Kiro (disabled)
 }
 
 impl SessionAgentType {
@@ -65,9 +65,9 @@ impl SessionAgentType {
             SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot - real GitHub Copilot logo
             SessionAgentType::Gemini => "\u{f1a0}",  // fa-google - Gemini is a Google product
             SessionAgentType::Antigravity => "\u{f1a0}", // fa-google - Antigravity is a Google product
-            SessionAgentType::Kiro => "\u{e62f}",    // seti-crystal - Kiro crystal motif
-            SessionAgentType::Shell => "\u{ea85}",   // cod-terminal
-            SessionAgentType::Ssh => "\u{f023}",     // fa-lock
+            SessionAgentType::Kiro => "\u{e62f}",        // seti-crystal - Kiro crystal motif
+            SessionAgentType::Shell => "\u{ea85}",       // cod-terminal
+            SessionAgentType::Ssh => "\u{f023}",         // fa-lock
         }
     }
 
@@ -484,7 +484,6 @@ impl std::str::FromStr for AntigravityModel {
         Ok(Self::parse(s))
     }
 }
-
 
 // ============================================================================
 // SSH TARGET (Connection configuration for SSH sessions)
@@ -987,39 +986,90 @@ mod tests {
         assert_eq!(agent.name(), "Google Antigravity");
         assert_eq!(agent.icon(), "\u{f1a0}");
         assert!(agent.is_available());
-        assert_eq!(
-            agent.description(),
-            "Google's agentic AI coding assistant"
-        );
+        assert_eq!(agent.description(), "Google's agentic AI coding assistant");
     }
 
     #[test]
     fn antigravity_model_parse_canonical_and_aliases() {
         assert_eq!(AntigravityModel::parse(""), AntigravityModel::SystemDefault);
-        assert_eq!(AntigravityModel::parse("default"), AntigravityModel::SystemDefault);
-        assert_eq!(AntigravityModel::parse("gemini-3.7-flash"), AntigravityModel::Gemini37Flash);
-        assert_eq!(AntigravityModel::parse("3.7-flash"), AntigravityModel::Gemini37Flash);
-        assert_eq!(AntigravityModel::parse("3.7"), AntigravityModel::Gemini37Flash);
-        assert_eq!(AntigravityModel::parse("gemini-2.5-pro"), AntigravityModel::Gemini25Pro);
-        assert_eq!(AntigravityModel::parse("2.5-pro"), AntigravityModel::Gemini25Pro);
-        assert_eq!(AntigravityModel::parse("pro"), AntigravityModel::Gemini25Pro);
-        assert_eq!(AntigravityModel::parse("gemini-2.5-flash"), AntigravityModel::Gemini25Flash);
-        assert_eq!(AntigravityModel::parse("2.5-flash"), AntigravityModel::Gemini25Flash);
-        assert_eq!(AntigravityModel::parse("flash"), AntigravityModel::Gemini25Flash);
-        assert_eq!(AntigravityModel::parse("unknown-model"), AntigravityModel::SystemDefault);
+        assert_eq!(
+            AntigravityModel::parse("default"),
+            AntigravityModel::SystemDefault
+        );
+        assert_eq!(
+            AntigravityModel::parse("gemini-3.7-flash"),
+            AntigravityModel::Gemini37Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("3.7-flash"),
+            AntigravityModel::Gemini37Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("3.7"),
+            AntigravityModel::Gemini37Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("gemini-2.5-pro"),
+            AntigravityModel::Gemini25Pro
+        );
+        assert_eq!(
+            AntigravityModel::parse("2.5-pro"),
+            AntigravityModel::Gemini25Pro
+        );
+        assert_eq!(
+            AntigravityModel::parse("pro"),
+            AntigravityModel::Gemini25Pro
+        );
+        assert_eq!(
+            AntigravityModel::parse("gemini-2.5-flash"),
+            AntigravityModel::Gemini25Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("2.5-flash"),
+            AntigravityModel::Gemini25Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("flash"),
+            AntigravityModel::Gemini25Flash
+        );
+        assert_eq!(
+            AntigravityModel::parse("unknown-model"),
+            AntigravityModel::SystemDefault
+        );
     }
 
     #[test]
     fn antigravity_model_cli_values_and_labels() {
         assert_eq!(AntigravityModel::SystemDefault.cli_value(), None);
-        assert_eq!(AntigravityModel::Gemini37Flash.cli_value(), Some("gemini-3.7-flash"));
-        assert_eq!(AntigravityModel::Gemini25Pro.cli_value(), Some("gemini-2.5-pro"));
-        assert_eq!(AntigravityModel::Gemini25Flash.cli_value(), Some("gemini-2.5-flash"));
+        assert_eq!(
+            AntigravityModel::Gemini37Flash.cli_value(),
+            Some("gemini-3.7-flash")
+        );
+        assert_eq!(
+            AntigravityModel::Gemini25Pro.cli_value(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            AntigravityModel::Gemini25Flash.cli_value(),
+            Some("gemini-2.5-flash")
+        );
 
-        assert_eq!(AntigravityModel::SystemDefault.display_label(), "system default");
-        assert_eq!(AntigravityModel::Gemini37Flash.display_label(), "gemini-3.7-flash");
-        assert_eq!(AntigravityModel::Gemini25Pro.display_label(), "gemini-2.5-pro");
-        assert_eq!(AntigravityModel::Gemini25Flash.display_label(), "gemini-2.5-flash");
+        assert_eq!(
+            AntigravityModel::SystemDefault.display_label(),
+            "system default"
+        );
+        assert_eq!(
+            AntigravityModel::Gemini37Flash.display_label(),
+            "gemini-3.7-flash"
+        );
+        assert_eq!(
+            AntigravityModel::Gemini25Pro.display_label(),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            AntigravityModel::Gemini25Flash.display_label(),
+            "gemini-2.5-flash"
+        );
     }
 
     #[test]
@@ -1037,9 +1087,18 @@ mod tests {
         );
 
         assert_eq!(format!("{}", AntigravityModel::SystemDefault), "default");
-        assert_eq!(format!("{}", AntigravityModel::Gemini37Flash), "gemini-3.7-flash");
-        assert_eq!(format!("{}", AntigravityModel::Gemini25Pro), "gemini-2.5-pro");
-        assert_eq!(format!("{}", AntigravityModel::Gemini25Flash), "gemini-2.5-flash");
+        assert_eq!(
+            format!("{}", AntigravityModel::Gemini37Flash),
+            "gemini-3.7-flash"
+        );
+        assert_eq!(
+            format!("{}", AntigravityModel::Gemini25Pro),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            format!("{}", AntigravityModel::Gemini25Flash),
+            "gemini-2.5-flash"
+        );
 
         use std::str::FromStr;
         assert_eq!(
@@ -1083,4 +1142,3 @@ mod tests {
         );
     }
 }
-

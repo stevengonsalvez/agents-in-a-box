@@ -4528,7 +4528,8 @@ mod tests {
             argv.contains(&"-p".to_string()),
             "a headless task MUST print-and-exit: {argv:?}"
         );
-        let (_p, argv) = runner.provider_command(Backend::Antigravity, &inv, dispatch_mode("headless"));
+        let (_p, argv) =
+            runner.provider_command(Backend::Antigravity, &inv, dispatch_mode("headless"));
         assert!(
             argv.contains(&"-p".to_string()),
             "a headless antigravity task MUST print-and-exit: {argv:?}"
@@ -4681,7 +4682,9 @@ mod tests {
         );
 
         // An antigravity agent on that claude-advertised runtime → antigravity backend.
-        let agy = bootstrap::create_agent(pool, &ws, "gemini_worker", "antigravity", None).await.unwrap();
+        let agy = bootstrap::create_agent(pool, &ws, "gemini_worker", "antigravity", None)
+            .await
+            .unwrap();
         let disp = resolve_dispatch(pool, &agy.id, None, Mode::Headless).await.unwrap();
         assert_eq!(
             disp.backend,

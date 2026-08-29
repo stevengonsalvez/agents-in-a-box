@@ -149,7 +149,10 @@ mod tests {
     fn parse_is_tolerant_and_rejects_unknown() {
         assert_eq!(AgentKind::parse("  Claude "), Some(AgentKind::Claude));
         assert_eq!(AgentKind::parse("CODEX"), Some(AgentKind::Codex));
-        assert_eq!(AgentKind::parse("Antigravity"), Some(AgentKind::Antigravity));
+        assert_eq!(
+            AgentKind::parse("Antigravity"),
+            Some(AgentKind::Antigravity)
+        );
         assert_eq!(AgentKind::parse("agy"), Some(AgentKind::Antigravity));
         assert_eq!(AgentKind::parse(" AGY "), Some(AgentKind::Antigravity));
         assert_eq!(AgentKind::parse("cursor"), None);
@@ -159,7 +162,10 @@ mod tests {
     /// FromStr parses tokens and aliases.
     #[test]
     fn from_str_parsing() {
-        assert_eq!("antigravity".parse::<AgentKind>().unwrap(), AgentKind::Antigravity);
+        assert_eq!(
+            "antigravity".parse::<AgentKind>().unwrap(),
+            AgentKind::Antigravity
+        );
         assert_eq!("agy".parse::<AgentKind>().unwrap(), AgentKind::Antigravity);
         assert_eq!("claude".parse::<AgentKind>().unwrap(), AgentKind::Claude);
         assert!("unknown".parse::<AgentKind>().is_err());

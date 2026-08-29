@@ -4252,7 +4252,10 @@ async fn execute_fleet_start(
         // Antigravity, and Claude sit here: Fleet can SEE their panes, but it cannot
         // launch one, so a start request is honestly rejected rather than
         // silently accepted.
-        FleetProvider::Claude | FleetProvider::Copilot | FleetProvider::Antigravity | FleetProvider::Unknown => (
+        FleetProvider::Claude
+        | FleetProvider::Copilot
+        | FleetProvider::Antigravity
+        | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),

@@ -322,7 +322,12 @@ mod tests {
         );
         assert_eq!(
             agents_from_flags(true, true, true, true, false),
-            vec![Agent::Claude, Agent::Codex, Agent::Copilot, Agent::Antigravity]
+            vec![
+                Agent::Claude,
+                Agent::Codex,
+                Agent::Copilot,
+                Agent::Antigravity
+            ]
         );
     }
 }

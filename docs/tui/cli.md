@@ -87,7 +87,7 @@ Options:
       --repo <REPO>                    Local repository path
       --create-branch <CREATE_BRANCH>  Create a new branch with this name
       --worktree                       Use git worktree for isolation
-      --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot]
+      --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot, antigravity]
       --model <MODEL>                  Provider model ID to pass through unchanged
   -p, --prompt <PROMPT>                Initial prompt to send
   -a, --attach                         Attach to session after creation
@@ -936,7 +936,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -969,7 +969,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1002,7 +1002,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1035,7 +1035,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1068,7 +1068,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1124,7 +1124,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1154,7 +1154,7 @@ Arguments:
 Options:
       --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
       --monthly-usd <MONTHLY_USD>  
-      --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor]
+      --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor, antigravity]
       --reset-day <RESET_DAY>      [default: 1]
   -h, --help                       Print help
 ```
@@ -1249,7 +1249,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1282,7 +1282,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1315,7 +1315,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1348,7 +1348,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1431,7 +1431,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -4045,6 +4045,7 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --codex            Target Codex CLI
       --copilot          Target GitHub Copilot CLI
+      --antigravity      Target Google Antigravity CLI
       --all              Target every known agent
   -h, --help             Print help
 ```
@@ -4064,6 +4065,7 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --codex            Target Codex CLI
       --copilot          Target GitHub Copilot CLI
+      --antigravity      Target Google Antigravity CLI
       --all              Target every known agent
   -h, --help             Print help
 ```
@@ -4096,7 +4098,7 @@ Usage: ainb notifyd list [OPTIONS]
 Options:
       --dismissed          Include dismissed notifications
       --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
-      --agent <agent>      Filter by agent (claude|codex|copilot)
+      --agent <agent>      Filter by agent (claude|codex|copilot|antigravity)
       --project <project>  Filter by project (basename of cwd)
       --limit <limit>      Max rows to show [default: 50]
   -h, --help               Print help

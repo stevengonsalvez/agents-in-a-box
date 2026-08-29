@@ -286,11 +286,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     ainb_hangar_daemon::rpc::set_approve_socket_for_test(Some(paths.approve_socket.clone()));
     let surface_dirs = [
         hangar_home.join("fleet").join("interview-surface"),
-        home_tmp
-            .path()
-            .join(".agents-in-a-box")
-            .join("fleet")
-            .join("interview-surface"),
+        home_tmp.path().join(".agents-in-a-box").join("fleet").join("interview-surface"),
         home_tmp.path().join("fleet").join("interview-surface"),
     ];
     for d in &surface_dirs {
@@ -310,9 +306,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             broker::serve(listener, state).await;
         });
     }
-    bound_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("approve.sock bound");
+    bound_rx.recv_timeout(Duration::from_secs(5)).expect("approve.sock bound");
     let hook_payload = serde_json::json!({
         "tool_use_id": "ask-tool-1",
         "tool_input": { "questions": questions }
