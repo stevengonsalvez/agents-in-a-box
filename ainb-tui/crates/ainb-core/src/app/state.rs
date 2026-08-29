@@ -2247,6 +2247,35 @@ impl ConfigScreenState {
     /// so a popup confirm does not have to know which category or node it came
     /// from — the filter pane shows rows from categories other than the
     /// selected one, and the old category-scoped lookup silently missed them.
+    /// Reseed one row's widget from the live config, WITHOUT marking it dirty.
+    ///
+    /// For a value that changed outside the settings screen — the auth flow
+    /// writes `authentication.claude_provider` through its own popup and
+    /// keychain path, then the row has to catch up. Those call sites used to
+    /// look the row up by the hand-written key `"claude_auth"`, which the
+    /// registry rewrite deleted, so the `find` silently never matched and the
+    /// row kept showing the old provider until restart. They also wrote a
+    /// `Text` status into what the registry declares a `Choice`.
+    pub fn reseed_row(&mut self, key: &str, config: &AppConfig) {
+        let Some(row) = crate::config::registry::row(key) else {
+            return;
+        };
+        let Ok(as_toml) = toml::Value::try_from(config) else {
+            return;
+        };
+        let current = crate::config::registry::navigate_toml(&as_toml, key).ok();
+        let value = row.to_value(current);
+        for rows in self.settings.values_mut() {
+            if let Some(existing) = rows.iter_mut().find(|r| r.key == key) {
+                existing.value = value;
+                // Deliberately not dirty: the value is already on disk, and
+                // marking it would write it back from this snapshot.
+                self.dirty.remove(key);
+                return;
+            }
+        }
+    }
+
     pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
         for rows in self.settings.values_mut() {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {

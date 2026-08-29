@@ -3772,7 +3772,21 @@ impl EventHandler {
     /// value another process has since changed.
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<usize> {
         let pending = state.config_screen_state.pending_edits().len();
+        let dirty_before = !state.config_screen_state.dirty.is_empty();
         let applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        // Nothing to write: return before touching the file. `save()` renders
+        // the whole AppConfig from the snapshot loaded at startup, so pressing
+        // `S` with no edits would revert anything `ainb config set` or another
+        // process wrote since — and then report "No changes to save". Exactly
+        // the hazard `save_tree_expansion` exists to avoid.
+        // Keyed off `dirty`, not `pending`: `pending_edits()` deliberately
+        // excludes plugin rows and read-only rows, so a plugin-only edit has
+        // `pending == 0` while still having work to do. `dirty` is the honest
+        // "did the user change anything" signal.
+        if !dirty_before && applied.external.is_empty() {
+            state.config_screen_state.mark_saved();
+            return Ok(0);
+        }
         state.app_config.save()?;
         crate::config::AppConfig::save_external_keys(&applied.external)?;
         // Cleared even for the rejected rows: leaving them dirty made one
@@ -6959,16 +6973,12 @@ impl EventHandler {
                         // Update auth status to show API key configured
                         let masked = credentials::get_anthropic_api_key_masked();
                         let status = format!("API Key ({})", masked);
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(status);
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save API key: {}", e));
@@ -6990,18 +7000,12 @@ impl EventHandler {
                         tracing::info!("API key successfully deleted from keychain");
 
                         // Update auth status to show system auth
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to delete API key: {}", e));
@@ -7044,17 +7048,12 @@ impl EventHandler {
                             // Update config screen status
                             let masked = credentials::get_anthropic_api_key_masked();
                             let status = format!("API Key ({})", masked);
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value =
-                                        crate::app::state::ConfigValue::Text(status);
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7092,18 +7091,12 @@ impl EventHandler {
                             let _ = credentials::delete_anthropic_api_key();
 
                             // Update config screen status
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value = crate::app::state::ConfigValue::Text(
-                                        "System Auth (Pro/Max Plan)".to_string(),
-                                    );
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7137,18 +7130,12 @@ impl EventHandler {
                         state.auth_provider_popup_state.refresh_providers();
 
                         // Update config screen
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
 
                         // Persist switch to system auth in config.toml
                         state.app_config.authentication.claude_provider =

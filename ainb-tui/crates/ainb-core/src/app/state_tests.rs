@@ -1607,6 +1607,36 @@ mod tests {
     }
 
     #[test]
+    fn a_save_with_no_edits_applies_nothing() {
+        // Pressing `S` with nothing edited must not write. `save()` renders the
+        // whole AppConfig from the snapshot taken at startup, so a no-op save
+        // would revert anything `ainb config set` or another process wrote
+        // since — while reporting "No changes to save".
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = PluginsConfig::default();
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        assert!(screen.pending_edits().is_empty(), "nothing was edited");
+
+        let mut app = AppConfig::default();
+        let applied = screen.apply_to_app_config(&mut app).expect("applies");
+        assert!(
+            applied.external.is_empty(),
+            "a clean screen produced external writes: {:?}",
+            applied.external
+        );
+    }
+
+    #[test]
     fn untouched_plugin_rows_are_not_written_into_config() {
         // Saving an unrelated setting must not materialise every discovered
         // plugin's schema defaults into config.toml. Doing so pins today's
