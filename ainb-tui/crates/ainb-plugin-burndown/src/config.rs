@@ -205,8 +205,32 @@ impl AppConfig {
         // directory, and a shared `config.toml.tmp` let either process rename
         // the other's half-written file over the real one.
         let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, doc.to_string())?;
-        std::fs::rename(&tmp, &path)?;
+        if let Err(err) = std::fs::write(&tmp, doc.to_string()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        // Carry the target's mode across. A temp file is created under the
+        // umask, so without this a `chmod 600` on a config holding the bridge's
+        // bot tokens and the skills API key comes back world-readable after a
+        // plan set. Core's `write_atomic` guards this for the same reason.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o600);
+            if let Err(err) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(err.into());
+            }
+        }
+        // Remove the temp on failure: the name is per-process, so nothing would
+        // ever overwrite a leftover holding the full config, secrets included.
+        if let Err(err) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
         Ok(())
     }
 }
