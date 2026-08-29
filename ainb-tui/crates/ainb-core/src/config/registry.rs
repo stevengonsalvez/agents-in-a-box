@@ -1212,6 +1212,20 @@ pub fn validate(key: &str, raw: &str) -> Result<toml::Value> {
         return Ok(parse_toml_scalar(raw));
     };
 
+    // A key BELOW an opaque root is a user-extensible namespace, not a typo:
+    // `plugins.<name>.<field>` normalises to `plugins.*`, whose shape is the
+    // plugin's own `[[config]]` manifest and not ours to declare. Refusing it
+    // broke `ainb config set plugins.learnings.learnings_dir`, which worked
+    // before the registry existed. Setting the opaque root ITSELF is still
+    // refused below — that is the structured value `ainb config edit` is for.
+    // `registry_key` stops descending at an opaque root, so a concrete key with
+    // MORE segments than its normalised form is one that reaches inside.
+    if matches!(row.kind, RowKind::Opaque)
+        && parse_dot_key(key).len() > parse_dot_key(&normalised).len()
+    {
+        return Ok(parse_toml_scalar(raw));
+    }
+
     match row.kind {
         RowKind::Text | RowKind::Secret => Ok(toml::Value::String(raw.to_string())),
         RowKind::Bool => match raw.trim().to_ascii_lowercase().as_str() {
@@ -1349,11 +1363,9 @@ impl ConfigRow {
     /// rounding a currency rate or a CPU share into an integer would silently
     /// corrupt it.
     ///
-    /// Not pure for [`RowKind::Secret`]: a secret row's status is "does this
-    /// reference resolve?", which reads the environment and — for a
-    /// `keychain:` reference — shells out to `/usr/bin/security`. Doing it here
-    /// keeps every row seeded through one call; the screen builds rows once, so
-    /// this never runs per frame.
+    /// [`RowKind::Secret`] reads the process environment for a `$VAR`
+    /// reference, which is free. It deliberately does NOT touch the keychain —
+    /// see [`secret_value`].
     #[must_use]
     pub fn to_value(&self, current: Option<&toml::Value>) -> ConfigValue {
         match self.kind {
@@ -1740,6 +1752,22 @@ mod tests {
         );
     }
 
+    /// Every settings category must be reachable. A category with a label, an
+    /// icon and no row is a menu entry nothing can ever open — the same drift
+    /// in the other direction from `every_leaf_has_an_entry`.
+    #[test]
+    fn every_category_has_at_least_one_row() {
+        let empty: Vec<ConfigCategory> = ConfigCategory::all()
+            .into_iter()
+            .filter(|category| !rows().any(|row| row.category == *category))
+            .collect();
+        assert!(
+            empty.is_empty(),
+            "these categories have no rows and can never be opened: {empty:?}\n\
+             Give each one a row, or drop the variant."
+        );
+    }
+
     #[test]
     fn registry_keys_are_unique() {
         let mut seen = BTreeMap::new();
@@ -2004,6 +2032,26 @@ mod tests {
             validate("mcp_pool.enabled", "FALSE").unwrap(),
             toml::Value::Boolean(false)
         );
+    }
+
+    /// #7. Per-plugin keys must stay settable: their schema is the plugin's own
+    /// `[[config]]` manifest, so the registry describes the table as opaque
+    /// rather than describing its contents.
+    #[test]
+    fn a_key_below_an_opaque_root_is_settable() {
+        assert_eq!(
+            validate("plugins.learnings.learnings_dir", "~/kb").unwrap(),
+            toml::Value::String("~/kb".to_string())
+        );
+        assert_eq!(
+            validate("plugins.burndown.daily_cap", "20").unwrap(),
+            toml::Value::Integer(20)
+        );
+        // The opaque ROOT itself is still refused — that is a structured value.
+        let err = validate("mcp_servers.ctx.definition.config", "{}").unwrap_err().to_string();
+        assert!(err.contains("ainb config edit"), "{err}");
+        // And a genuinely unknown key is still a typo.
+        assert!(validate("plugins", "x").is_err());
     }
 
     #[test]

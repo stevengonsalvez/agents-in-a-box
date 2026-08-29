@@ -141,7 +141,9 @@ pub fn build_rows(seed: &toml::Value) -> HashMap<ConfigCategory, Vec<ConfigSetti
 /// actually installed here as choices.
 ///
 /// The current value is kept in the list even when it is not one of the known
-/// editors, so opening the screen can never silently retarget a custom editor.
+/// editors — including the empty value of an unset preference — so opening the
+/// screen can never silently retarget a custom editor nor invent a choice the
+/// user never made.
 fn widen_with_detected_choices(setting: &mut ConfigSetting) {
     if setting.key != "ui_preferences.preferred_editor" {
         return;
@@ -158,7 +160,12 @@ fn widen_with_detected_choices(setting: &mut ConfigSetting) {
     if options.is_empty() {
         return; // Nothing detected: a text field beats an empty picker.
     }
-    if !current.is_empty() && !options.contains(&current) {
+    // An unset preference gets an explicit empty first option rather than
+    // silently pre-selecting whichever editor was detected first. Showing
+    // `Preferred Editor : code` to someone who never chose one is a claim about
+    // their config that is not true — and confirming the row would write it.
+    // The empty option round-trips to "remove the key" (`OPTIONAL_KEYS`).
+    if !options.contains(&current) {
         options.insert(0, current.clone());
     }
     let selected = options.iter().position(|option| *option == current).unwrap_or(0);
@@ -517,6 +524,27 @@ mod tests {
         // A child carries only its own subtree.
         let bridge = tree.iter().find(|node| node.path == "fleet.bridge").unwrap();
         assert!(bridge.rows.iter().all(|&i| fleet_rows[i].key.starts_with("fleet.bridge.")));
+    }
+
+    /// #9. An unset `preferred_editor` must render as unset, not as whichever
+    /// editor happens to be installed first.
+    #[test]
+    fn an_unset_editor_preference_does_not_preselect_one() {
+        let rows = build_rows(&seed());
+        let editor = rows
+            .get(&ConfigCategory::Editor)
+            .and_then(|rows| rows.iter().find(|row| row.key == "ui_preferences.preferred_editor"))
+            .expect("editor row");
+        assert_eq!(
+            editor.value.display(),
+            "",
+            "an unset editor preference was rendered as a real choice"
+        );
+        assert_eq!(
+            editor.value.raw(),
+            "",
+            "confirming the row would write that choice"
+        );
     }
 
     #[test]
