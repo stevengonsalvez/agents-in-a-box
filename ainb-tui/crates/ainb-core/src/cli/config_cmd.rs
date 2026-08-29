@@ -17,6 +17,7 @@ use std::process::Command;
 
 use super::OutputFormat;
 use crate::config::AppConfig;
+use crate::config::registry::{navigate_toml, set_validated};
 
 /// JSON output for the `path` subcommand
 #[derive(Debug, Serialize)]
@@ -123,7 +124,10 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         toml::Value::Table(toml::map::Map::new())
     };
 
-    set_toml_value(&mut root, key, value)?;
+    // Validated against CONFIG_REGISTRY: a mistyped key or an out-of-range
+    // value fails here rather than landing in the file and being dropped by the
+    // next load, which is how a `set` could look like it worked and do nothing.
+    set_validated(&mut root, key, value)?;
 
     let content = toml::to_string_pretty(&root).context("Failed to serialize config")?;
     fs::write(&config_path, &content).context("Failed to write user config")?;
@@ -238,90 +242,6 @@ fn cmd_edit() -> Result<()> {
     Ok(())
 }
 
-// --- TOML navigation helpers ---
-
-/// Navigate a TOML value tree using dot-notation keys
-fn navigate_toml<'a>(value: &'a toml::Value, key: &str) -> Result<&'a toml::Value> {
-    let parts = parse_dot_key(key);
-    if parts.is_empty() {
-        return Err(anyhow!("Empty key"));
-    }
-
-    let mut current = value;
-    for (i, part) in parts.iter().enumerate() {
-        if let toml::Value::Table(table) = current {
-            current = table.get(part.as_str()).ok_or_else(|| {
-                let path = parts[..=i].join(".");
-                anyhow!("Key '{path}' not found in configuration")
-            })?;
-        } else {
-            let path = parts[..i].join(".");
-            return Err(anyhow!("Cannot index into non-table value at '{path}'"));
-        }
-    }
-
-    Ok(current)
-}
-
-/// Set a value in a TOML tree using dot-notation keys
-fn set_toml_value(root: &mut toml::Value, key: &str, raw_value: &str) -> Result<()> {
-    let parts = parse_dot_key(key);
-    if parts.is_empty() {
-        return Err(anyhow!("Empty key"));
-    }
-
-    // Navigate to parent, creating intermediate tables as needed
-    let mut current = root;
-    for part in &parts[..parts.len() - 1] {
-        current = current
-            .as_table_mut()
-            .ok_or_else(|| anyhow!("Cannot set key in non-table value"))?
-            .entry(part)
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    }
-
-    let table = current
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("Cannot set key in non-table value"))?;
-
-    let leaf_key = &parts[parts.len() - 1];
-    let parsed = parse_toml_scalar(raw_value);
-    table.insert(leaf_key.clone(), parsed);
-
-    Ok(())
-}
-
-/// Parse a dot-notation key into parts
-fn parse_dot_key(key: &str) -> Vec<String> {
-    key.split('.').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-}
-
-/// Parse a raw string value into the most appropriate TOML scalar
-fn parse_toml_scalar(raw: &str) -> toml::Value {
-    // Try boolean
-    if raw.eq_ignore_ascii_case("true") {
-        return toml::Value::Boolean(true);
-    }
-    if raw.eq_ignore_ascii_case("false") {
-        return toml::Value::Boolean(false);
-    }
-
-    // Try integer
-    if let Ok(i) = raw.parse::<i64>() {
-        return toml::Value::Integer(i);
-    }
-
-    // Try float (only if it contains a dot to avoid int-like strings)
-    if raw.contains('.') {
-        if let Ok(f) = raw.parse::<f64>() {
-            return toml::Value::Float(f);
-        }
-    }
-
-    // Default to string
-    toml::Value::String(raw.to_string())
-}
-
 /// Print a TOML value in human-readable text format
 fn print_toml_value(value: &toml::Value) {
     match value {
@@ -362,6 +282,9 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The dotted-path helpers now live next to the registry that validates
+    // against them; these tests still pin their behaviour from the CLI side.
+    use crate::config::registry::{parse_dot_key, parse_toml_scalar, set_toml_value};
 
     // --- parse_dot_key tests ---
 
@@ -440,6 +363,36 @@ mod tests {
         assert_eq!(
             parse_toml_scalar("agents/"),
             toml::Value::String("agents/".to_string())
+        );
+    }
+
+    // --- `set` validation (the write path cmd_set takes) ---
+
+    #[test]
+    fn set_refuses_a_mistyped_key() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        let err = set_validated(&mut root, "docker.timout", "30").unwrap_err().to_string();
+        assert!(err.contains("Unknown config key"), "{err}");
+        assert!(
+            root.as_table().expect("table").is_empty(),
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn set_refuses_an_out_of_range_value() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        let err = set_validated(&mut root, "docker.timeout", "0").unwrap_err().to_string();
+        assert!(err.contains("between 1 and 3600"), "{err}");
+    }
+
+    #[test]
+    fn set_writes_a_known_key() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        set_validated(&mut root, "docker.timeout", "120").unwrap();
+        assert_eq!(
+            navigate_toml(&root, "docker.timeout").unwrap(),
+            &toml::Value::Integer(120)
         );
     }
 
