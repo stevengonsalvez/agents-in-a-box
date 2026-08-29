@@ -163,6 +163,55 @@ const EXIT_QUIESCE: Duration = Duration::from_millis(50);
 
 // --------------------------------------------------------------------- config
 
+/// The permission mode an adapter gets when neither the built-in registry nor
+/// config names one.
+const DEFAULT_PERMISSION_MODE: &str = "default";
+
+/// One `[acp.adapters.<name>]` table, as written.
+///
+/// Both fields are `Option` so an absent key means "leave the built-in alone"
+/// rather than "reset it to a default": a table that only repoints `command`
+/// must not silently unpin the permission mode, which is the setting that stops
+/// an adapter inheriting `bypassPermissions` from ambient state.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AcpAdapterToml {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    permission_mode: Option<String>,
+}
+
+/// Read `[acp.adapters]` from `~/.agents-in-a-box/config/config.toml`.
+///
+/// Empty on any failure (no file, no `$HOME`, bad TOML, malformed table), with
+/// a warning: the built-in adapters are always the floor.
+fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterToml> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return HashMap::new();
+    };
+    let path = std::path::PathBuf::from(home)
+        .join(".agents-in-a-box")
+        .join("config")
+        .join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let root: toml::Value = match toml::from_str(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "acp: config.toml does not parse; using the built-in adapters");
+            return HashMap::new();
+        }
+    };
+    let Some(table) = root.get("acp").and_then(|acp| acp.get("adapters")).cloned() else {
+        return HashMap::new();
+    };
+    table.try_into().unwrap_or_else(|error| {
+        tracing::warn!(%error, "acp: [acp.adapters] is malformed; using the built-in adapters");
+        HashMap::new()
+    })
+}
+
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -196,7 +245,7 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        let mode = "default".to_string();
+        let mode = DEFAULT_PERMISSION_MODE.to_string();
         let adapters = [
             ainb_acp::config::CLAUDE_ADAPTER,
             ainb_acp::config::CODEX_ADAPTER,
@@ -230,7 +279,7 @@ impl PoolConfig {
     /// untouched when the variable is unset or junk.
     #[must_use]
     pub fn from_env() -> Self {
-        let mut config = Self::default();
+        let mut config = Self::from_config();
         if let Some(ms) = std::env::var("AINB_ACP_TURN_DEADLINE_MS")
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -240,6 +289,36 @@ impl PoolConfig {
             config.sweep_interval = config
                 .sweep_interval
                 .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+        }
+        config
+    }
+
+    /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config
+    /// applied.
+    ///
+    /// The adapter registry was a hardcoded two-entry map with no user surface
+    /// at all: a provider absent from it simply could not be created, and an
+    /// adapter installed anywhere but `PATH` could not be reached. A named
+    /// adapter here overrides the built-in entry; a new name adds one.
+    ///
+    /// Read directly off config.toml rather than through `ainb`, which this
+    /// crate does not depend on, mirroring how the session-reader plugin reads
+    /// `[session_reader]`. Every failure degrades to the built-ins: a malformed
+    /// table must not leave the daemon with no adapters at all.
+    #[must_use]
+    pub fn from_config() -> Self {
+        let mut config = Self::default();
+        for (name, adapter) in acp_adapters_from_config() {
+            let entry = config
+                .adapters
+                .entry(name.clone())
+                .or_insert_with(|| AdapterConfig::new(name, DEFAULT_PERMISSION_MODE));
+            if let Some(command) = adapter.command {
+                entry.command = std::path::PathBuf::from(command);
+            }
+            if let Some(mode) = adapter.permission_mode {
+                entry.permission_mode = mode;
+            }
         }
         config
     }
