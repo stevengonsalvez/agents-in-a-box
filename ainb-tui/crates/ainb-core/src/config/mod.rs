@@ -961,6 +961,18 @@ fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
 /// read-only.
 const READ_ONLY_SECTIONS: &[&str] = &["usage"];
 
+/// Dotted paths `ainb-core` reads but must never write back from its own
+/// snapshot.
+///
+/// A superset of [`READ_ONLY_SECTIONS`], because the rule is not a top-level
+/// one. `[fleet.bridge]` sits INSIDE a section core does model, is carried as an
+/// opaque `toml::Value` passthrough, is never assigned by core, and is the table
+/// `fleet::bridge::config::SETUP_SKELETON` explicitly tells users to hand-edit.
+/// Without this, a settings save writes the startup snapshot back over a bot
+/// token edited while the TUI was open — the data loss this whole change exists
+/// to stop, one section further in than `[usage]`.
+const READ_ONLY_PATHS: &[&str] = &["usage", "fleet.bridge"];
+
 /// Write `contents` to `path` atomically, so a crash or a full disk cannot
 /// leave a truncated file behind.
 ///
@@ -1025,7 +1037,7 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// read or parse, refuses [`READ_ONLY_SECTIONS`], writes atomically.
 ///
 /// Path-explicit so it is testable without redirecting `HOME`.
-fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
+pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
     if edits.is_empty() {
         return Ok(());
     }
@@ -1034,24 +1046,155 @@ fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
     }
 
     let existing = read_existing(path)?;
-    let mut root = if existing.trim().is_empty() {
-        toml::Value::Table(toml::Table::new())
-    } else {
-        toml::Value::Table(existing.parse::<toml::Table>().context(
-            "refusing to save over a config.toml that does not parse — fix the syntax error first",
-        )?)
-    };
+    // `toml_edit`, not `toml`: this file is the one users are told to copy from
+    // `config/example.config.toml`, which is almost entirely comments. A
+    // round-trip through `to_string_pretty` deletes every comment and reflows
+    // every line — and this writer runs on a settings edit, not on an explicit
+    // "rewrite my config". `config/presets.rs` uses toml_edit for the same
+    // reason.
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().context(
+        "refusing to save over a config.toml that does not parse — fix the syntax error first",
+    )?;
 
     for (key, value) in edits {
         let section = key.split('.').next().unwrap_or_default();
-        if READ_ONLY_SECTIONS.contains(&section) {
-            anyhow::bail!("'{key}' is in a read-only section");
+        if READ_ONLY_PATHS
+            .iter()
+            .any(|path| *path == section || key.starts_with(&format!("{path}.")))
+        {
+            anyhow::bail!("'{key}' is in a section ainb-core must not write");
         }
-        registry::insert_at(&mut root, key, value.clone())?;
+        set_document_key(&mut doc, key, value)?;
     }
 
-    write_atomic(path, &toml::to_string_pretty(&root)?)?;
+    write_atomic(path, &doc.to_string())?;
     Ok(())
+}
+
+/// Set one dotted key in a `toml_edit` document, creating the parent tables it
+/// needs and leaving every other byte of the document untouched.
+/// Every scalar/array leaf in `table`, as dotted paths.
+///
+/// A leaf is anything that is not a table: writing those individually is what
+/// lets a save edit values in place instead of replacing whole sections and
+/// flattening them into inline tables.
+fn flatten_leaves(
+    table: &toml::map::Map<String, toml::Value>,
+    prefix: String,
+    out: &mut Vec<(String, toml::Value)>,
+) {
+    for (key, value) in table {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            // An empty table is a leaf: it still has to be written, or a
+            // section that exists only to be present would vanish.
+            toml::Value::Table(inner) if !inner.is_empty() => {
+                flatten_leaves(inner, path, out);
+            }
+            other => out.push((path, other.clone())),
+        }
+    }
+}
+
+/// The same walk over a `toml_edit` document, used to find leaves on disk that
+/// our snapshot no longer has.
+fn flatten_document_leaves(table: &toml_edit::Table, prefix: String, out: &mut Vec<String>) {
+    for (key, item) in table.iter() {
+        let path = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match item.as_table() {
+            Some(inner) if !inner.is_empty() => flatten_document_leaves(inner, path, out),
+            _ => out.push(path),
+        }
+    }
+}
+
+/// Remove one dotted key from the document, ignoring a path that is not there.
+fn remove_document_key(doc: &mut toml_edit::DocumentMut, key: &str) {
+    let parts = registry::parse_dot_key(key);
+    let Some((leaf, parents)) = parts.split_last() else {
+        return;
+    };
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for part in parents {
+        match table.get_mut(part).and_then(toml_edit::Item::as_table_like_mut) {
+            Some(next) => table = next,
+            None => return,
+        }
+    }
+    table.remove(leaf);
+}
+
+fn set_document_key(
+    doc: &mut toml_edit::DocumentMut,
+    key: &str,
+    value: &toml::Value,
+) -> Result<()> {
+    let parts = registry::parse_dot_key(key);
+    let Some((leaf, parents)) = parts.split_last() else {
+        anyhow::bail!("empty config key");
+    };
+
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for part in parents {
+        if table.get(part).is_none() {
+            let mut created = toml_edit::Table::new();
+            // Implicit: a parent that only exists to hold a sub-table does not
+            // print an empty `[header]` of its own.
+            created.set_implicit(true);
+            table.insert(part, toml_edit::Item::Table(created));
+        }
+        table = table
+            .get_mut(part)
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| anyhow::anyhow!("cannot set '{key}': '{part}' is not a table"))?;
+    }
+
+    match table.get_mut(leaf) {
+        Some(item) => {
+            let mut next = to_edit_value(value);
+            // Carry the old value's decor across. That decor holds the
+            // whitespace AND the trailing `# comment` on the same line, so
+            // replacing the item without it silently deletes the note the user
+            // wrote next to the setting they just changed.
+            if let Some(previous) = item.as_value() {
+                *next.decor_mut() = previous.decor().clone();
+            }
+            *item = toml_edit::Item::Value(next);
+        }
+        None => {
+            table.insert(leaf, toml_edit::Item::Value(to_edit_value(value)));
+        }
+    }
+    Ok(())
+}
+
+/// Convert a `toml::Value` into the `toml_edit` value the document stores.
+fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
+    match value {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(dt) => dt.to_string().into(),
+        toml::Value::Array(items) => {
+            items.iter().map(to_edit_value).collect::<toml_edit::Array>().into()
+        }
+        toml::Value::Table(entries) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (key, entry) in entries {
+                inline.insert(key, to_edit_value(entry));
+            }
+            inline.into()
+        }
+    }
 }
 
 /// The TOML value an external edit writes, or an error naming why the key is
@@ -1222,17 +1365,9 @@ impl AppConfig {
             if path.exists() {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read config from {}", path.display()))?;
-
-                let usage_present = content
-                    .parse::<toml::Value>()
-                    .ok()
-                    .and_then(|value| value.as_table().cloned())
-                    .is_some_and(|table| table.contains_key("usage"));
-
-                let file_config: AppConfig = toml::from_str(&content)
+                config
+                    .merge_file_contents(&content)
                     .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-
-                config.merge_loaded(file_config, usage_present);
             }
         }
 
@@ -1242,6 +1377,25 @@ impl AppConfig {
         }
 
         Ok(config)
+    }
+
+    /// Merge one config file's contents into `self`, exactly as [`load`](Self::load)
+    /// does for each path it finds.
+    ///
+    /// Split out so a test can round-trip a real file through the loader
+    /// without depending on `HOME` or the current directory — the field-by-field
+    /// `merge_loaded` below is where a newly-added key gets silently dropped,
+    /// and only a test that goes through this path catches it.
+    pub(crate) fn merge_file_contents(&mut self, content: &str) -> Result<()> {
+        let usage_present = content
+            .parse::<toml::Value>()
+            .ok()
+            .and_then(|value| value.as_table().cloned())
+            .is_some_and(|table| table.contains_key("usage"));
+
+        let file_config: AppConfig = toml::from_str(content)?;
+        self.merge_loaded(file_config, usage_present);
+        Ok(())
     }
 
     /// Overlay the sections this struct models onto whatever is already on
@@ -1285,13 +1439,75 @@ impl AppConfig {
         let toml::Value::Table(ours) = toml::Value::try_from(self)? else {
             anyhow::bail!("AppConfig did not serialize to a TOML table");
         };
+
+        // Snapshot the read-only paths BEFORE merging: a modelled section is
+        // replaced wholesale, so `[fleet]` takes `[fleet.bridge]` with it and
+        // "skip this key" is not enough for a path more than one level deep.
+        let on_disk = toml::Value::Table(table.clone());
+        let preserved: Vec<(&str, toml::Value)> = READ_ONLY_PATHS
+            .iter()
+            .filter_map(|path| {
+                registry::navigate_toml(&on_disk, path).ok().map(|value| (*path, value.clone()))
+            })
+            .collect();
+
         for (key, value) in ours {
-            if READ_ONLY_SECTIONS.contains(&key.as_str()) && table.contains_key(&key) {
-                continue;
-            }
             table.insert(key, value);
         }
-        Ok(toml::to_string_pretty(&table)?)
+
+        let mut root = toml::Value::Table(table);
+        for (path, value) in preserved {
+            // What is on disk wins for these paths. Absent on disk means core
+            // writes its snapshot, which is what `[usage]` already did.
+            registry::insert_at(&mut root, path, value)?;
+        }
+
+        // Render through `toml_edit`, not `toml::to_string_pretty`, so the
+        // file keeps its comments. Users are told to start from
+        // `config/example.config.toml`, which is ~320 lines of comments
+        // explaining what every key does; a settings save that silently
+        // deleted all of them would leave a file strictly less useful than the
+        // one it replaced.
+        //
+        // Setting LEAVES rather than whole sections is what makes that work: a
+        // top-level `doc["docker"] = <table>` writes `docker = { timeout = 60 }`
+        // as an inline value, flattening the `[docker]` header and taking every
+        // comment attached to it. Walking to leaves edits values in place and
+        // leaves the document's shape alone.
+        let toml::Value::Table(root_table) = root else {
+            anyhow::bail!("config did not render to a TOML table");
+        };
+        let mut doc = existing.parse::<toml_edit::DocumentMut>().unwrap_or_default();
+
+        let mut ours_leaves = Vec::new();
+        flatten_leaves(&root_table, String::new(), &mut ours_leaves);
+
+        // Wholesale replacement of a modelled section has to keep working, or
+        // removing an entry from `[mcp_servers]` would never stick. Leaf-wise
+        // writing cannot express a deletion, so prune first: drop any leaf the
+        // document has under a section we model that our snapshot no longer
+        // carries. Read-only paths are exempt — they are not ours to prune.
+        let ours_keys: std::collections::HashSet<&str> =
+            ours_leaves.iter().map(|(k, _)| k.as_str()).collect();
+        let mut doc_leaves = Vec::new();
+        flatten_document_leaves(doc.as_table(), String::new(), &mut doc_leaves);
+        for key in doc_leaves {
+            let section = key.split('.').next().unwrap_or_default();
+            let is_read_only = READ_ONLY_PATHS
+                .iter()
+                .any(|path| *path == section || key.starts_with(&format!("{path}.")));
+            if is_read_only || !root_table.contains_key(section) {
+                continue;
+            }
+            if !ours_keys.contains(key.as_str()) {
+                remove_document_key(&mut doc, &key);
+            }
+        }
+
+        for (key, value) in &ours_leaves {
+            set_document_key(&mut doc, key, value)?;
+        }
+        Ok(doc.to_string())
     }
 
     /// Save configuration to user config directory
@@ -1468,6 +1684,13 @@ impl AppConfig {
         // Old configs keep the default (true) values
         if other.ui_preferences.preferred_editor.is_some() {
             self.ui_preferences.preferred_editor = other.ui_preferences.preferred_editor;
+        }
+        // A field with no arm here is not merely "not merged": `load()` returns
+        // the default for it, and the next `save()` then overlays that default
+        // back over the file. An unlisted key is silently destroyed, not just
+        // ignored. Covered by `loading_restores_the_config_tree_expansion`.
+        if !other.ui_preferences.config_tree_expanded.is_empty() {
+            self.ui_preferences.config_tree_expanded = other.ui_preferences.config_tree_expanded;
         }
         if other.ui_preferences.home_sidebar_width.is_some() {
             self.ui_preferences.home_sidebar_width = other.ui_preferences.home_sidebar_width;
@@ -1802,6 +2025,128 @@ mod tests {
         );
     }
 
+    // ================================================================
+    // Review round 3, findings #1 #2 #3
+    // ================================================================
+
+    /// #1. A key `merge_loaded` has no arm for is dropped by every load, and
+    /// the next save then writes the empty value back over what was stored.
+    ///
+    /// Goes through `merge_file_contents`, which is exactly what `load()` runs
+    /// per file — a test built on a hand-made struct never touches `merge_loaded`
+    /// and so never sees this.
+    #[test]
+    fn loading_restores_the_config_tree_expansion() {
+        let on_disk =
+            "[ui_preferences]\nconfig_tree_expanded = [\"Fleet|fleet\", \"MCP Pool|mcp_pool\"]\n";
+
+        let mut config = AppConfig::default();
+        config.merge_file_contents(on_disk).expect("loads");
+
+        assert_eq!(
+            config.ui_preferences.config_tree_expanded,
+            vec!["Fleet|fleet".to_string(), "MCP Pool|mcp_pool".to_string()],
+            "the loader dropped the expansion state"
+        );
+
+        // And the round trip back to disk must not erase it.
+        let written = config.overlay_onto_existing(on_disk).expect("overlay");
+        let reread: toml::Value = toml::from_str(&written).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&reread, "ui_preferences.config_tree_expanded").ok(),
+            Some(&toml::Value::Array(vec![
+                toml::Value::String("Fleet|fleet".to_string()),
+                toml::Value::String("MCP Pool|mcp_pool".to_string()),
+            ])),
+            "saving after a load erased the expansion state:\n{written}"
+        );
+    }
+
+    /// #2. Persisting a setting must not reformat the file.
+    ///
+    /// `config/example.config.toml` is almost entirely comments and users are
+    /// told to copy it. A targeted write that round-trips through
+    /// `to_string_pretty` deletes every one of them — on a navigation keypress,
+    /// with no save and no confirmation.
+    #[test]
+    fn a_targeted_write_preserves_comments_and_layout() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        let hand_written = "\
+# ainb configuration
+# Copied from config/example.config.toml — every line below is load-bearing.
+
+[docker]
+# Connection timeout in seconds
+timeout   = 60
+
+[ui_preferences]
+theme = \"dark\"   # keep it dark
+";
+        fs::write(&path, hand_written).expect("seed");
+
+        write_keys_into(
+            &path,
+            &[(
+                "ui_preferences.config_tree_expanded".to_string(),
+                toml::Value::Array(vec![toml::Value::String("Fleet|fleet".to_string())]),
+            )],
+        )
+        .expect("targeted write");
+
+        let after = fs::read_to_string(&path).expect("read");
+        for comment in [
+            "# ainb configuration",
+            "# Copied from config/example.config.toml",
+            "# Connection timeout in seconds",
+            "# keep it dark",
+        ] {
+            assert!(
+                after.contains(comment),
+                "a settings write deleted {comment:?}:\n---\n{after}\n---"
+            );
+        }
+        assert!(
+            after.contains("timeout   = 60"),
+            "hand-written spacing was reflowed:\n---\n{after}\n---"
+        );
+        assert!(
+            after.contains("config_tree_expanded = [\"Fleet|fleet\"]"),
+            "the value was not written:\n---\n{after}\n---"
+        );
+    }
+
+    /// #3. `[fleet.bridge]` is hand-edited (see `SETUP_SKELETON`) and never
+    /// assigned by core, so a settings save must not write it back from the
+    /// snapshot it loaded at startup — that reverts a token edited while the
+    /// TUI was open. `[usage]` already has this guard; the bridge is the data
+    /// this PR exists to protect and had none.
+    #[test]
+    fn a_save_does_not_revert_a_hand_edited_bridge_token() {
+        // What the TUI loaded at startup.
+        let mut snapshot = AppConfig::default();
+        snapshot.fleet.bridge =
+            Some(toml::from_str("[telegram]\ntoken = \"keychain:stale\"\n").expect("stale bridge"));
+
+        // What is on disk now — the user hand-edited the token meanwhile.
+        let on_disk =
+            "[fleet.bridge.telegram]\ntoken = \"keychain:freshly-edited\"\nuser_id = 42\n";
+
+        let written = snapshot.overlay_onto_existing(on_disk).expect("overlay");
+        let after: toml::Value = toml::from_str(&written).expect("parse");
+
+        assert_eq!(
+            registry::navigate_toml(&after, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:freshly-edited".to_string())),
+            "a settings save reverted a hand-edited bridge token:\n{written}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "fleet.bridge.telegram.user_id").ok(),
+            Some(&toml::Value::Integer(42)),
+            "a settings save dropped a hand-added bridge key:\n{written}"
+        );
+    }
+
     /// #9. A navigational keystroke must not rewrite the whole file.
     ///
     /// `ConfigToggleExpand` used to call `AppConfig::save()`, which serializes
@@ -2087,6 +2432,48 @@ mod tests {
         assert!(
             root.join("config.toml.migrated").exists(),
             "stray file's contents were destroyed rather than kept"
+        );
+    }
+
+    /// A settings save must not strip the file's comments.
+    ///
+    /// Users are told to start from `config/example.config.toml`, which is
+    /// ~320 lines of comments explaining what every key does. Rendering the
+    /// save through `toml::to_string_pretty` deleted all of them, so the first
+    /// time anyone changed a setting the file they were left with was strictly
+    /// less useful than the one they copied.
+    #[test]
+    fn save_keeps_the_comments_in_a_hand_written_config() {
+        let existing = "\
+# The theme the TUI paints with.
+# Options: \"dark\" | \"light\"
+[ui_preferences]
+theme = \"dark\"   # trailing note
+
+# How long to wait on the Docker daemon.
+[docker]
+timeout = 60
+";
+        let mut config: AppConfig = toml::from_str(existing).expect("parses");
+        config.ui_preferences.theme = "light".to_string();
+
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        assert!(
+            saved.contains("# The theme the TUI paints with."),
+            "a leading comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("# How long to wait on the Docker daemon."),
+            "a section comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("# trailing note"),
+            "a trailing comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("theme = \"light\""),
+            "the edited value did not reach the file:\n{saved}"
         );
     }
 

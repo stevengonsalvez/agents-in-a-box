@@ -116,26 +116,28 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     fs::create_dir_all(&config_dir)?;
     let config_path = config_dir.join("config.toml");
 
-    // Load existing user config or start with empty table
+    // Validate against CONFIG_REGISTRY first: a mistyped key or an out-of-range
+    // value fails here rather than landing in the file and being dropped by the
+    // next load, which is how a `set` could look like it worked and do nothing.
     // `read_existing` maps only "not there" to empty: a present-but-unreadable
     // file must abort rather than be replaced by a fresh one.
     let existing = crate::config::read_existing(&config_path)?;
-    let mut root = if existing.trim().is_empty() {
+    let mut probe = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
         existing.parse::<toml::Value>().context("Failed to parse user config")?
     };
+    set_validated(&mut probe, key, value)?;
+    let validated = crate::config::registry::navigate_toml(&probe, key)?.clone();
 
-    // Validated against CONFIG_REGISTRY: a mistyped key or an out-of-range
-    // value fails here rather than landing in the file and being dropped by the
-    // next load, which is how a `set` could look like it worked and do nothing.
-    set_validated(&mut root, key, value)?;
-
-    let content = toml::to_string_pretty(&root).context("Failed to serialize config")?;
-    // Atomic, like every other writer of this file: a truncated config.toml is
-    // not cosmetic here — the next load sees a syntax error and every consumer
-    // (bridge tokens, skills key, [usage]) falls back to defaults.
-    crate::config::write_atomic(&config_path, &content).context("Failed to write user config")?;
+    // Write through the shared key-level writer, which edits the document in
+    // place. Serializing `probe` instead would be a whole-file rewrite that
+    // deletes every comment — and this file is meant to be started from
+    // `config/example.config.toml`, which is ~320 lines of comments explaining
+    // the keys. `ainb config set docker.timeout 90` must change one line, not
+    // strip the manual.
+    crate::config::write_keys_into(&config_path, &[(key.to_string(), validated)])
+        .context("Failed to write user config")?;
 
     println!("Set {key} = {value}");
     println!("Saved to {}", config_path.display());
