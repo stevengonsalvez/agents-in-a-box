@@ -1441,9 +1441,16 @@ impl ConfigRow {
             RowKind::Bool => {
                 ConfigValue::Bool(current.and_then(toml::Value::as_bool).unwrap_or(false))
             }
-            RowKind::Number { .. } => {
-                ConfigValue::Number(current.and_then(toml::Value::as_integer).unwrap_or(0))
-            }
+            RowKind::Number { .. } => match current.and_then(toml::Value::as_integer) {
+                Some(n) => ConfigValue::Number(n),
+                // An unset OPTIONAL row is blank, not `0`. Rendering `0` was a
+                // false claim about the config — `memory_limit` has a `min` of
+                // 64, so confirming the row unchanged sent `"0"` and the edit
+                // was rejected. Text also gives the row a way to be cleared,
+                // which a number widget has no way to express.
+                None if is_optional(self.key) => ConfigValue::Text(String::new()),
+                None => ConfigValue::Number(0),
+            },
             RowKind::Choice(options) => {
                 let selected = current.map(scalar_text).unwrap_or_default();
                 let idx = options.iter().position(|o| *o == selected).unwrap_or(0);

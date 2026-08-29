@@ -1024,6 +1024,13 @@ pub(crate) fn read_existing(path: &Path) -> Result<String> {
 }
 
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    // Follow a symlink to its target before writing. `rename` REPLACES a
+    // symlink with a regular file, so a config.toml symlinked into a dotfiles
+    // repo would silently stop being the tracked file after the first save,
+    // and the mode carry-over below (which follows the link) would give no
+    // hint that it had happened.
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = resolved.as_path();
     let tmp = temp_path(path);
     // Every failure below removes the temp file. The name is per-process and
     // random, so unlike the old fixed `config.toml.tmp` nothing would ever
@@ -1182,8 +1189,40 @@ fn flatten_document_leaves(table: &toml_edit::Table, prefix: String, out: &mut V
         } else {
             format!("{prefix}.{segment}")
         };
-        match item.as_table() {
-            Some(inner) if !inner.is_empty() => flatten_document_leaves(inner, path, out),
+        // `as_table_like`, not `as_table`: an inline table
+        // (`installation = { type = "Npm", … }`, which is exactly how
+        // `example.config.toml` documents `[mcp_servers.*]`) is an
+        // `Item::Value`, so `as_table()` says no. The `toml` side descends into
+        // it either way, so treating it as a leaf here made the prune pass
+        // remove it and the set pass re-emit it as `[section.sub]` headers,
+        // destroying the line and its comments on the first save.
+        match item.as_table_like() {
+            Some(inner) if !inner.is_empty() => {
+                flatten_document_leaves_like(inner, path, out);
+            }
+            _ => out.push(path),
+        }
+    }
+}
+
+/// [`flatten_document_leaves`] over anything table-like, including an inline
+/// table.
+fn flatten_document_leaves_like(
+    table: &dyn toml_edit::TableLike,
+    prefix: String,
+    out: &mut Vec<String>,
+) {
+    for (key, item) in table.iter() {
+        let segment = registry::quote_key_segment(key);
+        let path = if prefix.is_empty() {
+            segment
+        } else {
+            format!("{prefix}.{segment}")
+        };
+        match item.as_table_like() {
+            Some(inner) if !inner.is_empty() => {
+                flatten_document_leaves_like(inner, path, out);
+            }
             _ => out.push(path),
         }
     }
@@ -2566,6 +2605,52 @@ theme = \"dark\"   # keep it dark
         assert!(is_burndown_owned("usage"));
         assert!(!is_burndown_owned("fleet.bridge.telegram.token"));
         assert!(!is_burndown_owned("docker.timeout"));
+    }
+
+    /// An inline table must survive a save intact.
+    ///
+    /// `example.config.toml` documents `[mcp_servers.*]` with inline
+    /// `installation = { type = "Npm", … }` / `definition = { … }` values. An
+    /// inline table is an `Item::Value`, so `as_table()` says no: the document
+    /// walk called it a leaf while the `toml` walk descended into it, the
+    /// prune pass then removed it and the set pass re-emitted it as
+    /// `[section.sub]` headers — destroying the line and its comment.
+    #[test]
+    fn save_keeps_an_inline_table_and_its_comment() {
+        let existing = "\
+# my mcp servers
+[mcp_servers.context7]
+name = \"context7\"
+description = \"docs\"
+required_env = []
+enabled_by_default = true
+shared = true
+installation = { type = \"Npm\", package = \"@context7/mcp-server\", version = \"latest\" }  # inline
+definition = { type = \"Command\", command = \"npx\", args = [\"-y\"], env = {} }
+
+[docker]
+timeout = 60
+";
+        let config: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        assert!(
+            saved.contains("installation = {"),
+            "the inline table was expanded into headers:\n{saved}"
+        );
+        assert!(
+            saved.contains("# inline"),
+            "the inline comment was lost:\n{saved}"
+        );
+        assert!(
+            saved.contains("# my mcp servers"),
+            "the section comment was lost:\n{saved}"
+        );
+        assert!(
+            !saved.contains("[mcp_servers.context7.installation]"),
+            "the inline table was re-emitted as a header:\n{saved}"
+        );
+        toml::from_str::<AppConfig>(&saved).expect("saved config no longer deserializes");
     }
 
     /// A map key containing a dot must survive a save.
