@@ -55,12 +55,25 @@ pub enum RowKind {
     /// One of an enumerated set. The strings are the *serialized* forms, not
     /// display names, so they can be written straight back into config.toml.
     Choice(&'static [&'static str]),
-    /// Array of scalars, edited as a comma-separated list.
-    List,
+    /// Array of scalars, edited as a comma-separated list. The element type is
+    /// explicit because it cannot be guessed: `definition.args` is a
+    /// `Vec<String>` whose elements often look like numbers (`"8931"`), while
+    /// `config.ports` is a `Vec<u16>` that must NOT be stored as strings.
+    List(ListElement),
     /// A structured value (array of tables, or a nested JSON blob) with no
     /// scalar rendering. Displayed read-only; `ainb config set` refuses it and
     /// points at `ainb config edit`.
     Opaque,
+}
+
+/// What a [`RowKind::List`] holds. The list widget edits a comma-separated
+/// string either way; this decides what each element parses back into.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ListElement {
+    /// Elements stay strings, however numeric they look.
+    Text,
+    /// Elements are whole numbers (ports, ids).
+    Integer,
 }
 
 /// One editable configuration leaf.
@@ -238,14 +251,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::ContainerTemplates,
         label: "Command",
         help: "Container command argv (unset = the image default)",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.entrypoint",
         category: C::ContainerTemplates,
         label: "Entrypoint",
         help: "Container entrypoint argv (unset = the image default)",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.environment.*",
@@ -286,28 +299,28 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::ContainerTemplates,
         label: "System Packages",
         help: "apt packages installed into the image",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.npm_packages",
         category: C::ContainerTemplates,
         label: "NPM Packages",
         help: "npm packages installed globally in the image",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.python_packages",
         category: C::ContainerTemplates,
         label: "Python Packages",
         help: "pip packages installed into the image",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.ports",
         category: C::ContainerTemplates,
         label: "Exposed Ports",
         help: "Container ports published to the host",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Integer),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.config.volumes",
@@ -335,14 +348,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::ContainerTemplates,
         label: "Required Env Vars",
         help: "Variables that must be present on the host before the template runs",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "container_templates.*.default_mcp_servers",
         category: C::ContainerTemplates,
         label: "Default MCP Servers",
         help: "MCP servers installed into containers built from this template",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     // ── MCP servers ────────────────────────────────────────────────────────
     Entry::Row(ConfigRow {
@@ -427,7 +440,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::McpServers,
         label: "Launch Arguments",
         help: "Arguments appended to the launch command",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "mcp_servers.*.definition.env.*",
@@ -448,7 +461,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::McpServers,
         label: "Required Env Vars",
         help: "Host variables that must be set before this server can start",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "mcp_servers.*.enabled_by_default",
@@ -477,14 +490,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::Workspace,
         label: "Exclude Paths",
         help: "Substrings that exclude a directory from repository scanning",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "workspace_defaults.workspace_scan_paths",
         category: C::Workspace,
         label: "Scan Paths",
         help: "Extra directories scanned for git repositories, on top of the defaults",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "workspace_defaults.max_repositories",
@@ -566,6 +579,10 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
     Entry::Hidden {
         key: "ui_preferences.tmux_decision",
         why: "records whether the tmux.conf prompt was answered; owned by `ainb init` for the same reason",
+    },
+    Entry::Hidden {
+        key: "ui_preferences.config_tree_expanded",
+        why: "which nodes of this very screen's tree are open; written by the expand keypress, like the sidebar widths",
     },
     // ── Docker ─────────────────────────────────────────────────────────────
     Entry::Row(ConfigRow {
@@ -662,14 +679,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::Plugins,
         label: "Enabled Plugins",
         help: "Allowlist: when non-empty ONLY these plugins load",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Row(ConfigRow {
         key: "plugins.disabled",
         category: C::Plugins,
         label: "Disabled Plugins",
         help: "Denylist: these plugins are skipped (ignored when an allowlist is set)",
-        kind: RowKind::List,
+        kind: RowKind::List(ListElement::Text),
     }),
     Entry::Hidden {
         key: "plugins.*",
@@ -953,6 +970,45 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
 /// exist, so nothing here should claim they don't.
 pub const EXTERNAL_PREFIXES: &[&str] = &["fleet.bridge.", "skills.", "session_reader."];
 
+/// Registry keys whose schema field is an `Option`: clearing the widget must
+/// REMOVE the key rather than store an empty value.
+///
+/// Storing `""` in an `Option<String>` yields `Some("")`, not `None` —
+/// `docker.host` then becomes an empty endpoint that Docker tries to dial, and
+/// `preferred_editor` an empty command. Every other row keeps its empty value,
+/// because those fields have a serde default and removing the key would
+/// silently restore that default instead of honouring the edit.
+///
+/// Hand-written, like [`CONFIG_REGISTRY`] itself, and proved against the schema
+/// by `optional_keys_match_the_schema` — which DERIVES the true set by dropping
+/// each leaf and checking whether serde puts it back.
+pub const OPTIONAL_KEYS: &[&str] = &[
+    "authentication.github_method",
+    "container_templates.*.config.command",
+    "container_templates.*.config.cpu_limit",
+    "container_templates.*.config.entrypoint",
+    "container_templates.*.config.environment.*",
+    "container_templates.*.config.image_source.base_image",
+    "container_templates.*.config.image_source.build_args.*",
+    "container_templates.*.config.memory_limit",
+    "container_templates.*.config.user",
+    "docker.host",
+    "fleet.cost.group_overrides.*",
+    "fleet.cost.group_usd",
+    "fleet.cost.session_overrides.*",
+    "fleet.cost.session_usd",
+    "fleet.interview.surface",
+    "fleet.terminal",
+    "ui_preferences.preferred_editor",
+    "usage.model_aliases.*",
+];
+
+/// True when clearing this row's widget should remove the key.
+#[must_use]
+pub fn is_optional(key: &str) -> bool {
+    OPTIONAL_KEYS.contains(&registry_key(key).as_str())
+}
+
 /// Registry paths whose direct children are user-chosen map keys rather than
 /// schema field names. The child segment normalises to `*`.
 const MAP_PARENTS: &[&str] = &[
@@ -1083,7 +1139,11 @@ pub fn set_toml_value(root: &mut toml::Value, key: &str, raw_value: &str) -> Res
 }
 
 /// Insert an already-built value at a dotted path, creating intermediate tables.
-fn insert_at(root: &mut toml::Value, key: &str, value: toml::Value) -> Result<()> {
+///
+/// Public so a writer that has already produced a typed value (the tree-expansion
+/// array, say) does not have to render it back to a string just to have
+/// [`set_validated`] parse it again.
+pub fn insert_at(root: &mut toml::Value, key: &str, value: toml::Value) -> Result<()> {
     let parts = parse_dot_key(key);
     if parts.is_empty() {
         return Err(anyhow!("Empty key"));
@@ -1188,13 +1248,17 @@ pub fn validate(key: &str, raw: &str) -> Result<toml::Value> {
                 );
             }
         }
-        RowKind::List => {
-            let items: Vec<toml::Value> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(parse_toml_scalar)
-                .collect();
+        RowKind::List(element) => {
+            let mut items = Vec::new();
+            for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                items.push(match element {
+                    ListElement::Text => toml::Value::String(item.to_string()),
+                    ListElement::Integer => toml::Value::Integer(
+                        item.parse()
+                            .map_err(|_| anyhow!("'{key}' takes whole numbers, got '{item}'"))?,
+                    ),
+                });
+            }
             Ok(toml::Value::Array(items))
         }
         RowKind::Opaque => bail!(
@@ -1204,9 +1268,39 @@ pub fn validate(key: &str, raw: &str) -> Result<toml::Value> {
 }
 
 /// Validate `raw` against the registry, then write it into `root` at `key`.
+///
+/// An emptied widget on an [`OPTIONAL_KEYS`] row REMOVES the key instead of
+/// storing an empty value: `Option<String>` deserializes `""` as `Some("")`,
+/// which is how clearing `docker.host` used to leave Docker dialling an empty
+/// endpoint. Every other row keeps its empty value, because removing a key with
+/// a serde default would silently restore that default rather than honour the
+/// edit.
 pub fn set_validated(root: &mut toml::Value, key: &str, raw: &str) -> Result<()> {
+    if raw.trim().is_empty() && is_optional(key) {
+        remove_at(root, key);
+        return Ok(());
+    }
     let value = validate(key, raw)?;
     insert_at(root, key, value)
+}
+
+/// Delete the leaf at a dotted path, leaving its parent tables in place.
+/// Returns whether anything was removed.
+pub fn remove_at(root: &mut toml::Value, key: &str) -> bool {
+    let parts = parse_dot_key(key);
+    let Some((last, parents)) = parts.split_last() else {
+        return false;
+    };
+    let mut current = root;
+    for part in parents {
+        match current.as_table_mut().and_then(|table| table.get_mut(part.as_str())) {
+            Some(child) => current = child,
+            None => return false,
+        }
+    }
+    current
+        .as_table_mut()
+        .is_some_and(|table| table.remove(last.as_str()).is_some())
 }
 
 /// " Did you mean …" tail for an unknown key, or a pointer at `ainb config
@@ -1254,10 +1348,24 @@ impl ConfigRow {
     /// `Float` renders as text: [`ConfigValue`] has no float variant, and
     /// rounding a currency rate or a CPU share into an integer would silently
     /// corrupt it.
+    ///
+    /// Not pure for [`RowKind::Secret`]: a secret row's status is "does this
+    /// reference resolve?", which reads the environment and — for a
+    /// `keychain:` reference — shells out to `/usr/bin/security`. Doing it here
+    /// keeps every row seeded through one call; the screen builds rows once, so
+    /// this never runs per frame.
     #[must_use]
     pub fn to_value(&self, current: Option<&toml::Value>) -> ConfigValue {
         match self.kind {
-            RowKind::Secret => ConfigValue::Secret(current.map(scalar_text).unwrap_or_default()),
+            RowKind::Secret => {
+                let reference = current.map(scalar_text).unwrap_or_default();
+                let resolved = !reference.trim().is_empty()
+                    && !crate::fleet::bridge::secrets::resolve_secret(&reference).trim().is_empty();
+                ConfigValue::Secret(crate::app::state::SecretValue {
+                    reference,
+                    resolved,
+                })
+            }
             RowKind::Bool => {
                 ConfigValue::Bool(current.and_then(toml::Value::as_bool).unwrap_or(false))
             }
@@ -1269,7 +1377,7 @@ impl ConfigRow {
                 let idx = options.iter().position(|o| *o == selected).unwrap_or(0);
                 ConfigValue::Choice(options.iter().map(|o| (*o).to_string()).collect(), idx)
             }
-            RowKind::Text | RowKind::Float { .. } | RowKind::List | RowKind::Opaque => {
+            RowKind::Text | RowKind::Float { .. } | RowKind::List(_) | RowKind::Opaque => {
                 ConfigValue::Text(current.map(scalar_text).unwrap_or_default())
             }
         }
@@ -1349,6 +1457,7 @@ mod tests {
                 skill_manager_sources_width: Some(32),
                 statusline_decision: StatuslineDecision::Installed,
                 tmux_decision: TmuxDecision::Declined,
+                config_tree_expanded: vec!["Fleet|fleet".to_string()],
             },
             docker: DockerConfig {
                 host: Some("unix:///var/run/docker.sock".to_string()),
@@ -1424,7 +1533,7 @@ mod tests {
             system_packages: vec!["git".to_string()],
             npm_packages: vec!["@anthropic-ai/claude-code".to_string()],
             python_packages: vec!["uv".to_string()],
-            ports: vec![3000],
+            ports: vec![3000, 5173],
             volumes: vec![VolumeMount {
                 host_path: "/tmp".to_string(),
                 container_path: "/tmp".to_string(),
@@ -1501,7 +1610,12 @@ mod tests {
                     },
                     McpServerDefinition::Command {
                         command: "node".to_string(),
-                        args: vec!["index.js".to_string()],
+                        // "8931" is a STRING here (args is `Vec<String>`) and
+                        // deliberately looks like a number: a list widget that
+                        // guesses element types turns it into an integer and
+                        // the next load fails to deserialize. See
+                        // `every_row_round_trips_through_its_widget`.
+                        args: vec!["--port".to_string(), "8931".to_string()],
                         env: HashMap::from([("PORT".to_string(), "3000".to_string())]),
                     },
                 ),
@@ -2017,6 +2131,134 @@ mod tests {
                 other => panic!("expected a secret widget for {key}, got {other:?}"),
             }
         }
+    }
+
+    // --- review findings #6 / #7: what a widget's raw string writes back ---
+
+    /// Every leaf must survive the trip through its widget unchanged.
+    ///
+    /// `scalar_text` renders a value for editing and `validate` parses it back;
+    /// if those two disagree, confirming a row without touching it rewrites the
+    /// value into a different TYPE, and the next load fails to deserialize.
+    /// Found `mcp_servers.*.definition.args` (a `Vec<String>`) turning
+    /// `["--port", "8931"]` into `["--port", 8931]`.
+    #[test]
+    fn every_row_round_trips_through_its_widget() {
+        let mut broken = Vec::new();
+        for (key, observed) in schema_leaves() {
+            let Some(row) = row(&key) else { continue };
+            if matches!(row.kind, RowKind::Opaque) {
+                continue;
+            }
+            for value in observed {
+                let rendered = scalar_text(&value);
+                let Ok(parsed) = validate(&key, &rendered) else {
+                    broken.push(format!("{key}: '{rendered}' does not validate"));
+                    continue;
+                };
+                if parsed != value {
+                    broken.push(format!("{key}: {value} -> '{rendered}' -> {parsed}"));
+                }
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "these rows change their value's type on a no-op edit:\n  {}",
+            broken.join("\n  ")
+        );
+    }
+
+    /// `OPTIONAL_KEYS` must name exactly the leaves serde leaves absent.
+    ///
+    /// Derived, not trusted: drop each leaf from a fully-populated config,
+    /// deserialize, re-serialize, and see whether it comes back. A field with a
+    /// serde default reappears; an `Option` stays gone. Clearing the widget of
+    /// the latter has to REMOVE the key — storing `""` gives `Some("")`, which
+    /// is how `docker.host` ends up as an empty endpoint Docker then tries to
+    /// dial.
+    #[test]
+    fn optional_keys_match_the_schema() {
+        let full = toml::Value::try_from(fully_populated()).unwrap();
+
+        let mut derived: Vec<String> = Vec::new();
+        for (key, _) in schema_leaves() {
+            if row(&key).is_none() || is_external(&key) {
+                continue;
+            }
+            let Some(concrete) = first_concrete_path(&full, &key) else {
+                continue;
+            };
+            let mut trimmed = full.clone();
+            if !remove_at(&mut trimmed, &concrete) {
+                continue;
+            }
+            let Ok(parsed) = trimmed.try_into::<AppConfig>() else {
+                continue; // Required by the schema; not optional.
+            };
+            let reserialized = toml::Value::try_from(parsed).unwrap();
+            if navigate_toml(&reserialized, &concrete).is_err() {
+                derived.push(key);
+            }
+        }
+        derived.sort();
+        derived.dedup();
+
+        let mut declared: Vec<String> = OPTIONAL_KEYS.iter().map(|k| (*k).to_string()).collect();
+        declared.sort();
+
+        assert_eq!(
+            declared, derived,
+            "OPTIONAL_KEYS has drifted from the schema.\n  declared: {declared:?}\n  derived:  {derived:?}"
+        );
+    }
+
+    /// Resolve a registry key's `*` segments against a real config, taking the
+    /// first instance of each map.
+    fn first_concrete_path(seed: &toml::Value, key: &str) -> Option<String> {
+        let mut path = String::new();
+        let mut node = seed;
+        for segment in parse_dot_key(key) {
+            let table = node.as_table()?;
+            let name = if segment == "*" {
+                table.keys().next()?.clone()
+            } else {
+                segment.clone()
+            };
+            node = table.get(&name)?;
+            path = if path.is_empty() {
+                name
+            } else {
+                format!("{path}.{name}")
+            };
+        }
+        Some(path)
+    }
+
+    #[test]
+    fn clearing_an_optional_row_removes_the_key() {
+        let mut root: toml::Value =
+            toml::from_str("[docker]\nhost = \"tcp://1.2.3.4:2376\"\n").unwrap();
+        set_validated(&mut root, "docker.host", "").unwrap();
+        assert!(
+            navigate_toml(&root, "docker.host").is_err(),
+            "clearing an Option<String> must remove the key, not store \"\": {root}"
+        );
+        // And the config still loads, with the field back to None.
+        let parsed: AppConfig = root.try_into().unwrap();
+        assert_eq!(parsed.docker.host, None);
+    }
+
+    #[test]
+    fn clearing_a_defaulted_row_keeps_the_empty_value() {
+        // `branch_prefix` is a plain `String` with a serde default. Removing it
+        // would silently restore "agents/" instead of honouring the edit, so an
+        // empty value is stored as an empty value.
+        let mut root: toml::Value = toml::from_str("[workspace_defaults]\n").unwrap();
+        set_validated(&mut root, "workspace_defaults.branch_prefix", "").unwrap();
+        assert_eq!(
+            navigate_toml(&root, "workspace_defaults.branch_prefix").unwrap(),
+            &toml::Value::String(String::new())
+        );
     }
 
     #[test]

@@ -117,11 +117,13 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     let config_path = config_dir.join("config.toml");
 
     // Load existing user config or start with empty table
-    let mut root = if config_path.exists() {
-        let content = fs::read_to_string(&config_path).context("Failed to read user config")?;
-        content.parse::<toml::Value>().context("Failed to parse user config")?
-    } else {
+    // `read_existing` maps only "not there" to empty: a present-but-unreadable
+    // file must abort rather than be replaced by a fresh one.
+    let existing = crate::config::read_existing(&config_path)?;
+    let mut root = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
+    } else {
+        existing.parse::<toml::Value>().context("Failed to parse user config")?
     };
 
     // Validated against CONFIG_REGISTRY: a mistyped key or an out-of-range
@@ -130,7 +132,10 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     set_validated(&mut root, key, value)?;
 
     let content = toml::to_string_pretty(&root).context("Failed to serialize config")?;
-    fs::write(&config_path, &content).context("Failed to write user config")?;
+    // Atomic, like every other writer of this file: a truncated config.toml is
+    // not cosmetic here — the next load sees a syntax error and every consumer
+    // (bridge tokens, skills key, [usage]) falls back to defaults.
+    crate::config::write_atomic(&config_path, &content).context("Failed to write user config")?;
 
     println!("Set {key} = {value}");
     println!("Saved to {}", config_path.display());
@@ -222,7 +227,8 @@ fn cmd_edit() -> Result<()> {
         let default_config = AppConfig::default();
         let content = toml::to_string_pretty(&default_config)
             .context("Failed to serialize default config")?;
-        fs::write(&config_path, &content).context("Failed to create default config file")?;
+        crate::config::write_atomic(&config_path, &content)
+            .context("Failed to create default config file")?;
         println!("Created default config at {}", config_path.display());
     }
 

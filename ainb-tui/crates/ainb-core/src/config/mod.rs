@@ -19,6 +19,7 @@ pub mod mcp_init;
 pub mod onboarding;
 pub mod presets;
 pub mod registry;
+pub mod screen_model;
 pub mod session_defaults;
 pub mod ssh_display_names;
 
@@ -823,6 +824,16 @@ pub struct UiPreferences {
     /// default; `Declined` suppresses the prompt entirely.
     #[serde(default)]
     pub tmux_decision: TmuxDecision,
+
+    /// Which nodes of the Settings screen's category tree are expanded,
+    /// as `"<category label>|<dotted path>"` ids.
+    ///
+    /// Persisted UI state rather than a preference — it sits here beside the
+    /// sidebar widths for the same reason they do: the screen is unusable if
+    /// every section re-collapses on restart, and there is nowhere else that
+    /// survives a restart. Registered `Hidden` in the config registry.
+    #[serde(default)]
+    pub config_tree_expanded: Vec<String>,
 }
 
 /// The user's recorded decision on the Claude Code statusline wiring.
@@ -868,6 +879,7 @@ impl Default for UiPreferences {
             skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
+            config_tree_expanded: Vec::new(),
         }
     }
 }
@@ -956,10 +968,111 @@ const READ_ONLY_SECTIONS: &[&str] = &["usage"];
 /// skills API key and burndown's `[usage]` — so a partial write is not a
 /// cosmetic problem: the next load sees a syntax error and every consumer falls
 /// back to defaults. The burndown plugin already writes this way; core matches.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
+/// A temp filename no other writer can be using.
+///
+/// The old fixed `config.toml.tmp` is the SAME path `ainb-plugin-burndown`
+/// computes for its own atomic save. Now that both write one config.toml, two
+/// concurrent saves could each write that file and then rename the other's
+/// half-written copy over the real config. Process id plus a random word makes
+/// a collision impossible between processes and between threads.
+fn temp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "toml.{}.{:08x}.tmp",
+        std::process::id(),
+        rand::random::<u32>()
+    ))
+}
+
+/// Read a config file, mapping ONLY "it is not there" to empty.
+///
+/// `read_to_string(..).unwrap_or_default()` treats a permission error, an I/O
+/// error or a directory in the file's place as an empty file — and the caller
+/// then overwrites it, because `rename` needs permission on the DIRECTORY, not
+/// the file. `[skills]`, `[session_reader]` and `[fleet.bridge]` all live in
+/// that file and would go with it.
+pub(crate) fn read_existing(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(anyhow::Error::new(err).context(format!(
+            "refusing to save over {} — it exists but could not be read",
+            path.display()
+        ))),
+    }
+}
+
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = temp_path(path);
+    if let Err(err) = fs::write(&tmp, contents) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        // A unique temp name is only an improvement if it does not accumulate.
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Write exactly these dotted keys into a config file, leaving every other byte
+/// of it alone.
+///
+/// The narrow counterpart to [`AppConfig::save`], for the cases where
+/// serializing the whole struct would be wrong: a key the struct does not model
+/// (`[skills]`), or a key whose in-memory snapshot is stale and would revert
+/// another writer. Same safety discipline as `save` — refuses a file it cannot
+/// read or parse, refuses [`READ_ONLY_SECTIONS`], writes atomically.
+///
+/// Path-explicit so it is testable without redirecting `HOME`.
+fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let existing = read_existing(path)?;
+    let mut root = if existing.trim().is_empty() {
+        toml::Value::Table(toml::Table::new())
+    } else {
+        toml::Value::Table(existing.parse::<toml::Table>().context(
+            "refusing to save over a config.toml that does not parse — fix the syntax error first",
+        )?)
+    };
+
+    for (key, value) in edits {
+        let section = key.split('.').next().unwrap_or_default();
+        if READ_ONLY_SECTIONS.contains(&section) {
+            anyhow::bail!("'{key}' is in a read-only section");
+        }
+        registry::insert_at(&mut root, key, value.clone())?;
+    }
+
+    write_atomic(path, &toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+/// The TOML value an external edit writes, or an error naming why the key is
+/// not one this writer owns.
+///
+/// Split out from [`AppConfig::save_external_keys`] so the guard can be tested
+/// without resolving `HOME` — a test that calls the writer directly writes to
+/// the developer's real config.
+fn external_edit_value(key: &str, raw: &str) -> Result<toml::Value> {
+    // `fleet.bridge.*` matches `is_external` (its tokens are parsed by
+    // `fleet::bridge::config`, not by serde), but `[fleet]` IS modelled as an
+    // opaque passthrough — so `AppConfig::save` owns it and would revert
+    // anything written here on the next save.
+    if !registry::is_external(key) || key.starts_with("fleet.bridge.") {
+        anyhow::bail!("'{key}' is not an externally-owned config key — AppConfig::save owns it");
+    }
+    let section = key.split('.').next().unwrap_or_default();
+    if READ_ONLY_SECTIONS.contains(&section) {
+        anyhow::bail!("'{key}' is in a read-only section");
+    }
+    registry::validate(key, raw)
 }
 
 /// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
@@ -980,6 +1093,31 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// were. In particular a canonical file that does not parse aborts the
 /// migration rather than being replaced by the stray one — overwriting a config
 /// we failed to understand is the data loss this whole change exists to stop.
+/// Copy the keys of `higher` that `lower` does not already have, descending
+/// into tables both sides define. Returns how many leaves were carried across,
+/// so the caller can leave the file untouched when the answer is zero.
+fn merge_missing_keys(lower: &mut toml::Table, higher: toml::Table) -> usize {
+    let mut carried = 0;
+    for (key, value) in higher {
+        match lower.entry(key) {
+            toml::map::Entry::Vacant(slot) => {
+                slot.insert(value);
+                carried += 1;
+            }
+            toml::map::Entry::Occupied(mut slot) => {
+                // Two tables merge; anything else means the canonical file has
+                // a real value here and canonical wins.
+                if let (Some(existing), toml::Value::Table(incoming)) =
+                    (slot.get_mut().as_table_mut(), value)
+                {
+                    carried += merge_missing_keys(existing, incoming);
+                }
+            }
+        }
+    }
+    carried
+}
+
 fn migrate_stray_user_config(canonical: &Path) {
     let Some(stray) = canonical.parent().and_then(Path::parent).map(|d| d.join("config.toml"))
     else {
@@ -1019,13 +1157,12 @@ fn migrate_stray_user_config(canonical: &Path) {
     };
 
     // Canonical wins: only keys the real config never set are carried over.
-    let mut carried = 0usize;
-    for (key, value) in stray_table {
-        if let toml::map::Entry::Vacant(slot) = merged.entry(key) {
-            slot.insert(value);
-            carried += 1;
-        }
-    }
+    // Recursively, because a top-level-only merge loses everything under a
+    // section the canonical file has so much as touched — a canonical
+    // `[fleet.cost]` occupies the `fleet` key, and the stray's
+    // `[fleet.bridge.telegram] token` is then silently dropped. Losing bridge
+    // tokens is the whole reason this migration exists.
+    let carried = merge_missing_keys(&mut merged, stray_table);
 
     // Nothing to carry across: leave the canonical file byte-for-byte alone.
     // Rewriting it would strip the comments and layout of a file users are
@@ -1129,9 +1266,21 @@ impl AppConfig {
         let mut table = if existing.trim().is_empty() {
             toml::Table::new()
         } else {
-            existing.parse::<toml::Table>().context(
+            let table = existing.parse::<toml::Table>().context(
                 "refusing to save over a config.toml that does not parse — fix the syntax error first",
-            )?
+            )?;
+            // Second gate, and the one that matters in practice. A file can
+            // tokenize perfectly and still fail serde (`timeout = "60"`, a
+            // `Vec<String>` holding an int). `AppConfig::load` returns Err on
+            // such a file, and several callers `unwrap_or_default()` and then
+            // save — so without this, a DEFAULT config gets overlaid and every
+            // modelled section on disk is replaced with defaults. Same wipe the
+            // syntax gate above exists to stop, one layer down.
+            let _: AppConfig = toml::Value::Table(table.clone()).try_into().context(
+                "refusing to save over a config.toml that parses but does not load into ainb's \
+                 schema — saving would replace every section it models with defaults",
+            )?;
+            table
         };
         let toml::Value::Table(ours) = toml::Value::try_from(self)? else {
             anyhow::bail!("AppConfig did not serialize to a TOML table");
@@ -1151,7 +1300,7 @@ impl AppConfig {
         fs::create_dir_all(&config_dir)?;
 
         let config_path = config_dir.join("config.toml");
-        let existing = fs::read_to_string(&config_path).unwrap_or_default();
+        let existing = read_existing(&config_path)?;
         let content = self.overlay_onto_existing(&existing)?;
 
         match write_atomic(&config_path, &content) {
@@ -1176,6 +1325,51 @@ impl AppConfig {
                 Err(e.into())
             }
         }
+    }
+
+    /// Write registry keys that live in this file but NOT in `AppConfig`'s
+    /// serde shape — `[skills]` (owned by `ainb-cli`) and `[session_reader]`
+    /// (owned by the session-reader plugin). See
+    /// [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES).
+    ///
+    /// [`save`](Self::save) cannot carry these: it serializes `self`, and
+    /// `self` has no field for them, so an edit made in the settings screen
+    /// would be accepted and then silently dropped — the exact failure mode the
+    /// config registry exists to remove. This is a *second* writer over the
+    /// same file rather than a way around `save`: it starts from the on-disk
+    /// table (so every unmodelled section survives byte-for-byte), refuses a
+    /// file that does not parse, validates each value through the registry, and
+    /// writes atomically, exactly as `save` does.
+    ///
+    /// Refuses [`READ_ONLY_SECTIONS`] and any key that is not external, so it
+    /// can never become a back door around either guard.
+    pub fn save_external_keys(edits: &[(String, String)]) -> Result<()> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let mut prepared = Vec::with_capacity(edits.len());
+        for (key, raw) in edits {
+            prepared.push((key.clone(), external_edit_value(key, raw)?));
+        }
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        write_keys_into(&config_path, &prepared)
+    }
+
+    /// Persist the settings screen's tree expansion, and nothing else.
+    ///
+    /// Deliberately NOT `save()`: expanding a section is a navigational
+    /// keystroke, and `save()` writes the whole in-memory `AppConfig`, which is
+    /// the snapshot taken at startup. Navigating would then revert anything
+    /// `ainb config set` or another process had changed since — and multiply the
+    /// window for two writers to collide.
+    pub fn save_tree_expansion(ids: &[String]) -> Result<()> {
+        let value =
+            toml::Value::Array(ids.iter().map(|id| toml::Value::String(id.clone())).collect());
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        write_keys_into(
+            &config_path,
+            &[("ui_preferences.config_tree_expanded".to_string(), value)],
+        )
     }
 
     /// Get configuration file paths in order of precedence
@@ -1498,6 +1692,211 @@ impl ProjectConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ================================================================
+    // Review findings #2 #3 #4 #5 #10: what a save is allowed to destroy
+    // ================================================================
+
+    /// #2. A file that TOKENIZES but does not load into `AppConfig` must abort
+    /// the save.
+    ///
+    /// `AppConfig::load()` returns Err on such a file, and three callers
+    /// (`cli/tmux_install.rs`, `app/state.rs`, `cli/run.rs`) `unwrap_or_default()`
+    /// and then save — so a DEFAULT config gets overlaid onto the real file and
+    /// every modelled section is replaced with defaults. The syntax gate does
+    /// not catch it because the syntax is fine.
+    #[test]
+    fn saving_over_a_config_that_parses_but_does_not_load_is_refused() {
+        // `timeout` is a u64; a quoted number is valid TOML and invalid schema.
+        let on_disk = "[docker]\ntimeout = \"60\"\n\n[skills]\napi_key = \"sk-secret\"\n";
+        assert!(
+            toml::from_str::<AppConfig>(on_disk).is_err(),
+            "fixture must be a file that parses but does not load"
+        );
+        assert!(
+            on_disk.parse::<toml::Table>().is_ok(),
+            "fixture must tokenize"
+        );
+
+        let err = AppConfig::default()
+            .overlay_onto_existing(on_disk)
+            .expect_err("a config that does not load must not be overlaid");
+        assert!(
+            err.to_string().contains("does not load"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// #3. Two writers must not share a temp path. `write_atomic` used a fixed
+    /// `config.toml.tmp`, which `ainb-plugin-burndown` computes identically —
+    /// so a concurrent burndown save and TUI save could rename each other's
+    /// half-written temp over the real config.
+    #[test]
+    fn atomic_writes_do_not_share_a_temp_path() {
+        let path = Path::new("/tmp/config.toml");
+        let a = temp_path(path);
+        let b = temp_path(path);
+        assert_ne!(a, b, "two writes reused one temp path: {a:?}");
+        assert!(
+            !a.ends_with("config.toml.tmp"),
+            "temp path is the fixed name burndown also computes: {a:?}"
+        );
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "temp path does not identify the writing process: {a:?}"
+        );
+    }
+
+    /// #4. Only "not there" may be treated as empty. An unreadable-but-present
+    /// file read as `""` is overwritten wholesale, destroying `[skills]`,
+    /// `[session_reader]` and `[fleet.bridge]` — the rename needs only
+    /// directory permission, so the write succeeds.
+    #[test]
+    fn an_unreadable_config_is_not_treated_as_empty() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        // A directory in the file's place: present, and not readable as text.
+        let as_dir = tmp.path().join("config.toml");
+        fs::create_dir(&as_dir).expect("mkdir");
+        let err = read_existing(&as_dir).expect_err("an unreadable path must not read as empty");
+        assert!(err.to_string().contains("could not be read"), "{err}");
+
+        // Absent is still empty.
+        assert_eq!(read_existing(&tmp.path().join("absent.toml")).unwrap(), "");
+    }
+
+    /// #5. The stray-config migration merged only TOP-LEVEL keys, so a
+    /// canonical file with any `[fleet]` content already occupied the `fleet`
+    /// key and the stray's `[fleet.bridge.telegram]` tokens were never carried
+    /// across — the precise data loss this change exists to stop.
+    #[test]
+    fn migrate_carries_a_nested_stray_section_into_an_occupied_parent() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        fs::write(&canonical, "[fleet.cost]\nsession_usd = 5.0\n").expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[fleet.bridge.telegram]\ntoken = \"keychain:ainb-telegram\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        let merged: toml::Value =
+            toml::from_str(&fs::read_to_string(&canonical).expect("read")).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&merged, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:ainb-telegram".to_string())),
+            "the stray bridge token was dropped because `fleet` was already occupied: {merged}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&merged, "fleet.cost.session_usd").ok(),
+            Some(&toml::Value::Float(5.0)),
+            "the canonical value must still win"
+        );
+    }
+
+    /// #9. A navigational keystroke must not rewrite the whole file.
+    ///
+    /// `ConfigToggleExpand` used to call `AppConfig::save()`, which serializes
+    /// the in-memory snapshot taken at startup — so expanding a tree node
+    /// reverted anything `ainb config set` or another process had changed since.
+    /// The targeted writer touches one key and leaves every other byte.
+    #[test]
+    fn a_targeted_write_leaves_every_other_section_alone() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        // Stands in for "another writer changed this since we loaded".
+        fs::write(
+            &path,
+            "[docker]\ntimeout = 120\n\n[skills]\napi_key = \"sk-secret\"\n",
+        )
+        .expect("seed");
+
+        write_keys_into(
+            &path,
+            &[(
+                "ui_preferences.config_tree_expanded".to_string(),
+                toml::Value::Array(vec![toml::Value::String("Fleet|fleet".to_string())]),
+            )],
+        )
+        .expect("targeted write");
+
+        let after: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&after, "docker.timeout").ok(),
+            Some(&toml::Value::Integer(120)),
+            "a tree keystroke reverted another writer's value: {after}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "skills.api_key").ok(),
+            Some(&toml::Value::String("sk-secret".to_string()))
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "ui_preferences.config_tree_expanded").ok(),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "Fleet|fleet".to_string()
+            )]))
+        );
+    }
+
+    /// A targeted write is still refused on a file it cannot parse, and on a
+    /// read-only section — the narrow writer is not a way around either guard.
+    #[test]
+    fn a_targeted_write_keeps_the_same_guards() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        fs::write(&path, "this is not valid toml\n").expect("seed");
+        assert!(
+            write_keys_into(
+                &path,
+                &[("docker.timeout".to_string(), toml::Value::Integer(1))]
+            )
+            .is_err(),
+            "wrote over a config.toml that does not parse"
+        );
+
+        let ok_path = tmp.path().join("ok.toml");
+        fs::write(&ok_path, "[usage]\n").expect("seed");
+        assert!(
+            write_keys_into(
+                &ok_path,
+                &[(
+                    "usage.currency.code".to_string(),
+                    toml::Value::String("EUR".into())
+                )]
+            )
+            .is_err(),
+            "wrote into a read-only section"
+        );
+    }
+
+    /// #10. `fleet.bridge.*` matches `is_external` but `[fleet]` IS modelled
+    /// (as an opaque passthrough), so the next `AppConfig::save()` reverts
+    /// anything written here. The second writer must refuse it outright.
+    #[test]
+    fn the_external_writer_refuses_a_modelled_bridge_key() {
+        // Guard only — calling `save_external_keys` here would write to the
+        // developer's REAL config.toml, which is how this test first ran.
+        let err = external_edit_value("fleet.bridge.telegram.token", "keychain:x")
+            .expect_err("fleet.bridge is modelled; save() owns it");
+        assert!(
+            err.to_string().contains("fleet.bridge.telegram.token"),
+            "unexpected error: {err}"
+        );
+        // The genuinely external sections still go through.
+        assert!(external_edit_value("skills.catalog_release", "v1.2.3").is_ok());
+        assert!(external_edit_value("session_reader.incremental_window_days", "7").is_ok());
+        // And a modelled key is refused just as firmly.
+        assert!(external_edit_value("docker.timeout", "60").is_err());
+    }
 
     /// A canonical config with a syntax error must abort the migration, not be
     /// replaced by the stray file. Treating an unparseable file as empty would
@@ -2259,6 +2658,7 @@ mod old_config_tests {
                 skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
+                config_tree_expanded: Vec::new(),
             },
             docker: DockerConfig {
                 host: None,
@@ -2306,6 +2706,7 @@ mod old_config_tests {
                 skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
+                config_tree_expanded: Vec::new(),
             },
             docker: DockerConfig {
                 host: None,
