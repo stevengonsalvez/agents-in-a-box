@@ -150,32 +150,62 @@ impl AppConfig {
         })
     }
 
-    /// Atomic write of `~/.agents-in-a-box/config/config.toml`. Replaces only
-    /// the `[usage]` table; leaves every other table the plugin doesn't
-    /// own intact.
+    /// Atomic write of `~/.agents-in-a-box/config/config.toml`, touching only
+    /// the `[usage]` table.
+    ///
+    /// This plugin now shares the file with `ainb-core`, so two things that
+    /// used to be harmless are not:
+    ///
+    /// * Rendering through `toml::to_string_pretty` deleted every comment.
+    ///   Core edits this file through `toml_edit` specifically to keep them —
+    ///   users are told to start from `config/example.config.toml`, which is
+    ///   ~320 lines of explanation — and one `ainb burndown plan set` would
+    ///   have undone that for the whole file.
+    /// * Writing back the whole `_original` snapshot reverted anything core or
+    ///   `ainb config set` wrote between this plugin's `load()` and its
+    ///   `save()`. Re-reading here and editing in place narrows that to the
+    ///   `[usage]` table this plugin actually owns.
     pub fn save(&self) -> Result<()> {
         let path = config_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Start from the parsed original (or an empty inline table) so
-        // we preserve [docker], [ui_preferences], etc.
-        let mut root = self
-            ._original
-            .clone()
-            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        if let toml::Value::Table(ref mut table) = root {
-            let usage_value =
-                toml::Value::try_from(&self.usage).context("failed to serialise [usage] table")?;
-            table.insert("usage".to_string(), usage_value);
-        }
-        let content =
-            toml::to_string_pretty(&root).context("failed to serialise config to TOML")?;
+        // Re-read rather than trusting the snapshot from `load()`: another
+        // writer may have touched the file since.
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let mut doc = if existing.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            existing
+                .parse::<toml_edit::DocumentMut>()
+                .with_context(|| format!("failed to parse {}", path.display()))?
+        };
 
-        // Best-effort atomic write: tmp + rename.
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, content)?;
+        let usage_value =
+            toml::Value::try_from(&self.usage).context("failed to serialise [usage] table")?;
+        let rendered = toml::to_string_pretty(&toml::Value::Table(
+            [("usage".to_string(), usage_value)].into_iter().collect(),
+        ))
+        .context("failed to serialise [usage] table")?;
+        let fragment = rendered
+            .parse::<toml_edit::DocumentMut>()
+            .context("failed to re-parse the [usage] table")?;
+        if let Some(item) = fragment.get("usage") {
+            doc["usage"] = item.clone();
+        }
+
+        // Atomic, and with a per-process temp name: core writes this same
+        // directory, and a shared `config.toml.tmp` let either process rename
+        // the other's half-written file over the real one.
+        let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, doc.to_string())?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
