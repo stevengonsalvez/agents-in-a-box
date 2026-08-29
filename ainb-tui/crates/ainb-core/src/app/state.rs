@@ -2476,7 +2476,13 @@ impl ConfigScreenState {
         });
         if show_toggles {
             rows.retain(|row| {
-                (row.key != "plugins.enabled" && row.key != "plugins.disabled")
+                // `plugins.disabled` always stays. Discovery filters denied
+                // plugins out entirely, so after a restart a plugin disabled
+                // from this screen has no manifest and therefore no toggle row
+                // — dropping the raw list too left no way to re-enable it.
+                // Disabling would be a one-way door.
+                row.key == "plugins.disabled"
+                    || (row.key != "plugins.enabled" && row.key != "plugins.disabled")
                     || dirty.contains(&row.key)
             });
         }

@@ -3788,15 +3788,28 @@ impl EventHandler {
             return Ok(0);
         }
         state.app_config.save()?;
-        crate::config::AppConfig::save_external_keys(&applied.external)?;
-        // Cleared even for the rejected rows: leaving them dirty made one
-        // unwritable value re-fail every later save for the rest of the session.
+        // Collected, not propagated — the same rule the modelled rows already
+        // follow. An external value the registry rejects (a `0` in a
+        // `min: 1` row, say) used to fail the whole save with `?`, so
+        // `mark_saved()` never ran, the row stayed dirty, and every later save
+        // in that session re-hit the same error. One bad row must not wedge
+        // the screen.
+        let mut rejected = applied.rejected.clone();
+        if let Err(err) = crate::config::AppConfig::save_external_keys(&applied.external) {
+            let keys = applied
+                .external
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            rejected.push((keys, err.to_string()));
+        }
         state.config_screen_state.mark_saved();
-        for (key, why) in &applied.rejected {
+        for (key, why) in &rejected {
             tracing::warn!(key, error = %why, "settings edit rejected");
             state.add_error_notification(format!("{key}: {why}"));
         }
-        Ok(pending.saturating_sub(applied.rejected.len()))
+        Ok(pending.saturating_sub(rejected.len()))
     }
 
     /// Store a credential literal in the OS keychain and point the row at it.
@@ -3808,7 +3821,7 @@ impl EventHandler {
     /// storing an empty secret.
     fn store_secret_in_keychain(state: &mut AppState, row_key: &str, literal: &str) {
         let literal = literal.trim();
-        let Some(row) = state.config_screen_state.current_setting().cloned() else {
+        let Some(row) = crate::config::registry::row(row_key).cloned() else {
             return;
         };
         if literal.is_empty() {
