@@ -72,6 +72,13 @@ final class FleetDaemonContractTests: XCTestCase {
         XCTAssertEqual(try decode("some-future-provider"), .unknown)
     }
 
+    func testProviderDecodeKnowsAntigravity() throws {
+        func decode(_ raw: String) throws -> FleetProvider {
+            try JSONDecoder().decode(FleetProvider.self, from: Data("\"\(raw)\"".utf8))
+        }
+        XCTAssertEqual(try decode("antigravity"), .antigravity)
+    }
+
     /// The write leg is the trap: reading v2 while writing v1 connects fine and
     /// then fails every action at `requireWriteCapability`. Assert the ranges
     /// the SHIPPED store declares, not the `FleetConnection` defaults alone.
