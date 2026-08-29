@@ -122,6 +122,13 @@ async fn tokio_main() -> Result<()> {
     setup_logging();
     setup_panic_handler();
 
+    // Once per process, before anything calls AppConfig::load(). Older builds
+    // let the burndown and session-reader plugins keep a second config.toml one
+    // directory above the real one; this folds any leftover into the canonical
+    // file. Deliberately here rather than inside load(), which also runs in
+    // daemons and inside the TUI event loop.
+    config::AppConfig::migrate_legacy_paths();
+
     // Build the clap surface from the CommandRegistry. The base `ainb` command
     // (--format, after-help, etc.) lives in cli::root_clap_command(); each
     // built-in subcommand registers itself via CommandRegistry::built_ins().

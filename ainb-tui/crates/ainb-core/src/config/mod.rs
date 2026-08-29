@@ -937,6 +937,29 @@ fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
     }
 }
 
+/// Sections `ainb-core` reads but must never write back.
+///
+/// `[usage]` is owned by the burndown plugin, which does its own
+/// load-modify-save against this same file. Now that both agree on one path, a
+/// long-lived TUI overwriting `[usage]` from the snapshot it loaded at startup
+/// would silently revert a plan set from another shell mid-session. Core has no
+/// UI for `[usage]` and never assigns to it, so the honest contract is
+/// read-only.
+const READ_ONLY_SECTIONS: &[&str] = &["usage"];
+
+/// Write `contents` to `path` atomically, so a crash or a full disk cannot
+/// leave a truncated file behind.
+///
+/// This file now carries three writers' data — the bridge's bot tokens, the
+/// skills API key and burndown's `[usage]` — so a partial write is not a
+/// cosmetic problem: the next load sees a syntax error and every consumer falls
+/// back to defaults. The burndown plugin already writes this way; core matches.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 /// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
 /// `~/.agents-in-a-box/config/config.toml`, then move it aside.
 ///
@@ -946,8 +969,15 @@ fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
 /// the `config/` path; this carries the old file's contents across once, taking
 /// the canonical file's value wherever both set the same key.
 ///
-/// Best effort by design: any failure here leaves both files untouched rather
-/// than blocking startup.
+/// Deliberately NOT called from [`AppConfig::load`]: that runs in daemons, in
+/// plugin startup and inside the TUI event loop, and a filesystem write as a
+/// side effect of a read races every other process doing the same. Call it once
+/// from a binary's startup instead — see [`AppConfig::migrate_legacy_paths`].
+///
+/// Best effort by design: every failure path leaves BOTH files exactly as they
+/// were. In particular a canonical file that does not parse aborts the
+/// migration rather than being replaced by the stray one — overwriting a config
+/// we failed to understand is the data loss this whole change exists to stop.
 fn migrate_stray_user_config(canonical: &Path) {
     let Some(stray) = canonical.parent().and_then(Path::parent).map(|d| d.join("config.toml"))
     else {
@@ -964,40 +994,85 @@ fn migrate_stray_user_config(canonical: &Path) {
         return;
     };
 
-    let mut merged = fs::read_to_string(canonical)
-        .ok()
-        .and_then(|s| s.parse::<toml::Table>().ok())
-        .unwrap_or_default();
+    // An unreadable or unparseable canonical file must abort the migration.
+    // Treating it as empty would write the stray file's contents over a config
+    // whose real contents we could not read.
+    let mut merged = match fs::read_to_string(canonical) {
+        Ok(text) => match text.parse::<toml::Table>() {
+            Ok(table) => table,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    %err,
+                    "user config does not parse; leaving it alone instead of migrating over it"
+                );
+                return;
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(err) => {
+            tracing::warn!(path = %canonical.display(), %err, "cannot read user config; skipping migration");
+            return;
+        }
+    };
+
     // Canonical wins: only keys the real config never set are carried over.
+    let mut carried = 0usize;
     for (key, value) in stray_table {
-        merged.entry(key).or_insert(value);
+        if let toml::map::Entry::Vacant(slot) = merged.entry(key) {
+            slot.insert(value);
+            carried += 1;
+        }
     }
 
-    let Ok(rendered) = toml::to_string_pretty(&merged) else {
-        return;
-    };
-    if canonical.parent().is_some_and(|d| fs::create_dir_all(d).is_err()) {
-        return;
+    // Nothing to carry across: leave the canonical file byte-for-byte alone.
+    // Rewriting it would strip the comments and layout of a file users are
+    // explicitly pointed at hand-editing.
+    if carried > 0 {
+        let Ok(rendered) = toml::to_string_pretty(&merged) else {
+            return;
+        };
+        if canonical.parent().is_some_and(|d| fs::create_dir_all(d).is_err()) {
+            return;
+        }
+        if let Err(err) = write_atomic(canonical, &rendered) {
+            tracing::warn!(path = %canonical.display(), %err, "failed to write merged user config");
+            return;
+        }
     }
-    if fs::write(canonical, rendered).is_err() {
-        return;
+
+    // Keep the old file's contents rather than deleting them, and never clobber
+    // an earlier backup — in the worst case it is the only surviving copy.
+    let mut backup = stray.with_extension("toml.migrated");
+    let mut n = 1;
+    while backup.exists() {
+        backup = stray.with_extension(format!("toml.migrated.{n}"));
+        n += 1;
     }
-    // Keep the old file's contents around rather than deleting them outright.
-    let _ = fs::rename(&stray, stray.with_extension("toml.migrated"));
+    let _ = fs::rename(&stray, &backup);
     tracing::info!(
         stray = %stray.display(),
         canonical = %canonical.display(),
+        backup = %backup.display(),
+        carried,
         "merged stray config.toml into the user config"
     );
 }
-
 impl AppConfig {
-    /// Load configuration from default locations
-    pub fn load() -> Result<Self> {
+    /// One-shot cleanup of config files left behind by older builds.
+    ///
+    /// Call this ONCE from a binary's startup, before the first
+    /// [`AppConfig::load`]. It is deliberately separate from `load()`, which
+    /// runs in daemons, plugin startup and the TUI event loop where a
+    /// filesystem write as a side effect of a read would race other processes.
+    pub fn migrate_legacy_paths() {
         if let Ok(dir) = Self::get_user_config_dir() {
             migrate_stray_user_config(&dir.join("config.toml"));
         }
+    }
 
+    /// Load configuration from default locations
+    pub fn load() -> Result<Self> {
         // Try loading from multiple locations in order of precedence
         let config_paths = Self::get_config_paths();
 
@@ -1045,11 +1120,24 @@ impl AppConfig {
     /// sticks. Unmodelled tables nested under a modelled section need a
     /// passthrough field instead — see [`FleetConfig::bridge`].
     fn overlay_onto_existing(&self, existing: &str) -> Result<String> {
-        let mut table = existing.parse::<toml::Table>().unwrap_or_default();
+        // A file we cannot parse must abort the save, never be treated as
+        // empty. `AppConfig::load()` falls back to defaults on a parse error,
+        // so defaulting here would let one bad keystroke in a hand-edited file
+        // turn the next settings save into a wipe of every section on disk.
+        let mut table = if existing.trim().is_empty() {
+            toml::Table::new()
+        } else {
+            existing.parse::<toml::Table>().context(
+                "refusing to save over a config.toml that does not parse — fix the syntax error first",
+            )?
+        };
         let toml::Value::Table(ours) = toml::Value::try_from(self)? else {
             anyhow::bail!("AppConfig did not serialize to a TOML table");
         };
         for (key, value) in ours {
+            if READ_ONLY_SECTIONS.contains(&key.as_str()) && table.contains_key(&key) {
+                continue;
+            }
             table.insert(key, value);
         }
         Ok(toml::to_string_pretty(&table)?)
@@ -1064,7 +1152,7 @@ impl AppConfig {
         let existing = fs::read_to_string(&config_path).unwrap_or_default();
         let content = self.overlay_onto_existing(&existing)?;
 
-        match fs::write(&config_path, &content) {
+        match write_atomic(&config_path, &content) {
             Ok(()) => {
                 // Audit log the successful config save
                 audit::audit_config_saved(
@@ -1408,6 +1496,128 @@ impl ProjectConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A canonical config with a syntax error must abort the migration, not be
+    /// replaced by the stray file. Treating an unparseable file as empty would
+    /// destroy exactly the sections this change exists to protect.
+    #[test]
+    fn migrate_leaves_an_unparseable_canonical_config_alone() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        let broken = "[skills]\napi_key = \"sk-secret\"\nthis is not valid toml\n";
+        fs::write(&canonical, broken).expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[usage.currency]\ncode = \"GBP\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(&canonical).expect("read"),
+            broken,
+            "an unparseable canonical config was overwritten by the stray file"
+        );
+        assert!(
+            root.join("config.toml").exists(),
+            "the stray file was consumed even though the migration could not run"
+        );
+    }
+
+    /// A stray file that carries nothing across must leave the canonical file
+    /// byte-for-byte alone — users hand-edit it, and a round-trip through the
+    /// serializer strips every comment.
+    #[test]
+    fn migrate_does_not_reformat_when_nothing_is_carried_across() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        let commented = "# my notes\n[ui_preferences]\ntheme = \"dark\"\n";
+        fs::write(&canonical, commented).expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[ui_preferences]\ntheme = \"light\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(&canonical).expect("read"),
+            commented,
+            "the canonical file was reformatted despite nothing being carried across"
+        );
+        assert!(
+            root.join("config.toml.migrated").exists(),
+            "stray was not moved aside"
+        );
+    }
+
+    /// The backup is sometimes the only surviving copy, so a second migration
+    /// must not clobber the first one's backup.
+    #[test]
+    fn migrate_never_overwrites_an_existing_backup() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+        fs::write(&canonical, "").expect("write canonical");
+        fs::write(root.join("config.toml.migrated"), "first backup\n").expect("write backup");
+        fs::write(root.join("config.toml"), "[docker]\ntimeout = 90\n").expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(root.join("config.toml.migrated")).expect("read"),
+            "first backup\n",
+            "the earlier backup was destroyed"
+        );
+        assert!(
+            root.join("config.toml.migrated.1").exists(),
+            "the new backup did not fall back to a free name"
+        );
+    }
+
+    /// Saving over a file we cannot parse must fail loudly. `AppConfig::load()`
+    /// falls back to defaults on a parse error, so silently treating the file as
+    /// empty would turn the next settings save into a wipe of everything on disk.
+    #[test]
+    fn save_refuses_to_overlay_an_unparseable_file() {
+        let config = AppConfig::default();
+        let err = config
+            .overlay_onto_existing("[skills]\napi_key = \"sk\"\nnot valid toml\n")
+            .expect_err("overlaying an unparseable file must fail");
+        assert!(
+            err.to_string().contains("does not parse"),
+            "error should say the file is unparseable, got: {err}"
+        );
+    }
+
+    /// `[usage]` is owned by the burndown plugin, which load-modify-saves the
+    /// same file. A long-lived TUI must not revert a plan set from another
+    /// shell mid-session.
+    #[test]
+    fn save_does_not_rewrite_usage_owned_by_the_burndown_plugin() {
+        // What the TUI loaded at startup: no plan.
+        let config = AppConfig::default();
+        // What another process wrote to the file since then.
+        let on_disk = "[usage.currency]\ncode = \"GBP\"\nsymbol = \"£\"\nusd_rate = 0.79\n";
+
+        let saved = config.overlay_onto_existing(on_disk).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["usage"]["currency"]["code"].as_str(),
+            Some("GBP"),
+            "a settings save reverted [usage] to the snapshot loaded at startup"
+        );
+    }
 
     /// The overlay serializes a `toml::Table`, not the struct, so field
     /// declaration order no longer protects us: TOML requires every top-level
