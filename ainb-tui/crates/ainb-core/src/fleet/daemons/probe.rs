@@ -32,6 +32,15 @@ use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity, pr
 /// 30s long-poll cycle and the fleet daemon's 5s tick with headroom.
 pub const STALE_AFTER_MS: i64 = 90_000;
 
+/// [`STALE_AFTER_MS`] with `daemons.stale_after_ms` applied.
+///
+/// A function, not a const, because the value now comes from config; the const
+/// stays as the coded default and as the value the unit tests reason against.
+#[must_use]
+pub fn stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.stale_after_ms
+}
+
 /// The outbound-push staleness window for the bridge.
 ///
 /// How long the bridge may go without a SUCCESSFUL poll of the attention source
@@ -45,6 +54,12 @@ pub const STALE_AFTER_MS: i64 = 90_000;
 /// bridge answered yes to the first and (silently) no to the second for its
 /// entire life, which is the blind spot this closes.
 pub const ATTENTION_STALE_AFTER_MS: i64 = 45_000;
+
+/// [`ATTENTION_STALE_AFTER_MS`] with `daemons.attention_stale_after_ms` applied.
+#[must_use]
+pub fn attention_stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.attention_stale_after_ms
+}
 
 /// Which daemon a [`DaemonStatus`] describes. Stable wire strings for the JSON
 /// surface and stable display names for the text/TUI surfaces.
@@ -467,7 +482,7 @@ fn classify_outbound(
     match hb.last_attention_poll_at {
         Some(last) => {
             let age = now_ms.saturating_sub(last);
-            if age <= ATTENTION_STALE_AFTER_MS {
+            if age <= attention_stale_after_ms() {
                 OutboundVerdict::Healthy
             } else {
                 OutboundVerdict::Unreachable(format!(
@@ -478,7 +493,7 @@ fn classify_outbound(
         }
         // Never polled. Give the worker one window to complete its first poll
         // before calling it broken, then say so in the operator's words.
-        None if uptime_ms <= ATTENTION_STALE_AFTER_MS => OutboundVerdict::Starting,
+        None if uptime_ms <= attention_stale_after_ms() => OutboundVerdict::Starting,
         None => OutboundVerdict::Unreachable(format!(
             "no successful attention/list poll in {}s of uptime ({cause})",
             uptime_ms / 1000
@@ -548,7 +563,7 @@ pub fn classify_heartbeat(
     // The pid is alive but the heartbeat went quiet past the window: the process
     // exists but its loop is wedged or paused. Report stopped+stale so we don't
     // claim a healthy daemon.
-    if age > STALE_AFTER_MS {
+    if age > stale_after_ms() {
         return DaemonStatus {
             kind,
             state: DaemonState::Stopped,
@@ -836,7 +851,7 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
 
     // The OS timer fires every `interval_min`; allow 2x the cadence + a 90s grace
     // before we call it stale (timers are not punctual to the second).
-    let window_ms = (interval_min as i64) * 60_000 * 2 + STALE_AFTER_MS;
+    let window_ms = (interval_min as i64) * 60_000 * 2 + stale_after_ms();
     let age = now_ms.saturating_sub(hbs.last_heartbeat_ms);
     if age > window_ms {
         return DaemonStatus {

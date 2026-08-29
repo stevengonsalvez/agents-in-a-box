@@ -129,6 +129,14 @@ async fn tokio_main() -> Result<()> {
     // daemons and inside the TUI event loop.
     config::AppConfig::migrate_legacy_paths();
 
+    // Publish the config-sourced values that crates outside `ainb` read as env
+    // vars (`AINB_HOME`, the fleet knobs, the headroom port), and that child
+    // processes (plugin subprocesses, the hangar daemon) inherit. Only fills
+    // variables that are unset, so an exported override still wins. Here, on
+    // the single-threaded startup path, because it mutates the process
+    // environment; see `config::tunables::export_env_bridge`.
+    config::tunables::export_env_bridge(config::tunables::snapshot());
+
     // Build the clap surface from the CommandRegistry. The base `ainb` command
     // (--format, after-help, etc.) lives in cli::root_clap_command(); each
     // built-in subcommand registers itself via CommandRegistry::built_ins().
@@ -396,7 +404,7 @@ async fn run_tui_loop(
     // screens via `App::tick_plugin_renders` and its `take_render_dirty`
     // gate. Set to ~30 fps so a keystroke lands in the next iter
     // (< 33 ms) rather than the next 250 ms window.
-    let tick_rate = Duration::from_millis(33);
+    let tick_rate = Duration::from_millis(crate::config::tunables::snapshot().ui.tick_rate_ms);
     // App-tick cadence: how often we run the heavy host-side periodic
     // work (mascot animation, OAuth refresh check, tmux preview
     // capture, async action dispatch, log streaming refresh,
@@ -405,8 +413,9 @@ async fn run_tui_loop(
     // loop, stall key processing, and burn CPU. 250 ms is the
     // pre-perf-PR cadence; keeping it isolates the tick-rate cut
     // to only the event-poll path that actually affects perceived
-    // latency. See `last_app_tick` below.
-    let app_tick_rate = Duration::from_millis(250);
+    // latency. See `last_app_tick` below. Both cadences are
+    // `[ui]` keys now: a slow terminal wants a coarser poll.
+    let app_tick_rate = Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms);
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 

@@ -23,8 +23,9 @@ use ainb_hangar_core::channel::{Channel, ChannelSet};
 
 use crate::envelope::Envelope;
 
-/// Default per-event debounce window. Keeps a noisy session from
-/// spamming the system notification UI.
+/// Coded per-event debounce window. Keeps a noisy session from spamming the
+/// system notification UI. The effective window is `notifyd.os_debounce_secs`
+/// when config.toml names one; see [`crate::config`].
 pub const DEBOUNCE: Duration = Duration::from_secs(60);
 
 /// A debouncer for OS notifications keyed by
@@ -36,9 +37,10 @@ pub struct Debouncer {
 }
 
 impl Debouncer {
-    /// Build a debouncer with the [`DEBOUNCE`] window.
+    /// Build a debouncer with the configured window
+    /// (`notifyd.os_debounce_secs`), falling back to [`DEBOUNCE`].
     pub fn new() -> Self {
-        Self::with_window(DEBOUNCE)
+        Self::with_window(crate::config::load().os_debounce())
     }
 
     /// Build a debouncer with an explicit window (used by tests).

@@ -724,16 +724,13 @@ async fn dispatch_usage_via_plugin(argv: Vec<String>) -> ! {
 /// data. Subsequent runs hit session-reader's sqlite cache and finish
 /// in well under a second.
 ///
-/// Override via the `AINB_USAGE_TIMEOUT_SECS` env var when running
-/// against very large session archives.
-const PLUGIN_DATA_WAIT_DEFAULT_SECS: u64 = 120;
-
+/// Raise `usage_client.fetch_timeout_secs` (or `AINB_USAGE_TIMEOUT_SECS`)
+/// when running against very large session archives.
 fn plugin_data_wait() -> std::time::Duration {
-    std::env::var("AINB_USAGE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(PLUGIN_DATA_WAIT_DEFAULT_SECS))
+    std::time::Duration::from_secs(crate::config::tunables::resolved(
+        "AINB_USAGE_TIMEOUT_SECS",
+        crate::config::tunables::snapshot().usage_client.fetch_timeout_secs,
+    ))
 }
 
 /// Pause between retry attempts when burndown still reports
@@ -1645,8 +1642,10 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("listen")
                         .long("listen")
                         .value_name("ADDR")
-                        .default_value("127.0.0.1:8420")
-                        .help("Address to bind (default loopback; non-loopback needs --token)"),
+                        .help(
+                            "Address to bind (default: web.listen, or 127.0.0.1:8420; \
+                             non-loopback needs --token)",
+                        ),
                 )
                 .arg(
                     clap::Arg::new("token").long("token").value_name("SECRET").help(
@@ -1686,13 +1685,25 @@ impl CliCommand for WebCommand {
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         // Extract owned values synchronously so only owned data crosses into
         // the 'static future.
+        //
+        // `[web]` supplies the defaults; the flags still win, because a flag is
+        // a decision about THIS invocation and a file is a standing preference.
+        // `--listen` therefore carries no clap default any more: with one, an
+        // unset flag was indistinguishable from an explicit loopback and the
+        // config value could never be reached. The two booleans are
+        // `SetTrue`-only, so a flag can turn them on and a file is the only way
+        // to have them on by default.
+        //
+        // The token is deliberately not configurable here: `--token` is the
+        // only way in, and it never touches config.toml.
+        let defaults = &crate::config::tunables::snapshot().web;
         let listen_raw = matches
             .get_one::<String>("listen")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1:8420".to_string());
+            .unwrap_or_else(|| defaults.listen.clone());
         let token = matches.get_one::<String>("token").cloned();
-        let insecure_bind = matches.get_flag("insecure-bind");
-        let read_only = matches.get_flag("read-only");
+        let insecure_bind = matches.get_flag("insecure-bind") || defaults.insecure_bind;
+        let read_only = matches.get_flag("read-only") || defaults.read_only;
 
         Box::pin(async move {
             use std::net::ToSocketAddrs;

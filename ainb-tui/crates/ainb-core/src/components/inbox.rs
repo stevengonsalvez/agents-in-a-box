@@ -157,8 +157,14 @@ impl std::fmt::Debug for InboxState {
     }
 }
 
-const POLL_TICKS: u64 = 1; // every render — cheap with WAL + LIMIT 200
-const LIST_LIMIT: u32 = 200;
+const POLL_TICKS: u64 = 1; // every render, cheap with WAL + a bounded LIMIT
+
+/// Rows the list query asks for, from `ui.inbox_list_limit`. Read per refresh
+/// rather than baked in as a const, because the query runs every render and the
+/// right bound depends on the size of the fleet in front of it.
+fn list_limit() -> u32 {
+    crate::config::tunables::snapshot().ui.inbox_list_limit
+}
 
 impl InboxState {
     /// Open the SQLite store lazily and refresh the visible rows.
@@ -183,7 +189,7 @@ impl InboxState {
                 self.show_archived,
                 self.agent_filter.as_sql(),
                 None,
-                LIST_LIMIT,
+                list_limit(),
             ) {
                 Ok(rows) => {
                     self.rows = rows;

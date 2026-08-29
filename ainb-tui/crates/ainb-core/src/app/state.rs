@@ -1613,6 +1613,10 @@ pub enum ConfigCategory {
     Skills,
     SessionReader,
     Presets,
+    Daemons,
+    Web,
+    Acp,
+    HangarDaemon,
 }
 
 impl ConfigCategory {
@@ -1634,6 +1638,10 @@ impl ConfigCategory {
             ConfigCategory::Skills,
             ConfigCategory::SessionReader,
             ConfigCategory::Presets,
+            ConfigCategory::Daemons,
+            ConfigCategory::Web,
+            ConfigCategory::Acp,
+            ConfigCategory::HangarDaemon,
         ]
     }
 
@@ -1655,6 +1663,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Skills",
             ConfigCategory::SessionReader => "Session Reader",
             ConfigCategory::Presets => "Presets",
+            ConfigCategory::Daemons => "Daemons",
+            ConfigCategory::Web => "Web Dashboard",
+            ConfigCategory::Acp => "ACP Adapters",
+            ConfigCategory::HangarDaemon => "Hangar Daemon",
         }
     }
 
@@ -1676,6 +1688,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "🎓",
             ConfigCategory::SessionReader => "📖",
             ConfigCategory::Presets => "🗂️",
+            ConfigCategory::Daemons => "🛎️",
+            ConfigCategory::Web => "🌐",
+            ConfigCategory::Acp => "🔗",
+            ConfigCategory::HangarDaemon => "🏗️",
         }
     }
 
@@ -1697,6 +1713,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Catalog release, API key",
             ConfigCategory::SessionReader => "Incremental scan window",
             ConfigCategory::Presets => "Where presets.toml lives",
+            ConfigCategory::Daemons => "Staleness windows, notification debounce, approvals",
+            ConfigCategory::Web => "`ainb web` bind address and read-only mode",
+            ConfigCategory::Acp => "Per-adapter command and pinned permission mode",
+            ConfigCategory::HangarDaemon => "Auto-standup and lockdown (stored in the daemon DB)",
         }
     }
 }
@@ -1888,6 +1908,12 @@ pub struct AppliedEdits {
     /// then dropped, so a value that can never be written cannot wedge every
     /// subsequent save.
     pub rejected: Vec<(String, String)>,
+    /// `(daemon_config key, raw value)` for the `hangar_daemon.*` rows, whose
+    /// backend is the Hangar SQLite `daemon_config` table rather than
+    /// config.toml. Dispatched through
+    /// [`AsyncAction::HangarDaemonConfigSet`](crate::app::state::AsyncAction::HangarDaemonConfigSet),
+    /// because that store is async and this pass is not.
+    pub daemon: Vec<(String, String)>,
 }
 
 /// The settings screen: a section tree on the left, the rows of the selected
@@ -2276,6 +2302,32 @@ impl ConfigScreenState {
         }
     }
 
+    /// Overwrite the `hangar_daemon.*` rows from the daemon's stored values,
+    /// WITHOUT marking them dirty.
+    ///
+    /// `stored` is `(daemon_config key, value)`; a key absent from it keeps the
+    /// coded default the row was seeded with, which is what the daemon applies
+    /// for a key with no row. Deliberately not `set_row_value`: that marks the
+    /// row dirty, and the next save would write these values straight back into
+    /// a database that already holds them.
+    pub fn seed_hangar_daemon_rows(&mut self, stored: &[(String, String)]) {
+        for (daemon_key, value) in stored {
+            let key = format!("{}{daemon_key}", registry::HANGAR_DAEMON_PREFIX);
+            let Some(row) = registry::row(&key) else {
+                continue;
+            };
+            let seeded = row.to_value(Some(&registry::parse_toml_scalar(value)));
+            for rows in self.settings.values_mut() {
+                if let Some(existing) = rows.iter_mut().find(|r| r.key == key) {
+                    existing.value = seeded;
+                    self.dirty.remove(&key);
+                    break;
+                }
+            }
+        }
+        self.refresh_visible_rows();
+    }
+
     pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
         for rows in self.settings.values_mut() {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
@@ -2353,6 +2405,13 @@ impl ConfigScreenState {
 
         let mut applied = AppliedEdits::default();
         for (key, raw) in self.pending_edits() {
+            if let Some(daemon_key) = registry::hangar_daemon_key(&key) {
+                // Not config.toml at all: `save_external_keys` would happily
+                // write a `[hangar_daemon]` section that nothing ever reads,
+                // which is the silent no-op this category exists to avoid.
+                applied.daemon.push((daemon_key.to_string(), raw));
+                continue;
+            }
             if registry::is_external(&key) {
                 // These go through the key-level writer rather than the struct.
                 // `[skills]` and `[session_reader]` are parsed off this file by
@@ -2643,7 +2702,71 @@ fn seed_value(config: &AppConfig) -> toml::Value {
     if let Some(on_disk) = on_disk {
         merge_external_sections(&mut seed, &toml::Value::Table(on_disk));
     }
+    seed_hangar_daemon_defaults(&mut seed);
     seed
+}
+
+/// Plant every Hangar daemon knob's coded default under `hangar_daemon.` in the
+/// seed.
+///
+/// Without this the rows have no value to render at all and every one of them
+/// would seed as an empty widget, which claims the daemon is unconfigured. The
+/// coded default is the honest placeholder: it IS what the daemon runs when a
+/// key has no stored row. `AsyncAction::HangarDaemonConfigLoad` replaces it with
+/// the stored value shortly after startup.
+/// The Hangar SQLite database, when one exists.
+///
+/// `Store::open_default` CREATES the database and runs migrations, which is the
+/// right behaviour for the daemon and the wrong one for a settings screen
+/// painting itself: opening the TUI must not conjure a hangar.db on a machine
+/// that has never run the daemon. So the file is probed first.
+fn hangar_db_path() -> Option<std::path::PathBuf> {
+    let path = ainb_hangar_core::hangar_home()?.join("hangar.db");
+    path.exists().then_some(path)
+}
+
+/// Every stored `daemon_config` value, or `None` when there is no database yet.
+///
+/// Only the keys the registry knows: an internal-state row (the daemon's own
+/// bookkeeping) is not config and must never reach a settings row.
+async fn read_daemon_config() -> anyhow::Result<Option<Vec<(String, String)>>> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    if hangar_db_path().is_none() {
+        return Ok(None);
+    }
+    let store = ainb_hangar_store::Store::open_default().await?;
+    let mut stored = Vec::new();
+    for descriptor in DAEMON_CONFIG_REGISTRY {
+        if let Some(value) = DaemonConfigRepo::get(store.pool(), descriptor.key).await? {
+            stored.push((descriptor.key.to_string(), value));
+        }
+    }
+    Ok(Some(stored))
+}
+
+/// Validate one `daemon_config` edit and write it.
+///
+/// Validation goes through the descriptor, not the core registry: the daemon's
+/// own registry is the authority on what its table accepts, and it is the gate
+/// the RPC handler and the CLI both use.
+async fn write_daemon_config(key: &str, raw: &str) -> anyhow::Result<()> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let descriptor = ainb_hangar_core::daemon_config::descriptor(key)
+        .ok_or_else(|| anyhow::anyhow!("not a daemon config key"))?;
+    let normalized = descriptor.validate(raw).map_err(|why| anyhow::anyhow!(why))?;
+    let store = ainb_hangar_store::Store::open_default().await?;
+    DaemonConfigRepo::set(store.pool(), key, &normalized).await?;
+    Ok(())
+}
+
+fn seed_hangar_daemon_defaults(seed: &mut toml::Value) {
+    for descriptor in ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY {
+        let key = format!("{}{}", registry::HANGAR_DAEMON_PREFIX, descriptor.key);
+        let _ = registry::insert_at(seed, &key, registry::parse_toml_scalar(descriptor.default));
+    }
 }
 
 /// Copy each [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES) section from the
@@ -3024,6 +3147,13 @@ pub struct AppState {
     pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
+    /// Whether the Hangar daemon's stored `daemon_config` values have been read
+    /// into the settings rows yet.
+    ///
+    /// A one-shot of its own rather than a seeded `pending_async_action`: that
+    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
+    /// first keystroke and makes "no action is pending" untestable.
+    pub hangar_daemon_config_loaded: bool,
     // Flag to track if user cancelled during async operation
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
@@ -3592,6 +3722,14 @@ pub enum NewSessionStep {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsyncAction {
+    /// Write `(daemon_config key, raw value)` pairs to the Hangar daemon's
+    /// `daemon_config` SQLite table.
+    ///
+    /// A SECOND write backend, so it gets its own action rather than riding on
+    /// `AppConfig::save`. A rejected value or an unreachable database raises an
+    /// error notification; it is never a silent no-op, which for a row the user
+    /// just edited is indistinguishable from success.
+    HangarDaemonConfigSet(Vec<(String, String)>),
     // Phase 6 (new-session redesign): legacy `StartNewSession`,
     // `StartWorkspaceSearch`, `NewSessionInCurrentDir`, `NewSessionNormal`,
     // `NewSessionWithRepoInput`, `ValidateRepoSource`, `CloneRemoteRepo`,
@@ -3679,6 +3817,7 @@ impl Default for AppState {
             help_visible: false,
             new_session_state: None,
             pending_async_action: None,
+            hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
@@ -10126,7 +10265,56 @@ impl AppState {
         Ok(())
     }
 
+    /// Reseed the `Hangar Daemon` settings rows from the `daemon_config` table.
+    ///
+    /// A missing database is the normal state on a machine that has never run
+    /// the daemon, so it is silent: the rows keep their coded defaults, which is
+    /// what the daemon would apply anyway. A database that exists but cannot be
+    /// read IS reported, because then the rows are showing values that may not
+    /// be what is stored.
+    async fn load_hangar_daemon_config(&mut self) {
+        match read_daemon_config().await {
+            Ok(Some(stored)) => self.config_screen_state.seed_hangar_daemon_rows(&stored),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(%error, "hangar daemon config: could not read stored values");
+                self.add_warning_notification(format!(
+                    "Hangar Daemon settings show defaults: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Write edited `hangar_daemon.*` rows back to the `daemon_config` table.
+    ///
+    /// Every value passes `ConfigDescriptor::validate` first, which is the same
+    /// gate the RPC handler and the `ainb hangar daemon config set` CLI use, so
+    /// the three surfaces cannot disagree about what is legal. Each failure
+    /// raises its own error notification naming the row: a write the user asked
+    /// for that quietly did not happen is worse than one that visibly failed.
+    async fn set_hangar_daemon_config(&mut self, edits: Vec<(String, String)>) {
+        for (key, raw) in edits {
+            match write_daemon_config(&key, &raw).await {
+                Ok(()) => {}
+                Err(error) => {
+                    warn!(key, %error, "hangar daemon config write failed");
+                    self.add_error_notification(format!("hangar_daemon.{key}: {error}"));
+                }
+            }
+        }
+        // Re-read rather than trust the write: the row now shows what the
+        // database holds, including for any write that just failed.
+        self.load_hangar_daemon_config().await;
+    }
+
     pub async fn process_async_action(&mut self) -> anyhow::Result<()> {
+        // Once, on the first app tick: the `Hangar Daemon` settings rows are
+        // seeded with coded defaults synchronously (the store is async and the
+        // screen is not), and this replaces them with what is actually stored.
+        if !self.hangar_daemon_config_loaded {
+            self.hangar_daemon_config_loaded = true;
+            self.load_hangar_daemon_config().await;
+        }
         if let Some(action) = self.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
@@ -10135,6 +10323,9 @@ impl AppState {
             match action {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
+                }
+                AsyncAction::HangarDaemonConfigSet(edits) => {
+                    self.set_hangar_daemon_config(edits).await;
                 }
                 AsyncAction::CheckGitAuth => {
                     self.check_git_auth().await;
@@ -11244,18 +11435,20 @@ impl AppState {
         &self,
         now_ms: i64,
     ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
-        // Only events within this rolling window can mark a session.
-        const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
-        // Bounds query cost; ample for any realistic active fleet.
-        const QUERY_LIMIT: u32 = 500;
+        // Only events within this rolling window can mark a session, and only
+        // this many rows are read per refresh. Both bound query cost on a large
+        // notifications DB; `[ui]` raises them for a very large fleet.
+        let tunables = &crate::config::tunables::snapshot().ui;
+        let lookback_ms = i64::from(tunables.session_lookback_hours) * 60 * 60 * 1000;
+        let query_limit = tunables.session_query_limit;
 
         let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
         if !db.exists() {
             return None;
         }
         let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
-        let floor = now_ms - LOOKBACK_MS;
-        match store.recent_since(floor, QUERY_LIMIT) {
+        let floor = now_ms - lookback_ms;
+        match store.recent_since(floor, query_limit) {
             Ok(rows) => Some(rows),
             Err(e) => {
                 debug!("attention: notifications store read failed: {e}");

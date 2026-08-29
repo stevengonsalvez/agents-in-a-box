@@ -196,23 +196,27 @@ impl CurrentStateIndex {
     }
 }
 
-/// Default staleness window (ms) applied ONLY to the HEALTHY-suppressing kinds
-/// (RUNNING/DONE) so a stale "healthy" row from a stopped daemon eventually
-/// falls back to a live tmux scan instead of masking a real need forever. A few
-/// minutes is long enough to outlast normal materializer latency but short
-/// enough that a dead daemon surfaces quickly. Overridable via
-/// `AINB_FLEET_STATE_STALE_MS` (a non-negative integer; 0 disables it).
-const DEFAULT_HEALTHY_STALE_WINDOW_MS: i64 = 5 * 60_000;
-
-/// The effective healthy-kind staleness window, honouring the
-/// `AINB_FLEET_STATE_STALE_MS` override (clamped to ≥ 0; unset/invalid → the
-/// default).
+/// The effective staleness window (ms) for the HEALTHY-suppressing kinds
+/// (RUNNING/DONE), so a stale "healthy" row from a stopped daemon eventually
+/// falls back to a live tmux scan instead of masking a real need forever.
+///
+/// Its own knob (`fleet.healthy_state_stale_ms`, default 5 minutes), because it
+/// is a different clock from the sticky-kind window in `cli::fleet::needs`. The
+/// two used to share the ONE env var `AINB_FLEET_STATE_STALE_MS` while
+/// hardcoding different fallbacks (300000 here, 0 there): setting it moved both
+/// clocks at once, and neither knob had a default you could name. They are now
+/// separate keys with one default each.
+///
+/// `AINB_FLEET_STATE_STALE_MS` stays as the LAST rung so an existing override
+/// keeps doing what it did. Someone who set it to 0 to disable this floor must
+/// not silently get the 5-minute default back.
 fn effective_stale_window_ms() -> i64 {
-    std::env::var("AINB_FLEET_STATE_STALE_MS")
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .map(|v| v.max(0))
-        .unwrap_or(DEFAULT_HEALTHY_STALE_WINDOW_MS)
+    let config = crate::config::tunables::snapshot();
+    let legacy = crate::config::tunables::resolved(
+        "AINB_FLEET_STATE_STALE_MS",
+        config.fleet.healthy_state_stale_ms,
+    );
+    crate::config::tunables::resolved("AINB_FLEET_HEALTHY_STATE_STALE_MS", legacy).max(0)
 }
 
 /// Outcome of resolving one session against `current_state`.

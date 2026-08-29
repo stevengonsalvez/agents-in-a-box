@@ -3773,7 +3773,7 @@ impl EventHandler {
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<usize> {
         let pending = state.config_screen_state.pending_edits().len();
         let dirty_before = !state.config_screen_state.dirty.is_empty();
-        let applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        let mut applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
         // Nothing to write: return before touching the file. `save()` renders
         // the whole AppConfig from the snapshot loaded at startup, so pressing
         // `S` with no edits would revert anything `ainb config set` or another
@@ -3783,6 +3783,14 @@ impl EventHandler {
         // excludes plugin rows and read-only rows, so a plugin-only edit has
         // `pending == 0` while still having work to do. `dirty` is the honest
         // "did the user change anything" signal.
+        // The Hangar daemon rows land in a SQLite table, not this file, and
+        // that store is async while this pass is not. Queue them before the
+        // early return, so a save that touched only daemon rows still writes.
+        if !applied.daemon.is_empty() {
+            let edits = std::mem::take(&mut applied.daemon);
+            state.pending_async_action =
+                Some(crate::app::state::AsyncAction::HangarDaemonConfigSet(edits));
+        }
         if !dirty_before && applied.external.is_empty() {
             state.config_screen_state.mark_saved();
             return Ok(0);
@@ -4090,10 +4098,10 @@ impl EventHandler {
                 // detached `std::thread` it is not torn down mid-write at
                 // shutdown.
                 let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
-                let exclude_paths = state.app_config.workspace_defaults.exclude_paths.clone();
+                let defaults = state.app_config.workspace_defaults.clone();
                 tokio::task::spawn_blocking(move || {
                     let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
-                        .with_exclude_paths(exclude_paths);
+                        .with_workspace_defaults(&defaults);
                     if let Err(err) = scanner.scan() {
                         tracing::warn!(error = %err, "pick_repo: background repo rescan failed");
                     }
