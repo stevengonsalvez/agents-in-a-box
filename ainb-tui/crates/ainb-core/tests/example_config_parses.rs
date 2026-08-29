@@ -42,7 +42,10 @@ fn fenced_blocks(source: &str) -> Vec<String> {
 
     for line in source.lines() {
         if line.contains(OPEN) {
-            assert!(current.is_none(), "nested `{OPEN}` fence in example.config.toml");
+            assert!(
+                current.is_none(),
+                "nested `{OPEN}` fence in example.config.toml"
+            );
             current = Some(Vec::new());
             continue;
         }
@@ -58,7 +61,10 @@ fn fenced_blocks(source: &str) -> Vec<String> {
         }
     }
 
-    assert!(current.is_none(), "unclosed `{OPEN}` fence in example.config.toml");
+    assert!(
+        current.is_none(),
+        "unclosed `{OPEN}` fence in example.config.toml"
+    );
     blocks
 }
 
