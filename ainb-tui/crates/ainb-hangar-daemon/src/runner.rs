@@ -111,7 +111,7 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
-    "GEMINI_API_KEY",
+    "ANTIGRAVITY_HOME",
     // ccc / D11: the parent-session linkage the daemon stamps onto every task it
     // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
     // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
