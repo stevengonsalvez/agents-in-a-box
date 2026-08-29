@@ -128,7 +128,16 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         existing.parse::<toml::Value>().context("Failed to parse user config")?
     };
     set_validated(&mut probe, key, value)?;
-    let validated = crate::config::registry::navigate_toml(&probe, key)?.clone();
+
+    // An emptied optional key is a REMOVAL, not a value: `set_validated` drops
+    // it from `probe` rather than storing `""`, because `Some("")` is not the
+    // same as unset (an empty `docker.host` means "connect to nothing", not
+    // "autodetect"). Looking it up unconditionally then failed with "Key not
+    // found" and wrote nothing, so there was no way to clear one at all.
+    let validated = match crate::config::registry::navigate_toml(&probe, key) {
+        Ok(value) => Some(value.clone()),
+        Err(_) => None,
+    };
 
     // Write through the shared key-level writer, which edits the document in
     // place. Serializing `probe` instead would be a whole-file rewrite that
@@ -136,10 +145,22 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     // `config/example.config.toml`, which is ~320 lines of comments explaining
     // the keys. `ainb config set docker.timeout 90` must change one line, not
     // strip the manual.
-    crate::config::write_keys_into(&config_path, &[(key.to_string(), validated)])
-        .context("Failed to write user config")?;
+    match validated {
+        Some(value) => {
+            crate::config::write_keys_into(&config_path, &[(key.to_string(), value)])
+                .context("Failed to write user config")?;
+        }
+        None => {
+            crate::config::remove_key_from(&config_path, key)
+                .context("Failed to write user config")?;
+        }
+    }
 
-    println!("Set {key} = {value}");
+    if value.is_empty() {
+        println!("Cleared {key}");
+    } else {
+        println!("Set {key} = {value}");
+    }
     println!("Saved to {}", config_path.display());
 
     Ok(())

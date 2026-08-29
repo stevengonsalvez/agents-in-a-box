@@ -1106,7 +1106,54 @@ pub fn rows() -> impl Iterator<Item = &'static ConfigRow> {
 /// Split a dot-notation key into its segments, dropping empties.
 #[must_use]
 pub fn parse_dot_key(key: &str) -> Vec<String> {
-    key.split('.').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut chars = key.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // A quoted segment holds a key that is not bare — a model id like
+            // `gpt-4.1`, an MCP server called `my.server`. Splitting those on
+            // `.` invents nested tables and corrupts the file, so honour the
+            // quotes the same way TOML itself does.
+            '"' => quoted = !quoted,
+            '\\' if quoted => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            '.' if !quoted => {
+                let part = current.trim().to_string();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                current.clear();
+            }
+            other => current.push(other),
+        }
+    }
+    let last = current.trim().to_string();
+    if !last.is_empty() {
+        parts.push(last);
+    }
+    parts
+}
+
+/// Render one path segment for use in a dotted key, quoting it when it is not
+/// a bare TOML key.
+///
+/// The inverse of [`parse_dot_key`]'s quote handling: a segment containing a
+/// `.` (or a quote, or whitespace) has to go back as `"gpt-4.1"`, or the next
+/// parse splits it apart again.
+#[must_use]
+pub fn quote_key_segment(segment: &str) -> String {
+    let bare = !segment.is_empty()
+        && segment.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        segment.to_string()
+    } else {
+        format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 /// Navigate a TOML value tree using dot-notation keys.
@@ -1363,16 +1410,29 @@ impl ConfigRow {
     /// rounding a currency rate or a CPU share into an integer would silently
     /// corrupt it.
     ///
-    /// [`RowKind::Secret`] reads the process environment for a `$VAR`
-    /// reference, which is free. It deliberately does NOT touch the keychain —
-    /// see [`secret_value`].
+    /// [`RowKind::Secret`] resolves a `$VAR` reference against the process
+    /// environment, which is free, and deliberately does NOT touch the
+    /// keychain. `build_rows` runs before the TUI's first paint, and a
+    /// `keychain:` reference costs an in-process keyring read plus a
+    /// `/usr/bin/security` shell-out, each bounded at 5s — with the bridge's
+    /// four token rows and the skills key all set, that was up to ~50s of
+    /// blocking on startup against a locked keychain. A `keychain:` row is
+    /// reported as configured on the strength of having a reference at all;
+    /// whether the secret is actually retrievable is a question for the moment
+    /// something needs its value.
     #[must_use]
     pub fn to_value(&self, current: Option<&toml::Value>) -> ConfigValue {
         match self.kind {
             RowKind::Secret => {
                 let reference = current.map(scalar_text).unwrap_or_default();
-                let resolved = !reference.trim().is_empty()
-                    && !crate::fleet::bridge::secrets::resolve_secret(&reference).trim().is_empty();
+                let trimmed = reference.trim();
+                let resolved = if trimmed.is_empty() {
+                    false
+                } else if trimmed.starts_with("keychain:") {
+                    true
+                } else {
+                    !crate::fleet::bridge::secrets::resolve_secret(&reference).trim().is_empty()
+                };
                 ConfigValue::Secret(crate::app::state::SecretValue {
                     reference,
                     resolved,
