@@ -1607,6 +1607,37 @@ mod tests {
     }
 
     #[test]
+    fn untouched_plugin_rows_are_not_written_into_config() {
+        // Saving an unrelated setting must not materialise every discovered
+        // plugin's schema defaults into config.toml. Doing so pins today's
+        // defaults, so a later change in the plugin's manifest can never take
+        // effect for anyone who ever opened the settings screen.
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        // Nothing edited: the row exists and shows its default, but is clean.
+        let mut app = AppConfig::default();
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+
+        assert!(
+            app.plugins.values.get("learnings").is_none(),
+            "an untouched plugin row was written into config.toml: {:?}",
+            app.plugins.values
+        );
+    }
+
+    #[test]
     fn test_apply_routes_plugin_edit_to_values() {
         // Editing a Plugins-category row then apply_to_app_config writes into
         // app_config.plugins.values[plugin][key] — NOT a top-level config field
@@ -1628,11 +1659,12 @@ mod tests {
         // Simulate the popup-confirm edit: mutate the row value in place,
         // exactly as ConfigPopupConfirm does (matched by key).
         let row_key = plugin_row_key("learnings", "learnings_dir");
-        {
-            let rows = screen.settings.get_mut(&ConfigCategory::Plugins).unwrap();
-            let row = rows.iter_mut().find(|s| s.key == row_key).expect("row present");
-            row.value = ConfigValue::Text("/tmp/edited-kb".to_string());
-        }
+        // Through `set_row_value`, exactly as ConfigPopupConfirm does. Mutating
+        // the row in place instead would leave it out of `dirty`, and only
+        // dirty rows are written — an untouched plugin row must NOT be
+        // materialised into config.toml just because some other setting was
+        // saved.
+        screen.set_row_value(&row_key, ConfigValue::Text("/tmp/edited-kb".to_string()));
 
         let mut app = AppConfig::default();
         screen.apply_to_app_config(&mut app).expect("edits apply");
