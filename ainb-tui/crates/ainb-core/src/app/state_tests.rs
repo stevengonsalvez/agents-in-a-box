@@ -1117,12 +1117,19 @@ mod tests {
         screen.apply_to_app_config(&mut config).expect("edit applies");
         assert_eq!(config.docker.timeout, 120);
 
-        // Out of the registry's declared range: the save fails loudly instead
-        // of writing a value the rest of the app would have to cope with.
+        // Out of the registry's declared range: the row is REPORTED and
+        // skipped rather than written, and the pass still succeeds so one bad
+        // value cannot block every other row (see
+        // `a_rejected_edit_does_not_block_the_others`).
         let mut screen = ConfigScreenState::from_app_config(&config);
         edit(&mut screen, "docker.timeout", ConfigValue::Number(0));
-        let err = screen.apply_to_app_config(&mut config).unwrap_err().to_string();
-        assert!(err.contains("docker.timeout"), "{err}");
+        let applied = screen.apply_to_app_config(&mut config).expect("the pass succeeds");
+        assert_eq!(applied.rejected.len(), 1, "{:?}", applied.rejected);
+        assert!(
+            applied.rejected[0].1.contains("between 1 and 3600"),
+            "{:?}",
+            applied.rejected
+        );
         assert_eq!(
             config.docker.timeout, 120,
             "a rejected edit changes nothing"
@@ -1203,6 +1210,101 @@ mod tests {
         );
     }
 
+    /// #2b. Expanding a node must not write anything until the screen is left,
+    /// and a screen the user only browsed must leave the file alone entirely.
+    #[test]
+    fn expansion_is_flushed_once_on_exit_and_never_when_untouched() {
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        assert!(
+            screen.take_expansion_to_persist().is_none(),
+            "a freshly opened screen wants to write the config"
+        );
+
+        let root = screen
+            .tree
+            .iter()
+            .position(|node| node.category == ConfigCategory::ContainerTemplates && node.depth == 0)
+            .expect("container templates root");
+        screen.selected_node = screen
+            .visible_nodes
+            .iter()
+            .position(|index| *index == root)
+            .expect("root visible");
+
+        assert!(screen.toggle_expanded());
+        assert!(screen.toggle_expanded(), "collapse it again");
+
+        let flushed = screen
+            .take_expansion_to_persist()
+            .expect("a toggled tree must be persisted on exit");
+        assert!(flushed.is_empty(), "expanded then collapsed: {flushed:?}");
+        assert!(
+            screen.take_expansion_to_persist().is_none(),
+            "the flush must happen once, not on every exit"
+        );
+    }
+
+    /// #4. A Ctrl+K prompt that is escaped must disarm the row.
+    ///
+    /// Left armed, the NEXT ordinary edit of that same row is routed into the
+    /// keychain: typing `$TELEGRAM_BOT_TOKEN` stores that literal string as a
+    /// secret and rewrites the row to a `keychain:` ref, discarding the env
+    /// reference the user asked for. Drives the real event so the fix cannot be
+    /// "the state has a method nobody calls".
+    #[test]
+    fn cancelling_a_keychain_prompt_disarms_the_row() {
+        let mut state = crate::app::state::AppState::new();
+        state.config_screen_state.keychain_target = Some("fleet.bridge.telegram.token".to_string());
+
+        crate::app::EventHandler::process_event(
+            crate::app::events::AppEvent::ConfigPopupCancel,
+            &mut state,
+        );
+
+        assert_eq!(
+            state.config_screen_state.keychain_target, None,
+            "an escaped Ctrl+K prompt left the row armed; the next edit of it \
+             would be stored in the keychain"
+        );
+    }
+
+    /// #8. One unwritable row must not wedge every later save. The registry
+    /// refuses an out-of-range number; the other edit in the same pass has to
+    /// land anyway, and the bad key must not stay pending.
+    #[test]
+    fn a_rejected_edit_does_not_block_the_others() {
+        let mut config = AppConfig::default();
+        let mut screen = ConfigScreenState::from_app_config(&config);
+
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(0)); // below the range
+        edit(
+            &mut screen,
+            "workspace_defaults.branch_prefix",
+            ConfigValue::Text("squad/".to_string()),
+        );
+
+        let applied = screen.apply_to_app_config(&mut config).expect("the pass itself succeeds");
+        assert_eq!(applied.rejected.len(), 1, "{:?}", applied.rejected);
+        assert!(
+            applied.rejected[0].0 == "docker.timeout",
+            "{:?}",
+            applied.rejected
+        );
+        assert_eq!(
+            config.workspace_defaults.branch_prefix, "squad/",
+            "the good edit was blocked by the bad one"
+        );
+
+        // And once saved, the bad key is gone from `dirty` rather than
+        // re-failing on every subsequent auto-persist.
+        screen.mark_saved();
+        assert!(
+            screen.pending_edits().is_empty(),
+            "a rejected edit stayed pending: {:?}",
+            screen.pending_edits()
+        );
+    }
+
     #[test]
     fn the_search_filter_finds_a_row_by_its_dotted_key() {
         // The whole reason the tree got a `/` filter: a leaf is reachable
@@ -1240,7 +1342,7 @@ mod tests {
 
         let before = screen.visible_nodes.len();
         assert!(screen.current_node().unwrap().has_children);
-        screen.toggle_expanded().expect("root expands");
+        assert!(screen.toggle_expanded(), "root expands");
         assert!(
             screen.visible_nodes.len() > before,
             "expanding revealed nothing: {} -> {}",
@@ -1248,7 +1350,7 @@ mod tests {
             screen.visible_nodes.len()
         );
 
-        screen.toggle_expanded().expect("root collapses");
+        assert!(screen.toggle_expanded(), "root collapses");
         assert_eq!(screen.visible_nodes.len(), before);
     }
 
@@ -1391,6 +1493,69 @@ mod tests {
             .find(|s| s.key == plugin_row_key("learnings", "limit"))
             .expect("limit row present");
         assert!(matches!(limit.value, ConfigValue::Number(20)));
+    }
+
+    /// The same race for a per-plugin `[[config]]` row, which is what
+    /// `tripwire_config_plugins` flaked on: discovery landing between the edit
+    /// and its save rebuilt the row from the saved config and threw the typed
+    /// value away.
+    #[test]
+    fn discovery_does_not_drop_an_edited_plugin_field() {
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = plugins_values("learnings", &[("learnings_dir", "/tmp/seed")]);
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        let row_key = plugin_row_key("learnings", "learnings_dir");
+        screen.set_row_value(&row_key, ConfigValue::Text("/tmp/edited".to_string()));
+
+        // Discovery re-runs (a second plugin finished loading).
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        let row = screen
+            .settings
+            .get(&ConfigCategory::Plugins)
+            .and_then(|rows| rows.iter().find(|row| row.key == row_key))
+            .expect("row rebuilt");
+        assert!(
+            matches!(row.value, ConfigValue::Text(ref t) if t == "/tmp/edited"),
+            "discovery reverted an in-flight edit to {:?}",
+            row.value
+        );
+    }
+
+    /// Plugin discovery finishes after the screen is built, so it can land
+    /// between an edit of `plugins.disabled` and that edit's save. Replacing
+    /// the list rows with toggles at that moment used to take the pending value
+    /// with them.
+    #[test]
+    fn discovery_does_not_drop_an_edited_plugin_list_row() {
+        let mut screen = ConfigScreenState::default();
+        screen.set_row_value(
+            "plugins.disabled",
+            ConfigValue::Text("burndown, witr".to_string()),
+        );
+
+        let manifest = manifest_with_config("learnings", vec![]);
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &PluginsConfig::default());
+
+        assert!(
+            screen
+                .pending_edits()
+                .iter()
+                .any(|(key, raw)| key == "plugins.disabled" && raw == "burndown, witr"),
+            "discovery discarded a pending edit: {:?}",
+            screen.pending_edits()
+        );
     }
 
     #[test]

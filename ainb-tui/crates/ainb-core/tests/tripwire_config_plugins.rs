@@ -209,15 +209,27 @@ fn open_plugins_category(session: &str) -> Option<String> {
 /// matches is index-free and cannot drift.
 fn step_to_selected_row(session: &str, needle: &str) -> bool {
     for _ in 0..40 {
-        let cap = capture_pane(session);
-        let selected = cap.lines().find(|line| line.contains("▶") && line.contains(needle));
-        if selected.is_some() {
+        if selected_settings_row(&capture_pane(session)).is_some_and(|row| row.contains(needle)) {
             return true;
         }
         send_key(session, "j");
         thread::sleep(Duration::from_millis(120));
     }
     false
+}
+
+/// The selected row of the RIGHT-hand settings pane.
+///
+/// Both panes share every terminal line, so `line.contains("▶") &&
+/// line.contains(label)` is a false match whenever the left pane's selection
+/// happens to sit on the same row as the label — which depends on plugin
+/// discovery order and so flaked about one run in three. Split at the pane
+/// divider and only look right of it.
+fn selected_settings_row(capture: &str) -> Option<&str> {
+    capture
+        .lines()
+        .filter_map(|line| line.split("││").nth(1))
+        .find(|segment| segment.trim_start().starts_with('▶'))
 }
 
 /// Edit the learnings_dir row from the Plugins category: focus the Settings

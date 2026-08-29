@@ -1605,7 +1605,6 @@ pub enum ConfigCategory {
     Plugins,
     McpPool,
     Appearance,
-    Analytics,
     General,
     ContainerTemplates,
     McpServers,
@@ -1627,7 +1626,6 @@ impl ConfigCategory {
             ConfigCategory::Plugins,
             ConfigCategory::McpPool,
             ConfigCategory::Appearance,
-            ConfigCategory::Analytics,
             ConfigCategory::General,
             ConfigCategory::ContainerTemplates,
             ConfigCategory::McpServers,
@@ -1649,7 +1647,6 @@ impl ConfigCategory {
             ConfigCategory::Plugins => "Plugins",
             ConfigCategory::McpPool => "MCP Pool",
             ConfigCategory::Appearance => "Appearance",
-            ConfigCategory::Analytics => "Analytics",
             ConfigCategory::General => "General",
             ConfigCategory::ContainerTemplates => "Container Templates",
             ConfigCategory::McpServers => "MCP Servers",
@@ -1671,7 +1668,6 @@ impl ConfigCategory {
             ConfigCategory::Plugins => "🔌",
             ConfigCategory::McpPool => "🧬",
             ConfigCategory::Appearance => "🎨",
-            ConfigCategory::Analytics => "📊",
             ConfigCategory::General => "⚙️",
             ConfigCategory::ContainerTemplates => "📦",
             ConfigCategory::McpServers => "🛰️",
@@ -1693,7 +1689,6 @@ impl ConfigCategory {
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
             ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
-            ConfigCategory::Analytics => "Usage tracking, cost alerts",
             ConfigCategory::General => "Default template, presets file",
             ConfigCategory::ContainerTemplates => "Per-template image, resources, mounts",
             ConfigCategory::McpServers => "Per-server install and launch definitions",
@@ -1883,6 +1878,18 @@ pub enum ConfigPane {
 
 // Editor detection and mapping now uses the centralized crate::editors module
 
+/// What one pass of [`ConfigScreenState::apply_to_app_config`] produced.
+#[derive(Debug, Clone, Default)]
+pub struct AppliedEdits {
+    /// Edits whose section `AppConfig` does not model, for
+    /// [`AppConfig::save_external_keys`](crate::config::AppConfig::save_external_keys).
+    pub external: Vec<(String, String)>,
+    /// `(key, why)` for edits the registry refused. Reported to the user and
+    /// then dropped, so a value that can never be written cannot wedge every
+    /// subsequent save.
+    pub rejected: Vec<(String, String)>,
+}
+
 /// The settings screen: a section tree on the left, the rows of the selected
 /// section on the right.
 ///
@@ -1929,6 +1936,13 @@ pub struct ConfigScreenState {
     /// `[fleet.bridge.telegram]` section the user never created. Tracking the
     /// edits themselves cannot invent a value.
     pub dirty: BTreeSet<String>,
+    /// Whether the tree expansion changed since the screen opened.
+    ///
+    /// Expanding a section is a navigation keystroke; writing config.toml on
+    /// each one puts a read-parse-serialize-write in the event loop and gives a
+    /// user who is just looking around a modified file. The write happens once,
+    /// on the way out.
+    pub expansion_dirty: bool,
     /// The secret row a Ctrl+K prompt is collecting a literal for.
     ///
     /// Set for exactly one popup round-trip: the popup's confirm writes the
@@ -1991,6 +2005,7 @@ impl ConfigScreenState {
             visible_rows: Vec::new(),
             search: None,
             dirty: BTreeSet::new(),
+            expansion_dirty: false,
             keychain_target: None,
             editing: false,
             edit_buffer: String::new(),
@@ -2160,18 +2175,33 @@ impl ConfigScreenState {
         }
     }
 
-    /// Open or close the selected tree node. Returns the expansion ids to
-    /// persist, or `None` when the node has no children to toggle.
-    pub fn toggle_expanded(&mut self) -> Option<Vec<String>> {
-        let node = self.current_node()?;
+    /// Open or close the selected tree node.
+    ///
+    /// Records that the expansion changed; the write itself waits for
+    /// [`take_expansion_to_persist`](Self::take_expansion_to_persist) on screen
+    /// exit. Returns whether anything toggled.
+    pub fn toggle_expanded(&mut self) -> bool {
+        let Some(node) = self.current_node() else {
+            return false;
+        };
         if !node.has_children {
-            return None;
+            return false;
         }
         let id = node.id();
         if !self.expanded.remove(&id) {
             self.expanded.insert(id);
         }
+        self.expansion_dirty = true;
         self.refresh();
+        true
+    }
+
+    /// The expansion ids to write, once, if any node was toggled since the last
+    /// call. `None` means the file must be left alone.
+    pub fn take_expansion_to_persist(&mut self) -> Option<Vec<String>> {
+        if !std::mem::take(&mut self.expansion_dirty) {
+            return None;
+        }
         Some(self.expanded.iter().cloned().collect())
     }
 
@@ -2288,24 +2318,26 @@ impl ConfigScreenState {
     /// lines of per-field match arms whose only job was to name, for a second
     /// time, where each row lived — and which was missing an arm for every row
     /// that silently discarded its edit.
-    pub fn apply_to_app_config(
-        &self,
-        config: &mut AppConfig,
-    ) -> anyhow::Result<Vec<(String, String)>> {
+    pub fn apply_to_app_config(&self, config: &mut AppConfig) -> anyhow::Result<AppliedEdits> {
         let mut root = toml::Value::try_from(&*config)
             .map_err(|e| anyhow::anyhow!("config does not serialize to TOML: {e}"))?;
 
-        let mut external = Vec::new();
+        let mut applied = AppliedEdits::default();
         for (key, raw) in self.pending_edits() {
             if registry::is_external(&key) && !key.starts_with("fleet.bridge.") {
                 // `[skills]` / `[session_reader]` are parsed off this file by
                 // other crates and have no `AppConfig` field to land in.
                 // `[fleet.bridge]` DOES round-trip, as an opaque passthrough.
-                external.push((key, raw));
+                applied.external.push((key, raw));
                 continue;
             }
-            registry::set_validated(&mut root, &key, &raw)
-                .map_err(|e| anyhow::anyhow!("setting '{key}': {e}"))?;
+            // Collected, not propagated. Failing the whole save on the first
+            // bad row left that row in `dirty`, so every later auto-persist hit
+            // the same error — one out-of-range number blocked every unrelated
+            // edit for the rest of the session.
+            if let Err(e) = registry::set_validated(&mut root, &key, &raw) {
+                applied.rejected.push((key, e.to_string()));
+            }
         }
 
         *config = root
@@ -2318,7 +2350,7 @@ impl ConfigScreenState {
         self.apply_plugin_rows(config);
         self.apply_plugin_toggle_rows(config);
 
-        Ok(external)
+        Ok(applied)
     }
 
     /// Forget the pending edits after they have been written, so a later save
@@ -2389,7 +2421,17 @@ impl ConfigScreenState {
         // not yet run, dropping the lists would leave the category empty and
         // the section would vanish from the tree entirely.
         let show_toggles = !manifests.is_empty() && plugins_cfg.enabled.is_empty();
+        let dirty = self.dirty.clone();
         let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
+
+        // Discovery finishes asynchronously, so this can land between an edit
+        // and its save. Anything the user has already touched keeps the value
+        // they typed; everything else is rebuilt from the manifests.
+        let edited: HashMap<String, ConfigValue> = rows
+            .iter()
+            .filter(|row| dirty.contains(&row.key))
+            .map(|row| (row.key.clone(), row.value.clone()))
+            .collect();
 
         // Drop everything this method owns so repeated calls are idempotent.
         rows.retain(|row| {
@@ -2397,7 +2439,10 @@ impl ConfigScreenState {
                 && Self::parse_plugin_toggle_key(&row.key).is_none()
         });
         if show_toggles {
-            rows.retain(|row| row.key != "plugins.enabled" && row.key != "plugins.disabled");
+            rows.retain(|row| {
+                (row.key != "plugins.enabled" && row.key != "plugins.disabled")
+                    || dirty.contains(&row.key)
+            });
         }
 
         for manifest in manifests {
@@ -2426,12 +2471,20 @@ impl ConfigScreenState {
                 let saved_str = saved.and_then(|t| t.get(&field.key)).map(toml_scalar_to_string);
                 let value = config_value_for_field(field, saved_str.as_deref());
 
+                let key = Self::plugin_row_key(plugin, &field.key);
                 rows.push(ConfigSetting {
-                    key: Self::plugin_row_key(plugin, &field.key),
                     label: field.label.clone(),
-                    value,
+                    value: edited.get(&key).cloned().unwrap_or(value),
                     description: format!("{} · plugin: {}", field.label, plugin),
+                    key,
                 });
+            }
+        }
+
+        // Same for the enable toggles.
+        for row in rows.iter_mut() {
+            if let Some(value) = edited.get(&row.key) {
+                row.value = value.clone();
             }
         }
 

@@ -3756,11 +3756,17 @@ impl EventHandler {
     /// value another process has since changed.
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<usize> {
         let pending = state.config_screen_state.pending_edits().len();
-        let external = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        let applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
         state.app_config.save()?;
-        crate::config::AppConfig::save_external_keys(&external)?;
+        crate::config::AppConfig::save_external_keys(&applied.external)?;
+        // Cleared even for the rejected rows: leaving them dirty made one
+        // unwritable value re-fail every later save for the rest of the session.
         state.config_screen_state.mark_saved();
-        Ok(pending)
+        for (key, why) in &applied.rejected {
+            tracing::warn!(key, error = %why, "settings edit rejected");
+            state.add_error_notification(format!("{key}: {why}"));
+        }
+        Ok(pending.saturating_sub(applied.rejected.len()))
     }
 
     /// Store a credential literal in the OS keychain and point the row at it.
@@ -6695,6 +6701,14 @@ impl EventHandler {
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
+                // One write on the way out, and only when a node actually
+                // toggled — a user who just looked around leaves the file alone.
+                if let Some(ids) = state.config_screen_state.take_expansion_to_persist() {
+                    state.app_config.ui_preferences.config_tree_expanded = ids.clone();
+                    if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
+                        tracing::warn!(error = %e, "could not persist config tree expansion");
+                    }
+                }
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
@@ -6738,22 +6752,10 @@ impl EventHandler {
                 tracing::debug!("Config focus switched to Settings pane");
             }
             AppEvent::ConfigToggleExpand => {
-                // Opening or closing a section is worth remembering: the tree
-                // is ~40 nodes deep across every category, and re-drilling to
-                // the same one on every launch is the reason the old flat list
-                // felt navigable and a tree would not.
-                if let Some(ids) = state.config_screen_state.toggle_expanded() {
-                    state.app_config.ui_preferences.config_tree_expanded = ids.clone();
-                    // Deliberately NOT `app_config.save()`: that serializes the
-                    // whole snapshot taken at startup, so a navigational
-                    // keystroke would revert anything `ainb config set` or
-                    // another process changed since — and widen the window for
-                    // two writers to collide over one file. This touches the one
-                    // key that actually changed.
-                    if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
-                        tracing::warn!(error = %e, "could not persist config tree expansion");
-                    }
-                }
+                // In-memory only. Persisting here meant a read-parse-write of
+                // config.toml inside the event loop on every keypress; the flush
+                // happens once, on ConfigBack.
+                state.config_screen_state.toggle_expanded();
             }
             AppEvent::ConfigSearchStart => {
                 state.config_screen_state.start_search();
@@ -7244,6 +7246,12 @@ impl EventHandler {
             }
             AppEvent::ConfigPopupCancel => {
                 tracing::debug!("Config popup cancelled");
+                // A Ctrl+K prompt that is escaped must not leave the row armed:
+                // the next ordinary edit of that same row would be routed into
+                // the keychain, storing the typed "$MY_TOKEN" as a secret and
+                // rewriting the row to a `keychain:` ref — silently discarding
+                // the env reference the user actually asked for.
+                state.config_screen_state.keychain_target = None;
                 state.config_popup_state.close();
             }
             AppEvent::ConfigPopupInputChar(c) => {
