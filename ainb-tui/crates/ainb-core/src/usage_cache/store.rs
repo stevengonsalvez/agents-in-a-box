@@ -351,10 +351,13 @@ impl Cache {
     }
 }
 
-/// Resolve the default cache DB path (`~/.agents-in-a-box/cache/usage.db`)
-/// honoring the `AINB_USAGE_CACHE_DB` env override (used by tests).
+/// Resolve the cache DB path: `AINB_USAGE_CACHE_DB` (used by tests), else
+/// `usage_client.cache_db`, else `~/.agents-in-a-box/cache/usage.db`.
 pub fn default_db_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("AINB_USAGE_CACHE_DB") {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(p) = &crate::config::tunables::snapshot().usage_client.cache_db {
         return Some(PathBuf::from(p));
     }
     dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("cache").join("usage.db"))
