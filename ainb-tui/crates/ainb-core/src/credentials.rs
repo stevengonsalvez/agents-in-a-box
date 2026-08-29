@@ -66,6 +66,34 @@ pub fn store_credential(key: CredentialKey, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Account name for keychain items addressed by SERVICE alone.
+///
+/// A `keychain:<service>` reference in config.toml is resolved by
+/// [`crate::fleet::bridge::secrets`], which shells out to
+/// `security find-generic-password -s <service> -w` — service only, no account.
+/// The `keyring` crate always writes both attributes, so items written for those
+/// references need one fixed account for the lookup to be unambiguous.
+pub(crate) const REFERENCE_ACCOUNT: &str = "ainb";
+
+/// Store a secret under an arbitrary keychain SERVICE name, for a
+/// `keychain:<service>` reference held in config.toml.
+///
+/// Distinct from [`store_credential`], which files everything under one service
+/// keyed by account: those are ainb's own well-known credentials, whereas these
+/// are addressed by service because that is all the reference syntax carries.
+pub fn store_keychain_secret(service: &str, value: &str) -> Result<()> {
+    if service.trim().is_empty() {
+        anyhow::bail!("keychain service name is empty");
+    }
+    if value.is_empty() {
+        anyhow::bail!("refusing to store an empty secret");
+    }
+    let entry = Entry::new(service, REFERENCE_ACCOUNT).context("Failed to create keyring entry")?;
+    entry.set_password(value).context("Failed to store secret in keychain")?;
+    tracing::info!(service, "stored secret in keychain");
+    Ok(())
+}
+
 /// Retrieve a credential from the system keychain
 pub fn get_credential(key: CredentialKey) -> Result<Option<String>> {
     let entry = Entry::new(SERVICE_NAME, key.as_str()).context("Failed to create keyring entry")?;
@@ -251,5 +279,43 @@ mod tests {
 
         // Verify deleted
         assert!(!has_anthropic_api_key());
+    }
+}
+
+#[cfg(test)]
+mod keychain_reference_tests {
+    use super::*;
+
+    /// Round-trip a `keychain:<service>` reference: write it the way the
+    /// settings screen's Ctrl+K does, read it back the way
+    /// [`crate::fleet::bridge::secrets`] does.
+    ///
+    /// `#[ignore]` because it writes a real item to the developer's login
+    /// keychain — and because macOS has no default keychain at all when `HOME`
+    /// is redirected, which is exactly what every tripwire and CI job does, so
+    /// an always-on version would fail there for reasons unrelated to the code.
+    /// Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test -p ainb --lib keychain_reference_round_trips -- --ignored
+    /// security delete-generic-password -s ainb-test-secret-round-trip
+    /// ```
+    #[test]
+    #[ignore = "writes to the real login keychain; run manually"]
+    fn keychain_reference_round_trips() {
+        let service = "ainb-test-secret-round-trip";
+        store_keychain_secret(service, "xoxb-round-trip").expect("store");
+        let resolved =
+            crate::fleet::bridge::secrets::resolve_secret(&format!("keychain:{service}"));
+        assert_eq!(resolved, "xoxb-round-trip");
+
+        let entry = Entry::new(service, REFERENCE_ACCOUNT).unwrap();
+        entry.delete_credential().expect("clean up the test item");
+    }
+
+    #[test]
+    fn an_empty_secret_is_refused_rather_than_stored() {
+        assert!(store_keychain_secret("ainb-test-never-written", "").is_err());
+        assert!(store_keychain_secret("  ", "value").is_err());
     }
 }

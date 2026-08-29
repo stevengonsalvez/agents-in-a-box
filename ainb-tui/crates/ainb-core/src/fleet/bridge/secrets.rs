@@ -64,36 +64,93 @@ fn resolve_secret_with(value: &str, env: impl Fn(&str) -> Option<String>) -> Str
     raw.to_string()
 }
 
-/// macOS keychain lookup, bounded by a watchdog so a locked-keychain prompt
-/// can't hang the bridge at startup.
+/// Keychain lookup for a `keychain:<service>` reference.
+///
+/// Two readers, in this order:
+///
+/// 1. **In-process, via `keyring`.** This is how the settings screen's
+///    "store in the keychain" action WRITES the item, and an item is readable
+///    without a prompt by the process that created it. Shelling out to
+///    `security` for something ainb just wrote fails instead: the ACL trusts
+///    the creating binary, not `/usr/bin/security`, so the read raises an
+///    authorization dialog and the watchdog below times out before the user can
+///    answer it.
+/// 2. **`/usr/bin/security`**, for items a user (or an older ainb) put there by
+///    hand. Apple-signed and stable, so an "Always Allow" against it sticks
+///    across rebuilds.
+///
+/// Same reference syntax and the same keychain item either way — this is one
+/// scheme with two readers, not two schemes.
 fn resolve_keychain(service: &str) -> String {
-    let service_owned = service.to_string();
+    let owned = service.to_string();
+    // BOTH readers are bounded. `keyring::Entry::get_password` blocks on a
+    // locked keychain or an ACL prompt exactly like `security` does, so leaving
+    // the in-process read unbounded reintroduced the hang the watchdog exists
+    // to prevent — and put it on the TUI's startup path.
+    if let Some(Some(found)) = bounded(KEYCHAIN_TIMEOUT, move || {
+        resolve_keychain_in_process(&owned)
+    }) {
+        return found;
+    }
+    resolve_keychain_via_security(service)
+}
+
+/// Run `work` on a detached thread and give up after `limit`.
+///
+/// Detached on purpose: on a timeout we stop waiting, but the thread is NOT
+/// joined — a keychain call blocked behind a user dialog would otherwise block
+/// us right back. It self-reaps when the call returns, and the send into a
+/// dropped channel is a harmless no-op.
+fn bounded<T: Send + 'static>(
+    limit: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     let (tx, rx) = std::sync::mpsc::channel();
-    // Detached on purpose: on a timeout we stop waiting on `rx` and return, but
-    // this thread is NOT joined. It self-reaps — `security` is bounded by its own
-    // 5s wall-clock (KEYCHAIN_TIMEOUT mirrors it), so the thread finishes shortly
-    // after and `tx.send` into the dropped channel is a harmless no-op. A bounded,
-    // intentional leak, not an unbounded one.
     std::thread::spawn(move || {
-        let out = Command::new("/usr/bin/security")
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(limit).ok()
+}
+
+/// Step 1: the `keyring` read. `None` means "not found here, try `security`" —
+/// including on error, because a keychain ainb cannot open in-process may still
+/// be readable by the Apple-signed helper.
+fn resolve_keychain_in_process(service: &str) -> Option<String> {
+    let entry = keyring::Entry::new(service, crate::credentials::REFERENCE_ACCOUNT).ok()?;
+    match entry.get_password() {
+        Ok(password) if !password.trim().is_empty() => Some(password.trim().to_string()),
+        Ok(_) => None,
+        Err(keyring::Error::NoEntry) => None,
+        Err(e) => {
+            tracing::debug!(service, error = %e, "in-process keychain read failed; trying security");
+            None
+        }
+    }
+}
+
+/// Step 2: `/usr/bin/security`, bounded by a watchdog so a locked-keychain
+/// prompt can't hang the bridge at startup.
+fn resolve_keychain_via_security(service: &str) -> String {
+    let service_owned = service.to_string();
+    let output = bounded(KEYCHAIN_TIMEOUT, move || {
+        Command::new("/usr/bin/security")
             .args(["find-generic-password", "-s", &service_owned, "-w"])
-            .output();
-        let _ = tx.send(out);
+            .output()
     });
 
-    match rx.recv_timeout(KEYCHAIN_TIMEOUT) {
-        Ok(Ok(out)) if out.status.success() => {
+    match output {
+        Some(Ok(out)) if out.status.success() => {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
-        Ok(Ok(_)) => {
+        Some(Ok(_)) => {
             tracing::warn!(service, "keychain has no item for service");
             String::new()
         }
-        Ok(Err(e)) => {
+        Some(Err(e)) => {
             tracing::warn!(service, error = %e, "keychain lookup failed");
             String::new()
         }
-        Err(_) => {
+        None => {
             tracing::warn!(service, "keychain lookup timed out");
             String::new()
         }
@@ -103,6 +160,29 @@ fn resolve_keychain(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watchdog must give up on a call that never returns. Both keychain
+    /// readers block on a locked keychain or an ACL prompt, and the settings
+    /// screen resolves secrets on a path a user is waiting on.
+    #[test]
+    fn a_blocked_lookup_gives_up_instead_of_hanging() {
+        let started = std::time::Instant::now();
+        let result = bounded(Duration::from_millis(80), || {
+            std::thread::sleep(Duration::from_secs(30));
+            "never arrives"
+        });
+        assert_eq!(result, None, "an unbounded lookup would have blocked here");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the watchdog did not fire: waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_prompt_lookup_returns_its_value() {
+        assert_eq!(bounded(Duration::from_secs(5), || 42), Some(42));
+    }
 
     #[test]
     fn plain_literal_passes_through() {
