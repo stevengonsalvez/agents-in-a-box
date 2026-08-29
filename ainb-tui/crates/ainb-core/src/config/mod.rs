@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
 pub mod presets;
+pub mod registry;
 pub mod session_defaults;
 pub mod ssh_display_names;
 
@@ -30,6 +31,7 @@ pub use mcp::{McpInitStrategy, McpInstallation, McpServerConfig, McpServerDefini
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
+pub use registry::{CONFIG_REGISTRY, ConfigRow, Entry as ConfigEntry, RowKind};
 pub use session_defaults::{PerRepoDefaults, SessionDefaults};
 pub use ssh_display_names::{SessionLabelStore, SshDisplayNameStore, normalize_session_label};
 
