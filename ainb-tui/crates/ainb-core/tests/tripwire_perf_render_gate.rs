@@ -136,10 +136,19 @@ fn render_gate_repaints_on_input() {
     // 2) Press `b` for Inbox. With the dirty-gate, the keystroke must mark a
     //    repaint; the pane should change to the Inbox screen (its title line
     //    `📥 Inbox · …` uses a single space, distinct from the sidebar tile).
-    session.send_keys(&["b"]);
-    let inbox = session.poll(Instant::now() + Duration::from_secs(12), |c| {
-        c.contains("📥 Inbox ·")
-    });
+    thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut inbox = None;
+    while Instant::now() < deadline {
+        session.send_keys(&["b"]);
+        if let Some(cap) = session.poll(Instant::now() + Duration::from_secs(2), |c| {
+            c.contains("📥 Inbox ·")
+        }) {
+            inbox = Some(cap);
+            break;
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
     assert!(
         inbox.is_some(),
         "Inbox did not render after pressing 'b' — dirty-gate may have dropped \

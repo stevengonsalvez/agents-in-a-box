@@ -152,6 +152,9 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
 
     // Real broker on the isolated approve.sock, riding a test-owned runtime.
     let paths = Paths::under(&hangar_home);
+    paths.ensure_base().expect("create approve dir");
+    ainb_hangar_daemon::rpc::set_approve_socket_for_test(Some(paths.approve_socket.clone()));
+    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let broker_state =
         BrokerState::with_timeout(ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT);
@@ -160,9 +163,13 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         let state = broker_state.clone();
         rt.spawn(async move {
             let listener = tokio::net::UnixListener::bind(&sock).expect("bind approve.sock");
+            let _ = bound_tx.send(());
             broker::serve(listener, state).await;
         });
     }
+    bound_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("approve.sock bound");
 
     // Park a REAL waiter: the same blocking call a Claude PermissionRequest
     // hook makes. It blocks until the TUI's `y` decides it (or 60s deny-falls-back,
@@ -268,6 +275,7 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     );
 
     let decision = waiter.join().expect("waiter thread");
+    ainb_hangar_daemon::rpc::set_approve_socket_for_test(None);
     let _ = fs::remove_dir_all(&home);
     assert_eq!(
         decision.decision,

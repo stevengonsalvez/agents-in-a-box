@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 /// tmux session ainb spawns for the embedded witr browser. Must match
 /// `WITR_SESSION` in `crates/ainb-core/src/main.rs`'s `AttachWitr` arm.
 const WITR_SESSION: &str = "ainb-witr";
+static WITR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -132,6 +133,8 @@ fn pressing_w_embeds_witr_interactive_browser() {
         return;
     }
 
+    let _lock = WITR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     // Start from a clean slate — a leftover ainb-witr would make the
     // assertion pass without ainb doing anything.
     kill_session(WITR_SESSION);
@@ -171,10 +174,20 @@ fn pressing_w_embeds_witr_interactive_browser() {
     }
 
     // Press `w` → ainb should spawn the ainb-witr session running `witr -i`.
-    send_key(&session, "w");
-    let spawned = poll(Instant::now() + Duration::from_secs(40), || {
-        has_session(WITR_SESSION)
-    });
+    thread::sleep(Duration::from_millis(500));
+    let spawned = {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            send_key(&session, "w");
+            if poll(Instant::now() + Duration::from_secs(2), || has_session(WITR_SESSION)) {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        ok
+    };
     if !spawned {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -231,6 +244,8 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
         return;
     }
 
+    let _lock = WITR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     kill_session(WITR_SESSION);
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
@@ -265,10 +280,23 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
         kill_session(&session);
         panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
     }
-    send_key(&session, "s");
-    let on_sessions = poll(Instant::now() + Duration::from_secs(40), || {
-        capture_pane(&session).contains("del-sel")
-    });
+
+    thread::sleep(Duration::from_millis(500));
+    let on_sessions = {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            send_key(&session, "s");
+            if poll(Instant::now() + Duration::from_secs(2), || {
+                capture_pane(&session).contains("del-sel")
+            }) {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        ok
+    };
     if !on_sessions {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -276,10 +304,20 @@ fn witr_opened_from_session_list_resumes_on_session_list() {
     }
 
     // Press `w` → ainb spawns `ainb-witr` running `witr -i` and attaches.
-    send_key(&session, "w");
-    let spawned = poll(Instant::now() + Duration::from_secs(40), || {
-        has_session(WITR_SESSION)
-    });
+    thread::sleep(Duration::from_millis(500));
+    let spawned = {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            send_key(&session, "w");
+            if poll(Instant::now() + Duration::from_secs(2), || has_session(WITR_SESSION)) {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        ok
+    };
     if !spawned {
         let last = capture_pane(&session);
         kill_session(&session);

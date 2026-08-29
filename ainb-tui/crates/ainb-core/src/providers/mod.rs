@@ -25,6 +25,7 @@
 //! `Arc<dyn Provider>` so call sites that need shared access (CLI dispatch,
 //! TUI render path) can clone cheaply.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -33,6 +34,7 @@ pub mod gemini;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use antigravity::AntigravityProvider;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
@@ -86,6 +88,7 @@ impl ProviderRegistry {
         r.register(Arc::new(CodexProvider));
         r.register(Arc::new(GeminiProvider));
         r.register(Arc::new(CopilotProvider));
+        r.register(Arc::new(AntigravityProvider));
         r
     }
 
@@ -127,13 +130,14 @@ impl ProviderRegistry {
     }
 
     /// Permissive lookup that mirrors the old `CliProvider::from_str` aliases
-    /// ("openai" → codex, "google" → gemini, "github" → copilot). Used by CLI
+    /// ("openai" -> codex, "google" -> gemini, "github" -> copilot, "agy" -> antigravity). Used by CLI
     /// flag parsing where users may have learned the legacy aliases.
     pub fn get_with_aliases(&self, s: &str) -> Option<Arc<dyn Provider>> {
         let normalised = match s.to_lowercase().as_str() {
             "openai" => "codex".to_string(),
             "google" => "gemini".to_string(),
             "github" => "copilot".to_string(),
+            "agy" | "antigravity" => "antigravity".to_string(),
             other => other.to_string(),
         };
         self.get(&normalised)
@@ -150,8 +154,8 @@ mod tests {
     #[test]
     fn provider_registry_resolves_all_built_ins() {
         let r = ProviderRegistry::built_ins();
-        assert_eq!(r.len(), 4);
-        for id in ["claude", "codex", "gemini", "copilot"] {
+        assert_eq!(r.len(), 5);
+        for id in ["claude", "codex", "gemini", "copilot", "antigravity"] {
             let p = r.get(id).unwrap_or_else(|| panic!("missing {id}"));
             assert_eq!(p.id(), id);
         }
@@ -161,7 +165,7 @@ mod tests {
     fn registry_iter_preserves_registration_order() {
         let r = ProviderRegistry::built_ins();
         let ids: Vec<_> = r.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["claude", "codex", "gemini", "copilot"]);
+        assert_eq!(ids, vec!["claude", "codex", "gemini", "copilot", "antigravity"]);
     }
 
     #[test]
@@ -170,6 +174,8 @@ mod tests {
         assert_eq!(r.get_with_aliases("OpenAI").unwrap().id(), "codex");
         assert_eq!(r.get_with_aliases("google").unwrap().id(), "gemini");
         assert_eq!(r.get_with_aliases("GITHUB").unwrap().id(), "copilot");
+        assert_eq!(r.get_with_aliases("agy").unwrap().id(), "antigravity");
+        assert_eq!(r.get_with_aliases("Antigravity").unwrap().id(), "antigravity");
         assert_eq!(r.get_with_aliases("claude").unwrap().id(), "claude");
         assert!(r.get_with_aliases("unknown").is_none());
     }
@@ -198,6 +204,15 @@ mod tests {
 
         let copilot = r.get("copilot").unwrap();
         assert_eq!(copilot.skip_permissions_flag(), Some("--yolo"));
+
+        let antigravity = r.get("antigravity").unwrap();
+        assert_eq!(antigravity.command(), "agy");
+        assert_eq!(antigravity.api_key_env_var(), Some("GEMINI_API_KEY"));
+        assert_eq!(
+            antigravity.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
+        assert_eq!(antigravity.display_name(), "Google Antigravity");
     }
 
     #[test]

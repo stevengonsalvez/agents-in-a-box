@@ -69,6 +69,7 @@ impl SessionAgentRegistry {
         r.register(Arc::new(CodexAgent));
         r.register(Arc::new(GeminiAgent));
         r.register(Arc::new(CopilotAgent));
+        r.register(Arc::new(AntigravityAgent));
         r.register(Arc::new(KiroAgent));
         r
     }
@@ -205,6 +206,22 @@ impl SessionAgent for CopilotAgent {
     }
 }
 
+pub struct AntigravityAgent;
+impl SessionAgent for AntigravityAgent {
+    fn id(&self) -> &'static str {
+        "antigravity"
+    }
+    fn icon(&self) -> &'static str {
+        "\u{f1a0}"
+    }
+    fn name(&self) -> &'static str {
+        "Google Antigravity"
+    }
+    fn description(&self) -> &'static str {
+        "Google's agentic AI coding assistant"
+    }
+}
+
 pub struct KiroAgent;
 impl SessionAgent for KiroAgent {
     fn id(&self) -> &'static str {
@@ -229,11 +246,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_resolves_all_seven_built_ins() {
+    fn registry_resolves_all_eight_built_ins() {
         let r = SessionAgentRegistry::built_ins();
-        assert_eq!(r.len(), 7);
+        assert_eq!(r.len(), 8);
         for id in [
-            "claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro",
+            "claude", "shell", "ssh", "codex", "gemini", "copilot", "antigravity", "kiro",
         ] {
             assert!(r.get(id).is_some(), "missing {id}");
         }
@@ -246,7 +263,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro"
+                "claude", "shell", "ssh", "codex", "gemini", "copilot", "antigravity", "kiro"
             ]
         );
     }
@@ -254,7 +271,15 @@ mod tests {
     #[test]
     fn kiro_is_unavailable_others_are_available() {
         let r = SessionAgentRegistry::built_ins();
-        for id in ["claude", "shell", "ssh", "codex", "gemini", "copilot"] {
+        for id in [
+            "claude",
+            "shell",
+            "ssh",
+            "codex",
+            "gemini",
+            "copilot",
+            "antigravity",
+        ] {
             assert!(
                 r.get(id).unwrap().is_available(),
                 "{id} should be available"
@@ -273,6 +298,8 @@ mod tests {
         assert_eq!(r.get("claude").unwrap().name(), "Claude Code");
         assert_eq!(r.get("ssh").unwrap().icon(), "🔐");
         assert_eq!(r.get("ssh").unwrap().name(), "SSH");
+        assert_eq!(r.get("antigravity").unwrap().icon(), "\u{f1a0}");
+        assert_eq!(r.get("antigravity").unwrap().name(), "Google Antigravity");
         assert_eq!(r.get("kiro").unwrap().icon(), "🔮");
     }
 }

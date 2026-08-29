@@ -48,6 +48,7 @@ pub enum SessionAgentType {
     Codex,   // OpenAI Codex CLI
     Gemini,  // Google Gemini CLI
     Copilot, // GitHub Copilot CLI
+    Antigravity, // Google Antigravity CLI
     Kiro,    // AWS Kiro (disabled)
 }
 
@@ -61,9 +62,10 @@ impl SessionAgentType {
             // OpenAI ships no Nerd Font brand mark; geometric 4-point star
             // (painted near-white at the render site). Single-cell.
             SessionAgentType::Codex => "✦",
-            SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot — real GitHub Copilot logo
-            SessionAgentType::Gemini => "\u{f1a0}",  // fa-google — Gemini is a Google product
-            SessionAgentType::Kiro => "\u{e62f}",    // seti-crystal — Kiro crystal motif
+            SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot - real GitHub Copilot logo
+            SessionAgentType::Gemini => "\u{f1a0}",  // fa-google - Gemini is a Google product
+            SessionAgentType::Antigravity => "\u{f1a0}", // fa-google - Antigravity is a Google product
+            SessionAgentType::Kiro => "\u{e62f}",    // seti-crystal - Kiro crystal motif
             SessionAgentType::Shell => "\u{ea85}",   // cod-terminal
             SessionAgentType::Ssh => "\u{f023}",     // fa-lock
         }
@@ -77,6 +79,7 @@ impl SessionAgentType {
             SessionAgentType::Codex => "Codex CLI",
             SessionAgentType::Gemini => "Gemini CLI",
             SessionAgentType::Copilot => "GitHub Copilot",
+            SessionAgentType::Antigravity => "Google Antigravity",
             SessionAgentType::Kiro => "Kiro",
         }
     }
@@ -88,7 +91,8 @@ impl SessionAgentType {
             SessionAgentType::Ssh => "SSH connection to remote server",
             SessionAgentType::Codex => "OpenAI's coding assistant",
             SessionAgentType::Gemini => "Google's AI assistant",
-            SessionAgentType::Copilot => "GitHub Copilot CLI — AI coding agent by GitHub",
+            SessionAgentType::Copilot => "GitHub Copilot CLI: AI coding agent by GitHub",
+            SessionAgentType::Antigravity => "Google's agentic AI coding assistant",
             SessionAgentType::Kiro => "AWS AI coding assistant",
         }
     }
@@ -100,7 +104,8 @@ impl SessionAgentType {
             | SessionAgentType::Ssh
             | SessionAgentType::Codex
             | SessionAgentType::Gemini
-            | SessionAgentType::Copilot => true,
+            | SessionAgentType::Copilot
+            | SessionAgentType::Antigravity => true,
             SessionAgentType::Kiro => false,
         }
     }
@@ -115,6 +120,7 @@ impl SessionAgentType {
             SessionAgentType::Codex => "codex",
             SessionAgentType::Gemini => "gemini",
             SessionAgentType::Copilot => "copilot",
+            SessionAgentType::Antigravity => "antigravity",
             SessionAgentType::Kiro => "kiro",
         }
     }
@@ -365,6 +371,120 @@ impl CodexModel {
         }
     }
 }
+
+/// Available Antigravity models for session.
+///
+/// As with `ClaudeModel` and `CodexModel`, `SystemDefault` means "omit `--model` from the
+/// spawned `agy` command".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AntigravityModel {
+    /// Omit `--model` from the spawned `agy` command.
+    #[default]
+    SystemDefault,
+    /// `gemini-3.7-flash`: flagship reasoning and speed.
+    Gemini37Flash,
+    /// `gemini-2.5-pro`: flagship capability.
+    Gemini25Pro,
+    /// `gemini-2.5-flash`: fast and efficient.
+    Gemini25Flash,
+}
+
+impl AntigravityModel {
+    /// CLI value to pass to `agy --model`. `None` means "omit the flag entirely".
+    pub fn cli_value(&self) -> Option<&'static str> {
+        match self {
+            AntigravityModel::SystemDefault => None,
+            AntigravityModel::Gemini37Flash => Some("gemini-3.7-flash"),
+            AntigravityModel::Gemini25Pro => Some("gemini-2.5-pro"),
+            AntigravityModel::Gemini25Flash => Some("gemini-2.5-flash"),
+        }
+    }
+
+    /// Human-readable label for the Configure row.
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            AntigravityModel::SystemDefault => "system default",
+            AntigravityModel::Gemini37Flash => "gemini-3.7-flash",
+            AntigravityModel::Gemini25Pro => "gemini-2.5-pro",
+            AntigravityModel::Gemini25Flash => "gemini-2.5-flash",
+        }
+    }
+
+    /// Back-compat alias for call sites asking for `display_name`.
+    /// Forwards to `display_label`.
+    pub fn display_name(&self) -> &'static str {
+        self.display_label()
+    }
+
+    /// Get model description for UI
+    pub fn description(&self) -> &'static str {
+        match self {
+            AntigravityModel::SystemDefault => "Use the CLI's built-in default model",
+            AntigravityModel::Gemini37Flash => "Flagship reasoning, multimodal and speed",
+            AntigravityModel::Gemini25Pro => "Flagship Pro, best for complex reasoning",
+            AntigravityModel::Gemini25Flash => "Fastest, balanced for common tasks",
+        }
+    }
+
+    /// All variants in the order the Configure ring should cycle them.
+    pub fn all() -> Vec<AntigravityModel> {
+        vec![
+            AntigravityModel::SystemDefault,
+            AntigravityModel::Gemini37Flash,
+            AntigravityModel::Gemini25Pro,
+            AntigravityModel::Gemini25Flash,
+        ]
+    }
+
+    /// Get icon for the model
+    pub fn icon(&self) -> &'static str {
+        match self {
+            AntigravityModel::SystemDefault => "·",
+            AntigravityModel::Gemini37Flash => "⚡",
+            AntigravityModel::Gemini25Pro => "👑",
+            AntigravityModel::Gemini25Flash => "🚀",
+        }
+    }
+
+    /// Parse a TOML / preset string into an `AntigravityModel`. Accepts:
+    ///   * `""` or `"default"` -> `SystemDefault`
+    ///   * Canonical IDs (`gemini-3.7-flash`, `gemini-2.5-pro`, `gemini-2.5-flash`)
+    ///   * Short aliases (`3.7-flash`, `2.5-pro`, `2.5-flash`, `flash`, `pro`)
+    /// Unknown values fall back to `SystemDefault`.
+    pub fn parse(value: &str) -> AntigravityModel {
+        match value.trim().to_lowercase().as_str() {
+            "" | "default" => AntigravityModel::SystemDefault,
+            "gemini-3.7-flash" | "3.7-flash" | "3.7" => AntigravityModel::Gemini37Flash,
+            "gemini-2.5-pro" | "2.5-pro" | "pro" => AntigravityModel::Gemini25Pro,
+            "gemini-2.5-flash" | "2.5-flash" | "flash" => AntigravityModel::Gemini25Flash,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "AntigravityModel::parse: unknown model id, defaulting to SystemDefault"
+                );
+                AntigravityModel::SystemDefault
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for AntigravityModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.cli_value() {
+            Some(v) => write!(f, "{v}"),
+            None => write!(f, "default"),
+        }
+    }
+}
+
+impl std::str::FromStr for AntigravityModel {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse(s))
+    }
+}
+
 
 // ============================================================================
 // SSH TARGET (Connection configuration for SSH sessions)
@@ -850,13 +970,82 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexModel, is_default_model};
+    use super::*;
 
     #[test]
     fn default_model_sentinels_are_recognized_after_trimming() {
         assert!(is_default_model(""));
         assert!(is_default_model("  DEFAULT  "));
         assert!(!is_default_model("claude-opus-4-8"));
+        assert!(!is_default_model("gemini-3.7-flash"));
+    }
+
+    #[test]
+    fn session_agent_type_antigravity_properties() {
+        let agent = SessionAgentType::Antigravity;
+        assert_eq!(agent.id(), "antigravity");
+        assert_eq!(agent.name(), "Google Antigravity");
+        assert_eq!(agent.icon(), "\u{f1a0}");
+        assert!(agent.is_available());
+        assert_eq!(
+            agent.description(),
+            "Google's agentic AI coding assistant"
+        );
+    }
+
+    #[test]
+    fn antigravity_model_parse_canonical_and_aliases() {
+        assert_eq!(AntigravityModel::parse(""), AntigravityModel::SystemDefault);
+        assert_eq!(AntigravityModel::parse("default"), AntigravityModel::SystemDefault);
+        assert_eq!(AntigravityModel::parse("gemini-3.7-flash"), AntigravityModel::Gemini37Flash);
+        assert_eq!(AntigravityModel::parse("3.7-flash"), AntigravityModel::Gemini37Flash);
+        assert_eq!(AntigravityModel::parse("3.7"), AntigravityModel::Gemini37Flash);
+        assert_eq!(AntigravityModel::parse("gemini-2.5-pro"), AntigravityModel::Gemini25Pro);
+        assert_eq!(AntigravityModel::parse("2.5-pro"), AntigravityModel::Gemini25Pro);
+        assert_eq!(AntigravityModel::parse("pro"), AntigravityModel::Gemini25Pro);
+        assert_eq!(AntigravityModel::parse("gemini-2.5-flash"), AntigravityModel::Gemini25Flash);
+        assert_eq!(AntigravityModel::parse("2.5-flash"), AntigravityModel::Gemini25Flash);
+        assert_eq!(AntigravityModel::parse("flash"), AntigravityModel::Gemini25Flash);
+        assert_eq!(AntigravityModel::parse("unknown-model"), AntigravityModel::SystemDefault);
+    }
+
+    #[test]
+    fn antigravity_model_cli_values_and_labels() {
+        assert_eq!(AntigravityModel::SystemDefault.cli_value(), None);
+        assert_eq!(AntigravityModel::Gemini37Flash.cli_value(), Some("gemini-3.7-flash"));
+        assert_eq!(AntigravityModel::Gemini25Pro.cli_value(), Some("gemini-2.5-pro"));
+        assert_eq!(AntigravityModel::Gemini25Flash.cli_value(), Some("gemini-2.5-flash"));
+
+        assert_eq!(AntigravityModel::SystemDefault.display_label(), "system default");
+        assert_eq!(AntigravityModel::Gemini37Flash.display_label(), "gemini-3.7-flash");
+        assert_eq!(AntigravityModel::Gemini25Pro.display_label(), "gemini-2.5-pro");
+        assert_eq!(AntigravityModel::Gemini25Flash.display_label(), "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn antigravity_model_all_and_display() {
+        let all = AntigravityModel::all();
+        assert_eq!(all.len(), 4);
+        assert_eq!(
+            all,
+            vec![
+                AntigravityModel::SystemDefault,
+                AntigravityModel::Gemini37Flash,
+                AntigravityModel::Gemini25Pro,
+                AntigravityModel::Gemini25Flash,
+            ]
+        );
+
+        assert_eq!(format!("{}", AntigravityModel::SystemDefault), "default");
+        assert_eq!(format!("{}", AntigravityModel::Gemini37Flash), "gemini-3.7-flash");
+        assert_eq!(format!("{}", AntigravityModel::Gemini25Pro), "gemini-2.5-pro");
+        assert_eq!(format!("{}", AntigravityModel::Gemini25Flash), "gemini-2.5-flash");
+
+        use std::str::FromStr;
+        assert_eq!(
+            AntigravityModel::from_str("gemini-3.7-flash").unwrap(),
+            AntigravityModel::Gemini37Flash
+        );
     }
 
     /// The gpt-5.4 family retired 2026-08-31. Nothing may still resolve to it.
@@ -894,3 +1083,4 @@ mod tests {
         );
     }
 }
+

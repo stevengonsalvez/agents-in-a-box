@@ -11792,6 +11792,7 @@ impl AppState {
             SessionAgentType::Codex => CliProvider::Codex,
             SessionAgentType::Gemini => CliProvider::Gemini,
             SessionAgentType::Copilot => CliProvider::Copilot,
+            SessionAgentType::Antigravity => CliProvider::Antigravity,
             SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
                 anyhow::bail!("Restart unsupported for agent type {:?}", agent_type);
             }

@@ -284,6 +284,38 @@ async fn copilot_resume_launches_continue() {
     );
 }
 
+#[tokio::test]
+async fn antigravity_resume_launches_continue_and_model() {
+    if !tmux_available() {
+        eprintln!("skip: tmux unavailable");
+        return;
+    }
+    let name = format!("ainb-verify-antigravity-{}", std::process::id());
+    new_session(&name);
+    let cmd = launched_command(
+        &name,
+        SessionAgentType::Antigravity,
+        Some("gemini-3.7-flash"),
+        None,
+        true,
+    )
+    .await;
+    kill(&name);
+
+    assert!(
+        cmd.contains("agy") && cmd.contains("--continue"),
+        "antigravity resume must use --continue, got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--dangerously-skip-permissions"),
+        "antigravity yolo flag must survive, got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--model gemini-3.7-flash"),
+        "antigravity model flag must survive resume, got: {cmd}"
+    );
+}
+
 /// The isolation contract: a session this file creates must NOT exist on the
 /// ambient/default tmux server. Before `TMUX_TMPDIR` was pinned it did, which is
 /// how one test's teardown could kill the server another test was starting on.

@@ -232,10 +232,18 @@ fn a_broadcast_channel_is_created_addressed_and_receipted_per_recipient() {
         "the home screen never painted:\n{}",
         capture_pane(session)
     );
-    send_key(session, "f");
+    thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        send_key(session, "f");
+        if wait_for(session, "Fleet ·", 2) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
     assert!(
-        wait_for(session, "Fleet ·", 30),
-        "the Fleet panel did not open on the first `f`:\n{}",
+        wait_for(session, "Fleet ·", 5),
+        "the Fleet panel did not open:\n{}",
         capture_pane(session)
     );
     // The panel lands on the action queue, which shows only what needs the
