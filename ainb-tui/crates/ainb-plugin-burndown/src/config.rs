@@ -2,7 +2,7 @@
 //!
 //! ainb-core lives on the host side and the plugin can't link against it,
 //! so we define a narrow set of POD types matching the on-disk
-//! `~/.agents-in-a-box/config.toml` schema for the fields the plugin
+//! `~/.agents-in-a-box/config/config.toml` schema for the fields the plugin
 //! cares about (plan projection + currency display).
 //!
 //! Wire shape is identical to `ainb-core::config::{UsagePlan, UsagePlanId,
@@ -96,7 +96,7 @@ fn default_exchange_rate() -> f64 {
 
 /// Subset of ainb-core's `UsageConfig` the plugin reads/writes.
 ///
-/// The on-disk schema in `~/.agents-in-a-box/config.toml` lives under the
+/// The on-disk schema in `~/.agents-in-a-box/config/config.toml` lives under the
 /// `[usage]` table. The plugin only owns this slice — other top-level
 /// tables (docker, mcp, ui_preferences, etc.) are read-modify-write
 /// preserved through `toml::Value` round-tripping in [`AppConfig::save`].
@@ -123,7 +123,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Read `~/.agents-in-a-box/config.toml` (if present), parsing only
+    /// Read `~/.agents-in-a-box/config/config.toml` (if present), parsing only
     /// the `[usage]` table. Other tables are retained as raw
     /// `toml::Value` so `save()` can write them back unchanged.
     pub fn load() -> Result<Self> {
@@ -150,7 +150,7 @@ impl AppConfig {
         })
     }
 
-    /// Atomic write of `~/.agents-in-a-box/config.toml`. Replaces only
+    /// Atomic write of `~/.agents-in-a-box/config/config.toml`. Replaces only
     /// the `[usage]` table; leaves every other table the plugin doesn't
     /// own intact.
     pub fn save(&self) -> Result<()> {
@@ -181,7 +181,12 @@ impl AppConfig {
     }
 }
 
+/// `~/.agents-in-a-box/config/config.toml`.
+///
+/// The `config/` segment matters: this plugin used to read and write the file
+/// one level up, so the `[usage]` plan it stored was invisible to `ainb-core`
+/// and vice versa.
 fn config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not resolve home directory")?;
-    Ok(home.join(".agents-in-a-box").join("config.toml"))
+    Ok(home.join(".agents-in-a-box").join("config").join("config.toml"))
 }

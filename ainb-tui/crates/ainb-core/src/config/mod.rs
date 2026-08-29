@@ -937,9 +937,67 @@ fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
     }
 }
 
+/// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
+/// `~/.agents-in-a-box/config/config.toml`, then move it aside.
+///
+/// The burndown and session-reader plugins used to read and write the file one
+/// directory up from the one everything else uses, so a user's `[usage]` plan
+/// could end up in a file `ainb-core` never opened. Both plugins now agree on
+/// the `config/` path; this carries the old file's contents across once, taking
+/// the canonical file's value wherever both set the same key.
+///
+/// Best effort by design: any failure here leaves both files untouched rather
+/// than blocking startup.
+fn migrate_stray_user_config(canonical: &Path) {
+    let Some(stray) = canonical.parent().and_then(Path::parent).map(|d| d.join("config.toml"))
+    else {
+        return;
+    };
+    if !stray.exists() || stray == canonical {
+        return;
+    }
+
+    let Ok(stray_table) = fs::read_to_string(&stray).and_then(|s| {
+        s.parse::<toml::Table>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }) else {
+        return;
+    };
+
+    let mut merged = fs::read_to_string(canonical)
+        .ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+        .unwrap_or_default();
+    // Canonical wins: only keys the real config never set are carried over.
+    for (key, value) in stray_table {
+        merged.entry(key).or_insert(value);
+    }
+
+    let Ok(rendered) = toml::to_string_pretty(&merged) else {
+        return;
+    };
+    if canonical.parent().is_some_and(|d| fs::create_dir_all(d).is_err()) {
+        return;
+    }
+    if fs::write(canonical, rendered).is_err() {
+        return;
+    }
+    // Keep the old file's contents around rather than deleting them outright.
+    let _ = fs::rename(&stray, stray.with_extension("toml.migrated"));
+    tracing::info!(
+        stray = %stray.display(),
+        canonical = %canonical.display(),
+        "merged stray config.toml into the user config"
+    );
+}
+
 impl AppConfig {
     /// Load configuration from default locations
     pub fn load() -> Result<Self> {
+        if let Ok(dir) = Self::get_user_config_dir() {
+            migrate_stray_user_config(&dir.join("config.toml"));
+        }
+
         // Try loading from multiple locations in order of precedence
         let config_paths = Self::get_config_paths();
 
@@ -1042,7 +1100,7 @@ impl AppConfig {
             paths.push(cwd.join(".ainb").join("config.toml"));
         }
 
-        // 2. User config (~/.agents-in-a-box/config.toml)
+        // 2. User config (~/.agents-in-a-box/config/config.toml)
         if let Ok(config_dir) = Self::get_user_config_dir() {
             paths.push(config_dir.join("config.toml"));
         }
@@ -1378,6 +1436,47 @@ mod tests {
 
         let table: toml::Table = rendered.parse().expect("valid TOML");
         assert_eq!(table["skills"]["api_key"].as_str(), Some("sk-secret"));
+    }
+
+    /// A user who set `[usage]` while the plugins still read the file one
+    /// directory up must not lose it. The stray file is folded in and moved
+    /// aside, and the canonical file wins wherever both set the same key.
+    #[test]
+    fn migrate_folds_stray_config_in_and_moves_it_aside() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        fs::write(
+            root.join("config.toml"),
+            "[usage.currency]\ncode = \"GBP\"\n\n[ui_preferences]\ntheme = \"light\"\n",
+        )
+        .expect("write stray");
+        fs::write(&canonical, "[ui_preferences]\ntheme = \"dark\"\n").expect("write canonical");
+
+        migrate_stray_user_config(&canonical);
+
+        let merged: toml::Table =
+            fs::read_to_string(&canonical).expect("read").parse().expect("valid TOML");
+        assert_eq!(
+            merged["usage"]["currency"]["code"].as_str(),
+            Some("GBP"),
+            "the stray file's [usage] was not carried across"
+        );
+        assert_eq!(
+            merged["ui_preferences"]["theme"].as_str(),
+            Some("dark"),
+            "the stray file overwrote a key the canonical config already set"
+        );
+        assert!(
+            !root.join("config.toml").exists(),
+            "stray file was left in place"
+        );
+        assert!(
+            root.join("config.toml.migrated").exists(),
+            "stray file's contents were destroyed rather than kept"
+        );
     }
 
     /// Saving must not eat the sections `AppConfig` does not model.
