@@ -1025,7 +1025,14 @@ pub(crate) fn read_existing(path: &Path) -> Result<String> {
 
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let tmp = temp_path(path);
-    fs::write(&tmp, contents)?;
+    // Every failure below removes the temp file. The name is per-process and
+    // random, so unlike the old fixed `config.toml.tmp` nothing would ever
+    // overwrite a leftover — an aborted write would leave one in the config
+    // directory forever.
+    if let Err(err) = fs::write(&tmp, contents) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
     // Carry the target's permissions onto the replacement. `fs::write` used to
     // truncate in place and keep them; a temp file is created fresh under the
     // umask, so without this a `chmod 600 config.toml` is silently reverted to
@@ -1036,9 +1043,16 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        if let Err(err) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
     }
-    fs::rename(&tmp, path)
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Write exactly these dotted keys into a config file, leaving every other byte
@@ -1075,6 +1089,19 @@ pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
     remove_document_key(&mut doc, key);
     write_atomic(path, &doc.to_string())?;
     Ok(())
+}
+
+/// Whether `key` lives in a section the burndown plugin owns.
+///
+/// Core reads `[usage]` but must never write it: the plugin does its own
+/// load-modify-save against the same file, so a write from here would revert a
+/// plan set from another shell.
+#[must_use]
+pub(crate) fn is_burndown_owned(key: &str) -> bool {
+    let section = key.split('.').next().unwrap_or_default();
+    NEVER_WRITE_PATHS
+        .iter()
+        .any(|p| *p == section || key.starts_with(&format!("{p}.")))
 }
 
 pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
@@ -1252,16 +1279,20 @@ fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
 /// without resolving `HOME` — a test that calls the writer directly writes to
 /// the developer's real config.
 fn external_edit_value(key: &str, raw: &str) -> Result<toml::Value> {
-    // `fleet.bridge.*` matches `is_external` (its tokens are parsed by
-    // `fleet::bridge::config`, not by serde), but `[fleet]` IS modelled as an
-    // opaque passthrough — so `AppConfig::save` owns it and would revert
-    // anything written here on the next save.
-    if !registry::is_external(key) || key.starts_with("fleet.bridge.") {
+    // `fleet.bridge.*` belongs here. Its tokens are parsed by
+    // `fleet::bridge::config`, not by serde, and while `[fleet]` IS modelled as
+    // an opaque passthrough, `save()` deliberately preserves `fleet.bridge`
+    // from disk — so routing a bridge edit through the struct made it a no-op.
+    // The key-level write is the one path that actually lands it.
+    if !registry::is_external(key) {
         anyhow::bail!("'{key}' is not an externally-owned config key — AppConfig::save owns it");
     }
     let section = key.split('.').next().unwrap_or_default();
-    if READ_ONLY_SECTIONS.contains(&section) {
-        anyhow::bail!("'{key}' is in a read-only section");
+    if NEVER_WRITE_PATHS
+        .iter()
+        .any(|path| *path == section || key.starts_with(&format!("{path}.")))
+    {
+        anyhow::bail!("'{key}' is in a section ainb-core must not write");
     }
     registry::validate(key, raw)
 }
@@ -1359,9 +1390,25 @@ fn migrate_stray_user_config(canonical: &Path) {
     // Rewriting it would strip the comments and layout of a file users are
     // explicitly pointed at hand-editing.
     if carried > 0 {
-        let Ok(rendered) = toml::to_string_pretty(&merged) else {
-            return;
+        // Through `toml_edit`, like every other writer of this file: the
+        // population this migration touches is exactly the people who copied
+        // the ~320-line commented `example.config.toml`, and rendering the
+        // merged table would delete all of it on first launch, silently.
+        let mut doc = match fs::read_to_string(canonical)
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+        {
+            Ok(doc) => doc,
+            Err(_) => return,
         };
+        let mut leaves = Vec::new();
+        flatten_leaves(&merged, String::new(), &mut leaves);
+        for (key, value) in &leaves {
+            if set_document_key(&mut doc, key, value).is_err() {
+                return;
+            }
+        }
+        let rendered = doc.to_string();
         if canonical.parent().is_some_and(|d| fs::create_dir_all(d).is_err()) {
             return;
         }
@@ -2271,23 +2318,24 @@ theme = \"dark\"   # keep it dark
         );
     }
 
-    /// #10. `fleet.bridge.*` matches `is_external` but `[fleet]` IS modelled
-    /// (as an opaque passthrough), so the next `AppConfig::save()` reverts
-    /// anything written here. The second writer must refuse it outright.
+    /// `fleet.bridge.*` goes THROUGH the key-level writer, and the genuinely
+    /// modelled keys stay out of it.
+    ///
+    /// This assertion used to be the exact opposite. The reasoning was that
+    /// `[fleet]` is modelled, so `save()` owns it — but `save()` deliberately
+    /// preserves `fleet.bridge` from disk, so routing an edit through the
+    /// struct meant it was overwritten by the value already there. The
+    /// key-level write is the only path that lands it.
     #[test]
-    fn the_external_writer_refuses_a_modelled_bridge_key() {
-        // Guard only — calling `save_external_keys` here would write to the
-        // developer's REAL config.toml, which is how this test first ran.
-        let err = external_edit_value("fleet.bridge.telegram.token", "keychain:x")
-            .expect_err("fleet.bridge is modelled; save() owns it");
+    fn the_external_writer_accepts_bridge_keys_and_refuses_modelled_ones() {
         assert!(
-            err.to_string().contains("fleet.bridge.telegram.token"),
-            "unexpected error: {err}"
+            external_edit_value("fleet.bridge.telegram.token", "keychain:x").is_ok(),
+            "a bridge edit must reach the file"
         );
         // The genuinely external sections still go through.
         assert!(external_edit_value("skills.catalog_release", "v1.2.3").is_ok());
         assert!(external_edit_value("session_reader.incremental_window_days", "7").is_ok());
-        // And a modelled key is refused just as firmly.
+        // A modelled key belongs to `save()`, not here.
         assert!(external_edit_value("docker.timeout", "60").is_err());
     }
 
@@ -2481,6 +2529,43 @@ theme = \"dark\"   # keep it dark
             root.join("config.toml.migrated").exists(),
             "stray file's contents were destroyed rather than kept"
         );
+    }
+
+    /// A `fleet.bridge.*` edit must actually reach the file.
+    ///
+    /// This is the row class the whole PR exists to protect, and it was broken
+    /// twice in a row: first routed through the struct, where `save()`'s
+    /// preservation of `fleet.bridge` silently overwrote it, then routed to the
+    /// key-level writer which still refused the prefix. Both times the screen
+    /// reported "Setting saved to config.toml" and nothing changed.
+    #[test]
+    fn a_bridge_edit_is_accepted_by_the_external_writer() {
+        let value = external_edit_value("fleet.bridge.telegram.token", "keychain:ainb-telegram")
+            .expect("a bridge edit must be an accepted external write");
+        assert_eq!(value.as_str(), Some("keychain:ainb-telegram"));
+    }
+
+    /// The counterpart: `[usage]` belongs to the burndown plugin, and core must
+    /// keep refusing it.
+    #[test]
+    fn a_usage_edit_is_refused_by_the_external_writer() {
+        // Refused at the `is_external` gate, before the ownership check even
+        // runs — `[usage]` is not an externally-owned section, it is a modelled
+        // one core reads and the burndown plugin writes.
+        assert!(
+            external_edit_value("usage.currency.code", "GBP").is_err(),
+            "core must not write a section the burndown plugin owns"
+        );
+    }
+
+    /// And it must be refused with something actionable, not a bare failure
+    /// three calls downstream.
+    #[test]
+    fn burndown_owned_keys_are_recognised() {
+        assert!(is_burndown_owned("usage.currency.code"));
+        assert!(is_burndown_owned("usage"));
+        assert!(!is_burndown_owned("fleet.bridge.telegram.token"));
+        assert!(!is_burndown_owned("docker.timeout"));
     }
 
     /// A map key containing a dot must survive a save.
