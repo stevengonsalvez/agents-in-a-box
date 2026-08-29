@@ -973,6 +973,16 @@ const READ_ONLY_SECTIONS: &[&str] = &["usage"];
 /// to stop, one section further in than `[usage]`.
 const READ_ONLY_PATHS: &[&str] = &["usage", "fleet.bridge"];
 
+/// Paths `write_keys_into` refuses even for an explicit, key-level edit.
+///
+/// Narrower than [`READ_ONLY_PATHS`] on purpose. That list stops the *wholesale*
+/// overlay clobbering a section from a startup snapshot, which is a staleness
+/// problem, not an ownership one. `[fleet.bridge]` needs that protection but is
+/// still ours to change when the user actually edits one of its rows — writing
+/// the single key they touched is precisely the safe operation. `[usage]` is
+/// different: the burndown plugin owns it, so core must not write it at all.
+const NEVER_WRITE_PATHS: &[&str] = &["usage"];
+
 /// Write `contents` to `path` atomically, so a crash or a full disk cannot
 /// leave a truncated file behind.
 ///
@@ -1015,16 +1025,20 @@ pub(crate) fn read_existing(path: &Path) -> Result<String> {
 
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let tmp = temp_path(path);
-    if let Err(err) = fs::write(&tmp, contents) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
+    fs::write(&tmp, contents)?;
+    // Carry the target's permissions onto the replacement. `fs::write` used to
+    // truncate in place and keep them; a temp file is created fresh under the
+    // umask, so without this a `chmod 600 config.toml` is silently reverted to
+    // world-readable on the next save. This file holds bot tokens and an API
+    // key, so that is a real downgrade, and the temp file itself sits in the
+    // same directory before the rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
     }
-    if let Err(err) = fs::rename(&tmp, path) {
-        // A unique temp name is only an improvement if it does not accumulate.
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
-    }
-    Ok(())
+    fs::rename(&tmp, path)
 }
 
 /// Write exactly these dotted keys into a config file, leaving every other byte
@@ -1037,6 +1051,32 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// read or parse, refuses [`READ_ONLY_SECTIONS`], writes atomically.
 ///
 /// Path-explicit so it is testable without redirecting `HOME`.
+/// Remove one dotted key from a config file, preserving everything else.
+///
+/// The counterpart to [`write_keys_into`] for an optional key being cleared.
+/// Storing `""` is not the same as unset: an empty `docker.host` means "connect
+/// to nothing" where an absent one means "autodetect", so clearing has to
+/// delete the key rather than blank it.
+pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
+    let existing = read_existing(path)?;
+    if existing.trim().is_empty() {
+        return Ok(());
+    }
+    let section = key.split('.').next().unwrap_or_default();
+    if NEVER_WRITE_PATHS
+        .iter()
+        .any(|p| *p == section || key.starts_with(&format!("{p}.")))
+    {
+        anyhow::bail!("'{key}' is in a section ainb-core must not write");
+    }
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().context(
+        "refusing to save over a config.toml that does not parse — fix the syntax error first",
+    )?;
+    remove_document_key(&mut doc, key);
+    write_atomic(path, &doc.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
     if edits.is_empty() {
         return Ok(());
@@ -1058,7 +1098,7 @@ pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> R
 
     for (key, value) in edits {
         let section = key.split('.').next().unwrap_or_default();
-        if READ_ONLY_PATHS
+        if NEVER_WRITE_PATHS
             .iter()
             .any(|path| *path == section || key.starts_with(&format!("{path}.")))
         {
@@ -1071,8 +1111,6 @@ pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> R
     Ok(())
 }
 
-/// Set one dotted key in a `toml_edit` document, creating the parent tables it
-/// needs and leaving every other byte of the document untouched.
 /// Every scalar/array leaf in `table`, as dotted paths.
 ///
 /// A leaf is anything that is not a table: writing those individually is what
@@ -1084,10 +1122,14 @@ fn flatten_leaves(
     out: &mut Vec<(String, toml::Value)>,
 ) {
     for (key, value) in table {
+        // Quote a segment that is not a bare TOML key. A model id like
+        // `gpt-4.1` splits back into two segments otherwise, inventing a
+        // nested table and corrupting the file.
+        let segment = registry::quote_key_segment(key.as_ref());
         let path = if prefix.is_empty() {
-            key.clone()
+            segment
         } else {
-            format!("{prefix}.{key}")
+            format!("{prefix}.{segment}")
         };
         match value {
             // An empty table is a leaf: it still has to be written, or a
@@ -1104,10 +1146,14 @@ fn flatten_leaves(
 /// our snapshot no longer has.
 fn flatten_document_leaves(table: &toml_edit::Table, prefix: String, out: &mut Vec<String>) {
     for (key, item) in table.iter() {
+        // Quote a segment that is not a bare TOML key. A model id like
+        // `gpt-4.1` splits back into two segments otherwise, inventing a
+        // nested table and corrupting the file.
+        let segment = registry::quote_key_segment(key.as_ref());
         let path = if prefix.is_empty() {
-            key.to_string()
+            segment
         } else {
-            format!("{prefix}.{key}")
+            format!("{prefix}.{segment}")
         };
         match item.as_table() {
             Some(inner) if !inner.is_empty() => flatten_document_leaves(inner, path, out),
@@ -1132,6 +1178,8 @@ fn remove_document_key(doc: &mut toml_edit::DocumentMut, key: &str) {
     table.remove(leaf);
 }
 
+/// Set one dotted key in a `toml_edit` document, creating the parent tables it
+/// needs and leaving every other byte of the document untouched.
 fn set_document_key(
     doc: &mut toml_edit::DocumentMut,
     key: &str,
@@ -1218,24 +1266,6 @@ fn external_edit_value(key: &str, raw: &str) -> Result<toml::Value> {
     registry::validate(key, raw)
 }
 
-/// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
-/// `~/.agents-in-a-box/config/config.toml`, then move it aside.
-///
-/// The burndown and session-reader plugins used to read and write the file one
-/// directory up from the one everything else uses, so a user's `[usage]` plan
-/// could end up in a file `ainb-core` never opened. Both plugins now agree on
-/// the `config/` path; this carries the old file's contents across once, taking
-/// the canonical file's value wherever both set the same key.
-///
-/// Deliberately NOT called from [`AppConfig::load`]: that runs in daemons, in
-/// plugin startup and inside the TUI event loop, and a filesystem write as a
-/// side effect of a read races every other process doing the same. Call it once
-/// from a binary's startup instead — see [`AppConfig::migrate_legacy_paths`].
-///
-/// Best effort by design: every failure path leaves BOTH files exactly as they
-/// were. In particular a canonical file that does not parse aborts the
-/// migration rather than being replaced by the stray one — overwriting a config
-/// we failed to understand is the data loss this whole change exists to stop.
 /// Copy the keys of `higher` that `lower` does not already have, descending
 /// into tables both sides define. Returns how many leaves were carried across,
 /// so the caller can leave the file untouched when the answer is zero.
@@ -1261,6 +1291,24 @@ fn merge_missing_keys(lower: &mut toml::Table, higher: toml::Table) -> usize {
     carried
 }
 
+/// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
+/// `~/.agents-in-a-box/config/config.toml`, then move it aside.
+///
+/// The burndown and session-reader plugins used to read and write the file one
+/// directory up from the one everything else uses, so a user's `[usage]` plan
+/// could end up in a file `ainb-core` never opened. Both plugins now agree on
+/// the `config/` path; this carries the old file's contents across once, taking
+/// the canonical file's value wherever both set the same key.
+///
+/// Deliberately NOT called from [`AppConfig::load`]: that runs in daemons, in
+/// plugin startup and inside the TUI event loop, and a filesystem write as a
+/// side effect of a read races every other process doing the same. Call it once
+/// from a binary's startup instead — see [`AppConfig::migrate_legacy_paths`].
+///
+/// Best effort by design: every failure path leaves BOTH files exactly as they
+/// were. In particular a canonical file that does not parse aborts the
+/// migration rather than being replaced by the stray one — overwriting a config
+/// we failed to understand is the data loss this whole change exists to stop.
 fn migrate_stray_user_config(canonical: &Path) {
     let Some(stray) = canonical.parent().and_then(Path::parent).map(|d| d.join("config.toml"))
     else {
@@ -2433,6 +2481,39 @@ theme = \"dark\"   # keep it dark
             root.join("config.toml.migrated").exists(),
             "stray file's contents were destroyed rather than kept"
         );
+    }
+
+    /// A map key containing a dot must survive a save.
+    ///
+    /// Model ids routinely have dots, and `[usage.model_aliases]` is keyed by
+    /// them. Flattening `gpt-4.1` into a dotted path and splitting it again
+    /// invented a `[usage.model_aliases.gpt-4]` table with a `1` inside,
+    /// alongside the untouched original — after which the file no longer
+    /// deserialized and every consumer silently fell back to defaults.
+    #[test]
+    fn save_keeps_a_map_key_that_contains_a_dot() {
+        let existing = "\
+[usage.model_aliases]
+\"gpt-4.1\" = \"claude-sonnet-4-5\"
+
+[docker]
+timeout = 60
+";
+        let config: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+        assert_eq!(
+            reparsed["usage"]["model_aliases"]["gpt-4.1"].as_str(),
+            Some("claude-sonnet-4-5"),
+            "the dotted map key did not survive the save:\n{saved}"
+        );
+        assert!(
+            reparsed["usage"]["model_aliases"].get("gpt-4").is_none(),
+            "the dotted key was split into a nested table:\n{saved}"
+        );
+        // The whole point: it must still load.
+        toml::from_str::<AppConfig>(&saved).expect("saved config no longer deserializes");
     }
 
     /// A settings save must not strip the file's comments.

@@ -2324,10 +2324,17 @@ impl ConfigScreenState {
 
         let mut applied = AppliedEdits::default();
         for (key, raw) in self.pending_edits() {
-            if registry::is_external(&key) && !key.starts_with("fleet.bridge.") {
-                // `[skills]` / `[session_reader]` are parsed off this file by
-                // other crates and have no `AppConfig` field to land in.
-                // `[fleet.bridge]` DOES round-trip, as an opaque passthrough.
+            if registry::is_external(&key) {
+                // These go through the key-level writer rather than the struct.
+                // `[skills]` and `[session_reader]` are parsed off this file by
+                // other crates and have no `AppConfig` field to land in at all.
+                // `[fleet.bridge]` does round-trip as an opaque passthrough, but
+                // routing it through the struct made the edit a no-op: `save()`
+                // preserves `fleet.bridge` from disk to stop a stale startup
+                // snapshot clobbering a hand edit, so the value the user just
+                // typed was overwritten by the old one and the screen still
+                // reported "saved". Writing the single key they touched is both
+                // explicit and safe.
                 applied.external.push((key, raw));
                 continue;
             }
@@ -2512,6 +2519,15 @@ impl ConfigScreenState {
             return;
         };
         for setting in settings {
+            // Only rows the user actually edited. Writing every row would
+            // materialise each discovered plugin's schema defaults into
+            // config.toml the first time any unrelated setting was saved,
+            // pinning today's values so a later default change in the plugin's
+            // manifest could never take effect. This is the same reason
+            // `dirty` exists for the non-plugin rows.
+            if !self.dirty.contains(&setting.key) {
+                continue;
+            }
             let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
                 continue;
             };
