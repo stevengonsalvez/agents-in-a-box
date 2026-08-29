@@ -1035,108 +1035,221 @@ mod tests {
         );
     }
 
-    fn set_default_workspace(screen: &mut ConfigScreenState, value: &str) {
-        let settings = screen
-            .settings
-            .get_mut(&ConfigCategory::Workspace)
-            .expect("Workspace category present");
-        let setting = settings
-            .iter_mut()
-            .find(|s| s.key == "default_workspace")
-            .expect("default_workspace setting present");
-        setting.value = ConfigValue::Text(value.to_string());
+    /// Edit a row by its dotted key, exactly as the popup confirm does.
+    fn edit(screen: &mut ConfigScreenState, key: &str, value: ConfigValue) {
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == key),
+            "no row for '{key}'; the registry and the screen have drifted"
+        );
+        screen.set_row_value(key, value);
     }
 
-    fn displayed_default_workspace(screen: &ConfigScreenState) -> String {
+    fn row_display(screen: &ConfigScreenState, key: &str) -> String {
         screen
             .settings
-            .get(&ConfigCategory::Workspace)
-            .unwrap()
-            .iter()
-            .find(|s| s.key == "default_workspace")
-            .unwrap()
+            .values()
+            .flatten()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("no row for '{key}'"))
             .value
             .display()
     }
 
+    // ========================================================================
+    // Registry-driven rows: an edit reaches AppConfig and survives a reopen
+    // ========================================================================
+    //
+    // These replace the old hand-written `default_workspace` / `branch_prefix`
+    // round-trip tests. Those covered four of the ~24 rows and were the only
+    // rows with a persist branch worth testing; the point now is that ONE path
+    // (serialize → set_validated → deserialize) covers every row, so the tests
+    // pick one row per widget kind rather than one row per hand-written arm.
+
     #[test]
-    fn default_workspace_edit_replaces_primary_and_round_trips() {
+    fn a_text_edit_round_trips_through_the_registry() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths = vec![PathBuf::from("/a/git")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        set_default_workspace(&mut screen, "/a/projects");
-        screen.apply_to_app_config(&mut config);
 
-        // Primary scan path is the edited value, not appended to the tail.
-        assert_eq!(
-            config.workspace_defaults.workspace_scan_paths.first(),
-            Some(&PathBuf::from("/a/projects"))
+        edit(
+            &mut screen,
+            "workspace_defaults.branch_prefix",
+            ConfigValue::Text("squad/".to_string()),
         );
-        // Reopening the screen now shows the saved value.
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+
+        assert_eq!(config.workspace_defaults.branch_prefix, "squad/");
         let reopened = ConfigScreenState::from_app_config(&config);
-        assert_eq!(displayed_default_workspace(&reopened), "/a/projects");
+        assert_eq!(
+            row_display(&reopened, "workspace_defaults.branch_prefix"),
+            "squad/"
+        );
     }
 
     #[test]
-    fn default_workspace_edit_preserves_other_scan_dirs() {
+    fn a_list_edit_round_trips_as_a_comma_separated_list() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        set_default_workspace(&mut screen, "/a/projects");
-        screen.apply_to_app_config(&mut config);
 
-        // Old primary replaced; the secondary scan dir is kept.
+        edit(
+            &mut screen,
+            "workspace_defaults.workspace_scan_paths",
+            ConfigValue::Text("/a/projects, /a/work".to_string()),
+        );
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+
         assert_eq!(
             config.workspace_defaults.workspace_scan_paths,
             vec![PathBuf::from("/a/projects"), PathBuf::from("/a/work")]
         );
-    }
-
-    #[test]
-    fn default_workspace_noop_confirm_keeps_secondary_dirs() {
-        // Opening the popup and confirming without changing the value must NOT
-        // drop other configured scan dirs (regression: a de-dup that stripped
-        // the unchanged primary then overwrote slot 0 lost the secondary).
-        let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
-        let mut screen = ConfigScreenState::from_app_config(&config);
-        // first() is /a/git — re-confirm it unchanged.
-        set_default_workspace(&mut screen, "/a/git");
-        screen.apply_to_app_config(&mut config);
-
+        let reopened = ConfigScreenState::from_app_config(&config);
         assert_eq!(
-            config.workspace_defaults.workspace_scan_paths,
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")]
+            row_display(&reopened, "workspace_defaults.workspace_scan_paths"),
+            "/a/projects, /a/work"
         );
     }
 
     #[test]
-    fn default_workspace_edit_does_not_duplicate_existing_path() {
+    fn a_number_edit_round_trips_and_is_range_checked() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        // Promote an already-present path to primary.
-        set_default_workspace(&mut screen, "/a/work");
-        screen.apply_to_app_config(&mut config);
+
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(120));
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+        assert_eq!(config.docker.timeout, 120);
+
+        // Out of the registry's declared range: the save fails loudly instead
+        // of writing a value the rest of the app would have to cope with.
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(0));
+        let err = screen.apply_to_app_config(&mut config).unwrap_err().to_string();
+        assert!(err.contains("docker.timeout"), "{err}");
+        assert_eq!(
+            config.docker.timeout, 120,
+            "a rejected edit changes nothing"
+        );
+    }
+
+    #[test]
+    fn an_untouched_row_is_never_written() {
+        // The screen seeds ~150 rows, most of them from serde defaults. Only
+        // the rows the user actually edited may reach config.toml — otherwise
+        // opening Settings and pressing S would materialise every default.
+        let config = AppConfig::default();
+        let screen = ConfigScreenState::from_app_config(&config);
+        assert!(
+            screen.pending_edits().is_empty(),
+            "a freshly-opened screen has pending edits: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    #[test]
+    fn a_read_only_usage_row_is_shown_but_never_written() {
+        // `[usage]` belongs to the burndown plugin (READ_ONLY_SECTIONS). The
+        // row exists so the value is visible, and is refused at both the
+        // keypress and the save.
+        let config = AppConfig::default();
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == "usage.currency.code"),
+            "usage rows must still be visible"
+        );
+        // Even a forced edit (the keypress path refuses first) is filtered out.
+        screen.set_row_value("usage.currency.code", ConfigValue::Text("EUR".to_string()));
+        assert!(
+            !screen.pending_edits().iter().any(|(key, _)| key.starts_with("usage.")),
+            "a usage row must never reach a save: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    /// #11. `EXTERNAL_PREFIXES` holds DOTTED PATHS, so grafting them into the
+    /// seed has to walk the path. The old code trimmed `"fleet.bridge."` to
+    /// `"fleet.bridge"` and looked it up as a flat top-level key, which TOML can
+    /// never contain — the section was silently never carried across.
+    #[test]
+    fn external_sections_graft_at_their_dotted_path() {
+        let mut seed: toml::Value = toml::from_str("[docker]\ntimeout = 60\n").unwrap();
+        let on_disk: toml::Value = toml::from_str(
+            "[skills]\napi_key = \"sk-secret\"\n\n[fleet.bridge.telegram]\ntoken = \"keychain:t\"\n",
+        )
+        .unwrap();
+
+        crate::app::state::merge_external_sections(&mut seed, &on_disk);
 
         assert_eq!(
-            config.workspace_defaults.workspace_scan_paths.first(),
-            Some(&PathBuf::from("/a/work"))
+            crate::config::registry::navigate_toml(&seed, "skills.api_key").ok(),
+            Some(&toml::Value::String("sk-secret".to_string())),
+            "single-segment external section was dropped: {seed}"
         );
-        let dupes = config
-            .workspace_defaults
-            .workspace_scan_paths
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:t".to_string())),
+            "a dotted external prefix was looked up as a flat key: {seed}"
+        );
+    }
+
+    /// The seed must not overwrite a section it already carries — the loaded
+    /// config wins over whatever is on disk.
+    #[test]
+    fn an_external_section_already_in_the_seed_is_not_overwritten() {
+        let mut seed: toml::Value =
+            toml::from_str("[skills]\napi_key = \"from-config\"\n").unwrap();
+        let on_disk: toml::Value = toml::from_str("[skills]\napi_key = \"from-disk\"\n").unwrap();
+        crate::app::state::merge_external_sections(&mut seed, &on_disk);
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "skills.api_key").ok(),
+            Some(&toml::Value::String("from-config".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_search_filter_finds_a_row_by_its_dotted_key() {
+        // The whole reason the tree got a `/` filter: a leaf is reachable
+        // without knowing which section it lives in.
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        screen.start_search();
+        for c in "idle_grace".chars() {
+            screen.push_search_char(c);
+        }
+        let hits: Vec<String> =
+            screen.current_settings().iter().map(|row| row.key.clone()).collect();
+        assert!(
+            hits.contains(&"mcp_pool.idle_grace_secs".to_string()),
+            "search missed the row: {hits:?}"
+        );
+
+        screen.clear_search();
+        assert!(!screen.is_searching());
+    }
+
+    #[test]
+    fn expanding_a_node_reveals_its_children() {
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        // Select the Container Templates root, which nests per template.
+        let root = screen
+            .tree
             .iter()
-            .filter(|p| *p == &PathBuf::from("/a/work"))
-            .count();
-        assert_eq!(dupes, 1, "edited path must not be duplicated");
+            .position(|node| node.category == ConfigCategory::ContainerTemplates && node.depth == 0)
+            .expect("container templates root");
+        screen.selected_node = screen
+            .visible_nodes
+            .iter()
+            .position(|index| *index == root)
+            .expect("root visible");
+
+        let before = screen.visible_nodes.len();
+        assert!(screen.current_node().unwrap().has_children);
+        screen.toggle_expanded().expect("root expands");
+        assert!(
+            screen.visible_nodes.len() > before,
+            "expanding revealed nothing: {} -> {}",
+            before,
+            screen.visible_nodes.len()
+        );
+
+        screen.toggle_expanded().expect("root collapses");
+        assert_eq!(screen.visible_nodes.len(), before);
     }
 
     // ========================================================================
@@ -1229,10 +1342,12 @@ mod tests {
 
         let rows = screen.settings.get(&ConfigCategory::Plugins).expect("Plugins category present");
 
-        // The original enable/disable placeholder row is preserved.
+        // The static "Installed Plugins: None installed" placeholder is gone,
+        // replaced by a real per-plugin enable toggle.
         assert!(
-            rows.iter().any(|s| s.key == "installed_plugins"),
-            "existing enable/disable placeholder row must be kept"
+            rows.iter().any(|s| s.key == "plugin-enabled:learnings"),
+            "expected a real enable toggle for the loaded plugin, got: {:?}",
+            rows.iter().map(|s| &s.key).collect::<Vec<_>>()
         );
 
         // learnings_dir: path → Text, value from plugins.values (override wins).
@@ -1279,6 +1394,54 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_toggle_writes_the_denylist() {
+        // The "real plugin list" that replaced the static "Installed Plugins:
+        // None installed" placeholder. Turning a plugin off must land in
+        // `plugins.disabled`; turning it back on must remove it, which a
+        // diff-free rebuild gets right and an append would not.
+        let manifest = manifest_with_config("learnings", vec![]);
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(false));
+
+        let mut app = AppConfig::default();
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert_eq!(app.plugins.disabled, vec!["learnings".to_string()]);
+
+        // Re-enable: the name comes back out of the denylist.
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(true));
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert!(
+            app.plugins.disabled.is_empty(),
+            "re-enabling left the plugin disabled: {:?}",
+            app.plugins.disabled
+        );
+    }
+
+    #[test]
+    fn a_plugin_disabled_elsewhere_is_not_dropped_by_a_toggle_save() {
+        // A shared config can disable a plugin this machine never discovered.
+        // Rebuilding `plugins.disabled` from the visible toggles alone would
+        // silently re-enable it on the next save.
+        let manifest = manifest_with_config("learnings", vec![]);
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(false));
+
+        let mut app = AppConfig::default();
+        app.plugins.disabled = vec!["not-installed-here".to_string()];
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert_eq!(
+            app.plugins.disabled,
+            vec!["learnings".to_string(), "not-installed-here".to_string()]
+        );
+    }
+
+    #[test]
     fn test_apply_routes_plugin_edit_to_values() {
         // Editing a Plugins-category row then apply_to_app_config writes into
         // app_config.plugins.values[plugin][key] — NOT a top-level config field
@@ -1307,7 +1470,7 @@ mod tests {
         }
 
         let mut app = AppConfig::default();
-        screen.apply_to_app_config(&mut app);
+        screen.apply_to_app_config(&mut app).expect("edits apply");
 
         // The edit landed under plugins.values[learnings][learnings_dir],
         // not at any top-level config field.
@@ -1713,15 +1876,15 @@ mod mcp_pool_config_screen_tests {
     use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
     use crate::config::AppConfig;
 
+    /// Edit a row by its dotted key, as the popup confirm does. The per-server
+    /// `shared` rows now file under McpServers rather than McpPool, so the
+    /// lookup has to span categories.
     fn set_bool(screen: &mut ConfigScreenState, key: &str, value: bool) {
-        let setting = screen
-            .settings
-            .get_mut(&ConfigCategory::McpPool)
-            .unwrap()
-            .iter_mut()
-            .find(|s| s.key == key)
-            .unwrap_or_else(|| panic!("missing setting {key}"));
-        setting.value = ConfigValue::Bool(value);
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == key),
+            "missing setting {key}"
+        );
+        screen.set_row_value(key, ConfigValue::Bool(value));
     }
 
     #[test]
@@ -1734,19 +1897,19 @@ mod mcp_pool_config_screen_tests {
 
         // Loaded values reflect config.
         let settings = screen.settings.get(&ConfigCategory::McpPool).unwrap();
-        let grace = settings.iter().find(|s| s.key == "idle_grace_secs").unwrap();
+        let grace = settings.iter().find(|s| s.key == "mcp_pool.idle_grace_secs").unwrap();
         assert_eq!(grace.value.display(), "120");
         // Per-server toggles exist for the built-in defaults.
         assert!(
-            settings.iter().any(|s| s.key == "shared.context7"),
+            settings.iter().any(|s| s.key == "mcp_servers.context7.shared"),
             "expected per-server toggle, got: {:?}",
             settings.iter().map(|s| &s.key).collect::<Vec<_>>()
         );
 
         // Edit: disable pool + opt context7 out of sharing.
-        set_bool(&mut screen, "pool_enabled", false);
-        set_bool(&mut screen, "shared.context7", false);
-        screen.apply_to_app_config(&mut config);
+        set_bool(&mut screen, "mcp_pool.enabled", false);
+        set_bool(&mut screen, "mcp_servers.context7.shared", false);
+        screen.apply_to_app_config(&mut config).expect("edits apply");
 
         assert!(!config.mcp_pool.enabled);
         assert!(!config.mcp_servers["context7"].shared);
@@ -1758,9 +1921,9 @@ mod mcp_pool_config_screen_tests {
         // Reopen → edited values shown.
         let reopened = ConfigScreenState::from_app_config(&config);
         let settings = reopened.settings.get(&ConfigCategory::McpPool).unwrap();
-        let enabled = settings.iter().find(|s| s.key == "pool_enabled").unwrap();
+        let enabled = settings.iter().find(|s| s.key == "mcp_pool.enabled").unwrap();
         assert_eq!(enabled.value.display(), "✗ Disabled");
-        let ctx = settings.iter().find(|s| s.key == "shared.context7").unwrap();
+        let ctx = settings.iter().find(|s| s.key == "mcp_servers.context7.shared").unwrap();
         assert_eq!(ctx.value.display(), "✗ Disabled");
     }
 }

@@ -11,14 +11,14 @@ use crate::claude::{ClaudeApiClient, ClaudeMessage};
 // boss-mode @-trigger; removed along with the prompt textarea.
 use crate::components::home_screen_v2::HomeScreenV2State;
 use crate::components::live_logs_stream::LogEntry;
-use crate::config::{AppConfig, SessionLabelStore};
+use crate::config::screen_model::{self, ConfigTreeNode};
+use crate::config::{AppConfig, SessionLabelStore, registry};
 use crate::credentials;
 use crate::docker::LogStreamingCoordinator;
-use crate::editors;
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1714,10 +1714,57 @@ pub struct ConfigSetting {
     pub description: String,
 }
 
+/// A credential row: the *reference* config.toml stores, plus whether that
+/// reference currently resolves to a non-empty secret.
+///
+/// The screen never renders the plaintext of a credential, and never renders a
+/// literal's characters either — only a status and the source it came from. The
+/// resolved value is deliberately not kept: nothing on this screen needs it, and
+/// not holding it is the cheapest way to guarantee it cannot be painted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SecretValue {
+    /// Exactly what config.toml holds: empty, a literal, `$ENV_VAR`, or
+    /// `keychain:<service>`.
+    pub reference: String,
+    /// Whether `reference` resolved when the row was built. Resolving a
+    /// `keychain:` reference shells out to `/usr/bin/security`, so this is
+    /// evaluated once at build time and never per frame.
+    pub resolved: bool,
+}
+
+impl SecretValue {
+    /// True when the reference points somewhere else (env var / keychain)
+    /// rather than being the secret itself.
+    #[must_use]
+    pub fn is_reference(&self) -> bool {
+        self.reference.starts_with('$') || self.reference.starts_with("keychain:")
+    }
+
+    /// `unset` / `resolved (source)` / `unresolved (source)` / `literal …`.
+    #[must_use]
+    pub fn status_line(&self) -> String {
+        if self.reference.trim().is_empty() {
+            return "unset".to_string();
+        }
+        if self.is_reference() {
+            let status = if self.resolved {
+                "resolved"
+            } else {
+                "unresolved"
+            };
+            return format!("{status}  ({})", self.reference);
+        }
+        // A literal already in the user's config keeps working; we say so
+        // rather than rewriting it behind their back.
+        "literal  (in config.toml)".to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ConfigValue {
     Text(String),
-    Secret(String), // Masked display
+    /// A credential. Rendered as status + source, never as the value.
+    Secret(SecretValue),
     Bool(bool),
     Choice(Vec<String>, usize), // Options and selected index
     Number(i64),
@@ -1727,14 +1774,22 @@ impl ConfigValue {
     pub fn display(&self) -> String {
         match self {
             ConfigValue::Text(s) => s.clone(),
-            ConfigValue::Secret(s) => {
-                if s.is_empty() {
-                    "Not configured".to_string()
-                } else {
-                    format!("{}••••••••", &s[..std::cmp::min(8, s.len())])
-                }
-            }
+            ConfigValue::Secret(secret) => secret.status_line(),
             ConfigValue::Bool(b) => if *b { "✓ Enabled" } else { "✗ Disabled" }.to_string(),
+            ConfigValue::Choice(options, idx) => options.get(*idx).cloned().unwrap_or_default(),
+            ConfigValue::Number(n) => n.to_string(),
+        }
+    }
+
+    /// The raw string this widget would persist: the inverse of
+    /// [`ConfigRow::to_value`](crate::config::ConfigRow::to_value), and what
+    /// [`registry::set_validated`](crate::config::registry::set_validated)
+    /// parses back into a typed TOML value.
+    pub fn raw(&self) -> String {
+        match self {
+            ConfigValue::Text(s) => s.clone(),
+            ConfigValue::Secret(secret) => secret.reference.clone(),
+            ConfigValue::Bool(b) => b.to_string(),
             ConfigValue::Choice(options, idx) => options.get(*idx).cloned().unwrap_or_default(),
             ConfigValue::Number(n) => n.to_string(),
         }
@@ -1808,7 +1863,8 @@ fn config_value_for_field(
 /// `[[config]]` schema today, but is handled for totality.)
 fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
     match value {
-        ConfigValue::Text(s) | ConfigValue::Secret(s) => toml::Value::String(s.clone()),
+        ConfigValue::Text(s) => toml::Value::String(s.clone()),
+        ConfigValue::Secret(secret) => toml::Value::String(secret.reference.clone()),
         ConfigValue::Bool(b) => toml::Value::Boolean(*b),
         ConfigValue::Number(n) => toml::Value::Integer(*n),
         ConfigValue::Choice(options, idx) => {
@@ -1827,12 +1883,58 @@ pub enum ConfigPane {
 
 // Editor detection and mapping now uses the centralized crate::editors module
 
+/// The settings screen: a section tree on the left, the rows of the selected
+/// section on the right.
+///
+/// Every row comes from [`CONFIG_REGISTRY`](crate::config::CONFIG_REGISTRY),
+/// seeded from the loaded config, so "a TOML key exists" and "a menu row
+/// exists" are the same statement. The screen used to carry its own list of
+/// ~24 hand-written rows with a hand-written persist branch per row; ten of
+/// those rows accepted an edit and dropped it, and every new schema field
+/// needed both lists touched to become reachable. Now the registry is the only
+/// list, and a save routes every edit through
+/// [`registry::set_validated`](crate::config::registry::set_validated).
 #[derive(Debug, Clone)]
 pub struct ConfigScreenState {
-    pub selected_category: usize,
+    /// Index into [`visible_nodes`](Self::visible_nodes) — the tree row the
+    /// left pane has selected.
+    pub selected_node: usize,
+    /// Index into [`visible_rows`](Self::visible_rows).
     pub selected_setting: usize,
+    /// Categories that have at least one row, in [`ConfigCategory::all`] order.
     pub categories: Vec<ConfigCategory>,
-    pub settings: std::collections::HashMap<ConfigCategory, Vec<ConfigSetting>>,
+    /// Rows per category, in registry order. Plugin rows are appended to
+    /// [`ConfigCategory::Plugins`] by [`Self::apply_plugin_manifests`].
+    pub settings: HashMap<ConfigCategory, Vec<ConfigSetting>>,
+    /// The whole tree in pre-order: category roots plus a node per TOML
+    /// sub-table under them.
+    pub tree: Vec<ConfigTreeNode>,
+    /// Indices into [`tree`](Self::tree) that are currently on screen, i.e.
+    /// with every collapsed subtree skipped.
+    pub visible_nodes: Vec<usize>,
+    /// `ConfigTreeNode::id`s of the expanded nodes, persisted in
+    /// `ui_preferences.config_tree_expanded`.
+    pub expanded: BTreeSet<String>,
+    /// `(category, row index)` of every row the right pane shows: the selected
+    /// node's subtree, or the `/` filter's matches.
+    pub visible_rows: Vec<(ConfigCategory, usize)>,
+    /// The active `/` filter. `Some("")` is an open, empty filter box.
+    pub search: Option<String>,
+    /// Keys the user has actually edited this session, and therefore the only
+    /// keys a save writes.
+    ///
+    /// Deliberately not "every row that differs from the file": a row for an
+    /// absent optional leaf seeds as an empty/false widget, so a diff against
+    /// the file would materialise `require_mention_in_groups = false` into a
+    /// `[fleet.bridge.telegram]` section the user never created. Tracking the
+    /// edits themselves cannot invent a value.
+    pub dirty: BTreeSet<String>,
+    /// The secret row a Ctrl+K prompt is collecting a literal for.
+    ///
+    /// Set for exactly one popup round-trip: the popup's confirm writes the
+    /// literal to the OS keychain and stores only `keychain:<service>` in the
+    /// row, so the plaintext never reaches `config.toml` or the row's value.
+    pub keychain_target: Option<String>,
     pub editing: bool,
     pub edit_buffer: String,
     /// True when entering API key (special handling - saves to keychain)
@@ -1843,236 +1945,7 @@ pub struct ConfigScreenState {
 
 impl Default for ConfigScreenState {
     fn default() -> Self {
-        let mut settings = std::collections::HashMap::new();
-
-        // Authentication settings
-        // Determine current auth status for display
-        let auth_status = match credentials::get_anthropic_api_key() {
-            Ok(Some(key)) => {
-                let masked = if key.len() > 12 {
-                    format!("{}••••••••", &key[..12])
-                } else {
-                    "••••••••".to_string()
-                };
-                format!("API Key ({})", masked)
-            }
-            _ => "System Auth (Pro/Max Plan)".to_string(),
-        };
-
-        settings.insert(
-            ConfigCategory::Authentication,
-            vec![
-                ConfigSetting {
-                    key: "claude_auth".to_string(),
-                    label: "Claude Authentication".to_string(),
-                    value: ConfigValue::Text(auth_status),
-                    description: "Press Enter to configure authentication provider".to_string(),
-                },
-                ConfigSetting {
-                    key: "github_auth".to_string(),
-                    label: "GitHub Credentials".to_string(),
-                    value: ConfigValue::Text("System Default".to_string()),
-                    description: "Uses git credential helper. PAT support coming soon.".to_string(),
-                },
-            ],
-        );
-
-        // Workspace settings
-        settings.insert(
-            ConfigCategory::Workspace,
-            vec![
-                ConfigSetting {
-                    key: "default_workspace".to_string(),
-                    label: "Default Workspace".to_string(),
-                    value: ConfigValue::Text("~/projects".to_string()),
-                    description: "Default directory for new sessions".to_string(),
-                },
-                ConfigSetting {
-                    key: "branch_prefix".to_string(),
-                    label: "Branch Prefix".to_string(),
-                    value: ConfigValue::Text("agents/".to_string()),
-                    description: "Prefix for auto-created branch names".to_string(),
-                },
-                ConfigSetting {
-                    key: "exclude_paths".to_string(),
-                    label: "Exclude Paths".to_string(),
-                    value: ConfigValue::Text("node_modules, .git, target".to_string()),
-                    description: "Patterns to exclude from repo scanning (comma-separated)"
-                        .to_string(),
-                },
-                ConfigSetting {
-                    key: "max_repositories".to_string(),
-                    label: "Max Repositories".to_string(),
-                    value: ConfigValue::Number(500),
-                    description: "Maximum repositories to show in search results".to_string(),
-                },
-            ],
-        );
-
-        // Docker settings
-        settings.insert(
-            ConfigCategory::Docker,
-            vec![
-                ConfigSetting {
-                    key: "docker_host".to_string(),
-                    label: "Docker Host".to_string(),
-                    value: ConfigValue::Text("Auto-detect".to_string()),
-                    description: "Docker daemon connection (auto-detect, unix socket, or TCP)"
-                        .to_string(),
-                },
-                ConfigSetting {
-                    key: "docker_timeout".to_string(),
-                    label: "Connection Timeout".to_string(),
-                    value: ConfigValue::Number(60),
-                    description: "Docker connection timeout in seconds".to_string(),
-                },
-            ],
-        );
-
-        // Agent defaults
-        settings.insert(
-            ConfigCategory::AgentDefaults,
-            vec![
-                ConfigSetting {
-                    key: "default_model".to_string(),
-                    label: "Default Model".to_string(),
-                    value: ConfigValue::Choice(
-                        vec![
-                            "Opus 4.5".to_string(),
-                            "Sonnet 4.5".to_string(),
-                            "Haiku 4.5".to_string(),
-                        ],
-                        1, // Sonnet default
-                    ),
-                    description: "Default Claude model for new sessions".to_string(),
-                },
-                ConfigSetting {
-                    key: "auto_approve".to_string(),
-                    label: "Auto-Approve Actions".to_string(),
-                    value: ConfigValue::Bool(false),
-                    description: "Automatically approve file writes and commands".to_string(),
-                },
-            ],
-        );
-
-        // Editor
-        // Detect available editors for the editor preference setting
-        let available_editors = editors::get_editor_options();
-        let editor_names: Vec<String> =
-            available_editors.iter().map(|(name, _)| name.clone()).collect();
-        let default_editor_index =
-            available_editors.iter().position(|(_, avail)| *avail).unwrap_or(0);
-
-        settings.insert(
-            ConfigCategory::Editor,
-            vec![ConfigSetting {
-                key: "preferred_editor".to_string(),
-                label: "Preferred Editor".to_string(),
-                value: ConfigValue::Choice(editor_names, default_editor_index),
-                description: "Editor for opening sessions (o key)".to_string(),
-            }],
-        );
-
-        // Appearance
-        settings.insert(
-            ConfigCategory::Appearance,
-            vec![
-                ConfigSetting {
-                    key: "theme".to_string(),
-                    label: "Theme".to_string(),
-                    value: ConfigValue::Choice(
-                        vec![
-                            "Dark".to_string(),
-                            "Light".to_string(),
-                            "System".to_string(),
-                        ],
-                        0,
-                    ),
-                    description: "Color theme for the TUI".to_string(),
-                },
-                ConfigSetting {
-                    key: "show_container_status".to_string(),
-                    label: "Show Container Status".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Show container mode icons in session list".to_string(),
-                },
-                ConfigSetting {
-                    key: "show_git_status".to_string(),
-                    label: "Show Git Status".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Show git changes in session list".to_string(),
-                },
-            ],
-        );
-
-        // Plugins (empty for now)
-        settings.insert(
-            ConfigCategory::Plugins,
-            vec![ConfigSetting {
-                key: "installed_plugins".to_string(),
-                label: "Installed Plugins".to_string(),
-                value: ConfigValue::Text("None installed".to_string()),
-                description: "Manage installed plugins from the Catalog".to_string(),
-            }],
-        );
-
-        // MCP Pool (per-server `shared.*` toggles appended in from_app_config)
-        settings.insert(
-            ConfigCategory::McpPool,
-            vec![
-                ConfigSetting {
-                    key: "pool_enabled".to_string(),
-                    label: "Shared MCP Pool".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "One MCP server process shared across all host sessions"
-                        .to_string(),
-                },
-                ConfigSetting {
-                    key: "idle_grace_secs".to_string(),
-                    label: "Idle Grace (seconds)".to_string(),
-                    value: ConfigValue::Number(300),
-                    description: "Reap a pooled server this long after its last session detaches"
-                        .to_string(),
-                },
-            ],
-        );
-
-        // Analytics
-        settings.insert(
-            ConfigCategory::Analytics,
-            vec![
-                ConfigSetting {
-                    key: "track_usage".to_string(),
-                    label: "Track Usage".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Track session duration and token usage".to_string(),
-                },
-                ConfigSetting {
-                    key: "cost_alerts".to_string(),
-                    label: "Cost Alerts".to_string(),
-                    value: ConfigValue::Bool(false),
-                    description: "Alert when spending exceeds threshold".to_string(),
-                },
-            ],
-        );
-
-        Self {
-            selected_category: 0,
-            selected_setting: 0,
-            // Only the categories that have hand-written rows today. The
-            // registry knows about more (container templates, fleet, usage,
-            // …) but nothing renders them yet, and an empty category is worse
-            // than an absent one.
-            categories: ConfigCategory::all()
-                .into_iter()
-                .filter(|category| settings.contains_key(category))
-                .collect(),
-            settings,
-            editing: false,
-            edit_buffer: String::new(),
-            api_key_input_mode: false,
-            focused_pane: ConfigPane::Categories,
-        }
+        Self::from_app_config(&AppConfig::default())
     }
 }
 
@@ -2081,288 +1954,389 @@ impl ConfigScreenState {
         Self::default()
     }
 
-    pub fn current_category(&self) -> Option<&ConfigCategory> {
-        self.categories.get(self.selected_category)
+    /// The registry row key whose edit opens the auth-provider popup instead of
+    /// the generic choice popup.
+    ///
+    /// Choosing "API key" there also prompts for the key and stores it in the
+    /// OS keychain, which a plain choice widget cannot do. Matched by KEY, not
+    /// by pane index — the old index match broke the moment the row order
+    /// changed.
+    pub const CLAUDE_PROVIDER_KEY: &'static str = "authentication.claude_provider";
+
+    /// Build the screen from a loaded config.
+    ///
+    /// The seed is the serialized `config` plus the top-level sections
+    /// `AppConfig` does not model (`[skills]`, `[session_reader]`), read off the
+    /// user config file so their rows show what is actually on disk rather than
+    /// blank. A missing or unparseable file just means those rows seed empty.
+    pub fn from_app_config(config: &AppConfig) -> Self {
+        let seed = seed_value(config);
+        let settings = screen_model::build_rows(&seed);
+        let categories: Vec<ConfigCategory> = ConfigCategory::all()
+            .into_iter()
+            .filter(|category| settings.get(category).is_some_and(|rows| !rows.is_empty()))
+            .collect();
+        let tree = screen_model::build_tree(&categories, &settings);
+        let expanded: BTreeSet<String> =
+            config.ui_preferences.config_tree_expanded.iter().cloned().collect();
+
+        let mut state = Self {
+            selected_node: 0,
+            selected_setting: 0,
+            categories,
+            settings,
+            tree,
+            visible_nodes: Vec::new(),
+            expanded,
+            visible_rows: Vec::new(),
+            search: None,
+            dirty: BTreeSet::new(),
+            keychain_target: None,
+            editing: false,
+            edit_buffer: String::new(),
+            api_key_input_mode: false,
+            focused_pane: ConfigPane::Categories,
+        };
+        state.refresh();
+        state
     }
 
+    // --- derived view state -------------------------------------------------
+
+    /// Recompute the two flattened lists the panes render. Cheap (a walk over
+    /// ~40 tree nodes and ~250 rows) and called only when something that
+    /// changes them changes, never per frame.
+    pub fn refresh(&mut self) {
+        self.refresh_visible_nodes();
+        self.refresh_visible_rows();
+    }
+
+    fn refresh_visible_nodes(&mut self) {
+        let mut visible = Vec::new();
+        let mut skip_deeper_than: Option<usize> = None;
+        for (index, node) in self.tree.iter().enumerate() {
+            if let Some(depth) = skip_deeper_than {
+                if node.depth > depth {
+                    continue;
+                }
+                skip_deeper_than = None;
+            }
+            visible.push(index);
+            if node.has_children && !self.expanded.contains(&node.id()) {
+                skip_deeper_than = Some(node.depth);
+            }
+        }
+        self.visible_nodes = visible;
+        if self.selected_node >= self.visible_nodes.len() {
+            self.selected_node = self.visible_nodes.len().saturating_sub(1);
+        }
+    }
+
+    fn refresh_visible_rows(&mut self) {
+        self.visible_rows = match self.search.as_deref() {
+            Some(query) if !query.trim().is_empty() => self.search_matches(query.trim()),
+            _ => self
+                .current_node()
+                .and_then(|node| {
+                    let category = node.category;
+                    let rows = node.rows.clone();
+                    self.settings
+                        .get(&category)
+                        .map(|_| rows.into_iter().map(|index| (category, index)).collect())
+                })
+                .unwrap_or_default(),
+        };
+        if self.selected_setting >= self.visible_rows.len() {
+            self.selected_setting = self.visible_rows.len().saturating_sub(1);
+        }
+    }
+
+    /// Rows matching the `/` filter, across every category.
+    ///
+    /// Ranked so a row whose key or label CONTAINS the query comes before one
+    /// that merely has it as a subsequence: typing `theme` should land on
+    /// `ui_preferences.theme`, not on the first row whose help text happens to
+    /// spell t-h-e-m-e.
+    fn search_matches(&self, query: &str) -> Vec<(ConfigCategory, usize)> {
+        let lowered = query.to_lowercase();
+        let mut exact = Vec::new();
+        let mut loose = Vec::new();
+        for category in &self.categories {
+            let Some(rows) = self.settings.get(category) else {
+                continue;
+            };
+            for (index, row) in rows.iter().enumerate() {
+                let key = row.key.to_lowercase();
+                let label = row.label.to_lowercase();
+                if key.contains(&lowered) || label.contains(&lowered) {
+                    exact.push((*category, index));
+                } else if screen_model::fuzzy_matches(&row.key, query)
+                    || screen_model::fuzzy_matches(&row.label, query)
+                    || screen_model::fuzzy_matches(&row.description, query)
+                {
+                    loose.push((*category, index));
+                }
+            }
+        }
+        exact.extend(loose);
+        exact
+    }
+
+    /// The tree node the left pane has selected.
+    #[must_use]
+    pub fn current_node(&self) -> Option<&ConfigTreeNode> {
+        self.visible_nodes
+            .get(self.selected_node)
+            .and_then(|index| self.tree.get(*index))
+    }
+
+    /// The category the right pane's title names.
+    #[must_use]
+    pub fn current_category(&self) -> Option<ConfigCategory> {
+        if self.is_searching() {
+            return None;
+        }
+        self.current_node().map(|node| node.category)
+    }
+
+    /// The rows the right pane shows, in display order.
+    #[must_use]
     pub fn current_settings(&self) -> Vec<&ConfigSetting> {
-        self.current_category()
-            .and_then(|cat| self.settings.get(cat))
-            .map(|s| s.iter().collect())
-            .unwrap_or_default()
+        self.visible_rows
+            .iter()
+            .filter_map(|(category, index)| self.settings.get(category)?.get(*index))
+            .collect()
     }
 
+    #[must_use]
     pub fn current_setting(&self) -> Option<&ConfigSetting> {
-        self.current_settings().get(self.selected_setting).copied()
+        let (category, index) = *self.visible_rows.get(self.selected_setting)?;
+        self.settings.get(&category)?.get(index)
     }
+
+    /// Why the selected row cannot be edited, or `None`.
+    #[must_use]
+    pub fn current_read_only_reason(&self) -> Option<&'static str> {
+        screen_model::read_only_reason(&self.current_setting()?.key)
+    }
+
+    /// True while the `/` filter box is open.
+    #[must_use]
+    pub fn is_searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    // --- navigation ---------------------------------------------------------
 
     pub fn select_next_category(&mut self) {
-        if !self.categories.is_empty() {
-            self.selected_category = (self.selected_category + 1) % self.categories.len();
-            self.selected_setting = 0;
+        if self.visible_nodes.is_empty() {
+            return;
         }
+        self.selected_node = (self.selected_node + 1) % self.visible_nodes.len();
+        self.selected_setting = 0;
+        self.refresh_visible_rows();
     }
 
     pub fn select_prev_category(&mut self) {
-        if !self.categories.is_empty() {
-            self.selected_category = if self.selected_category == 0 {
-                self.categories.len() - 1
-            } else {
-                self.selected_category - 1
-            };
-            self.selected_setting = 0;
+        if self.visible_nodes.is_empty() {
+            return;
         }
+        self.selected_node =
+            self.selected_node.checked_sub(1).unwrap_or(self.visible_nodes.len() - 1);
+        self.selected_setting = 0;
+        self.refresh_visible_rows();
     }
 
     pub fn select_next_setting(&mut self) {
-        let settings_count = self.current_settings().len();
-        if settings_count > 0 {
-            self.selected_setting = (self.selected_setting + 1) % settings_count;
+        if !self.visible_rows.is_empty() {
+            self.selected_setting = (self.selected_setting + 1) % self.visible_rows.len();
         }
     }
 
     pub fn select_prev_setting(&mut self) {
-        let settings_count = self.current_settings().len();
-        if settings_count > 0 {
-            self.selected_setting = if self.selected_setting == 0 {
-                settings_count - 1
-            } else {
-                self.selected_setting - 1
-            };
+        if !self.visible_rows.is_empty() {
+            self.selected_setting =
+                self.selected_setting.checked_sub(1).unwrap_or(self.visible_rows.len() - 1);
         }
     }
 
+    /// Open or close the selected tree node. Returns the expansion ids to
+    /// persist, or `None` when the node has no children to toggle.
+    pub fn toggle_expanded(&mut self) -> Option<Vec<String>> {
+        let node = self.current_node()?;
+        if !node.has_children {
+            return None;
+        }
+        let id = node.id();
+        if !self.expanded.remove(&id) {
+            self.expanded.insert(id);
+        }
+        self.refresh();
+        Some(self.expanded.iter().cloned().collect())
+    }
+
+    // --- search -------------------------------------------------------------
+
+    /// Open the `/` filter box.
+    pub fn start_search(&mut self) {
+        self.search = Some(String::new());
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Settings;
+        self.refresh_visible_rows();
+    }
+
+    pub fn push_search_char(&mut self, c: char) {
+        if let Some(query) = self.search.as_mut() {
+            query.push(c);
+            self.selected_setting = 0;
+            self.refresh_visible_rows();
+        }
+    }
+
+    pub fn pop_search_char(&mut self) {
+        if let Some(query) = self.search.as_mut() {
+            query.pop();
+            self.selected_setting = 0;
+            self.refresh_visible_rows();
+        }
+    }
+
+    /// Close the filter box and go back to the selected section.
+    pub fn clear_search(&mut self) {
+        self.search = None;
+        self.selected_setting = 0;
+        self.focused_pane = ConfigPane::Categories;
+        self.refresh_visible_rows();
+    }
+
+    // --- editing ------------------------------------------------------------
+
+    /// Overwrite a row's widget value and mark it for the next save.
+    ///
+    /// Keyed by the row's dotted path, which is unique across the whole screen,
+    /// so a popup confirm does not have to know which category or node it came
+    /// from — the filter pane shows rows from categories other than the
+    /// selected one, and the old category-scoped lookup silently missed them.
+    pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
+        for rows in self.settings.values_mut() {
+            if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
+                row.value = value;
+                self.dirty.insert(key.to_string());
+                return;
+            }
+        }
+    }
+
+    /// Cycle the selected row's value in place (booleans and choices only).
     pub fn toggle_current_setting(&mut self) {
-        if let Some(category) = self.current_category().cloned() {
-            if let Some(settings) = self.settings.get_mut(&category) {
-                if let Some(setting) = settings.get_mut(self.selected_setting) {
-                    match &mut setting.value {
-                        ConfigValue::Bool(ref mut b) => *b = !*b,
-                        ConfigValue::Choice(options, ref mut idx) => {
-                            *idx = (*idx + 1) % options.len();
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        let Some(key) = self.current_setting().map(|row| row.key.clone()) else {
+            return;
+        };
+        if screen_model::read_only_reason(&key).is_some() {
+            return;
         }
+        let Some(current) = self.current_setting().map(|row| row.value.clone()) else {
+            return;
+        };
+        let next = match current {
+            ConfigValue::Bool(b) => ConfigValue::Bool(!b),
+            ConfigValue::Choice(options, idx) if !options.is_empty() => {
+                let next = (idx + 1) % options.len();
+                ConfigValue::Choice(options, next)
+            }
+            _ => return,
+        };
+        self.set_row_value(&key, next);
     }
 
-    /// Create ConfigScreenState from AppConfig (loads persisted settings)
-    pub fn from_app_config(config: &AppConfig) -> Self {
-        let mut state = Self::default();
+    // --- persistence --------------------------------------------------------
 
-        // Update Authentication settings from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Authentication) {
-            for setting in settings.iter_mut() {
-                if setting.key == "claude_auth" {
-                    // Build status text based on provider and API key presence
-                    use crate::config::ClaudeAuthProvider;
-                    let status = match &config.authentication.claude_provider {
-                        ClaudeAuthProvider::ApiKey => {
-                            let masked = credentials::get_anthropic_api_key_masked();
-                            if masked == "Not configured" {
-                                "API Key (Not configured)".to_string()
-                            } else {
-                                format!("API Key ({})", masked)
-                            }
-                        }
-                        ClaudeAuthProvider::SystemAuth => "System Auth (Pro/Max Plan)".to_string(),
-                        ClaudeAuthProvider::AmazonBedrock => {
-                            "Amazon Bedrock [Coming Soon]".to_string()
-                        }
-                        ClaudeAuthProvider::GoogleVertex => {
-                            "Google Vertex [Coming Soon]".to_string()
-                        }
-                        ClaudeAuthProvider::AzureFoundry => {
-                            "Azure Foundry [Coming Soon]".to_string()
-                        }
-                        ClaudeAuthProvider::GlmZai => "GLM on ZAI [Coming Soon]".to_string(),
-                        ClaudeAuthProvider::LlmGateway => "LLM Gateway [Coming Soon]".to_string(),
-                    };
-                    setting.value = ConfigValue::Text(status);
+    /// Every edit the user has made, as `(dotted key, raw value)`.
+    ///
+    /// Read-only rows are filtered out rather than trusted not to be dirty: the
+    /// screen refuses those edits at the keypress, and this is the second lock
+    /// on the same door.
+    #[must_use]
+    pub fn pending_edits(&self) -> Vec<(String, String)> {
+        let mut edits = Vec::new();
+        for category in &self.categories {
+            let Some(rows) = self.settings.get(category) else {
+                continue;
+            };
+            for row in rows {
+                if !self.dirty.contains(&row.key) {
+                    continue;
                 }
+                if Self::parse_plugin_row_key(&row.key).is_some()
+                    || Self::parse_plugin_toggle_key(&row.key).is_some()
+                    || screen_model::read_only_reason(&row.key).is_some()
+                {
+                    continue;
+                }
+                edits.push((row.key.clone(), row.value.raw()));
             }
         }
+        edits
+    }
 
-        // Update Workspace settings from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Workspace) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "default_workspace" => {
-                        // Use first scan path or default
-                        let path = config
-                            .workspace_defaults
-                            .workspace_scan_paths
-                            .first()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "~/projects".to_string());
-                        setting.value = ConfigValue::Text(path);
-                    }
-                    "branch_prefix" => {
-                        setting.value =
-                            ConfigValue::Text(config.workspace_defaults.branch_prefix.clone());
-                    }
-                    "exclude_paths" => {
-                        let paths = config.workspace_defaults.exclude_paths.join(", ");
-                        setting.value = ConfigValue::Text(if paths.is_empty() {
-                            "node_modules, .git, target".to_string()
-                        } else {
-                            paths
-                        });
-                    }
-                    "max_repositories" => {
-                        setting.value =
-                            ConfigValue::Number(config.workspace_defaults.max_repositories as i64);
-                    }
-                    _ => {}
-                }
+    /// Fold every edit into `config`, returning the ones whose section
+    /// `AppConfig` does not model so the caller can hand them to
+    /// [`AppConfig::save_external_keys`].
+    ///
+    /// The whole persist path is: serialize `config` to TOML, write each edit
+    /// through the registry's validator, deserialize back. That replaced ~200
+    /// lines of per-field match arms whose only job was to name, for a second
+    /// time, where each row lived — and which was missing an arm for every row
+    /// that silently discarded its edit.
+    pub fn apply_to_app_config(
+        &self,
+        config: &mut AppConfig,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let mut root = toml::Value::try_from(&*config)
+            .map_err(|e| anyhow::anyhow!("config does not serialize to TOML: {e}"))?;
+
+        let mut external = Vec::new();
+        for (key, raw) in self.pending_edits() {
+            if registry::is_external(&key) && !key.starts_with("fleet.bridge.") {
+                // `[skills]` / `[session_reader]` are parsed off this file by
+                // other crates and have no `AppConfig` field to land in.
+                // `[fleet.bridge]` DOES round-trip, as an opaque passthrough.
+                external.push((key, raw));
+                continue;
             }
+            registry::set_validated(&mut root, &key, &raw)
+                .map_err(|e| anyhow::anyhow!("setting '{key}': {e}"))?;
         }
 
-        // Update Docker settings from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Docker) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "docker_host" => {
-                        let host_display =
-                            config.docker.host.clone().unwrap_or_else(|| "Auto-detect".to_string());
-                        setting.value = ConfigValue::Text(host_display);
-                    }
-                    "docker_timeout" => {
-                        setting.value = ConfigValue::Number(config.docker.timeout as i64);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        *config = root
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("edited config does not deserialize: {e}"))?;
 
-        // Update Agent Defaults from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::AgentDefaults) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "auto_approve" => {
-                        // Will be added to AppConfig
-                        setting.value = ConfigValue::Bool(false);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Plugin rows keep their own path: their schema lives in the plugin
+        // manifest, not the registry, and `plugins.*` is an opaque leaf the
+        // registry validator deliberately refuses.
+        self.apply_plugin_rows(config);
+        self.apply_plugin_toggle_rows(config);
 
-        // Update Editor from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Editor) {
-            for setting in settings.iter_mut() {
-                if setting.key == "preferred_editor" {
-                    // Load current preferred editor from config
-                    if let Some(ref preferred) = config.ui_preferences.preferred_editor {
-                        // Find the index of the preferred editor in our list
-                        if let ConfigValue::Choice(ref options, ref mut idx) = setting.value {
-                            // Map command to display name
-                            let display_name = match preferred.as_str() {
-                                "code" => "VS Code",
-                                "cursor" => "Cursor",
-                                "zed" => "Zed",
-                                "nvim" => "Neovim",
-                                "vim" => "Vim",
-                                "emacs" => "Emacs",
-                                "subl" => "Sublime Text",
-                                _ => preferred.as_str(),
-                            };
-                            if let Some(pos) = options.iter().position(|n| n == display_name) {
-                                *idx = pos;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Ok(external)
+    }
 
-        // Update Appearance from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Appearance) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "theme" => {
-                        let theme_idx = match config.ui_preferences.theme.as_str() {
-                            "dark" => 0,
-                            "light" => 1,
-                            "system" => 2,
-                            _ => 0,
-                        };
-                        setting.value = ConfigValue::Choice(
-                            vec![
-                                "Dark".to_string(),
-                                "Light".to_string(),
-                                "System".to_string(),
-                            ],
-                            theme_idx,
-                        );
-                    }
-                    "show_container_status" => {
-                        setting.value =
-                            ConfigValue::Bool(config.ui_preferences.show_container_status);
-                    }
-                    "show_git_status" => {
-                        setting.value = ConfigValue::Bool(config.ui_preferences.show_git_status);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Update MCP Pool from config + append one shared-toggle per server
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::McpPool) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "pool_enabled" => {
-                        setting.value = ConfigValue::Bool(config.mcp_pool.enabled);
-                    }
-                    "idle_grace_secs" => {
-                        setting.value = ConfigValue::Number(config.mcp_pool.idle_grace_secs as i64);
-                    }
-                    _ => {}
-                }
-            }
-            let mut names: Vec<&String> = config.mcp_servers.keys().collect();
-            names.sort();
-            for name in names {
-                let server = &config.mcp_servers[name];
-                settings.push(ConfigSetting {
-                    key: format!("shared.{name}"),
-                    label: format!("Share: {name}"),
-                    value: ConfigValue::Bool(server.shared),
-                    description: format!(
-                        "Pool '{name}' across sessions (disable for stateful servers)"
-                    ),
-                });
-            }
-        }
-
-        // Update Analytics from config
-        if let Some(settings) = state.settings.get_mut(&ConfigCategory::Analytics) {
-            for setting in settings.iter_mut() {
-                match setting.key.as_str() {
-                    "track_usage" => {
-                        setting.value = ConfigValue::Bool(true); // Default, not in AppConfig yet
-                    }
-                    "cost_alerts" => {
-                        setting.value = ConfigValue::Bool(false); // Default, not in AppConfig yet
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        state
+    /// Forget the pending edits after they have been written, so a later save
+    /// does not rewrite values another process may have changed since.
+    pub fn mark_saved(&mut self) {
+        self.dirty.clear();
     }
 
     /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin
-    /// `[[config]]` field (vs. the static enable/disable placeholder rows).
-    /// The row key is `plugin:<plugin_name>:<field_key>` — unique across
-    /// plugins that share a field name, and reversible in
-    /// [`apply_to_app_config`](Self::apply_to_app_config) so the edit lands
-    /// under `plugins.values[plugin_name][field_key]`.
+    /// `[[config]]` field (vs. a registry row). The row key is
+    /// `plugin:<plugin_name>:<field_key>` — unique across plugins that share a
+    /// field name, and reversible in
+    /// [`apply_plugin_rows`](Self::apply_plugin_rows) so the edit lands under
+    /// `plugins.values[plugin_name][field_key]`.
     const PLUGIN_ROW_PREFIX: &'static str = "plugin:";
+
+    /// Prefix for the per-plugin enable/disable toggle rows.
+    const PLUGIN_TOGGLE_PREFIX: &'static str = "plugin-enabled:";
 
     /// Compose the Plugins-category row key for a plugin's config field.
     fn plugin_row_key(plugin: &str, field_key: &str) -> String {
@@ -2370,38 +2344,78 @@ impl ConfigScreenState {
     }
 
     /// Split a Plugins-category row key back into `(plugin_name, field_key)`,
-    /// or `None` for the static placeholder rows. The plugin name and the
-    /// field key are joined by the *first* `:` after the prefix, so plugin
-    /// names never contain `:` but field keys may.
+    /// or `None` for any other row. The plugin name and the field key are
+    /// joined by the *first* `:` after the prefix, so plugin names never
+    /// contain `:` but field keys may.
     fn parse_plugin_row_key(key: &str) -> Option<(&str, &str)> {
         let rest = key.strip_prefix(Self::PLUGIN_ROW_PREFIX)?;
         rest.split_once(':')
     }
 
-    /// Append per-plugin `[[config]]` rows to the Plugins category from the
-    /// loaded plugin manifests, keeping the existing enable/disable rows.
+    /// The plugin name behind an enable/disable toggle row, or `None`.
+    fn parse_plugin_toggle_key(key: &str) -> Option<&str> {
+        key.strip_prefix(Self::PLUGIN_TOGGLE_PREFIX)
+    }
+
+    /// Rebuild the Plugins category from the loaded plugin manifests: one
+    /// enable/disable toggle per plugin, then one row per `[[config]]` field.
     ///
-    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the
-    /// field `kind` to the matching [`ConfigValue`] widget
-    /// (`path`/`string` → `Text`, `bool` → `Bool`, `enum` → `Choice`,
-    /// `int` → `Number`). The displayed value defaults from
-    /// `plugins.values[plugin][key]` when present, else the schema `default`.
+    /// The toggles are the "real plugin list" that replaces the old static
+    /// "Installed Plugins: None installed" placeholder — a row that reported
+    /// nothing and edited nothing. They write `plugins.disabled`, so while they
+    /// are shown the raw `plugins.enabled` / `plugins.disabled` list rows are
+    /// dropped: two rows writing one key is how they end up disagreeing.
+    ///
+    /// An allowlist (`plugins.enabled` non-empty) takes precedence over the
+    /// denylist in discovery, so a toggle there would be a lie. In that mode the
+    /// raw list rows stay and no toggles are added.
+    ///
+    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the field
+    /// `kind` to the matching [`ConfigValue`] widget (`path`/`string` → `Text`,
+    /// `bool` → `Bool`, `enum` → `Choice`, `int` → `Number`). The displayed
+    /// value defaults from `plugins.values[plugin][key]` when present, else the
+    /// schema `default`.
     ///
     /// Idempotent: re-invoking it (e.g. after the plugin runtime finishes
-    /// discovery) rebuilds the per-plugin rows from scratch rather than
-    /// duplicating them — only the static placeholder rows are retained.
+    /// discovery) rebuilds the plugin rows from scratch rather than duplicating
+    /// them.
     pub fn apply_plugin_manifests(
         &mut self,
         manifests: &[ainb_plugin_protocol::manifest::Manifest],
         plugins_cfg: &crate::config::PluginsConfig,
     ) {
+        // Toggles only replace the raw list rows when there is something to
+        // toggle. With plugins disabled (`AINB_DISABLE_PLUGINS=1`) or discovery
+        // not yet run, dropping the lists would leave the category empty and
+        // the section would vanish from the tree entirely.
+        let show_toggles = !manifests.is_empty() && plugins_cfg.enabled.is_empty();
         let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
-        // Drop any previously-appended plugin rows so repeated calls are
-        // idempotent; keep the static enable/disable placeholders.
-        rows.retain(|s| Self::parse_plugin_row_key(&s.key).is_none());
+
+        // Drop everything this method owns so repeated calls are idempotent.
+        rows.retain(|row| {
+            Self::parse_plugin_row_key(&row.key).is_none()
+                && Self::parse_plugin_toggle_key(&row.key).is_none()
+        });
+        if show_toggles {
+            rows.retain(|row| row.key != "plugins.enabled" && row.key != "plugins.disabled");
+        }
 
         for manifest in manifests {
             let plugin = manifest.plugin.name.as_str();
+
+            if show_toggles {
+                let enabled = !plugins_cfg.disabled.iter().any(|name| name == plugin);
+                rows.push(ConfigSetting {
+                    key: format!("{}{plugin}", Self::PLUGIN_TOGGLE_PREFIX),
+                    label: format!("Plugin: {plugin}"),
+                    value: ConfigValue::Bool(enabled),
+                    description: format!(
+                        "{} · load {plugin} at startup",
+                        manifest.plugin.description
+                    ),
+                });
+            }
+
             // The resolved [plugins.<name>] value table, if the user has set
             // any keys — drives the displayed default ahead of the schema's.
             let saved = plugins_cfg.values.get(plugin).and_then(toml::Value::as_table);
@@ -2420,178 +2434,26 @@ impl ConfigScreenState {
                 });
             }
         }
+
+        // The Plugins category may have gone from empty to populated (or back),
+        // which changes both panes.
+        self.rebuild_tree();
     }
 
-    /// Convert ConfigScreenState back to AppConfig for saving
-    pub fn apply_to_app_config(&self, config: &mut AppConfig) {
-        // Apply Workspace settings (extracted to keep this method under the
-        // clippy `too_many_lines` threshold).
-        self.apply_workspace_rows(config);
-
-        // Apply Docker settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Docker) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "docker_host" => {
-                        if let ConfigValue::Text(host) = &setting.value {
-                            if host == "Auto-detect" || host.is_empty() {
-                                config.docker.host = None;
-                            } else {
-                                config.docker.host = Some(host.clone());
-                            }
-                        }
-                    }
-                    "docker_timeout" => {
-                        if let ConfigValue::Number(timeout) = &setting.value {
-                            config.docker.timeout = *timeout as u64;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Apply MCP Pool settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::McpPool) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "pool_enabled" => {
-                        if let ConfigValue::Bool(enabled) = &setting.value {
-                            config.mcp_pool.enabled = *enabled;
-                        }
-                    }
-                    "idle_grace_secs" => {
-                        if let ConfigValue::Number(secs) = &setting.value {
-                            config.mcp_pool.idle_grace_secs = (*secs).max(0) as u64;
-                        }
-                    }
-                    key => {
-                        if let (Some(name), ConfigValue::Bool(shared)) =
-                            (key.strip_prefix("shared."), &setting.value)
-                        {
-                            if let Some(server) = config.mcp_servers.get_mut(name) {
-                                server.shared = *shared;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Apply Editor settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Editor) {
-            for setting in settings {
-                if setting.key == "preferred_editor" {
-                    if let ConfigValue::Choice(options, idx) = &setting.value {
-                        if let Some(editor_name) = options.get(*idx) {
-                            // Convert display name to command
-                            if let Some(cmd) = editors::editor_name_to_command(editor_name) {
-                                config.ui_preferences.preferred_editor = Some(cmd.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Apply Appearance settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Appearance) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "theme" => {
-                        if let ConfigValue::Choice(options, idx) = &setting.value {
-                            if let Some(theme) = options.get(*idx) {
-                                config.ui_preferences.theme = theme.to_lowercase();
-                            }
-                        }
-                    }
-                    "show_container_status" => {
-                        if let ConfigValue::Bool(show) = &setting.value {
-                            config.ui_preferences.show_container_status = *show;
-                        }
-                    }
-                    "show_git_status" => {
-                        if let ConfigValue::Bool(show) = &setting.value {
-                            config.ui_preferences.show_git_status = *show;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Apply per-plugin [[config]] edits (extracted to keep this method under
-        // the clippy `too_many_lines` threshold).
-        self.apply_plugin_rows(config);
-    }
-
-    /// Route the Workspace-category rows (`default_workspace`, `branch_prefix`,
-    /// `exclude_paths`, `max_repositories`) back into `config.workspace_defaults`.
-    fn apply_workspace_rows(&self, config: &mut AppConfig) {
-        let Some(settings) = self.settings.get(&ConfigCategory::Workspace) else {
-            return;
-        };
-        for setting in settings {
-            match setting.key.as_str() {
-                "default_workspace" => {
-                    if let ConfigValue::Text(path) = &setting.value {
-                        let expanded = if path.starts_with("~/") {
-                            dirs::home_dir()
-                                .map(|h| h.join(&path[2..]))
-                                .unwrap_or_else(|| std::path::PathBuf::from(path))
-                        } else {
-                            std::path::PathBuf::from(path)
-                        };
-                        // "Default Workspace" is surfaced as
-                        // `workspace_scan_paths.first()` in `from_app_config`, so
-                        // it must be written back as the *primary* entry. The old
-                        // code pushed to the end, leaving `first()` pointing at the
-                        // stale path — editing the field then appeared to do
-                        // nothing on reopen.
-                        //
-                        // Rebuild as: edited path first, then every other distinct
-                        // scan dir. This replaces the old primary (index 0),
-                        // de-dups the edited path, and — crucially — preserves the
-                        // remaining scan dirs even on a no-op confirm (drop the old
-                        // primary, never the tail).
-                        let paths = &mut config.workspace_defaults.workspace_scan_paths;
-                        let tail: Vec<std::path::PathBuf> =
-                            paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
-                        paths.clear();
-                        paths.push(expanded);
-                        paths.extend(tail);
-                    }
-                }
-                "branch_prefix" => {
-                    if let ConfigValue::Text(prefix) = &setting.value {
-                        config.workspace_defaults.branch_prefix = prefix.clone();
-                    }
-                }
-                "exclude_paths" => {
-                    if let ConfigValue::Text(paths) = &setting.value {
-                        config.workspace_defaults.exclude_paths = paths
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    }
-                }
-                "max_repositories" => {
-                    if let ConfigValue::Number(max) = &setting.value {
-                        config.workspace_defaults.max_repositories = *max as usize;
-                    }
-                }
-                _ => {}
-            }
-        }
+    /// Recompute `categories` + `tree` after the row set changed.
+    fn rebuild_tree(&mut self) {
+        self.categories = ConfigCategory::all()
+            .into_iter()
+            .filter(|category| self.settings.get(category).is_some_and(|rows| !rows.is_empty()))
+            .collect();
+        self.tree = screen_model::build_tree(&self.categories, &self.settings);
+        self.refresh();
     }
 
     /// Route every Plugins-category row whose key is `plugin:<name>:<field_key>`
     /// (see [`Self::plugin_row_key`]) into `config.plugins.values[<name>]
-    /// [<field_key>]` — NOT a top-level field. The static enable/disable
-    /// placeholder rows have no such prefix and are skipped. The serialized
-    /// `[plugins.<name>]` table round-trips through the existing
-    /// `AppConfig::save()` pipeline.
+    /// [<field_key>]` — NOT a top-level field. The serialized `[plugins.<name>]`
+    /// table round-trips through the existing `AppConfig::save()` pipeline.
     fn apply_plugin_rows(&self, config: &mut AppConfig) {
         let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
             return;
@@ -2615,6 +2477,92 @@ impl ConfigScreenState {
                 table.insert(field_key.to_string(), toml_value);
             }
         }
+    }
+
+    /// Turn the per-plugin enable toggles into `plugins.disabled`.
+    ///
+    /// Rebuilt from the rows rather than diffed, so re-enabling a plugin removes
+    /// its name; sorted so config.toml diffs stay stable across saves. No-op
+    /// when there are no toggle rows (allowlist mode, or discovery has not run).
+    fn apply_plugin_toggle_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
+            return;
+        };
+        let mut seen_a_toggle = false;
+        let mut disabled: Vec<String> = Vec::new();
+        for setting in settings {
+            let Some(plugin) = Self::parse_plugin_toggle_key(&setting.key) else {
+                continue;
+            };
+            seen_a_toggle = true;
+            if matches!(setting.value, ConfigValue::Bool(false)) {
+                disabled.push(plugin.to_string());
+            }
+        }
+        if !seen_a_toggle {
+            return;
+        }
+        // Keep names for plugins that aren't installed here: a shared config
+        // that disables a plugin this machine never discovered must not have
+        // that line dropped on the next save.
+        for name in &config.plugins.disabled {
+            let known = settings.iter().any(|row| {
+                Self::parse_plugin_toggle_key(&row.key).is_some_and(|plugin| plugin == name)
+            });
+            if !known && !disabled.contains(name) {
+                disabled.push(name.clone());
+            }
+        }
+        disabled.sort();
+        disabled.dedup();
+        config.plugins.disabled = disabled;
+    }
+}
+
+/// The TOML tree the settings rows read from.
+///
+/// `AppConfig` does not model the whole file: `[skills]` and
+/// `[session_reader]` are parsed straight off it by `ainb-cli` and the
+/// session-reader plugin. Their registry rows would otherwise always render
+/// blank, so they are merged in from disk here. Best effort — an unreadable or
+/// unparseable file just leaves those rows empty, exactly as if the sections
+/// were absent.
+fn seed_value(config: &AppConfig) -> toml::Value {
+    let mut seed =
+        toml::Value::try_from(config).unwrap_or_else(|_| toml::Value::Table(toml::Table::new()));
+
+    let on_disk = AppConfig::get_user_config_dir()
+        .ok()
+        .map(|dir| dir.join("config.toml"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    if let Some(on_disk) = on_disk {
+        merge_external_sections(&mut seed, &toml::Value::Table(on_disk));
+    }
+    seed
+}
+
+/// Copy each [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES) section from the
+/// on-disk file into the seed, unless the seed already has it.
+///
+/// The prefixes are DOTTED PATHS (`"fleet.bridge."`), not top-level keys, so
+/// they have to be walked rather than looked up flat: `table.get("fleet.bridge")`
+/// can never match, because TOML nests. Harmless today only because
+/// `fleet.bridge` happens to be a modelled passthrough that the seed already
+/// carries; `skills` and `session_reader` are single-segment and worked by
+/// accident.
+pub(crate) fn merge_external_sections(seed: &mut toml::Value, on_disk: &toml::Value) {
+    for prefix in registry::EXTERNAL_PREFIXES {
+        let path = prefix.trim_end_matches('.');
+        if registry::navigate_toml(seed, path).is_ok() {
+            continue;
+        }
+        let Ok(value) = registry::navigate_toml(on_disk, path) else {
+            continue;
+        };
+        // Best effort: an on-disk shape that will not graft is simply skipped,
+        // leaving those rows blank rather than failing the whole screen.
+        let _ = registry::insert_at(seed, path, value.clone());
     }
 }
 
