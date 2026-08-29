@@ -82,6 +82,11 @@ const CODEX_HOOKS_TEMPLATE: &str = include_str!("../../../../plugins/ainb-hooks/
 const COPILOT_HOOKS_TEMPLATE: &str =
     include_str!("../../../../plugins/ainb-hooks/copilot/hooks.json");
 
+/// The Antigravity drop-in template (with the `__AINB_HOOK_SCRIPT__`
+/// placeholder substituted at install time).
+const ANTIGRAVITY_HOOKS_TEMPLATE: &str =
+    include_str!("../../../../plugins/ainb-hooks/antigravity/hooks.json");
+
 /// The host CLI agent being installed for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,6 +98,9 @@ pub enum Agent {
     /// GitHub Copilot CLI. Hooks are installed as a standalone drop-in at
     /// `~/.copilot/hooks/ainb.json`; included in `ALL`.
     Copilot,
+    /// Google Antigravity CLI. Hooks are installed as a standalone drop-in at
+    /// `~/.gemini/antigravity-cli/hooks/ainb.json`; included in `ALL`.
+    Antigravity,
     /// Catch-all for any agent written by a newer build that this binary
     /// doesn't know. Keeps `install.json` forward-compatible: an unknown
     /// variant no longer hard-fails `serde` deserialization — which used to
@@ -104,7 +112,12 @@ pub enum Agent {
 
 impl Agent {
     /// All known agents this binary can install — used to derive `--all`.
-    pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Codex, Agent::Copilot];
+    pub const ALL: &'static [Agent] = &[
+        Agent::Claude,
+        Agent::Codex,
+        Agent::Copilot,
+        Agent::Antigravity,
+    ];
 
     /// Lowercase name for logs / status output.
     pub fn name(self) -> &'static str {
@@ -112,6 +125,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
+            Agent::Antigravity => "antigravity",
             Agent::Unknown => "unknown",
         }
     }
@@ -134,6 +148,12 @@ pub struct InstallRecord {
     /// to remove only the managed file while leaving sibling drop-ins intact.
     #[serde(default)]
     pub copilot_hooks_json: Option<PathBuf>,
+    /// Resolved path to ainb's standalone Antigravity hooks drop-in
+    /// (`~/.gemini/antigravity-cli/hooks/ainb.json`). Set on install;
+    /// used by uninstall to remove only the managed file while leaving
+    /// sibling drop-ins intact.
+    #[serde(default)]
+    pub antigravity_hooks_json: Option<PathBuf>,
     /// The plugin manifest version that was written to disk at install
     /// time. Compared against [`embedded_plugin_version`] on startup to
     /// detect drift after an `ainb` upgrade. `None` for records written
@@ -627,6 +647,13 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 }
                 Err(e) => failures.push((Agent::Copilot, e)),
             },
+            Agent::Antigravity => match install_antigravity(home, &hook_script) {
+                Ok(hooks_json) => {
+                    record.antigravity_hooks_json = Some(hooks_json);
+                    push_unique(&mut record.agents, Agent::Antigravity);
+                }
+                Err(e) => failures.push((Agent::Antigravity, e)),
+            },
             // Unknown agents are owned by a newer build; skip without
             // disturbing an existing record entry.
             Agent::Unknown => {}
@@ -853,6 +880,36 @@ fn install_copilot(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf>
     Ok(dropin)
 }
 
+/// Path to the ainb-owned Antigravity drop-in file under an explicit home root.
+fn antigravity_dropin(home: &Path) -> PathBuf {
+    home.join(".gemini")
+        .join("antigravity-cli")
+        .join("hooks")
+        .join("ainb.json")
+}
+
+/// Install Antigravity hooks: write our drop-in verbatim to
+/// `<home>/.gemini/antigravity-cli/hooks/ainb.json`. Whole-file write of a standalone
+/// drop-in — we never merge into a shared config, and uninstall deletes just this one
+/// file. Substitutes `__AINB_HOOK_SCRIPT__` placeholder with canonical script path.
+fn install_antigravity(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
+    let dropin = antigravity_dropin(home);
+    if let Some(parent) = dropin.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let path_json = serde_json::to_string(&hook_script_canonical.to_string_lossy())?;
+    let path_escaped = path_json.trim_matches('"');
+    let resolved = ANTIGRAVITY_HOOKS_TEMPLATE.replace("__AINB_HOOK_SCRIPT__", path_escaped);
+    let value: serde_json::Value = serde_json::from_str(&strip_line_comments(&resolved))
+        .context("parsing embedded antigravity hooks template")?;
+    let text = serde_json::to_string_pretty(&value)?;
+    std::fs::write(&dropin, text).with_context(|| format!("writing {}", dropin.display()))?;
+    info!(dropin = %dropin.display(), "installed antigravity hooks");
+    Ok(dropin)
+}
+
 fn is_ainb_managed_entry(entry: &serde_json::Value) -> bool {
     entry.get("_ainb_managed").and_then(|v| v.as_bool()).unwrap_or(false)
         || entry
@@ -925,6 +982,16 @@ pub fn uninstall(paths: &Paths, agents: &[Agent]) -> Result<()> {
                     }
                 }
                 record.agents.retain(|a| *a != Agent::Copilot);
+            }
+            Agent::Antigravity => {
+                if let Some(dropin) = record.antigravity_hooks_json.take() {
+                    if dropin.exists() {
+                        std::fs::remove_file(&dropin).with_context(|| {
+                            format!("removing antigravity drop-in {}", dropin.display())
+                        })?;
+                    }
+                }
+                record.agents.retain(|a| *a != Agent::Antigravity);
             }
             // Unknown agents are owned by a newer build; leave record intact.
             Agent::Unknown => {}
@@ -1205,6 +1272,13 @@ fn agent_health(agent: Agent, record: &InstallRecord, script: &Path) -> HookAgen
         }
         Agent::Copilot => {
             config_references_script(record.copilot_hooks_json.as_deref(), script, "drop-in")
+        }
+        Agent::Antigravity => {
+            config_references_script(
+                record.antigravity_hooks_json.as_deref(),
+                script,
+                "antigravity drop-in",
+            )
         }
         Agent::Unknown => (false, "unknown agent".to_string()),
     };
@@ -1795,6 +1869,112 @@ mod tests {
     }
 
     #[test]
+    fn install_antigravity_writes_native_dropin_file() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let record = install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
+
+        let dropin = dir
+            .path()
+            .join(".gemini/antigravity-cli/hooks/ainb.json");
+        assert_eq!(
+            record.antigravity_hooks_json.as_deref(),
+            Some(dropin.as_path())
+        );
+        assert!(
+            dropin.exists(),
+            "drop-in file must exist at {}",
+            dropin.display()
+        );
+
+        let raw = std::fs::read_to_string(&dropin).unwrap();
+        assert!(
+            !raw.contains("__AINB_HOOK_SCRIPT__"),
+            "placeholder survived: {raw}"
+        );
+        assert!(
+            raw.contains(&record.hook_script.to_string_lossy().to_string()),
+            "drop-in lacks resolved script path: {raw}"
+        );
+
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v["version"],
+            serde_json::json!(1),
+            "missing version:1: {raw}"
+        );
+        let hooks = v["hooks"].as_object().expect("hooks object");
+
+        for event in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "Notification",
+        ] {
+            let arr = hooks
+                .get(event)
+                .and_then(|e| e.as_array())
+                .unwrap_or_else(|| panic!("event {event} missing or not an array: {raw}"));
+            assert_eq!(arr.len(), 1, "expected 1 entry for {event}: {raw}");
+            let entry = &arr[0];
+            assert_eq!(entry["type"], serde_json::json!("command"), "{raw}");
+            let cmd = entry["command"].as_str().expect("command string");
+            assert!(
+                cmd.contains("AINB_AGENT=antigravity"),
+                "command not tagged for antigravity: {cmd}"
+            );
+            assert!(cmd.contains("notify.sh"), "command lacks script: {cmd}");
+        }
+    }
+
+    #[test]
+    fn uninstall_antigravity_removes_dropin_only() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        let hooks_dir = dir.path().join(".gemini/antigravity-cli/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let sibling = hooks_dir.join("other.json");
+        std::fs::write(&sibling, r#"{"version":1,"hooks":{}}"#).unwrap();
+
+        install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
+        let dropin = hooks_dir.join("ainb.json");
+        assert!(dropin.exists());
+        assert!(sibling.exists(), "install must not touch sibling drop-ins");
+
+        uninstall(&p, &[Agent::Antigravity]).unwrap();
+        assert!(!dropin.exists(), "our drop-in must be removed");
+        assert!(
+            sibling.exists(),
+            "uninstall must not touch sibling drop-ins"
+        );
+        assert!(
+            hooks_dir.exists(),
+            "uninstall must not remove the hooks dir"
+        );
+
+        let record = InstallRecord::load(&p).unwrap();
+        assert!(!record.agents.contains(&Agent::Antigravity));
+    }
+
+    #[test]
+    fn install_antigravity_overwrites_its_own_dropin_idempotently() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
+        install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
+        let dropin = dir
+            .path()
+            .join(".gemini/antigravity-cli/hooks/ainb.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dropin).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn status_reports_each_known_agent() {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
@@ -1804,6 +1984,7 @@ mod tests {
         assert!(names.contains(&"claude"));
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"copilot"));
+        assert!(names.contains(&"antigravity"));
         for r in &rows {
             assert!(!r.installed);
             assert!(!r.socket_ok);

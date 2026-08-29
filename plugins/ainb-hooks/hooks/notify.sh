@@ -249,7 +249,7 @@ fi
 # parent inbox commit, and — on Stop — the synchronous drain that prints
 # {"decision":"block",...}). The shell only forwards what it already parsed and
 # relays the command's stdout verbatim so Claude Code sees the block JSON.
-if { [ "${AINB_MANAGED:-}" = "atc" ] || [ "${AINB_AGENT:-}" = "claude" ] || [ "${AINB_AGENT:-}" = "codex" ]; } \
+if { [ "${AINB_MANAGED:-}" = "atc" ] || [ "${AINB_AGENT:-}" = "claude" ] || [ "${AINB_AGENT:-}" = "codex" ] || [ "${AINB_AGENT:-}" = "antigravity" ]; } \
   && [ -n "${AINB_HOOK_BIN}" ] && [ -x "${AINB_HOOK_BIN}" ]; then
   AINB_HOOK_EVENT="${AINB_HOOK_EVENT:-${AINB_RAW_EVENT}}"
   # Resolve the matcher to forward: the managed command sets AINB_HOOK_MATCHER

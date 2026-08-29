@@ -110,6 +110,32 @@ fn fire_copilot_hook(script: &Path, home: &Path, json: &str) {
     );
 }
 
+fn fire_antigravity_hook(script: &Path, home: &Path, json: &str) {
+    let out = Command::new("bash")
+        .arg(script)
+        .env("HOME", home)
+        .env("AINB_AGENT", "antigravity")
+        .env("AINB_NOTIFY_DISABLE_LAZY_SPAWN", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(json.as_bytes()).unwrap();
+            }
+            child.wait_with_output()
+        })
+        .expect("running antigravity hook");
+    assert!(
+        out.status.success(),
+        "antigravity hook failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn atc_hook_prefers_ainb_bin_over_path() {
     let script = hook_script();
@@ -268,13 +294,19 @@ async fn hook_script_into_real_daemon_persists_supported_agents() {
     let copilot_stop_json = r#"{"type":"agentStop","sessionId":"sess-copilot-2","working_directory":"/Users/example/copilot-proj"}"#;
     fire_copilot_hook(&script, &home, copilot_stop_json);
 
+    // Antigravity path: JSON on stdin, hook_event_name/type, agent=antigravity.
+    let antigravity_notification_json = r#"{"hook_event_name":"Notification","session_id":"sess-agy-1","cwd":"/Users/example/agy-proj"}"#;
+    fire_antigravity_hook(&script, &home, antigravity_notification_json);
+    let antigravity_stop_json = r#"{"hook_event_name":"Stop","session_id":"sess-agy-2","cwd":"/Users/example/agy-proj"}"#;
+    fire_antigravity_hook(&script, &home, antigravity_stop_json);
+
     // Give the daemon a tick to drain the writes.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Open the same DB the daemon wrote.
     let store = Store::open(&paths.db).unwrap();
     let rows = store.list(false, None, None, 100).unwrap();
-    assert_eq!(rows.len(), 5, "expected 5 rows, got {:?}", rows);
+    assert_eq!(rows.len(), 7, "expected 7 rows, got {:?}", rows);
 
     let mut by_agent: std::collections::HashMap<String, _> = std::collections::HashMap::new();
     for row in &rows {
@@ -304,6 +336,14 @@ async fn hook_script_into_real_daemon_persists_supported_agents() {
         .collect();
     assert_eq!(copilot_events.get("notification"), Some(&"sess-copilot-1"));
     assert_eq!(copilot_events.get("agentStop"), Some(&"sess-copilot-2"));
+
+    let antigravity_events: std::collections::HashMap<_, _> = rows
+        .iter()
+        .filter(|row| row.agent == "antigravity")
+        .map(|row| (row.raw_event.as_str(), row.session_id.as_str()))
+        .collect();
+    assert_eq!(antigravity_events.get("Notification"), Some(&"sess-agy-1"));
+    assert_eq!(antigravity_events.get("Stop"), Some(&"sess-agy-2"));
 
     daemon.abort();
 }
