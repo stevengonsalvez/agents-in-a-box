@@ -464,6 +464,17 @@ pub struct FleetConfig {
     /// `Option` for the same presence reason as [`InterviewConfig::surface`].
     #[serde(default)]
     pub terminal: Option<String>,
+    /// `[fleet.bridge]` carried verbatim, never interpreted here.
+    ///
+    /// The phone bridge parses this table itself, off the same file, with its
+    /// own resolver (`fleet::bridge::config`) — it holds bot tokens, so
+    /// `ainb-core` deliberately does not model its shape. It still has to be a
+    /// field: `save()` preserves unmodelled *top-level* sections, but `fleet`
+    /// IS modelled, so anything nested under it that has no field here would be
+    /// dropped on the next save. That is exactly how the bridge's Telegram,
+    /// Slack and Discord tokens used to get wiped by any settings save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<toml::Value>,
 }
 
 fn default_fleet_terminal() -> &'static str {
@@ -476,6 +487,7 @@ impl Default for FleetConfig {
             cost: CostBudgetConfig::default(),
             interview: InterviewConfig::default(),
             terminal: None,
+            bridge: None,
         }
     }
 }
@@ -960,13 +972,39 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Overlay the sections this struct models onto whatever is already on
+    /// disk, leaving every other top-level section untouched.
+    ///
+    /// `AppConfig` does not model the whole file. `[skills]` (catalog release +
+    /// API key) and `[session_reader]` are parsed straight off the same path by
+    /// other crates, and nothing here has a field for them. A plain
+    /// `to_string_pretty(self)` write therefore erased them on every settings
+    /// save. Overlaying key-by-key keeps them, and keeps any section a future
+    /// crate adds, without `ainb-core` needing to know what they are.
+    ///
+    /// Deliberately shallow: a modelled section (`[fleet]`, `[mcp_servers]`, …)
+    /// is replaced wholesale so that *removing* an entry from it actually
+    /// sticks. Unmodelled tables nested under a modelled section need a
+    /// passthrough field instead — see [`FleetConfig::bridge`].
+    fn overlay_onto_existing(&self, existing: &str) -> Result<String> {
+        let mut table = existing.parse::<toml::Table>().unwrap_or_default();
+        let toml::Value::Table(ours) = toml::Value::try_from(self)? else {
+            anyhow::bail!("AppConfig did not serialize to a TOML table");
+        };
+        for (key, value) in ours {
+            table.insert(key, value);
+        }
+        Ok(toml::to_string_pretty(&table)?)
+    }
+
     /// Save configuration to user config directory
     pub fn save(&self) -> Result<()> {
         let config_dir = Self::get_user_config_dir()?;
         fs::create_dir_all(&config_dir)?;
 
         let config_path = config_dir.join("config.toml");
-        let content = toml::to_string_pretty(self)?;
+        let existing = fs::read_to_string(&config_path).unwrap_or_default();
+        let content = self.overlay_onto_existing(&existing)?;
 
         match fs::write(&config_path, &content) {
             Ok(()) => {
@@ -1143,6 +1181,9 @@ impl AppConfig {
         if other.fleet.terminal.is_some() {
             self.fleet.terminal.clone_from(&other.fleet.terminal);
         }
+        if other.fleet.bridge.is_some() {
+            self.fleet.bridge.clone_from(&other.fleet.bridge);
+        }
 
         // Pool settings: trust the loaded layer whenever it differs from the
         // defaults. `enabled = false` must survive (it IS the default-diverging
@@ -1309,6 +1350,109 @@ impl ProjectConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The overlay serializes a `toml::Table`, not the struct, so field
+    /// declaration order no longer protects us: TOML requires every top-level
+    /// scalar before the first table, and a sorted map interleaves them
+    /// (`authentication` sorts before `version`). Prove a fully-populated
+    /// config still renders to something that parses back.
+    #[test]
+    fn overlay_output_is_valid_toml_for_a_full_config() {
+        let mut config = AppConfig::default();
+        config.load_builtin_templates();
+
+        let rendered = config
+            .overlay_onto_existing("[skills]\napi_key = \"sk-secret\"\n")
+            .expect("overlay must not fail on a fully-populated config");
+
+        let reparsed: AppConfig = toml::from_str(&rendered).expect("overlay emitted invalid TOML");
+        assert_eq!(reparsed.version, config.version);
+        assert_eq!(
+            reparsed.default_container_template,
+            config.default_container_template
+        );
+        assert_eq!(
+            reparsed.container_templates.len(),
+            config.container_templates.len()
+        );
+
+        let table: toml::Table = rendered.parse().expect("valid TOML");
+        assert_eq!(table["skills"]["api_key"].as_str(), Some("sk-secret"));
+    }
+
+    /// Saving must not eat the sections `AppConfig` does not model.
+    ///
+    /// `[skills]` and `[session_reader]` are read off this same file by
+    /// `ainb-cli` and the session-reader plugin; `[fleet.bridge]` holds the
+    /// phone bridge's bot tokens. Before the overlay write, every settings save
+    /// replaced the file wholesale and silently destroyed all three.
+    #[test]
+    fn save_preserves_sections_app_config_does_not_model() {
+        let existing = r#"
+[skills]
+catalog_release = "v1.5.0"
+api_key = "sk-secret"
+
+[session_reader]
+incremental_window_days = 90
+
+[fleet.bridge.telegram]
+token = "keychain:ainb-telegram"
+user_id = 123456789
+
+[ui_preferences]
+theme = "dark"
+"#;
+        // Round-trip through load so `[fleet.bridge]` reaches the struct the
+        // way a real save does, then write back over the same content.
+        let loaded: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = loaded.overlay_onto_existing(existing).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+
+        assert_eq!(
+            reparsed["skills"]["catalog_release"].as_str(),
+            Some("v1.5.0"),
+            "[skills] was dropped by save"
+        );
+        assert_eq!(
+            reparsed["skills"]["api_key"].as_str(),
+            Some("sk-secret"),
+            "the skills API key was dropped by save"
+        );
+        assert_eq!(
+            reparsed["session_reader"]["incremental_window_days"].as_integer(),
+            Some(90),
+            "[session_reader] was dropped by save"
+        );
+        assert_eq!(
+            reparsed["fleet"]["bridge"]["telegram"]["token"].as_str(),
+            Some("keychain:ainb-telegram"),
+            "[fleet.bridge] was dropped by save — bridge tokens are gone"
+        );
+    }
+
+    /// The flip side of the overlay: a modelled section is replaced wholesale,
+    /// so deleting an entry from it actually sticks instead of being resurrected
+    /// from the previous file contents.
+    #[test]
+    fn save_replaces_modelled_sections_wholesale() {
+        let existing = r#"
+[ui_preferences]
+theme = "light"
+show_git_status = false
+"#;
+        let mut config: AppConfig = toml::from_str(existing).expect("parses");
+        config.ui_preferences.show_git_status = true;
+
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+
+        assert_eq!(
+            reparsed["ui_preferences"]["show_git_status"].as_bool(),
+            Some(true),
+            "a modelled field kept its stale on-disk value"
+        );
+    }
 
     #[test]
     fn test_default_config() {
