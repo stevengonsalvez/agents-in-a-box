@@ -56,12 +56,11 @@ pub enum ConfigCommands {
 }
 
 /// Execute a config subcommand
-#[allow(clippy::unused_async)]
 pub async fn execute(command: ConfigCommands, format: OutputFormat) -> Result<()> {
     match command {
         ConfigCommands::Show => cmd_show(format),
         ConfigCommands::Get { key } => cmd_get(&key, format),
-        ConfigCommands::Set { key, value } => cmd_set(&key, &value),
+        ConfigCommands::Set { key, value } => cmd_set(&key, &value).await,
         ConfigCommands::Reset { force } => cmd_reset(force),
         ConfigCommands::Path => cmd_path(format),
         ConfigCommands::Edit => cmd_edit(),
@@ -111,10 +110,18 @@ fn cmd_get(key: &str, format: OutputFormat) -> Result<()> {
 }
 
 /// Set a config value in the user-level config file
-fn cmd_set(key: &str, value: &str) -> Result<()> {
+async fn cmd_set(key: &str, value: &str) -> Result<()> {
     let config_dir = AppConfig::get_user_config_dir()?;
     fs::create_dir_all(&config_dir)?;
     let config_path = config_dir.join("config.toml");
+
+    // A `hangar_daemon.*` key is not in this file: its backend is the Hangar
+    // daemon's `daemon_config` SQLite table. Writing it here would produce a
+    // `[hangar_daemon]` section nothing ever reads, which is exactly the silent
+    // no-op the registry exists to stop.
+    if let Some(daemon_key) = crate::config::registry::hangar_daemon_key(key) {
+        return set_hangar_daemon(key, daemon_key, value).await;
+    }
 
     // Validate against CONFIG_REGISTRY first: a mistyped key or an out-of-range
     // value fails here rather than landing in the file and being dropped by the
@@ -176,6 +183,32 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     }
     println!("Saved to {}", config_path.display());
 
+    Ok(())
+}
+
+/// Write one knob to the Hangar daemon's `daemon_config` table.
+///
+/// Validated by the daemon's OWN descriptor rather than by `CONFIG_REGISTRY`:
+/// that table is the daemon's authority on what it accepts, and it is the same
+/// gate the `hangar/daemon_config_set` RPC and `ainb hangar daemon config set`
+/// pass. `CONFIG_REGISTRY` still owns the row's label, help and search entry.
+///
+/// Opening the store creates the database if it is missing, which is correct
+/// here and only here: the user has explicitly asked for a value to be stored.
+async fn set_hangar_daemon(key: &str, daemon_key: &str, value: &str) -> Result<()> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let descriptor = ainb_hangar_core::daemon_config::descriptor(daemon_key)
+        .ok_or_else(|| anyhow!("'{key}' is not a Hangar daemon config key"))?;
+    let normalized = descriptor.validate(value).map_err(|why| anyhow!(why))?;
+    let store = ainb_hangar_store::Store::open_default()
+        .await
+        .context("open the Hangar database")?;
+    DaemonConfigRepo::set(store.pool(), daemon_key, &normalized)
+        .await
+        .with_context(|| format!("write daemon_config `{daemon_key}`"))?;
+    println!("Set {key} = {normalized}");
+    println!("Saved to the Hangar daemon database (takes effect on its next tick)");
     Ok(())
 }
 
