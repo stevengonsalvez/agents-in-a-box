@@ -274,6 +274,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
                 FleetProvider::Claude => "claude",
                 FleetProvider::Codex => "codex",
                 FleetProvider::Copilot => "copilot",
+                FleetProvider::Antigravity => "antigravity",
                 FleetProvider::Acp => "acp",
                 FleetProvider::Unknown => "unknown",
             }
@@ -2886,6 +2887,8 @@ fn provider_label(provider: &str) -> &'static str {
         "CODEX"
     } else if provider.eq_ignore_ascii_case("copilot") {
         "COPILOT"
+    } else if provider.eq_ignore_ascii_case("antigravity") || provider.eq_ignore_ascii_case("agy") {
+        "ANTIGRAVITY"
     } else if provider.eq_ignore_ascii_case("acp") {
         "ACP"
     } else {
@@ -6036,6 +6039,7 @@ mod tests {
                 FleetProvider::Claude
                 | FleetProvider::Codex
                 | FleetProvider::Copilot
+                | FleetProvider::Antigravity
                 | FleetProvider::Acp => true,
                 FleetProvider::Unknown => false,
             }
@@ -6045,6 +6049,7 @@ mod tests {
             FleetProvider::Claude,
             FleetProvider::Codex,
             FleetProvider::Copilot,
+            FleetProvider::Antigravity,
             FleetProvider::Acp,
             FleetProvider::Unknown,
         ] {

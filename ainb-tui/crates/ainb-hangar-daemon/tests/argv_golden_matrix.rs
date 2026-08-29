@@ -118,6 +118,7 @@ const fn backend_label(backend: Backend) -> &'static str {
         Backend::Claude => "claude",
         Backend::Codex => "codex",
         Backend::Copilot => "copilot",
+        Backend::Antigravity => "antigravity",
     }
 }
 
@@ -140,6 +141,7 @@ const fn program_placeholder(backend: Backend) -> &'static str {
         Backend::Claude => "<CLAUDE_BIN>",
         Backend::Codex => "<CODEX_BIN>",
         Backend::Copilot => "<COPILOT_BIN>",
+        Backend::Antigravity => "<ANTIGRAVITY_BIN>",
     }
 }
 
@@ -163,7 +165,7 @@ fn cases_for(backend: Backend) -> Vec<Case> {
 }
 
 /// Every backend in the matrix, in golden-file order.
-const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Copilot];
+const BACKENDS: [Backend; 4] = [Backend::Claude, Backend::Codex, Backend::Copilot, Backend::Antigravity];
 
 /// A runner whose provider paths are distinct, deterministic sentinels.
 ///
@@ -175,6 +177,7 @@ fn golden_runner() -> Runner {
         claude_path: PathBuf::from("/golden/bin/claude"),
         codex_path: PathBuf::from("/golden/bin/codex"),
         copilot_path: PathBuf::from("/golden/bin/copilot"),
+        antigravity_path: PathBuf::from("/golden/bin/agy"),
         max_runtime: Duration::from_secs(60),
         tail_lines: 50,
         sandbox: true,
@@ -370,7 +373,7 @@ fn provider_argv_matrix_matches_golden() {
     );
 }
 
-/// The matrix must stay exhaustive: 3 backends x 2 modes x 2 model states x
+/// The matrix must stay exhaustive: 4 backends x 2 modes x 2 model states x
 /// 2 cli_args states, with no duplicate case labels.
 ///
 /// Without this, silently dropping a loop would shrink the contract while the
@@ -388,7 +391,7 @@ fn matrix_covers_every_backend_mode_and_option_axis() {
         );
         labels.extend(cases.iter().map(Case::label));
     }
-    assert_eq!(labels.len(), 24, "matrix is not 3 x 2 x 2 x 2");
+    assert_eq!(labels.len(), 32, "matrix is not 4 x 2 x 2 x 2");
 
     let mut unique = labels.clone();
     unique.sort_unstable();

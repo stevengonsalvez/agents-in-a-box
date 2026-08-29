@@ -1,0 +1,96 @@
+# ARGV GOLDEN: antigravity
+#
+# Frozen output of Runner::provider_command for every antigravity case in the
+# matrix: mode x model x cli_args. One token per line; <PROMPT> and
+# <*_BIN> are normalised so the file is stable across machines.
+#
+# Regenerate with UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon \
+#   --test argv_golden_matrix    (only when the change is INTENDED).
+
+=== case: antigravity | headless | model=default | cli_args=absent
+program: <ANTIGRAVITY_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --
+  <PROMPT>
+
+=== case: antigravity | headless | model=default | cli_args=present
+program: <ANTIGRAVITY_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: antigravity | headless | model=pinned | cli_args=absent
+program: <ANTIGRAVITY_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --model
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: antigravity | headless | model=pinned | cli_args=present
+program: <ANTIGRAVITY_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: antigravity | interactive | model=default | cli_args=absent
+program: <ANTIGRAVITY_BIN>
+argv:
+  --dangerously-skip-permissions
+  -i
+  --
+  <PROMPT>
+
+=== case: antigravity | interactive | model=default | cli_args=present
+program: <ANTIGRAVITY_BIN>
+argv:
+  --dangerously-skip-permissions
+  -i
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: antigravity | interactive | model=pinned | cli_args=absent
+program: <ANTIGRAVITY_BIN>
+argv:
+  --dangerously-skip-permissions
+  -i
+  --model
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: antigravity | interactive | model=pinned | cli_args=present
+program: <ANTIGRAVITY_BIN>
+argv:
+  --dangerously-skip-permissions
+  -i
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
