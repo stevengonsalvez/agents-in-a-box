@@ -998,6 +998,43 @@ mod tests {
     use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
     use crate::config::AppConfig;
 
+    // ========================================================================
+    // Config screen category list
+    // ========================================================================
+
+    /// The screen renders only the categories that have rows. `ConfigCategory`
+    /// now covers the whole TOML schema (registry.rs), so without this filter
+    /// opening Settings would show eight empty sections.
+    #[test]
+    fn config_screen_lists_only_categories_that_have_rows() {
+        let screen = ConfigScreenState::default();
+        for category in &screen.categories {
+            let rows = screen
+                .settings
+                .get(category)
+                .unwrap_or_else(|| panic!("category {category:?} is listed but has no settings"));
+            assert!(
+                !rows.is_empty(),
+                "category {category:?} is listed but has no rows"
+            );
+        }
+    }
+
+    /// The tmux tripwire (`tripwire_config_plugins`) steps down exactly five
+    /// times to reach Plugins. Renumbering the category list silently breaks a
+    /// test that lives in another file, so pin the order here where it is cheap
+    /// to see.
+    #[test]
+    fn plugins_is_the_sixth_category() {
+        let screen = ConfigScreenState::default();
+        assert_eq!(
+            screen.categories.get(5),
+            Some(&ConfigCategory::Plugins),
+            "categories: {:?}",
+            screen.categories
+        );
+    }
+
     fn set_default_workspace(screen: &mut ConfigScreenState, value: &str) {
         let settings = screen
             .settings

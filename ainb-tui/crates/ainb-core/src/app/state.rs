@@ -1588,6 +1588,13 @@ impl AgentProvider {
 // Configuration Screen State
 // ============================================================================
 
+/// A section of the settings screen.
+///
+/// Every [`ConfigRow`](crate::config::ConfigRow) files under one of these, so
+/// the list has to cover the whole TOML schema, not just the sections the
+/// hand-written rows below happen to reach. The screen renders the subset that
+/// actually has rows today; `CONFIG_REGISTRY` is the source of truth for the
+/// rest, and wiring it in is what removes that gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigCategory {
     Authentication,
@@ -1597,9 +1604,16 @@ pub enum ConfigCategory {
     Editor,
     Plugins,
     McpPool,
-    Permissions,
     Appearance,
     Analytics,
+    General,
+    ContainerTemplates,
+    McpServers,
+    Fleet,
+    Usage,
+    Skills,
+    SessionReader,
+    Presets,
 }
 
 impl ConfigCategory {
@@ -1612,9 +1626,16 @@ impl ConfigCategory {
             ConfigCategory::Editor,
             ConfigCategory::Plugins,
             ConfigCategory::McpPool,
-            ConfigCategory::Permissions,
             ConfigCategory::Appearance,
             ConfigCategory::Analytics,
+            ConfigCategory::General,
+            ConfigCategory::ContainerTemplates,
+            ConfigCategory::McpServers,
+            ConfigCategory::Fleet,
+            ConfigCategory::Usage,
+            ConfigCategory::Skills,
+            ConfigCategory::SessionReader,
+            ConfigCategory::Presets,
         ]
     }
 
@@ -1627,9 +1648,16 @@ impl ConfigCategory {
             ConfigCategory::Editor => "Editor",
             ConfigCategory::Plugins => "Plugins",
             ConfigCategory::McpPool => "MCP Pool",
-            ConfigCategory::Permissions => "Permissions",
             ConfigCategory::Appearance => "Appearance",
             ConfigCategory::Analytics => "Analytics",
+            ConfigCategory::General => "General",
+            ConfigCategory::ContainerTemplates => "Container Templates",
+            ConfigCategory::McpServers => "MCP Servers",
+            ConfigCategory::Fleet => "Fleet",
+            ConfigCategory::Usage => "Usage",
+            ConfigCategory::Skills => "Skills",
+            ConfigCategory::SessionReader => "Session Reader",
+            ConfigCategory::Presets => "Presets",
         }
     }
 
@@ -1642,9 +1670,16 @@ impl ConfigCategory {
             ConfigCategory::Editor => "📝",
             ConfigCategory::Plugins => "🔌",
             ConfigCategory::McpPool => "🧬",
-            ConfigCategory::Permissions => "🛡️",
             ConfigCategory::Appearance => "🎨",
             ConfigCategory::Analytics => "📊",
+            ConfigCategory::General => "⚙️",
+            ConfigCategory::ContainerTemplates => "📦",
+            ConfigCategory::McpServers => "🛰️",
+            ConfigCategory::Fleet => "🚁",
+            ConfigCategory::Usage => "💰",
+            ConfigCategory::Skills => "🎓",
+            ConfigCategory::SessionReader => "📖",
+            ConfigCategory::Presets => "🗂️",
         }
     }
 
@@ -1657,9 +1692,16 @@ impl ConfigCategory {
             ConfigCategory::Editor => "Preferred code editor for sessions",
             ConfigCategory::Plugins => "Installed plugins, enable/disable",
             ConfigCategory::McpPool => "Shared MCP servers: one process across sessions",
-            ConfigCategory::Permissions => "File write, shell, git approval",
             ConfigCategory::Appearance => "Theme, colors, status indicators",
             ConfigCategory::Analytics => "Usage tracking, cost alerts",
+            ConfigCategory::General => "Default template, presets file",
+            ConfigCategory::ContainerTemplates => "Per-template image, resources, mounts",
+            ConfigCategory::McpServers => "Per-server install and launch definitions",
+            ConfigCategory::Fleet => "Cost caps, interview surface, phone bridge",
+            ConfigCategory::Usage => "Plan, currency, model aliases",
+            ConfigCategory::Skills => "Catalog release, API key",
+            ConfigCategory::SessionReader => "Incremental scan window",
+            ConfigCategory::Presets => "Where presets.toml lives",
         }
     }
 }
@@ -1913,31 +1955,6 @@ impl Default for ConfigScreenState {
             ],
         );
 
-        // Permissions
-        settings.insert(
-            ConfigCategory::Permissions,
-            vec![
-                ConfigSetting {
-                    key: "allow_file_write".to_string(),
-                    label: "Allow File Write".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Allow agents to write files".to_string(),
-                },
-                ConfigSetting {
-                    key: "allow_shell".to_string(),
-                    label: "Allow Shell Commands".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Allow agents to run shell commands".to_string(),
-                },
-                ConfigSetting {
-                    key: "allow_git".to_string(),
-                    label: "Allow Git Operations".to_string(),
-                    value: ConfigValue::Bool(true),
-                    description: "Allow agents to perform git operations".to_string(),
-                },
-            ],
-        );
-
         // Editor
         // Detect available editors for the editor preference setting
         let available_editors = editors::get_editor_options();
@@ -2042,7 +2059,14 @@ impl Default for ConfigScreenState {
         Self {
             selected_category: 0,
             selected_setting: 0,
-            categories: ConfigCategory::all(),
+            // Only the categories that have hand-written rows today. The
+            // registry knows about more (container templates, fleet, usage,
+            // …) but nothing renders them yet, and an empty category is worse
+            // than an absent one.
+            categories: ConfigCategory::all()
+                .into_iter()
+                .filter(|category| settings.contains_key(category))
+                .collect(),
             settings,
             editing: false,
             edit_buffer: String::new(),
@@ -2490,18 +2514,6 @@ impl ConfigScreenState {
                         if let ConfigValue::Bool(show) = &setting.value {
                             config.ui_preferences.show_git_status = *show;
                         }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Apply Permissions settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Permissions) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "allow_file_write" | "allow_shell" | "allow_git" => {
-                        // These would be added to AppConfig in future
                     }
                     _ => {}
                 }
