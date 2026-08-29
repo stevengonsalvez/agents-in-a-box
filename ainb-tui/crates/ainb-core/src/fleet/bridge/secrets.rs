@@ -64,9 +64,49 @@ fn resolve_secret_with(value: &str, env: impl Fn(&str) -> Option<String>) -> Str
     raw.to_string()
 }
 
-/// macOS keychain lookup, bounded by a watchdog so a locked-keychain prompt
-/// can't hang the bridge at startup.
+/// Keychain lookup for a `keychain:<service>` reference.
+///
+/// Two readers, in this order:
+///
+/// 1. **In-process, via `keyring`.** This is how the settings screen's
+///    "store in the keychain" action WRITES the item, and an item is readable
+///    without a prompt by the process that created it. Shelling out to
+///    `security` for something ainb just wrote fails instead: the ACL trusts
+///    the creating binary, not `/usr/bin/security`, so the read raises an
+///    authorization dialog and the watchdog below times out before the user can
+///    answer it.
+/// 2. **`/usr/bin/security`**, for items a user (or an older ainb) put there by
+///    hand. Apple-signed and stable, so an "Always Allow" against it sticks
+///    across rebuilds.
+///
+/// Same reference syntax and the same keychain item either way — this is one
+/// scheme with two readers, not two schemes.
 fn resolve_keychain(service: &str) -> String {
+    if let Some(found) = resolve_keychain_in_process(service) {
+        return found;
+    }
+    resolve_keychain_via_security(service)
+}
+
+/// Step 1: the `keyring` read. `None` means "not found here, try `security`" —
+/// including on error, because a keychain ainb cannot open in-process may still
+/// be readable by the Apple-signed helper.
+fn resolve_keychain_in_process(service: &str) -> Option<String> {
+    let entry = keyring::Entry::new(service, crate::credentials::REFERENCE_ACCOUNT).ok()?;
+    match entry.get_password() {
+        Ok(password) if !password.trim().is_empty() => Some(password.trim().to_string()),
+        Ok(_) => None,
+        Err(keyring::Error::NoEntry) => None,
+        Err(e) => {
+            tracing::debug!(service, error = %e, "in-process keychain read failed; trying security");
+            None
+        }
+    }
+}
+
+/// Step 2: `/usr/bin/security`, bounded by a watchdog so a locked-keychain
+/// prompt can't hang the bridge at startup.
+fn resolve_keychain_via_security(service: &str) -> String {
     let service_owned = service.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     // Detached on purpose: on a timeout we stop waiting on `rx` and return, but
