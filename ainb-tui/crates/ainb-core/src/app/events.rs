@@ -780,6 +780,22 @@ fn worth_persisting_repo_defaults(
     !prompt_text.is_empty() || defaults.per_repo.contains_key(repo_label)
 }
 
+/// Whether a secret row should render as configured.
+///
+/// A `keychain:` reference counts on the strength of being set. Whether the
+/// secret actually retrieves is a question for whoever needs its value, not for
+/// a status dot drawn on the event loop.
+fn secret_reference_is_set(reference: &str) -> bool {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("keychain:") {
+        return true;
+    }
+    !crate::fleet::bridge::secrets::resolve_secret(reference).trim().is_empty()
+}
+
 impl EventHandler {
     fn persist_sessions_pane_preferences(state: &mut AppState) {
         state.app_config.ui_preferences.sessions_sidebar_width =
@@ -7195,12 +7211,18 @@ impl EventHandler {
                                         Some(crate::app::state::ConfigValue::Secret(
                                             crate::app::state::SecretValue {
                                                 reference: text.clone(),
-                                                resolved:
-                                                    !crate::fleet::bridge::secrets::resolve_secret(
-                                                        text,
-                                                    )
-                                                    .trim()
-                                                    .is_empty(),
+                                                // A `keychain:` reference is
+                                                // taken at face value, exactly
+                                                // as `ConfigRow::to_value`
+                                                // does. Resolving it here means
+                                                // a keyring read plus a
+                                                // `security` shell-out, each
+                                                // bounded at 5s, on the event
+                                                // loop — up to ~10s of frozen
+                                                // TUI against a locked
+                                                // keychain, just for a status
+                                                // dot.
+                                                resolved: secret_reference_is_set(text),
                                             },
                                         ))
                                     }

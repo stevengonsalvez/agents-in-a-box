@@ -127,6 +127,15 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     } else {
         existing.parse::<toml::Value>().context("Failed to parse user config")?
     };
+    // `[usage]` is owned by the burndown plugin. Its rows are registered and
+    // validated, so without this the value passes every check and then dies
+    // three calls later on "is in a section ainb-core must not write" — a
+    // correct refusal with nothing actionable in it.
+    if crate::config::is_burndown_owned(key) {
+        anyhow::bail!(
+            "'{key}' is owned by the burndown plugin — set it with `ainb burndown plan set`"
+        );
+    }
     set_validated(&mut probe, key, value)?;
 
     // An emptied optional key is a REMOVAL, not a value: `set_validated` drops
@@ -145,6 +154,7 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     // `config/example.config.toml`, which is ~320 lines of comments explaining
     // the keys. `ainb config set docker.timeout 90` must change one line, not
     // strip the manual.
+    let cleared = validated.is_none();
     match validated {
         Some(value) => {
             crate::config::write_keys_into(&config_path, &[(key.to_string(), value)])
@@ -156,7 +166,10 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
         }
     }
 
-    if value.is_empty() {
+    // Keyed off what actually happened: only an OPTIONAL_KEYS row is removed
+    // when emptied. `skills.api_key = ""` stores an empty string, and calling
+    // that "Cleared" would be a lie.
+    if cleared {
         println!("Cleared {key}");
     } else {
         println!("Set {key} = {value}");

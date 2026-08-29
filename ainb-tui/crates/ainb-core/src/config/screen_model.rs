@@ -70,7 +70,7 @@ fn expand_from(node: &toml::Value, rest: &[String], prefix: String, out: &mut Ve
 
     let base = join_path(&prefix, &rest[..star].join("."));
     for (name, child) in table {
-        expand_from(child, &rest[star + 1..], join_path(&base, name), out);
+        expand_from(child, &rest[star + 1..], join_map_key(&base, name), out);
     }
 }
 
@@ -80,6 +80,17 @@ fn join_path(prefix: &str, tail: &str) -> String {
         (false, true) => prefix.to_string(),
         (false, false) => format!("{prefix}.{tail}"),
     }
+}
+
+/// Join a map key onto a path, quoting it when it is not a bare TOML key.
+///
+/// A server called `context7.io` would otherwise produce the row key
+/// `mcp_servers.context7.io.shared`, which re-splits into a path that does not
+/// exist: the row seeds from a default instead of disk, and toggling it writes
+/// a `mcp_servers.context7 = { io = { ... } }` table that stops the whole
+/// config deserializing. Same class as the dotted-key bug in `flatten_leaves`.
+fn join_map_key(prefix: &str, key: &str) -> String {
+    join_path(prefix, &crate::config::registry::quote_key_segment(key))
 }
 
 /// Why a registry row cannot be edited from the settings screen, or `None`
