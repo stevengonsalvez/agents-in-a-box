@@ -83,31 +83,14 @@ pub fn snapshot() -> Arc<AppConfig> {
 /// the caller only ever holds the user one.
 pub fn refresh_snapshot() {
     let loaded = Arc::new(AppConfig::load().unwrap_or_default());
-    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&loaded));
-    // Re-publish, or the values children inherit stay frozen at startup. A
-    // child does not see them as self-planted, so the stale value OUTRANKS the
-    // child's own config: saving `fleet.idle_min` in the TUI would leave every
-    // plugin and subprocess on the old number until the TUI itself restarted.
-    republish_env_bridge(&loaded);
-}
-
-/// Re-plant the bridged variables after a config change.
-///
-/// Only the ones this process planted itself are overwritten — a variable the
-/// user exported still outranks config, which is the whole precedence
-/// contract.
-fn republish_env_bridge(config: &AppConfig) {
-    let planted: Vec<&'static str> = BRIDGED
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|set| set.iter().copied().collect())
-        .unwrap_or_default();
-    for name in planted {
-        std::env::remove_var(name);
-    }
-    *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = None;
-    export_env_bridge(config);
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
+    // Deliberately does NOT re-publish the env bridge. `save()` is called from
+    // all over the running TUI, and `set_var` racing another thread's `getenv`
+    // is a data race — the same reason `export_env_bridge` was moved to
+    // `main()` before any thread exists. Bridged values therefore stay at
+    // their startup value for out-of-crate readers; every row whose reader
+    // lives outside this crate says "(restart)" in its help so the screen does
+    // not promise a live change it cannot make.
 }
 
 /// Install `config` as the snapshot. Test seam, and the escape hatch for a
@@ -226,8 +209,24 @@ pub fn parse_bool_token(raw: &str) -> Option<bool> {
 /// while others join `.agents-in-a-box` onto it. A config key would have to
 /// pick one and silently relocate the other's files. The variable keeps working
 /// exactly as it does today; resolving the ambiguity is its own change.
+pub const INHERITED_MARKER: &str = "AINB_BRIDGED_VARS";
+
 pub fn export_env_bridge(config: &AppConfig) {
     let mut planted = BTreeSet::new();
+    // Anything a parent bridged is NOT a user override down here. Without
+    // this, a child inherits `AINB_HEADROOM_PORT=8787` from the TUI, does not
+    // see it in its own `BRIDGED`, and lets that stale value beat its own
+    // config.toml — permanently, since only the parent ever republishes. A
+    // session pane could never change a bridged key.
+    let inherited: BTreeSet<String> = std::env::var(INHERITED_MARKER)
+        .unwrap_or_default()
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    for name in &inherited {
+        std::env::remove_var(name);
+    }
     let mut publish = |name: &'static str, value: String| {
         if std::env::var_os(name).is_none() {
             std::env::set_var(name, value);
@@ -272,6 +271,14 @@ pub fn export_env_bridge(config: &AppConfig) {
         publish("AINB_USAGE_CACHE_DB", db.clone());
     }
 
+    // Hand the list to children so they can tell an inherited plant from a
+    // real user export.
+    let names: Vec<&str> = planted.iter().copied().collect();
+    if names.is_empty() {
+        std::env::remove_var(INHERITED_MARKER);
+    } else {
+        std::env::set_var(INHERITED_MARKER, names.join(","));
+    }
     *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = Some(planted);
 }
 
@@ -636,7 +643,7 @@ pub struct AcpAdapterConfig {
     pub permission_mode: String,
 }
 
-fn default_acp_permission_mode() -> String {
+pub(crate) fn default_acp_permission_mode() -> String {
     "default".to_string()
 }
 
@@ -683,6 +690,78 @@ mod tests {
     }
 
     /// The full ladder for a numeric knob, one rung at a time.
+    /// A variable a PARENT bridged must not beat this process's own config.
+    ///
+    /// The child does not have it in its own `BRIDGED`, so without the marker
+    /// `env_override` returned the inherited value and it won the ladder —
+    /// permanently, because only the parent ever republishes. A session pane
+    /// opened from the TUI could never change a bridged key.
+    #[test]
+    fn an_inherited_bridge_value_does_not_beat_the_child_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prior_port = std::env::var_os("AINB_HEADROOM_PORT");
+        let prior_marker = std::env::var_os(INHERITED_MARKER);
+        clear_bridged_for_test();
+
+        // What a parent left behind.
+        std::env::set_var("AINB_HEADROOM_PORT", "8787");
+        std::env::set_var(INHERITED_MARKER, "AINB_HEADROOM_PORT");
+
+        let mut config = AppConfig::default();
+        config.usage_client.headroom_port = 9000;
+        export_env_bridge(&config);
+
+        assert_eq!(
+            resolved("AINB_HEADROOM_PORT", config.usage_client.headroom_port),
+            9000,
+            "the parent's inherited plant beat this process's own config"
+        );
+
+        clear_bridged_for_test();
+        match prior_port {
+            Some(v) => std::env::set_var("AINB_HEADROOM_PORT", v),
+            None => std::env::remove_var("AINB_HEADROOM_PORT"),
+        }
+        match prior_marker {
+            Some(v) => std::env::set_var(INHERITED_MARKER, v),
+            None => std::env::remove_var(INHERITED_MARKER),
+        }
+    }
+
+    /// A real user export still wins — the marker must not swallow those.
+    #[test]
+    fn a_user_export_still_beats_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prior_port = std::env::var_os("AINB_HEADROOM_PORT");
+        let prior_marker = std::env::var_os(INHERITED_MARKER);
+        clear_bridged_for_test();
+
+        std::env::set_var("AINB_HEADROOM_PORT", "7777");
+        std::env::remove_var(INHERITED_MARKER);
+
+        let mut config = AppConfig::default();
+        config.usage_client.headroom_port = 9000;
+        export_env_bridge(&config);
+
+        assert_eq!(
+            resolved("AINB_HEADROOM_PORT", config.usage_client.headroom_port),
+            7777,
+            "an operator's own export must outrank config"
+        );
+
+        clear_bridged_for_test();
+        match prior_port {
+            Some(v) => std::env::set_var("AINB_HEADROOM_PORT", v),
+            None => std::env::remove_var("AINB_HEADROOM_PORT"),
+        }
+        match prior_marker {
+            Some(v) => std::env::set_var(INHERITED_MARKER, v),
+            None => std::env::remove_var(INHERITED_MARKER),
+        }
+    }
+
     #[test]
     fn headroom_port_ladder_is_env_then_config_then_default() {
         // `AINB_HEADROOM_PORT` is also mutated by `headroom::tests` and
