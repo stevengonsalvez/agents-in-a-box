@@ -386,8 +386,20 @@ async fn a_buffered_chunk_commits_on_the_interval_without_a_second_push() {
     );
     assert_eq!(rows(&store).await.len(), 0);
 
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    let high_water = writer.tick().await.expect("tick").expect("high water");
+    // Poll rather than sleeping a fixed 80ms: on a loaded CI runner the
+    // commit interval had not elapsed by the time the assertion ran, and the
+    // test failed claiming the chunk never committed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let high_water = loop {
+        if let Some(hw) = writer.tick().await.expect("tick") {
+            break hw;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the buffered chunk never committed within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
 
     assert_eq!(high_water.session_key, SESSION_KEY);
     assert_eq!(rows(&store).await.len(), 1);

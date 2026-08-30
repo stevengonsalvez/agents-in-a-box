@@ -124,6 +124,41 @@ impl Store {
         Self::ping_in_read_only(&dir).await
     }
 
+    /// Read every `daemon_config` row without creating or migrating anything.
+    ///
+    /// [`Self::open_default`] runs `backup_before_pending_migrations` (a whole
+    /// `VACUUM INTO` copy) and then `apply_migrations`. Doing that from a read
+    /// — the TUI's first tick, `ainb config show` — migrates a running
+    /// daemon's live schema out from under it after an upgrade, and blocks the
+    /// caller for the length of the copy. Reads use this instead; migration
+    /// ownership stays with daemon startup.
+    ///
+    /// `Ok(None)` when there is no database yet, so callers show defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be resolved, or if an existing
+    /// database cannot be read.
+    pub async fn read_daemon_config_read_only() -> anyhow::Result<Option<Vec<(String, String)>>> {
+        use sqlx::{ConnectOptions as _, Connection as _};
+
+        let db_path = Self::default_dir()?.join(DB_FILE_NAME);
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let mut conn = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(false)
+            .read_only(true)
+            .connect()
+            .await?;
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM daemon_config")
+            .fetch_all(&mut conn)
+            .await?;
+        conn.close().await?;
+        Ok(Some(rows))
+    }
+
     async fn ping_in_read_only(dir: &Path) -> anyhow::Result<()> {
         use sqlx::ConnectOptions as _;
 

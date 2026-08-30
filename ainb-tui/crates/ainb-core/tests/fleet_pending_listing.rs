@@ -109,7 +109,7 @@ fn fleet_approve_listing_names_the_worktree_tool_input_and_age() {
 
     // Real broker on the isolated approve.sock.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let state = BrokerState::new();
+    let state = BrokerState::with_timeout(ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT);
     {
         let sock = paths.approve_socket.clone();
         rt.spawn(async move {

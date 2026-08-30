@@ -740,13 +740,11 @@ impl SessionStore {
 /// Default port for the ainb-managed Headroom compression proxy.
 pub const HEADROOM_DEFAULT_PORT: u16 = 8787;
 
-/// Base URL of the local Headroom proxy. Port overridable via `AINB_HEADROOM_PORT`.
+/// Base URL of the local Headroom proxy. One resolver with
+/// [`crate::headroom::proxy_port`], so the URL a session is pointed at and the
+/// port the proxy is spawned on cannot disagree.
 pub fn headroom_base_url() -> String {
-    let port = std::env::var("AINB_HEADROOM_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(HEADROOM_DEFAULT_PORT);
-    format!("http://127.0.0.1:{port}")
+    format!("http://127.0.0.1:{}", crate::headroom::proxy_port())
 }
 
 /// Shell `export … && ` prefix that routes a session's CLI through the local

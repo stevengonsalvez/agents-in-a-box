@@ -153,7 +153,8 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     // Real broker on the isolated approve.sock, riding a test-owned runtime.
     let paths = Paths::under(&hangar_home);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let broker_state = BrokerState::new();
+    let broker_state =
+        BrokerState::with_timeout(ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT);
     {
         let sock = paths.approve_socket.clone();
         let state = broker_state.clone();

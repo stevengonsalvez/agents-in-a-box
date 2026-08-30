@@ -62,11 +62,40 @@ pub fn read_root_for(tool: &str) -> PathBuf {
         }
     }
 
-    if let Some(real) = real_home_for(tool) {
-        return real;
+    if use_real_homes() {
+        if let Some(real) = real_home_for(tool) {
+            return real;
+        }
     }
 
     ainb_skill_core::default_ainb_home().join("tools").join(tool)
+}
+
+/// Whether tier 2 (the tool's real config dir) is in play at all.
+///
+/// True by default, because an installed skill has to be where the tool
+/// actually looks. `general.skill_install_real_homes = false`, which the host
+/// publishes as `AINB_USE_REAL_HOMES`, routes every read and write into the
+/// managed sandbox instead, for a machine whose `~/.claude` is hand-managed and
+/// must not be touched.
+///
+/// The variable had no reader at all before: real homes became the
+/// unconditional default and the opt-in flag was left documented but dead, so
+/// setting it did nothing. It is a live gate again, defaulting to the shipped
+/// behaviour.
+///
+/// This crate reads the variable rather than config.toml because it does not
+/// depend on `ainb`; the host fills it at startup
+/// (`ainb::config::tunables::export_env_bridge`), and an exported value still
+/// wins over the file.
+fn use_real_homes() -> bool {
+    match std::env::var("AINB_USE_REAL_HOMES") {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
 }
 
 /// Best-effort per-tool real-home mapping. Returns `None` when the

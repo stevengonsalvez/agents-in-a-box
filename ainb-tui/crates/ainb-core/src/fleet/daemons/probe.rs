@@ -32,6 +32,15 @@ use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity, pr
 /// 30s long-poll cycle and the fleet daemon's 5s tick with headroom.
 pub const STALE_AFTER_MS: i64 = 90_000;
 
+/// [`STALE_AFTER_MS`] with `daemons.stale_after_ms` applied.
+///
+/// A function, not a const, because the value now comes from config; the const
+/// stays as the coded default and as the value the unit tests reason against.
+#[must_use]
+pub fn stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.stale_after_ms
+}
+
 /// The outbound-push staleness window for the bridge.
 ///
 /// How long the bridge may go without a SUCCESSFUL poll of the attention source
@@ -45,6 +54,12 @@ pub const STALE_AFTER_MS: i64 = 90_000;
 /// bridge answered yes to the first and (silently) no to the second for its
 /// entire life, which is the blind spot this closes.
 pub const ATTENTION_STALE_AFTER_MS: i64 = 45_000;
+
+/// [`ATTENTION_STALE_AFTER_MS`] with `daemons.attention_stale_after_ms` applied.
+#[must_use]
+pub fn attention_stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.attention_stale_after_ms
+}
 
 /// Which daemon a [`DaemonStatus`] describes. Stable wire strings for the JSON
 /// surface and stable display names for the text/TUI surfaces.
@@ -467,7 +482,7 @@ fn classify_outbound(
     match hb.last_attention_poll_at {
         Some(last) => {
             let age = now_ms.saturating_sub(last);
-            if age <= ATTENTION_STALE_AFTER_MS {
+            if age <= attention_stale_after_ms() {
                 OutboundVerdict::Healthy
             } else {
                 OutboundVerdict::Unreachable(format!(
@@ -478,7 +493,7 @@ fn classify_outbound(
         }
         // Never polled. Give the worker one window to complete its first poll
         // before calling it broken, then say so in the operator's words.
-        None if uptime_ms <= ATTENTION_STALE_AFTER_MS => OutboundVerdict::Starting,
+        None if uptime_ms <= attention_stale_after_ms() => OutboundVerdict::Starting,
         None => OutboundVerdict::Unreachable(format!(
             "no successful attention/list poll in {}s of uptime ({cause})",
             uptime_ms / 1000
@@ -548,7 +563,7 @@ pub fn classify_heartbeat(
     // The pid is alive but the heartbeat went quiet past the window: the process
     // exists but its loop is wedged or paused. Report stopped+stale so we don't
     // claim a healthy daemon.
-    if age > STALE_AFTER_MS {
+    if age > stale_after_ms() {
         return DaemonStatus {
             kind,
             state: DaemonState::Stopped,
@@ -836,7 +851,7 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
 
     // The OS timer fires every `interval_min`; allow 2x the cadence + a 90s grace
     // before we call it stale (timers are not punctual to the second).
-    let window_ms = (interval_min as i64) * 60_000 * 2 + STALE_AFTER_MS;
+    let window_ms = (interval_min as i64) * 60_000 * 2 + stale_after_ms();
     let age = now_ms.saturating_sub(hbs.last_heartbeat_ms);
     if age > window_ms {
         return DaemonStatus {
@@ -1160,6 +1175,24 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
 
 #[cfg(test)]
 mod tests {
+    /// Pin the tunables snapshot to defaults for this module.
+    ///
+    /// `stale_after_ms()` and `attention_stale_after_ms()` read the snapshot,
+    /// which lazily loads the developer's real
+    /// `~/.agents-in-a-box/config/config.toml` — so anyone who had set
+    /// `daemons.stale_after_ms` failed these tests locally while CI, with no
+    /// config file, passed. The fixtures below are built from the consts, so
+    /// the snapshot has to agree with them.
+    fn pin_default_snapshot() -> std::sync::MutexGuard<'static, ()> {
+        // The shared lock, held by the CALLER for the length of its test: the
+        // snapshot is process-global, so installing it without the lock races
+        // every other test that installs or reads one.
+        let guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::config::tunables::install_snapshot(crate::config::AppConfig::default());
+        guard
+    }
+
     use super::*;
     use tempfile::TempDir;
 
@@ -1573,6 +1606,7 @@ mod tests {
 
     #[test]
     fn bridge_whose_last_attention_poll_went_stale_is_degraded() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let last_poll = now - (ATTENTION_STALE_AFTER_MS + 60_000);
         let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(last_poll));
@@ -1597,6 +1631,7 @@ mod tests {
 
     #[test]
     fn bridge_poll_exactly_at_the_window_edge_is_still_running() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::Bridge,
@@ -1618,6 +1653,7 @@ mod tests {
 
     #[test]
     fn freshly_started_bridge_gets_one_window_before_degrading() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // Up for 10s: the worker has not had its first poll yet. Degrading here
         // would make every bridge restart look broken for a minute.
@@ -1767,6 +1803,7 @@ mod tests {
 
     #[test]
     fn wedged_daemon_live_pid_but_old_beat_is_stale() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::FleetDaemon,
@@ -1781,6 +1818,7 @@ mod tests {
 
     #[test]
     fn beat_exactly_at_window_edge_is_still_running() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // age == STALE_AFTER_MS is NOT > the window, so still running. The
         // outbound poll is fresh so this isolates the liveness edge.

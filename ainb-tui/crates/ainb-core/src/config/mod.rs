@@ -22,6 +22,7 @@ pub mod registry;
 pub mod screen_model;
 pub mod session_defaults;
 pub mod ssh_display_names;
+pub mod tunables;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
 pub use favorites_store::{
@@ -35,6 +36,10 @@ pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default
 pub use registry::{CONFIG_REGISTRY, ConfigRow, Entry as ConfigEntry, RowKind};
 pub use session_defaults::{PerRepoDefaults, SessionDefaults};
 pub use ssh_display_names::{SessionLabelStore, SshDisplayNameStore, normalize_session_label};
+pub use tunables::{
+    AcpAdapterConfig, AcpConfig, DaemonsConfig, GeneralConfig, NotifydConfig, UiConfig,
+    UsageClientConfig, WebServerConfig,
+};
 
 /// Authentication provider for Claude API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -268,6 +273,37 @@ pub struct AppConfig {
     /// Shared MCP pool settings. See [`McpPoolConfig`].
     #[serde(default)]
     pub mcp_pool: McpPoolConfig,
+
+    /// Cross-cutting knobs with no other home. See [`GeneralConfig`].
+    #[serde(default)]
+    pub general: GeneralConfig,
+
+    /// TUI cadences and query bounds. See [`UiConfig`].
+    #[serde(default)]
+    pub ui: UiConfig,
+
+    /// Daemon-staleness windows. See [`DaemonsConfig`].
+    #[serde(default)]
+    pub daemons: DaemonsConfig,
+
+    /// How usage data is fetched and cached: core's half of usage, distinct
+    /// from the plugin-owned `[usage]`. See [`UsageClientConfig`].
+    #[serde(default)]
+    pub usage_client: UsageClientConfig,
+
+    /// Notification-daemon knobs, parsed by the daemon itself and mirrored
+    /// here so a save round-trips them. See [`NotifydConfig`].
+    #[serde(default)]
+    pub notifyd: NotifydConfig,
+
+    /// `ainb web` defaults, overridden by its CLI flags. See
+    /// [`WebServerConfig`].
+    #[serde(default)]
+    pub web: WebServerConfig,
+
+    /// The ACP adapter registry. See [`AcpConfig`].
+    #[serde(default)]
+    pub acp: AcpConfig,
 }
 
 /// Shared MCP server pool for host (tmux) sessions.
@@ -467,6 +503,55 @@ pub struct FleetConfig {
     /// `Option` for the same presence reason as [`InterviewConfig::surface`].
     #[serde(default)]
     pub terminal: Option<String>,
+    /// Minutes a session must sit quiet before it reads IDLE.
+    ///
+    /// One knob for both IDLE producers (the tmux classifier and notifyd's
+    /// hook-sourced fold), so a session cannot be idle to one and busy to the
+    /// other. Env: `AINB_FLEET_IDLE_MIN`.
+    #[serde(default = "default_fleet_idle_min")]
+    pub idle_min: u64,
+
+    /// How `ainb fleet send` delivers: `tmux` (send-keys first, broker
+    /// fallback), `tmux-only`, or `broker`. Env: `AINB_FLEET_TRANSPORT`.
+    #[serde(default = "default_fleet_transport")]
+    pub transport: String,
+
+    /// Attach cost/hint enrichment to fleet rows. Off means the reader still
+    /// serves free cached suggestions but flags nothing `need_enrich`, so no
+    /// producer runs and no tokens are spent. Env: `AINB_FLEET_ENRICH`.
+    #[serde(default = "default_true")]
+    pub enrich: bool,
+
+    /// Staleness window (ms) for a hook-sourced `current_state` row of a STICKY
+    /// kind (ASK/ERR/WAIT/IDLE) before the reader falls back to a live scan.
+    /// `0` (the default) disables the check: those kinds stay true until a new
+    /// event changes them, so age is a poor staleness signal for them.
+    ///
+    /// Distinct from [`healthy_state_stale_ms`](Self::healthy_state_stale_ms),
+    /// which is the point of splitting them. Both windows used to read the ONE
+    /// env var `AINB_FLEET_STATE_STALE_MS` with two different hardcoded
+    /// fallbacks (0 here, 300000 there), so setting it moved two unrelated
+    /// clocks at once and neither had a single knowable default.
+    /// Env: `AINB_FLEET_STATE_STALE_MS`.
+    #[serde(default)]
+    pub state_stale_ms: i64,
+
+    /// Staleness window (ms) for a hook-sourced row of a HEALTHY-suppressing
+    /// kind (RUNNING/DONE). These are the dangerous ones: a daemon that stopped
+    /// materializing leaves a stale RUNNING row that suppresses the live scan
+    /// forever, so this window has a real floor rather than being off by
+    /// default. Env: `AINB_FLEET_HEALTHY_STATE_STALE_MS`, falling back to the
+    /// legacy `AINB_FLEET_STATE_STALE_MS` so an existing override keeps working.
+    #[serde(default = "default_fleet_healthy_state_stale_ms")]
+    pub healthy_state_stale_ms: i64,
+
+    /// Seconds of pane silence after which tmux discovery calls a live session
+    /// between turns rather than working. Sized above a slow tool call so a
+    /// quiet-but-busy agent is not mislabelled.
+    /// Env: `AINB_FLEET_TMUX_IDLE_AFTER_SECS`.
+    #[serde(default = "default_fleet_tmux_idle_after_secs")]
+    pub tmux_idle_after_secs: i64,
+
     /// `[fleet.bridge]` carried verbatim, never interpreted here.
     ///
     /// The phone bridge parses this table itself, off the same file, with its
@@ -484,12 +569,34 @@ fn default_fleet_terminal() -> &'static str {
     "warp"
 }
 
+fn default_fleet_idle_min() -> u64 {
+    5
+}
+
+fn default_fleet_transport() -> String {
+    "tmux".to_string()
+}
+
+pub(crate) fn default_fleet_healthy_state_stale_ms() -> i64 {
+    5 * 60_000
+}
+
+fn default_fleet_tmux_idle_after_secs() -> i64 {
+    120
+}
+
 impl Default for FleetConfig {
     fn default() -> Self {
         Self {
             cost: CostBudgetConfig::default(),
             interview: InterviewConfig::default(),
             terminal: None,
+            idle_min: default_fleet_idle_min(),
+            transport: default_fleet_transport(),
+            enrich: true,
+            state_stale_ms: 0,
+            healthy_state_stale_ms: default_fleet_healthy_state_stale_ms(),
+            tmux_idle_after_secs: default_fleet_tmux_idle_after_secs(),
             bridge: None,
         }
     }
@@ -737,6 +844,19 @@ pub struct WorkspaceDefaults {
     /// Behavior when a target worktree path already exists
     #[serde(default)]
     pub worktree_collision_behavior: WorktreeCollisionBehavior,
+
+    /// How many directory levels below each scan path the repository scanner
+    /// descends. `WorkspaceScanner::with_max_depth` has always existed and was
+    /// never wired to anything, so the value was effectively frozen at 3. Deep
+    /// trees need more; every extra level multiplies the walk.
+    #[serde(default = "default_scan_max_depth")]
+    pub scan_max_depth: usize,
+
+    /// Seconds a cached repository scan stays fresh before the next scan walks
+    /// the disk again. The cache is also invalidated by a scan path's mtime, so
+    /// this is the ceiling on staleness, not the only guard.
+    #[serde(default = "default_scan_cache_ttl_secs")]
+    pub scan_cache_ttl_secs: i64,
 }
 
 impl Default for WorkspaceDefaults {
@@ -747,6 +867,8 @@ impl Default for WorkspaceDefaults {
             workspace_scan_paths: Vec::new(),
             max_repositories: default_max_repositories(),
             worktree_collision_behavior: WorktreeCollisionBehavior::default(),
+            scan_max_depth: default_scan_max_depth(),
+            scan_cache_ttl_secs: default_scan_cache_ttl_secs(),
         }
     }
 }
@@ -933,6 +1055,14 @@ fn default_docker_timeout() -> u64 {
 
 fn default_max_repositories() -> usize {
     500
+}
+
+fn default_scan_max_depth() -> usize {
+    3
+}
+
+fn default_scan_cache_ttl_secs() -> i64 {
+    3600
 }
 
 /// Merge a higher-layer per-plugin value table into the lower-layer one in
@@ -1655,6 +1785,12 @@ impl AppConfig {
 
         match write_atomic(&config_path, &content) {
             Ok(()) => {
+                // The promoted tunables read from a process-wide snapshot, so
+                // without this a save reports success and changes nothing until
+                // the next launch: syntax highlighting stays on, the inbox keeps
+                // its old limit. Re-loads rather than installing `self`, because
+                // `load()` also merges the project and system layers.
+                tunables::refresh_snapshot();
                 // Audit log the successful config save
                 audit::audit_config_saved(
                     &config_path.display().to_string(),
@@ -1798,6 +1934,13 @@ impl AppConfig {
             self.workspace_defaults.worktree_collision_behavior =
                 other.workspace_defaults.worktree_collision_behavior;
         }
+        if other.workspace_defaults.scan_max_depth != default_scan_max_depth() {
+            self.workspace_defaults.scan_max_depth = other.workspace_defaults.scan_max_depth;
+        }
+        if other.workspace_defaults.scan_cache_ttl_secs != default_scan_cache_ttl_secs() {
+            self.workspace_defaults.scan_cache_ttl_secs =
+                other.workspace_defaults.scan_cache_ttl_secs;
+        }
 
         // Override UI preferences
         // Check if this is an old config (empty theme indicates pre-v0.4 config)
@@ -1883,6 +2026,28 @@ impl AppConfig {
         if other.fleet.bridge.is_some() {
             self.fleet.bridge.clone_from(&other.fleet.bridge);
         }
+        // Promoted knobs: a layer counts as having set one only when it differs
+        // from the coded default. A field with no arm here is silently DROPPED
+        // on load and then overlaid back onto the file by the next save. That
+        // is the failure `loading_restores_the_config_tree_expansion` guards.
+        if other.fleet.idle_min != default_fleet_idle_min() {
+            self.fleet.idle_min = other.fleet.idle_min;
+        }
+        if other.fleet.transport != default_fleet_transport() {
+            self.fleet.transport = other.fleet.transport.clone();
+        }
+        if !other.fleet.enrich {
+            self.fleet.enrich = false;
+        }
+        if other.fleet.state_stale_ms != 0 {
+            self.fleet.state_stale_ms = other.fleet.state_stale_ms;
+        }
+        if other.fleet.healthy_state_stale_ms != default_fleet_healthy_state_stale_ms() {
+            self.fleet.healthy_state_stale_ms = other.fleet.healthy_state_stale_ms;
+        }
+        if other.fleet.tmux_idle_after_secs != default_fleet_tmux_idle_after_secs() {
+            self.fleet.tmux_idle_after_secs = other.fleet.tmux_idle_after_secs;
+        }
 
         // Pool settings: trust the loaded layer whenever it differs from the
         // defaults. `enabled = false` must survive (it IS the default-diverging
@@ -1913,6 +2078,49 @@ impl AppConfig {
                     .or_insert_with(|| toml::Value::Table(toml::value::Table::new())),
                 higher_table,
             );
+        }
+
+        // Promoted sections layer wholesale, like `[mcp_pool]`: a layer that
+        // omits the section deserializes to the default and changes nothing, so
+        // "differs from the default" is the only usable signal that a file set
+        // it. `[acp]` is a map and layers per adapter instead, so a project can
+        // repoint one adapter without redeclaring the registry.
+        if other.general != GeneralConfig::default() {
+            self.general = other.general;
+        }
+        if other.ui != UiConfig::default() {
+            self.ui = other.ui;
+        }
+        if other.daemons != DaemonsConfig::default() {
+            self.daemons = other.daemons;
+        }
+        if other.usage_client != UsageClientConfig::default() {
+            self.usage_client = other.usage_client;
+        }
+        if other.notifyd != NotifydConfig::default() {
+            self.notifyd = other.notifyd;
+        }
+        if other.web != WebServerConfig::default() {
+            self.web = other.web;
+        }
+        // Per FIELD, not per entry. `HashMap::extend` replaces the whole
+        // value, so a higher layer that set only `command` reset
+        // `permission_mode` back to the default — which defeats the point of
+        // `AcpAdapterToml`'s Option fields, where an absent key means "leave
+        // the built-in alone".
+        for (name, adapter) in other.acp.adapters {
+            let entry = self.acp.adapters.entry(name).or_default();
+            if adapter.command.is_some() {
+                entry.command = adapter.command;
+            }
+            // `permission_mode` is a `String` with a serde default here, so an
+            // absent key and an explicit `"default"` are indistinguishable
+            // after deserialization. Same differs-from-default convention the
+            // rest of this merge uses; the cost is that explicitly writing the
+            // default in a higher layer cannot override a lower one.
+            if adapter.permission_mode != crate::config::tunables::default_acp_permission_mode() {
+                entry.permission_mode = adapter.permission_mode;
+            }
         }
     }
 
@@ -1960,6 +2168,13 @@ impl Default for AppConfig {
             presets: PresetsConfig::default(),
             fleet: FleetConfig::default(),
             mcp_pool: McpPoolConfig::default(),
+            general: GeneralConfig::default(),
+            ui: UiConfig::default(),
+            daemons: DaemonsConfig::default(),
+            usage_client: UsageClientConfig::default(),
+            notifyd: NotifydConfig::default(),
+            web: WebServerConfig::default(),
+            acp: AcpConfig::default(),
         };
 
         // Load built-in templates

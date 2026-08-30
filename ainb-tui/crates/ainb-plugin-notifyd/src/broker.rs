@@ -69,6 +69,17 @@ use tracing::{debug, error, warn};
 /// deny — never approve.
 pub const DEFAULT_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The effective AWAIT ceiling: `notifyd.approval_timeout_secs` when config
+/// names one, else [`DEFAULT_AWAIT_TIMEOUT`].
+///
+/// Clamped by [`crate::config::NotifydConfig::approval_timeout`] so a
+/// configured value can shorten the wait but can never climb above the client's
+/// re-dial deadline and turn a deny into a hung hook.
+#[must_use]
+pub fn await_timeout() -> Duration {
+    crate::config::load().approval_timeout()
+}
+
 /// A human's answer to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -347,9 +358,9 @@ pub struct BrokerState {
 }
 
 impl BrokerState {
-    /// Fresh state with the default AWAIT timeout.
+    /// Fresh state with the configured AWAIT timeout. See [`await_timeout`].
     pub fn new() -> Self {
-        Self::with_timeout(DEFAULT_AWAIT_TIMEOUT)
+        Self::with_timeout(await_timeout())
     }
 
     /// Fresh state with a custom AWAIT timeout (tests use a tiny value).
