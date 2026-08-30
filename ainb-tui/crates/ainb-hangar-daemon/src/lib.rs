@@ -653,6 +653,9 @@ pub const PARENT_PID_ENV: &str = "AINB_HANGAR_PARENT_PID";
 /// Former name of [`PARENT_PID_ENV`], still honoured so a spawner and a daemon
 /// binary from different versions agree (the installed daemon can be older than
 /// the `ainb` that launches it).
+///
+/// Compatibility shim: remove once no released `ainb` older than the rename is
+/// still spawning daemons, and update the tripwire harnesses that set it.
 pub const LEGACY_PARENT_PID_ENV: &str = "HANGAR_TEST_PARENT_PID";
 
 /// Parent-death backstop. The caller gives this daemon its own parent PID: the

@@ -5303,7 +5303,9 @@ impl AppState {
                 // Quiet: this runs while the TUI holds the alternate screen, so
                 // the announcing variant's stdout lands on top of the frame.
                 Self::spawn_blocking_restart(tx, kind, || {
-                    crate::cli::hangar::run_daemon_restart_quiet()
+                    crate::cli::hangar::run_daemon_restart_quiet(
+                        crate::cli::hangar::LauncherLifetime::Persistent,
+                    )
                 })
             }
             DaemonRow::Mcp => {
@@ -5425,9 +5427,11 @@ impl AppState {
         o.hangar_start_status = Some("starting / upgrading Hangar daemon…".to_string());
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::start_or_upgrade_daemon_from_current()
-                    .map(|_| "Hangar running against current Ainb".to_string())
-                    .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
+                crate::cli::hangar::start_or_upgrade_daemon_from_current(
+                    crate::cli::hangar::LauncherLifetime::Persistent,
+                )
+                .map(|_| "Hangar running against current Ainb".to_string())
+                .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
             })
             .await
             .unwrap_or_else(|e| format!("Hangar start failed: {e}"));

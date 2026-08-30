@@ -8635,7 +8635,8 @@ async fn run_daemon_run() -> Result<()> {
 /// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
 /// stderr go to the daemon's own rolling log, not this terminal.
 fn run_daemon_start() -> Result<()> {
-    start_or_upgrade_daemon(true)
+    // Ephemeral: this verb exists to leave a daemon running after `ainb` exits.
+    start_or_upgrade_daemon(true, LauncherLifetime::Ephemeral)
 }
 
 /// Best-effort autostart of the Hangar daemon before the TUI connects.
@@ -8645,30 +8646,31 @@ fn run_daemon_start() -> Result<()> {
 /// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
 /// `mcp_pool`'s `ensure_daemon` warn-and-continue.
 pub fn ensure_hangar_daemon() {
-    if let Err(e) = start_or_upgrade_daemon(false) {
+    // Persistent: the TUI is the daemon's consumer and outlives it.
+    if let Err(e) = start_or_upgrade_daemon(false, LauncherLifetime::Persistent) {
         tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
     }
 }
 
 /// Start a missing daemon, or hand an older released owner to this Ainb
 /// binary. Used by the Daemons screen's explicit upgrade control.
-pub(crate) fn start_or_upgrade_daemon_from_current() -> Result<()> {
-    start_or_upgrade_daemon(false)
+pub(crate) fn start_or_upgrade_daemon_from_current(launcher: LauncherLifetime) -> Result<()> {
+    start_or_upgrade_daemon(false, launcher)
 }
 
 /// Start a missing daemon, or hand off an older recorded release to this one.
 ///
 /// Unknown, equal, prerelease, and newer owners are deliberately left alone:
 /// autostart may upgrade a released daemon but must not guess or downgrade.
-fn start_or_upgrade_daemon(announce: bool) -> Result<()> {
+fn start_or_upgrade_daemon(announce: bool, launcher: LauncherLifetime) -> Result<()> {
     let pid = running_daemon_pid().ok().flatten();
     let running = running_daemon_version(pid);
     let result = if pid.is_some()
         && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION"))
     {
-        restart_daemon(announce)
+        restart_daemon(announce, launcher)
     } else {
-        start_daemon_if_stopped(announce)
+        start_daemon_if_stopped(announce, launcher)
     };
     result
 }
@@ -8710,39 +8712,94 @@ fn open_daemon_stderr_log(log_dir: &std::path::Path) -> Result<std::fs::File> {
 
 /// True when `path` sits under the system temp dir.
 ///
-/// Both sides are canonicalized on the second attempt because macOS `$TMPDIR`
-/// (`/var/folders/...`) is reached through a symlink to `/private/var/...`, so a
-/// caller that resolved its home would otherwise slip past a raw prefix test.
+/// Checks `$TMPDIR` plus the fixed `/tmp` and `/var/tmp` roots, because on macOS
+/// `std::env::temp_dir()` is `$TMPDIR` (`/var/folders/...`) and says nothing
+/// about `/tmp` — which is where this repo's own recording harnesses put their
+/// homes (`mktemp -d /tmp/bj.XXXXXX`).
+///
+/// Both sides are canonicalized on the second attempt because those roots are
+/// reached through symlinks on macOS (`/tmp` -> `/private/tmp`), so a caller
+/// that resolved its home would otherwise slip past a raw prefix test.
 fn is_under_temp_dir(path: &std::path::Path) -> bool {
-    let temp = std::env::temp_dir();
-    if path.starts_with(&temp) {
-        return true;
-    }
     let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    real(path).starts_with(real(&temp))
+    let resolved = real(path);
+    [
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/var/tmp"),
+    ]
+    .iter()
+    .any(|root| path.starts_with(root) || resolved.starts_with(real(root)))
 }
 
-/// Bind a daemon we are about to spawn to our own lifetime when its home is
-/// ephemeral.
+/// Does the process launching a daemon stay alive to use it?
 ///
-/// A daemon whose hangar home lives under the system temp dir can never be
-/// found again: `single_instance`, `hangar daemon stop` and the pid file are all
-/// home-scoped, and the home dies with whoever created it (any harness running
-/// under `HOME=$(mktemp -d)`). macOS has no `PR_SET_PDEATHSIG` and the child is
-/// detached into its own process group, so it reparents to launchd and runs
-/// forever. Arming the daemon's parent-death watchdog makes it exit with us.
+/// The parent-death watchdog is only ever correct for a launcher that outlives
+/// the daemon it wants. `ainb hangar daemon start` and `ainb doctor` exit about
+/// a second after the spawn: binding a daemon to one of those would stand it
+/// down immediately and report success for a process that is already dying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LauncherLifetime {
+    /// The TUI: it lives for as long as the daemon is wanted.
+    Persistent,
+    /// A one-shot CLI verb, which is expected to leave the daemon behind.
+    Ephemeral,
+}
+
+/// Should the daemon we are about to spawn be bound to this process's life?
 ///
-/// Inert in production: a real home under `$HOME` never sits under `temp_dir()`,
-/// so the Homebrew daemon and a deliberate dev-build daemon are untouched.
-/// Issue #784.
+/// Three conditions, all required:
+///
+/// 1. We outlive it. A one-shot verb must leave a daemon that survives it.
+/// 2. Its home is ephemeral, so no other guard can ever address it again:
+///    `single_instance`, `hangar daemon stop` and the pid file are all
+///    home-scoped, and the home dies with whoever created it (any harness
+///    running under `HOME=$(mktemp -d)`). macOS has no `PR_SET_PDEATHSIG` and
+///    the child is detached into its own process group, so it otherwise
+///    reparents to launchd and runs forever.
+/// 3. Nobody upstream already declared a parent. A harness that set the env var
+///    itself named a longer-lived owner on purpose; overriding it with our pid
+///    would kill the daemon the harness is still driving.
+///
+/// Inert for a home under a real `$HOME`, so the Homebrew daemon is untouched.
+/// A deliberate dev-build daemon on a temp `AINB_HANGAR_HOME` IS in scope, but
+/// only when started by a persistent launcher. Issue #784.
+fn should_bind_daemon_to_parent(
+    hangar_home: &std::path::Path,
+    launcher: LauncherLifetime,
+    parent_already_declared: bool,
+) -> bool {
+    launcher == LauncherLifetime::Persistent
+        && !parent_already_declared
+        && is_under_temp_dir(hangar_home)
+}
+
+/// Arm the spawned daemon's parent-death watchdog when [`should_bind_daemon_to_parent`]
+/// says this daemon must not outlive us.
 fn arm_watchdog_for_ephemeral_home(
     command: &mut std::process::Command,
     hangar_home: &std::path::Path,
+    launcher: LauncherLifetime,
 ) {
-    if !is_under_temp_dir(hangar_home) {
+    let declared = [
+        ainb_hangar_daemon::PARENT_PID_ENV,
+        ainb_hangar_daemon::LEGACY_PARENT_PID_ENV,
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+
+    if !should_bind_daemon_to_parent(hangar_home, launcher, declared) {
         return;
     }
     let pid = std::process::id().to_string();
+    // A daemon that stands down for this reason writes its last line into
+    // <home>/hangar/logs, inside the home that is about to be deleted. Say so
+    // here too, where the log survives.
+    tracing::info!(
+        home = %hangar_home.display(),
+        parent = %pid,
+        "hangar home is ephemeral; binding the daemon's life to this process"
+    );
     // Both names: the daemon binary we launch may be an installed build that
     // predates the rename and only knows the legacy one.
     command
@@ -8753,7 +8810,7 @@ fn arm_watchdog_for_ephemeral_home(
 /// Spawn the daemon as a detached background child unless it is already running,
 /// recording its EXACT pid. When `announce` is true the outcome is printed
 /// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
-pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
+pub(crate) fn start_daemon_if_stopped(announce: bool, launcher: LauncherLifetime) -> Result<()> {
     // `resolve_daemon_launch` self-execs `(current_exe, ["hangar","daemon","run"])`
     // on both of its fallback paths. Under `cargo test` that exe is the TEST
     // binary, and libtest reads the argv as name filters, so the "daemon" is a
@@ -8829,7 +8886,7 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
         command.process_group(0);
     }
     if let Ok(home) = ainb_hangar_daemon::hangar_dir() {
-        arm_watchdog_for_ephemeral_home(&mut command, &home);
+        arm_watchdog_for_ephemeral_home(&mut command, &home, launcher);
     }
     let mut child = command.spawn().with_context(|| format!("spawn daemon `{launched}`"))?;
 
@@ -8859,7 +8916,7 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
         // the incumbent it lost to has since exited too. Nothing is wrong here,
         // the home is simply free again, so try once more before calling it a
         // failure. Only a second empty-handed attempt is worth an error.
-        if let Some(pid) = respawn_once(&bin, &args)? {
+        if let Some(pid) = respawn_once(&bin, &args, launcher)? {
             owner = Some(pid);
         } else {
             anyhow::bail!(
@@ -9181,7 +9238,7 @@ fn run_daemon_stop() -> Result<()> {
 /// else autostarted it. Report the stop problem and start anyway: if the old
 /// daemon is somehow still up, `start` is a no-op that says so.
 pub(crate) fn run_daemon_restart() -> Result<()> {
-    restart_daemon(true)
+    restart_daemon(true, LauncherLifetime::Ephemeral)
 }
 
 /// Restart the daemon without printing anything.
@@ -9190,11 +9247,11 @@ pub(crate) fn run_daemon_restart() -> Result<()> {
 /// background thread does not scroll — it smears over whatever the renderer
 /// last painted, and nothing repaints it away. Every other daemon the Daemons
 /// screen restarts is already silent; this is the Hangar equivalent.
-pub(crate) fn run_daemon_restart_quiet() -> Result<()> {
-    restart_daemon(false)
+pub(crate) fn run_daemon_restart_quiet(launcher: LauncherLifetime) -> Result<()> {
+    restart_daemon(false, launcher)
 }
 
-fn restart_daemon(announce: bool) -> Result<()> {
+fn restart_daemon(announce: bool, launcher: LauncherLifetime) -> Result<()> {
     if let Err(e) = stop_daemon(announce) {
         if announce {
             println!("hangar daemon: stop reported a problem, starting anyway: {e}");
@@ -9223,7 +9280,7 @@ fn restart_daemon(announce: bool) -> Result<()> {
             return Ok(());
         }
     }
-    start_daemon_if_stopped(announce)
+    start_daemon_if_stopped(announce, launcher)
 }
 
 /// Spawn the daemon once more and report the pid that ends up owning the home.
@@ -9231,7 +9288,11 @@ fn restart_daemon(announce: bool) -> Result<()> {
 /// Used only on the "our child declined and the incumbent then vanished" path:
 /// the home was contested a moment ago and is free now, which is a race to
 /// re-run, not a failure to report.
-fn respawn_once(bin: &std::path::Path, args: &[&str]) -> Result<Option<u32>> {
+fn respawn_once(
+    bin: &std::path::Path,
+    args: &[&str],
+    launcher: LauncherLifetime,
+) -> Result<Option<u32>> {
     // Same rule as `start_daemon_if_stopped`: never detach a test harness.
     if crate::self_exec_guard::running_under_cargo_test() {
         anyhow::bail!(
@@ -9251,7 +9312,7 @@ fn respawn_once(bin: &std::path::Path, args: &[&str]) -> Result<Option<u32>> {
         command.process_group(0);
     }
     if let Ok(home) = ainb_hangar_daemon::hangar_dir() {
-        arm_watchdog_for_ephemeral_home(&mut command, &home);
+        arm_watchdog_for_ephemeral_home(&mut command, &home, launcher);
     }
     let child = command.spawn().context("respawn daemon")?;
     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -10761,16 +10822,24 @@ fn json_string(s: &str) -> String {
 mod ephemeral_home_watchdog_tests {
     //! Issue #784: a daemon autostarted under `HOME=$(mktemp -d)` outlives
     //! every guard in the system, because all of them are home-scoped and the
-    //! home is deleted with its creator. The spawner arms the daemon's
-    //! parent-death watchdog for exactly those homes, and for no other.
+    //! home is deleted with its creator. The spawner binds such a daemon to its
+    //! own life, and only when it is a launcher that outlives it.
     //!
-    //! Nothing here spawns a process: the assertion is on the `Command` the
-    //! spawner would have run.
+    //! Nothing here spawns a process: the decision is a pure function, and the
+    //! wiring assertion is on the `Command` the spawner would have run.
 
-    use super::arm_watchdog_for_ephemeral_home;
+    use super::{LauncherLifetime, arm_watchdog_for_ephemeral_home, should_bind_daemon_to_parent};
 
-    /// The value the spawned daemon would see for `key`, if any.
-    fn env_of(command: &std::process::Command, key: &str) -> Option<String> {
+    /// A home of the shape a `HOME=$(mktemp -d)` harness produces under `root`.
+    fn ephemeral_home(root: &str) -> std::path::PathBuf {
+        std::path::Path::new(root).join("bj.Q9x7fk").join(".agents-in-a-box")
+    }
+
+    /// The value the spawned daemon would see for `key` — but ONLY from an
+    /// explicit mutation. `Command::get_envs` does not report the inherited
+    /// environment, so `None` here means "we did not set it", not "the child
+    /// will not see it".
+    fn explicitly_set_env(command: &std::process::Command, key: &str) -> Option<String> {
         command.get_envs().find_map(|(name, value)| {
             (name == key).then(|| {
                 value
@@ -10781,67 +10850,120 @@ mod ephemeral_home_watchdog_tests {
         })
     }
 
-    fn armed_for(hangar_home: &std::path::Path) -> Option<String> {
-        let mut command = std::process::Command::new("/bin/true");
-        arm_watchdog_for_ephemeral_home(&mut command, hangar_home);
-        env_of(&command, ainb_hangar_daemon::PARENT_PID_ENV)
+    #[test]
+    fn binds_a_persistent_launcher_to_an_ephemeral_home() {
+        for root in ["/tmp", "/var/tmp"] {
+            assert!(
+                should_bind_daemon_to_parent(
+                    &ephemeral_home(root),
+                    LauncherLifetime::Persistent,
+                    false
+                ),
+                "a home under {root} is ephemeral"
+            );
+        }
+        // `$TMPDIR` too, which on macOS is neither of the above.
+        assert!(should_bind_daemon_to_parent(
+            &std::env::temp_dir().join("bj.Q9x7fk").join(".agents-in-a-box"),
+            LauncherLifetime::Persistent,
+            false
+        ));
     }
 
     #[test]
-    fn arms_the_watchdog_for_a_home_under_the_temp_dir() {
-        let home = std::env::temp_dir().join(".tmpQ9x7fk").join(".agents-in-a-box");
-        assert_eq!(
-            armed_for(&home).as_deref(),
-            Some(std::process::id().to_string().as_str()),
-            "a daemon under {} must be bound to this process",
-            home.display()
-        );
+    fn never_binds_a_daemon_a_one_shot_verb_must_leave_behind() {
+        // `ainb hangar daemon start` and `ainb doctor` exit ~1s after the
+        // spawn. Binding there stands the daemon down immediately, while the
+        // verb reports that it started one.
+        assert!(!should_bind_daemon_to_parent(
+            &ephemeral_home("/tmp"),
+            LauncherLifetime::Ephemeral,
+            false
+        ));
     }
 
     #[test]
-    fn arms_the_legacy_name_too_for_an_older_daemon_binary() {
-        // The installed daemon we launch can predate the rename; it would
-        // ignore the new name and become immortal again.
-        let home = std::env::temp_dir().join(".tmpQ9x7fk").join(".agents-in-a-box");
-        let mut command = std::process::Command::new("/bin/true");
-        arm_watchdog_for_ephemeral_home(&mut command, &home);
-        assert_eq!(
-            env_of(&command, ainb_hangar_daemon::LEGACY_PARENT_PID_ENV),
-            env_of(&command, ainb_hangar_daemon::PARENT_PID_ENV)
-        );
+    fn never_overrides_a_parent_a_harness_already_declared() {
+        // A harness that set the env var itself named a longer-lived owner on
+        // purpose; replacing it with our pid kills the daemon it is driving.
+        assert!(!should_bind_daemon_to_parent(
+            &ephemeral_home("/tmp"),
+            LauncherLifetime::Persistent,
+            true
+        ));
     }
 
     #[test]
     fn leaves_a_real_home_alone() {
-        // The Homebrew daemon and a deliberate dev-build daemon must keep
-        // outliving the `ainb` invocation that started them.
-        let home = std::path::Path::new("/Users/example/.agents-in-a-box");
-        assert_eq!(
-            armed_for(home),
-            None,
-            "a real home must not arm the watchdog"
-        );
+        // The Homebrew daemon must keep outliving the invocation that started it.
+        assert!(!should_bind_daemon_to_parent(
+            std::path::Path::new("/Users/example/.agents-in-a-box"),
+            LauncherLifetime::Persistent,
+            false
+        ));
     }
 
     #[test]
     fn leaves_the_running_users_real_home_alone() {
         // Same claim, against the home this machine actually resolves, so the
-        // test fails if `temp_dir()` ever starts prefixing it.
+        // test fails if the temp roots ever start prefixing it.
         let Some(home) = dirs::home_dir() else {
             return;
         };
         let home = home.join(".agents-in-a-box");
         if super::is_under_temp_dir(&home) {
             // This very suite is running under an ephemeral `$HOME`, which is
-            // the case the other test covers. Nothing to assert here.
+            // the case the other tests cover. Nothing to assert here.
+            return;
+        }
+        assert!(!should_bind_daemon_to_parent(
+            &home,
+            LauncherLifetime::Persistent,
+            false
+        ));
+    }
+
+    #[test]
+    fn arms_both_env_names_when_it_binds() {
+        // The installed daemon we launch can predate the rename; it would
+        // ignore the new name and become immortal again.
+        let mut command = std::process::Command::new("/bin/true");
+        arm_watchdog_for_ephemeral_home(
+            &mut command,
+            &ephemeral_home("/tmp"),
+            LauncherLifetime::Persistent,
+        );
+        let ours = std::process::id().to_string();
+        // Skipped when the suite itself runs with a parent already declared:
+        // then the no-override rule wins, which its own test covers.
+        let declared = [
+            ainb_hangar_daemon::PARENT_PID_ENV,
+            ainb_hangar_daemon::LEGACY_PARENT_PID_ENV,
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+        if declared {
             return;
         }
         assert_eq!(
-            armed_for(&home),
-            None,
-            "{} must not arm the watchdog",
-            home.display()
+            explicitly_set_env(&command, ainb_hangar_daemon::PARENT_PID_ENV).as_deref(),
+            Some(ours.as_str())
         );
+        assert_eq!(
+            explicitly_set_env(&command, ainb_hangar_daemon::LEGACY_PARENT_PID_ENV).as_deref(),
+            Some(ours.as_str())
+        );
+    }
+
+    #[test]
+    fn sets_nothing_when_it_does_not_bind() {
+        let mut command = std::process::Command::new("/bin/true");
+        arm_watchdog_for_ephemeral_home(
+            &mut command,
+            &ephemeral_home("/tmp"),
+            LauncherLifetime::Ephemeral,
+        );
+        assert_eq!(command.get_envs().count(), 0);
     }
 }
 

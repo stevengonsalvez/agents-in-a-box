@@ -208,6 +208,70 @@ fn daemon_start_status_stop_round_trip() {
     }
 }
 
+/// Issue #784's guard binds a daemon to the process that launched it when the
+/// hangar home is ephemeral. That is only ever correct for a launcher which
+/// outlives the daemon (the TUI). `ainb hangar daemon start` exits about a
+/// second after the spawn, and its whole contract is to leave a daemon behind:
+/// arming there would stand the new daemon down and still report success.
+///
+/// Deliberately does NOT set `HANGAR_TEST_PARENT_PID`, unlike `run`: with a
+/// parent already declared the guard declines anyway, which would hide the
+/// regression this test exists to catch.
+#[test]
+fn daemon_start_under_a_temp_home_outlives_the_cli_invocation() {
+    reap_orphaned_test_daemons();
+    let Some(daemon) = daemon_bin() else {
+        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
+        return;
+    };
+    // Under `$TMPDIR`, so the home IS ephemeral by the guard's definition.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+
+    let out = Command::new(ainb_bin())
+        .args(["hangar", "daemon", "start"])
+        .env("AINB_HANGAR_HOME", home)
+        .env("HOME", home)
+        .env("AINB_HANGAR_DAEMON_BIN", &daemon)
+        .env("HANGAR_DAEMON_RUNTIME_ID", "rt-lifecycle-outlives")
+        .env("HANGAR_DAEMON_DISABLE_CLAIM", "1")
+        .env("AINB_CODEX_MANAGED", "0")
+        .env_remove("HANGAR_TEST_PARENT_PID")
+        .env_remove("AINB_HANGAR_PARENT_PID")
+        .output()
+        .expect("spawn ainb");
+    assert!(
+        out.status.success(),
+        "daemon start should exit 0; out={}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let pid = read_pid(home).expect("daemon start wrote a pid file");
+    let _cleanup = ExactPidCleanup(pid);
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .join("hangar.sock")
+            .exists()),
+        "the started daemon must reach its run loop"
+    );
+
+    // `ainb` has exited by now (`output()` waited for it). A daemon wrongly
+    // bound to it SIGINTs itself on the watchdog's next tick, ~1s later.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        pid_alive(pid),
+        "daemon {pid} must outlive the `ainb hangar daemon start` that spawned it"
+    );
+
+    let (ok, out) = run(home, &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "daemon stop should exit 0; out={out}");
+    assert!(
+        wait_until(Duration::from_secs(10), || !pid_alive(pid)),
+        "the stopped daemon pid {pid} must die"
+    );
+}
+
 #[test]
 fn daemon_exits_when_its_test_parent_is_sigkilled() {
     reap_orphaned_test_daemons();
