@@ -6,23 +6,79 @@ title: "TUI architecture"
 
 ## Workspace crates
 
-Members are declared in `ainb-tui/Cargo.toml` (`default-members = ["crates/ainb-core"]`):
+34 members, declared in `ainb-tui/Cargo.toml`. `default-members` is
+`["crates/ainb-core", "crates/ainb-hangar-daemon"]`, so a bare `cargo build`
+produces the TUI and the Hangar daemon.
+
+### The host
 
 | Crate | Role |
-|-------|------|
-| `ainb-core` | The TUI app + `ainb` CLI binary. All screens, event loop, session/git/tmux/docker integration. |
-| `ainb-plugin-runtime` | Host-side plugin runtime that loads and supervises v2 plugins. |
-| `ainb-plugin-sdk-rust` | Rust SDK for authoring v2 plugins. |
-| `ainb-plugin-protocol` | Wire protocol / JSON-RPC types shared by host and plugins. |
-| `ainb-plugin-types-sessions` | Shared session data types exposed to plugins. |
-| `ainb-plugin-burndown` | In-tree v2 reference plugin: usage/burndown analytics. |
-| `ainb-plugin-notifyd` | In-tree v2 reference plugin: notifications. |
-| `ainb-plugin-session-reader` | In-tree v2 reference plugin: session data backend. |
-| `ainb-plugin-cts-v2` | Conformance test suite for the v2 plugin ABI. |
-| `ainb-plugin-testkit` | Test harness for plugin authors. |
-| `xtask` | Workspace task runner (build/release helpers). |
+|---|---|
+| `ainb-core` | The TUI app and the `ainb` binary: screens, event loop, session, git, tmux and provider integration. |
+| `ainb-cli` | The skill-manager CLI (`ainb skill`, `source`, `search`), routed before the async runtime starts. |
+| `ainb-web` | Read-only SSE web dashboard over the fleet. |
+| `xtask` | Workspace automation: builds canary plugins and release helpers. |
 
-The workspace pins `version = "1.2.0"`, Rust edition 2021, and forbids `unsafe_code`.
+### Plugin platform
+
+| Crate | Role |
+|---|---|
+| `ainb-plugin-protocol` | Wire types: JSON-RPC 2.0 envelopes, Content-Length framing, error codes. |
+| `ainb-plugin-runtime` | Host side: subprocess spawn, lifecycle FSM, snapshot and action bus, capability gate. |
+| `ainb-plugin-sdk-rust` | Rust SDK for writing a plugin. |
+| `ainb-plugin-testkit` | In-process harness so a plugin author can test without a subprocess. |
+| `ainb-plugin-cts-v2` | Conformance suite: 18 numbered axes plus 3 canaries, 21 in total. |
+| `ainb-plugin-types-sessions` | Shared session schema exposed across the wire. |
+
+### In-tree plugins
+
+Six, staged into `dist/plugins/<id>/` by `scripts/build-plugins.sh`.
+
+| Crate | Plugin id | Role |
+|---|---|---|
+| `ainb-plugin-burndown` | `burndown` | Usage and cost analytics; owns the Stats screen and `ainb usage`. |
+| `ainb-plugin-session-reader` | `session-reader` | Silent publisher: walks provider logs, feeds burndown. |
+| `ainb-plugin-witr` | `witr` | Process-causality tracing; wraps the external `witr` binary. |
+| `ainb-plugin-abtop` | `abtop` | Live agent-process monitor; wraps the external `abtop` binary. |
+| `ainb-plugin-learnings` | `learnings` | Browse, search and graph the knowledge base. |
+| `ainb-plugin-hangar` | `hangar-tui` | The Hangar screen; a client of the Hangar daemon. |
+
+> `ainb-plugin-notifyd` is **not** a plugin despite the crate name. It builds
+> the `ainb-notifyd` daemon, which listens on a Unix socket and writes to
+> SQLite; the Inbox screen reads that store. It has no plugin manifest and
+> speaks no plugin ABI.
+
+### Hangar
+
+Seven crates behind the managed-agents control plane.
+
+| Crate | Role |
+|---|---|
+| `ainb-hangar-core` | IO-free domain types: actors, ids, task status, clock. |
+| `ainb-hangar-proto` | The daemon's JSON-RPC surface; `ALL_METHODS` is the registry. |
+| `ainb-hangar-store` | SQLite pool, embedded migrations, repository wrappers. |
+| `ainb-hangar-client` | The one client onto the daemon's socket. |
+| `ainb-hangar-daemon` | The control plane itself: scheduler, task FSM, agent runner. |
+| `ainb-hangar-sandbox` | Filesystem-confined spawn wrapper (Seatbelt on macOS). |
+| `ainb-hangar-secrets` | Read/write bridge onto the OS keychain. |
+
+### Fleet, skills and support
+
+| Crate | Role |
+|---|---|
+| `ainb-fleet-core` | Session discovery, needs classification, verified tmux delivery. |
+| `ainb-fleet-tools` | The fleet copilot's MCP tool server. |
+| `ainb-acp` | Agent Client Protocol client, transcript reducer, store writer. |
+| `ainb-skill-core` | Manifest-driven install, sync and removal of skills and agents. |
+| `ainb-adapters-source` | Where units come from: git, local, marketplace. |
+| `ainb-adapters-tool` | Where units go: the nine tool homes. |
+| `ainb-diff` | Confirm-diff rendering for the skill installer. |
+| `ainb-fetch` | Shared HTTP fetch with caching. |
+| `ainb-usage` | Usage and cost primitives shared by burndown and fleet cost. |
+| `ainb-model-rates` | Per-model pricing tables. |
+
+Rust edition 2021, `unsafe_code` forbidden. Regenerate the counts above with
+`cargo metadata --no-deps`.
 
 ## ainb-core module tree
 
