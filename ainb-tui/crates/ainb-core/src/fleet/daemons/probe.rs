@@ -1183,8 +1183,14 @@ mod tests {
     /// `daemons.stale_after_ms` failed these tests locally while CI, with no
     /// config file, passed. The fixtures below are built from the consts, so
     /// the snapshot has to agree with them.
-    fn pin_default_snapshot() {
+    fn pin_default_snapshot() -> std::sync::MutexGuard<'static, ()> {
+        // The shared lock, held by the CALLER for the length of its test: the
+        // snapshot is process-global, so installing it without the lock races
+        // every other test that installs or reads one.
+        let guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::config::tunables::install_snapshot(crate::config::AppConfig::default());
+        guard
     }
 
     use super::*;
@@ -1600,7 +1606,7 @@ mod tests {
 
     #[test]
     fn bridge_whose_last_attention_poll_went_stale_is_degraded() {
-        pin_default_snapshot();
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let last_poll = now - (ATTENTION_STALE_AFTER_MS + 60_000);
         let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(last_poll));
@@ -1625,7 +1631,7 @@ mod tests {
 
     #[test]
     fn bridge_poll_exactly_at_the_window_edge_is_still_running() {
-        pin_default_snapshot();
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::Bridge,
@@ -1647,7 +1653,7 @@ mod tests {
 
     #[test]
     fn freshly_started_bridge_gets_one_window_before_degrading() {
-        pin_default_snapshot();
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // Up for 10s: the worker has not had its first poll yet. Degrading here
         // would make every bridge restart look broken for a minute.
@@ -1797,7 +1803,7 @@ mod tests {
 
     #[test]
     fn wedged_daemon_live_pid_but_old_beat_is_stale() {
-        pin_default_snapshot();
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::FleetDaemon,
@@ -1812,7 +1818,7 @@ mod tests {
 
     #[test]
     fn beat_exactly_at_window_edge_is_still_running() {
-        pin_default_snapshot();
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // age == STALE_AFTER_MS is NOT > the window, so still running. The
         // outbound poll is fresh so this isolates the liveness edge.

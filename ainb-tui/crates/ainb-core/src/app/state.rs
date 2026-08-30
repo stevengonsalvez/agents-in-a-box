@@ -10377,13 +10377,18 @@ impl AppState {
         // only returns rows that EXIST, so a first-time write that failed left
         // the rejected value on screen with `dirty` already cleared: the row
         // claimed the setting had landed and no later save would ever write it.
-        for (key, _) in &failures {
-            let row_key = format!("hangar_daemon.{key}");
-            self.config_screen_state.dirty.insert(row_key);
-        }
+        let failed_rows: Vec<String> =
+            failures.iter().map(|(key, _)| format!("hangar_daemon.{key}")).collect();
         // Re-read rather than trust the write: the row now shows what the
         // database holds, including for any write that just failed.
         self.load_hangar_daemon_config().await;
+        // AFTER the re-seed, not before. `seed_hangar_daemon_rows` clears
+        // `dirty` for every key it finds in the store, so marking the row for
+        // retry first meant the flag was erased on the next line for any knob
+        // that already had a row — i.e. everything except a first-ever write.
+        for row_key in failed_rows {
+            self.config_screen_state.dirty.insert(row_key);
+        }
     }
 
     pub async fn process_async_action(&mut self) -> anyhow::Result<()> {

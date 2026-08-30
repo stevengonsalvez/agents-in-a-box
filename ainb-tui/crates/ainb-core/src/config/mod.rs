@@ -2103,7 +2103,25 @@ impl AppConfig {
         if other.web != WebServerConfig::default() {
             self.web = other.web;
         }
-        self.acp.adapters.extend(other.acp.adapters);
+        // Per FIELD, not per entry. `HashMap::extend` replaces the whole
+        // value, so a higher layer that set only `command` reset
+        // `permission_mode` back to the default — which defeats the point of
+        // `AcpAdapterToml`'s Option fields, where an absent key means "leave
+        // the built-in alone".
+        for (name, adapter) in other.acp.adapters {
+            let entry = self.acp.adapters.entry(name).or_default();
+            if adapter.command.is_some() {
+                entry.command = adapter.command;
+            }
+            // `permission_mode` is a `String` with a serde default here, so an
+            // absent key and an explicit `"default"` are indistinguishable
+            // after deserialization. Same differs-from-default convention the
+            // rest of this merge uses; the cost is that explicitly writing the
+            // default in a higher layer cannot override a lower one.
+            if adapter.permission_mode != crate::config::tunables::default_acp_permission_mode() {
+                entry.permission_mode = adapter.permission_mode;
+            }
+        }
     }
 
     /// Load built-in container templates

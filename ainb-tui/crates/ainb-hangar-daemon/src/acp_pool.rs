@@ -321,7 +321,20 @@ impl PoolConfig {
                 entry.command = std::path::PathBuf::from(command);
             }
             if let Some(mode) = adapter.permission_mode {
-                entry.permission_mode = mode;
+                // Validated here, not just in the settings screen: the row's
+                // Choice list gates the UI and `ainb config set`, but a hand-edited
+                // typo would otherwise reach `session/new` unchecked — and an
+                // unpinned adapter has been observed inheriting
+                // `bypassPermissions`, so a silent fall-through is not safe.
+                const MODES: &[&str] = &["default", "acceptEdits", "bypassPermissions", "plan"];
+                if MODES.contains(&mode.as_str()) {
+                    entry.permission_mode = mode;
+                } else {
+                    tracing::warn!(
+                        %mode,
+                        "unknown acp permission_mode in config; using \"default\""
+                    );
+                }
             }
         }
         config
