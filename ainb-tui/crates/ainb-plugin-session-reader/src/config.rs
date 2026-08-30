@@ -1,5 +1,5 @@
 //! Plugin-side config: the `[session_reader]` table of
-//! `~/.agents-in-a-box/config.toml`.
+//! `~/.agents-in-a-box/config/config.toml`.
 //!
 //! Read-only — the host owns the file; this plugin only consumes its
 //! own table (mirroring the burndown plugin's disk-read pattern, since
@@ -82,10 +82,14 @@ pub fn load_from(path: &Path) -> SessionReaderConfig {
     }
 }
 
-/// `~/.agents-in-a-box/config.toml`, resolved via `$HOME`.
+/// `~/.agents-in-a-box/config/config.toml`, resolved via `$HOME`.
+///
+/// The `config/` segment matters: this plugin used to read the file one level
+/// up, which nothing writes. `[session_reader]` set the way the docs describe
+/// therefore never reached it.
 fn default_config_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".agents-in-a-box").join("config.toml"))
+    Some(PathBuf::from(home).join(".agents-in-a-box").join("config").join("config.toml"))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 use crate::app::{
     AppState,
     screens::ids as screen_ids,
-    state::{AsyncAction, AuthMethod, ConfigPane},
+    state::{AsyncAction, AuthMethod, ConfigPane, ConfigScreenState},
 };
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
@@ -456,22 +456,28 @@ pub enum AppEvent {
     InboxRefresh,               // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
-    ConfigBack,            // Return to home screen (Esc)
-    ConfigNextCategory,    // Navigate to next category
-    ConfigPrevCategory,    // Navigate to previous category
-    ConfigNextSetting,     // Navigate to next setting
-    ConfigPrevSetting,     // Navigate to previous setting
-    ConfigSwitchPane,      // Toggle focus between category and settings pane (Tab)
-    ConfigNavigateUp,      // Navigate up within current focused pane
-    ConfigNavigateDown,    // Navigate down within current focused pane
-    ConfigFocusCategories, // Switch focus to categories pane (Left)
-    ConfigFocusSettings,   // Switch focus to settings pane (Right)
-    ConfigEditSetting,     // Start editing current setting (Enter)
-    ConfigSaveEdit,        // Save current edit (Enter while editing)
-    ConfigCancelEdit,      // Cancel current edit (Esc while editing)
-    ConfigEditChar(char),  // Input character while editing
-    ConfigEditBackspace,   // Backspace while editing
-    ConfigSaveAll,         // Save all settings (S)
+    ConfigBack,             // Return to home screen (Esc)
+    ConfigNextCategory,     // Navigate to next category
+    ConfigPrevCategory,     // Navigate to previous category
+    ConfigNextSetting,      // Navigate to next setting
+    ConfigPrevSetting,      // Navigate to previous setting
+    ConfigSwitchPane,       // Toggle focus between category and settings pane (Tab)
+    ConfigNavigateUp,       // Navigate up within current focused pane
+    ConfigNavigateDown,     // Navigate down within current focused pane
+    ConfigFocusCategories,  // Switch focus to categories pane (Left)
+    ConfigFocusSettings,    // Switch focus to settings pane (Right)
+    ConfigEditSetting,      // Start editing current setting (Enter)
+    ConfigSaveEdit,         // Save current edit (Enter while editing)
+    ConfigCancelEdit,       // Cancel current edit (Esc while editing)
+    ConfigEditChar(char),   // Input character while editing
+    ConfigEditBackspace,    // Backspace while editing
+    ConfigSaveAll,          // Save all settings (S)
+    ConfigToggleExpand,     // Open/close the selected section in the tree (Enter/Space)
+    ConfigSearchStart,      // Open the `/` filter over every row
+    ConfigSearchChar(char), // Type into the `/` filter
+    ConfigSearchBackspace,  // Backspace in the `/` filter
+    ConfigSearchCancel,     // Close the `/` filter (Esc)
+    ConfigSecretToKeychain, // Store a credential literal in the OS keychain (Ctrl+K)
     // API Key configuration
     ConfigApiKeyStart,  // Start API key input mode (when on API Key Status)
     ConfigApiKeySave,   // Save the entered API key to keychain
@@ -772,6 +778,22 @@ fn worth_persisting_repo_defaults(
     repo_label: &str,
 ) -> bool {
     !prompt_text.is_empty() || defaults.per_repo.contains_key(repo_label)
+}
+
+/// Whether a secret row should render as configured.
+///
+/// A `keychain:` reference counts on the strength of being set. Whether the
+/// secret actually retrieves is a question for whoever needs its value, not for
+/// a status dot drawn on the event loop.
+fn secret_reference_is_set(reference: &str) -> bool {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("keychain:") {
+        return true;
+    }
+    !crate::fleet::bridge::secrets::resolve_secret(reference).trim().is_empty()
 }
 
 impl EventHandler {
@@ -3330,28 +3352,54 @@ impl EventHandler {
                 KeyCode::Char(c) => Some(AppEvent::ConfigEditChar(c)),
                 _ => None,
             }
+        } else if config_state.is_searching() {
+            // `/` filter box: every printable key narrows the match list, so
+            // the vim nav letters have to come from the arrow keys here.
+            match key_event.code {
+                KeyCode::Esc => Some(AppEvent::ConfigSearchCancel),
+                KeyCode::Up => Some(AppEvent::ConfigPrevSetting),
+                KeyCode::Down => Some(AppEvent::ConfigNextSetting),
+                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
+                KeyCode::Backspace => Some(AppEvent::ConfigSearchBackspace),
+                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(AppEvent::ConfigSecretToKeychain)
+                }
+                KeyCode::Char(c) => Some(AppEvent::ConfigSearchChar(c)),
+                _ => None,
+            }
         } else {
-            // Navigation mode - check if we're on auth settings
-            let is_auth_category = config_state.selected_category == 0; // Authentication category
-            let on_claude_auth = is_auth_category && config_state.selected_setting == 0; // Claude Authentication
+            // Navigation mode. The Claude-auth row opens its own popup rather
+            // than the generic choice widget, because picking "API key" there
+            // also prompts for the key and stores it in the OS keychain.
+            // Matched by KEY: the old `selected_category == 0 &&
+            // selected_setting == 0` index match pointed at whatever row
+            // happened to sort first.
+            let on_claude_auth = config_state
+                .current_setting()
+                .is_some_and(|row| row.key == ConfigScreenState::CLAUDE_PROVIDER_KEY);
+            let on_categories = config_state.focused_pane == ConfigPane::Categories;
 
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::ConfigBack),
                 KeyCode::Tab => Some(AppEvent::ConfigSwitchPane),
+                KeyCode::Char('/') => Some(AppEvent::ConfigSearchStart),
+                // Ctrl+K before the bare `k` nav arm, which would otherwise
+                // swallow it.
+                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(AppEvent::ConfigSecretToKeychain)
+                }
                 // Up/Down navigate within the current focused pane
                 KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::ConfigNavigateUp),
                 KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::ConfigNavigateDown),
                 // Left/Right switch focus between panes
                 KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::ConfigFocusCategories),
                 KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::ConfigFocusSettings),
-                KeyCode::Enter => {
-                    if on_claude_auth {
-                        // Open the auth provider popup
-                        Some(AppEvent::AuthProviderPopupOpen)
-                    } else {
-                        Some(AppEvent::ConfigEditSetting)
-                    }
-                }
+                // Space opens/closes a section from either pane, so the tree is
+                // reachable without giving up Enter-to-edit.
+                KeyCode::Char(' ') => Some(AppEvent::ConfigToggleExpand),
+                KeyCode::Enter if on_categories => Some(AppEvent::ConfigToggleExpand),
+                KeyCode::Enter if on_claude_auth => Some(AppEvent::AuthProviderPopupOpen),
+                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
                 KeyCode::Char('s' | 'S') => Some(AppEvent::ConfigSaveAll),
                 _ => None,
             }
@@ -3711,6 +3759,106 @@ impl EventHandler {
             }
         }
         Ok(session_name.to_string())
+    }
+
+    /// Write every pending settings-screen edit, returning how many landed.
+    ///
+    /// One path for both the auto-persist on a popup confirm and the explicit
+    /// `S` save-all, so they cannot drift. The order matters: `apply_to_app_config`
+    /// folds the edits into the live config and hands back the ones whose section
+    /// `AppConfig` does not model, `save()` writes the modelled part (overlaying
+    /// the file so unknown sections survive), then `save_external_keys` writes the
+    /// rest. On success the edits are cleared, so a later save cannot rewrite a
+    /// value another process has since changed.
+    fn persist_config_screen(state: &mut AppState) -> anyhow::Result<usize> {
+        let pending = state.config_screen_state.pending_edits().len();
+        let dirty_before = !state.config_screen_state.dirty.is_empty();
+        let applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        // Nothing to write: return before touching the file. `save()` renders
+        // the whole AppConfig from the snapshot loaded at startup, so pressing
+        // `S` with no edits would revert anything `ainb config set` or another
+        // process wrote since — and then report "No changes to save". Exactly
+        // the hazard `save_tree_expansion` exists to avoid.
+        // Keyed off `dirty`, not `pending`: `pending_edits()` deliberately
+        // excludes plugin rows and read-only rows, so a plugin-only edit has
+        // `pending == 0` while still having work to do. `dirty` is the honest
+        // "did the user change anything" signal.
+        if !dirty_before && applied.external.is_empty() {
+            state.config_screen_state.mark_saved();
+            return Ok(0);
+        }
+        state.app_config.save()?;
+        // Collected, not propagated — the same rule the modelled rows already
+        // follow. An external value the registry rejects (a `0` in a
+        // `min: 1` row, say) used to fail the whole save with `?`, so
+        // `mark_saved()` never ran, the row stayed dirty, and every later save
+        // in that session re-hit the same error. One bad row must not wedge
+        // the screen.
+        let mut rejected = applied.rejected.clone();
+        if let Err(err) = crate::config::AppConfig::save_external_keys(&applied.external) {
+            let keys = applied
+                .external
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            rejected.push((keys, err.to_string()));
+        }
+        state.config_screen_state.mark_saved();
+        for (key, why) in &rejected {
+            tracing::warn!(key, error = %why, "settings edit rejected");
+            state.add_error_notification(format!("{key}: {why}"));
+        }
+        Ok(pending.saturating_sub(rejected.len()))
+    }
+
+    /// Store a credential literal in the OS keychain and point the row at it.
+    ///
+    /// The literal is written under a service name derived from the row's key
+    /// and NEVER written to `config.toml`: the row is left holding
+    /// `keychain:<service>`, which the existing bridge secret resolver already
+    /// understands. An empty literal is treated as "clear this row" rather than
+    /// storing an empty secret.
+    fn store_secret_in_keychain(state: &mut AppState, row_key: &str, literal: &str) {
+        let literal = literal.trim();
+        let Some(row) = crate::config::registry::row(row_key).cloned() else {
+            return;
+        };
+        if literal.is_empty() {
+            state.config_screen_state.set_row_value(
+                row_key,
+                crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue::default()),
+            );
+        } else {
+            let service = crate::config::screen_model::keychain_service(row_key);
+            match crate::credentials::store_keychain_secret(&service, literal) {
+                Ok(()) => {
+                    state.config_screen_state.set_row_value(
+                        row_key,
+                        crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue {
+                            reference: format!("keychain:{service}"),
+                            resolved: true,
+                        }),
+                    );
+                    state.add_success_notification(format!(
+                        "{} stored in the keychain as '{service}'",
+                        row.label
+                    ));
+                }
+                Err(e) => {
+                    // Loud on both channels: the notification can scroll away,
+                    // and "the secret silently did not get stored" is the worst
+                    // possible outcome for this flow.
+                    tracing::error!(service, error = %e, "keychain write failed");
+                    state.add_error_notification(format!("Keychain write failed: {e}"));
+                    return;
+                }
+            }
+        }
+        match Self::persist_config_screen(state) {
+            Ok(_) => {}
+            Err(e) => state.add_error_notification(format!("Failed to save setting: {e}")),
+        }
     }
 
     pub fn process_event(event: AppEvent, state: &mut AppState) {
@@ -6596,49 +6744,27 @@ impl EventHandler {
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
+                // One write on the way out, and only when a node actually
+                // toggled — a user who just looked around leaves the file alone.
+                if let Some(ids) = state.config_screen_state.take_expansion_to_persist() {
+                    state.app_config.ui_preferences.config_tree_expanded = ids.clone();
+                    if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
+                        tracing::warn!(error = %e, "could not persist config tree expansion");
+                    }
+                }
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
-                let num_categories = state.config_screen_state.categories.len();
-                if num_categories > 0 {
-                    state.config_screen_state.selected_category =
-                        (state.config_screen_state.selected_category + 1) % num_categories;
-                    state.config_screen_state.selected_setting = 0;
-                }
+                state.config_screen_state.select_next_category();
             }
             AppEvent::ConfigPrevCategory => {
-                let num_categories = state.config_screen_state.categories.len();
-                if num_categories > 0 {
-                    state.config_screen_state.selected_category = state
-                        .config_screen_state
-                        .selected_category
-                        .checked_sub(1)
-                        .unwrap_or(num_categories - 1);
-                    state.config_screen_state.selected_setting = 0;
-                }
+                state.config_screen_state.select_prev_category();
             }
             AppEvent::ConfigNextSetting => {
-                let current_category = &state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(current_category) {
-                    if !settings.is_empty() {
-                        state.config_screen_state.selected_setting =
-                            (state.config_screen_state.selected_setting + 1) % settings.len();
-                    }
-                }
+                state.config_screen_state.select_next_setting();
             }
             AppEvent::ConfigPrevSetting => {
-                let current_category = &state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(current_category) {
-                    if !settings.is_empty() {
-                        state.config_screen_state.selected_setting = state
-                            .config_screen_state
-                            .selected_setting
-                            .checked_sub(1)
-                            .unwrap_or(settings.len() - 1);
-                    }
-                }
+                state.config_screen_state.select_prev_setting();
             }
             AppEvent::ConfigSwitchPane => {
                 // Toggle focus between categories and settings panes
@@ -6652,67 +6778,14 @@ impl EventHandler {
                     state.config_screen_state.focused_pane
                 );
             }
-            AppEvent::ConfigNavigateUp => {
-                // Navigate up within the currently focused pane
-                match state.config_screen_state.focused_pane {
-                    ConfigPane::Categories => {
-                        // Navigate to previous category
-                        let num_categories = state.config_screen_state.categories.len();
-                        if num_categories > 0 {
-                            state.config_screen_state.selected_category = state
-                                .config_screen_state
-                                .selected_category
-                                .checked_sub(1)
-                                .unwrap_or(num_categories - 1);
-                            state.config_screen_state.selected_setting = 0;
-                        }
-                    }
-                    ConfigPane::Settings => {
-                        // Navigate to previous setting
-                        let current_category = &state.config_screen_state.categories
-                            [state.config_screen_state.selected_category];
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get(current_category)
-                        {
-                            if !settings.is_empty() {
-                                state.config_screen_state.selected_setting = state
-                                    .config_screen_state
-                                    .selected_setting
-                                    .checked_sub(1)
-                                    .unwrap_or(settings.len() - 1);
-                            }
-                        }
-                    }
-                }
-            }
-            AppEvent::ConfigNavigateDown => {
-                // Navigate down within the currently focused pane
-                match state.config_screen_state.focused_pane {
-                    ConfigPane::Categories => {
-                        // Navigate to next category
-                        let num_categories = state.config_screen_state.categories.len();
-                        if num_categories > 0 {
-                            state.config_screen_state.selected_category =
-                                (state.config_screen_state.selected_category + 1) % num_categories;
-                            state.config_screen_state.selected_setting = 0;
-                        }
-                    }
-                    ConfigPane::Settings => {
-                        // Navigate to next setting
-                        let current_category = &state.config_screen_state.categories
-                            [state.config_screen_state.selected_category];
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get(current_category)
-                        {
-                            if !settings.is_empty() {
-                                state.config_screen_state.selected_setting =
-                                    (state.config_screen_state.selected_setting + 1)
-                                        % settings.len();
-                            }
-                        }
-                    }
-                }
-            }
+            AppEvent::ConfigNavigateUp => match state.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config_screen_state.select_prev_category(),
+                ConfigPane::Settings => state.config_screen_state.select_prev_setting(),
+            },
+            AppEvent::ConfigNavigateDown => match state.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config_screen_state.select_next_category(),
+                ConfigPane::Settings => state.config_screen_state.select_next_setting(),
+            },
             AppEvent::ConfigFocusCategories => {
                 state.config_screen_state.focused_pane = ConfigPane::Categories;
                 tracing::debug!("Config focus switched to Categories pane");
@@ -6721,13 +6794,34 @@ impl EventHandler {
                 state.config_screen_state.focused_pane = ConfigPane::Settings;
                 tracing::debug!("Config focus switched to Settings pane");
             }
+            AppEvent::ConfigToggleExpand => {
+                // In-memory only. Persisting here meant a read-parse-write of
+                // config.toml inside the event loop on every keypress; the flush
+                // happens once, on ConfigBack.
+                state.config_screen_state.toggle_expanded();
+            }
+            AppEvent::ConfigSearchStart => {
+                state.config_screen_state.start_search();
+            }
+            AppEvent::ConfigSearchChar(c) => {
+                state.config_screen_state.push_search_char(c);
+            }
+            AppEvent::ConfigSearchBackspace => {
+                state.config_screen_state.pop_search_char();
+            }
+            AppEvent::ConfigSearchCancel => {
+                state.config_screen_state.clear_search();
+            }
             AppEvent::ConfigEditSetting => {
-                let current_category = state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(&current_category) {
-                    if let Some(setting) = settings.get(state.config_screen_state.selected_setting)
+                let selected = state.config_screen_state.current_setting().cloned();
+                if let Some(setting) = selected {
+                    // A row core cannot persist says so instead of opening an
+                    // editor that would throw the value away.
+                    if let Some(reason) =
+                        crate::config::screen_model::read_only_reason(&setting.key)
                     {
-                        // Open popup based on setting type
+                        state.add_info_notification(format!("{}: {reason}", setting.label));
+                    } else {
                         let title = setting.label.clone();
                         let description = setting.description.clone();
                         let key = setting.key.clone();
@@ -6750,9 +6844,19 @@ impl EventHandler {
                                     text,
                                 );
                             }
-                            crate::app::state::ConfigValue::Secret(_) => {
-                                // For secrets, show empty input (don't reveal existing value)
-                                state.config_popup_state.open_text(&title, &description, &key, "");
+                            crate::app::state::ConfigValue::Secret(secret) => {
+                                // Editing a secret edits the REFERENCE
+                                // ($ENV_VAR or keychain:<service>), never a
+                                // plaintext value: a literal typed here would
+                                // land in config.toml. Ctrl+K is the path that
+                                // takes a literal, and it writes it to the
+                                // keychain instead.
+                                state.config_popup_state.open_text(
+                                    &title,
+                                    "reference: $ENV_VAR or keychain:<service> — Ctrl+K stores a literal in the keychain",
+                                    &key,
+                                    &secret.reference,
+                                );
                             }
                             crate::app::state::ConfigValue::Bool(value) => {
                                 state.config_popup_state.open_boolean(
@@ -6775,46 +6879,63 @@ impl EventHandler {
                     }
                 }
             }
-            AppEvent::ConfigSaveEdit => {
-                let current_category = state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) =
-                    state.config_screen_state.settings.get_mut(&current_category)
-                {
-                    if let Some(setting) =
-                        settings.get_mut(state.config_screen_state.selected_setting)
-                    {
-                        let new_value = state.config_screen_state.edit_buffer.clone();
-                        // Update the value based on the type
-                        setting.value = match &setting.value {
-                            crate::app::state::ConfigValue::Text(_) => {
-                                crate::app::state::ConfigValue::Text(new_value)
-                            }
-                            crate::app::state::ConfigValue::Secret(_) => {
-                                crate::app::state::ConfigValue::Secret(new_value)
-                            }
-                            crate::app::state::ConfigValue::Bool(_) => {
-                                crate::app::state::ConfigValue::Bool(
-                                    new_value.to_lowercase() == "true",
-                                )
-                            }
-                            crate::app::state::ConfigValue::Number(_) => {
-                                crate::app::state::ConfigValue::Number(
-                                    new_value.parse().unwrap_or(0),
-                                )
-                            }
-                            crate::app::state::ConfigValue::Choice(options, _) => {
-                                // Try to find the index of the entered value
-                                let idx = options.iter().position(|o| o == &new_value).unwrap_or(0);
-                                crate::app::state::ConfigValue::Choice(options.clone(), idx)
-                            }
+            AppEvent::ConfigSecretToKeychain => {
+                let selected = state.config_screen_state.current_setting().cloned();
+                match selected.as_ref().map(|setting| (&setting.value, setting)) {
+                    Some((crate::app::state::ConfigValue::Secret(secret), setting)) => {
+                        // Pre-fill with an existing literal so migrating one out
+                        // of config.toml is a confirm away — and so the user is
+                        // shown what is about to move, never a silent rewrite.
+                        let prefill = if secret.is_reference() {
+                            ""
+                        } else {
+                            secret.reference.as_str()
                         };
-                        tracing::info!(
-                            "Saved setting: {} = {}",
-                            setting.label,
-                            setting.value.display()
+                        let service = crate::config::screen_model::keychain_service(&setting.key);
+                        state.config_screen_state.keychain_target = Some(setting.key.clone());
+                        state.config_popup_state.open_text(
+                            &format!("{} → keychain", setting.label),
+                            &format!(
+                                "stored under '{service}'; config.toml keeps only the reference"
+                            ),
+                            &setting.key,
+                            prefill,
                         );
                     }
+                    _ => state.add_info_notification(
+                        "Ctrl+K stores a credential in the keychain; this row is not one"
+                            .to_string(),
+                    ),
+                }
+            }
+            AppEvent::ConfigSaveEdit => {
+                let new_value = state.config_screen_state.edit_buffer.clone();
+                if let Some(setting) = state.config_screen_state.current_setting().cloned() {
+                    let updated = match &setting.value {
+                        crate::app::state::ConfigValue::Text(_) => {
+                            crate::app::state::ConfigValue::Text(new_value)
+                        }
+                        crate::app::state::ConfigValue::Secret(secret) => {
+                            crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue {
+                                reference: new_value,
+                                resolved: secret.resolved,
+                            })
+                        }
+                        crate::app::state::ConfigValue::Bool(_) => {
+                            crate::app::state::ConfigValue::Bool(
+                                new_value.eq_ignore_ascii_case("true"),
+                            )
+                        }
+                        crate::app::state::ConfigValue::Number(_) => {
+                            crate::app::state::ConfigValue::Number(new_value.parse().unwrap_or(0))
+                        }
+                        crate::app::state::ConfigValue::Choice(options, _) => {
+                            let idx = options.iter().position(|o| o == &new_value).unwrap_or(0);
+                            crate::app::state::ConfigValue::Choice(options.clone(), idx)
+                        }
+                    };
+                    tracing::info!("Saved setting: {} = {}", setting.label, updated.display());
+                    state.config_screen_state.set_row_value(&setting.key, updated);
                 }
                 state.config_screen_state.editing = false;
                 state.config_screen_state.edit_buffer.clear();
@@ -6832,16 +6953,10 @@ impl EventHandler {
             }
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
-
-                // Apply ConfigScreenState settings to AppConfig
-                state.config_screen_state.apply_to_app_config(&mut state.app_config);
-
-                // Save to disk
-                match state.app_config.save() {
-                    Ok(()) => {
-                        state.add_success_notification("Settings saved to config.toml".to_string());
-                        tracing::info!("Settings saved to ~/.agents-in-a-box/config/config.toml");
-                    }
+                match Self::persist_config_screen(state) {
+                    Ok(0) => state.add_info_notification("No changes to save".to_string()),
+                    Ok(n) => state
+                        .add_success_notification(format!("Saved {n} setting(s) to config.toml")),
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save settings: {}", e));
                         tracing::error!("Failed to save config: {}", e);
@@ -6871,16 +6986,12 @@ impl EventHandler {
                         // Update auth status to show API key configured
                         let masked = credentials::get_anthropic_api_key_masked();
                         let status = format!("API Key ({})", masked);
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(status);
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save API key: {}", e));
@@ -6902,18 +7013,12 @@ impl EventHandler {
                         tracing::info!("API key successfully deleted from keychain");
 
                         // Update auth status to show system auth
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to delete API key: {}", e));
@@ -6956,17 +7061,12 @@ impl EventHandler {
                             // Update config screen status
                             let masked = credentials::get_anthropic_api_key_masked();
                             let status = format!("API Key ({})", masked);
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value =
-                                        crate::app::state::ConfigValue::Text(status);
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7004,18 +7104,12 @@ impl EventHandler {
                             let _ = credentials::delete_anthropic_api_key();
 
                             // Update config screen status
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value = crate::app::state::ConfigValue::Text(
-                                        "System Auth (Pro/Max Plan)".to_string(),
-                                    );
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7049,18 +7143,12 @@ impl EventHandler {
                         state.auth_provider_popup_state.refresh_providers();
 
                         // Update config screen
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
 
                         // Persist switch to system auth in config.toml
                         state.app_config.authentication.claude_provider =
@@ -7086,74 +7174,93 @@ impl EventHandler {
 
                 if let Some(value) = state.config_popup_state.get_value() {
                     let setting_key = state.config_popup_state.setting_key.clone();
-                    let current_category = state.config_screen_state.categories
-                        [state.config_screen_state.selected_category];
 
-                    // Update the setting value
-                    if let Some(settings) =
-                        state.config_screen_state.settings.get_mut(&current_category)
-                    {
-                        if let Some(setting) = settings.iter_mut().find(|s| s.key == setting_key) {
-                            match value {
-                                ConfigPopupValue::Choice(text, idx) => {
-                                    if let crate::app::state::ConfigValue::Choice(opts, _) =
-                                        &setting.value
-                                    {
-                                        setting.value = crate::app::state::ConfigValue::Choice(
-                                            opts.clone(),
-                                            idx,
-                                        );
+                    // Ctrl+K flow: the popup collected a plaintext credential.
+                    // It goes to the OS keychain and the row keeps only the
+                    // reference, so the literal never reaches config.toml.
+                    let keychain_row = state
+                        .config_screen_state
+                        .keychain_target
+                        .take()
+                        .filter(|k| *k == setting_key);
+                    if let Some(row_key) = keychain_row {
+                        if let ConfigPopupValue::Text(literal) = &value {
+                            Self::store_secret_in_keychain(state, &row_key, literal);
+                        }
+                        state.config_popup_state.close();
+                    } else {
+                        let updated = match &value {
+                            ConfigPopupValue::Choice(_, idx) => state
+                                .config_screen_state
+                                .current_setting()
+                                .and_then(|row| match &row.value {
+                                    crate::app::state::ConfigValue::Choice(options, _) => {
+                                        Some(crate::app::state::ConfigValue::Choice(
+                                            options.clone(),
+                                            *idx,
+                                        ))
                                     }
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        text
-                                    );
-                                }
-                                ConfigPopupValue::Text(text) => {
-                                    setting.value =
-                                        crate::app::state::ConfigValue::Text(text.clone());
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        text
-                                    );
-                                }
-                                ConfigPopupValue::Boolean(b) => {
-                                    setting.value = crate::app::state::ConfigValue::Bool(b);
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        b
-                                    );
-                                }
-                                ConfigPopupValue::Number(n) => {
-                                    setting.value = crate::app::state::ConfigValue::Number(n);
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        n
-                                    );
+                                    _ => None,
+                                }),
+                            ConfigPopupValue::Text(text) => {
+                                // A secret row edits its reference, so the text has
+                                // to go back as a reference, not as a plain value.
+                                match state.config_screen_state.current_setting().map(|r| &r.value)
+                                {
+                                    Some(crate::app::state::ConfigValue::Secret(_)) => {
+                                        Some(crate::app::state::ConfigValue::Secret(
+                                            crate::app::state::SecretValue {
+                                                reference: text.clone(),
+                                                // A `keychain:` reference is
+                                                // taken at face value, exactly
+                                                // as `ConfigRow::to_value`
+                                                // does. Resolving it here means
+                                                // a keyring read plus a
+                                                // `security` shell-out, each
+                                                // bounded at 5s, on the event
+                                                // loop — up to ~10s of frozen
+                                                // TUI against a locked
+                                                // keychain, just for a status
+                                                // dot.
+                                                resolved: secret_reference_is_set(text),
+                                            },
+                                        ))
+                                    }
+                                    _ => Some(crate::app::state::ConfigValue::Text(text.clone())),
                                 }
                             }
-                        }
-                    }
+                            ConfigPopupValue::Boolean(b) => {
+                                Some(crate::app::state::ConfigValue::Bool(*b))
+                            }
+                            ConfigPopupValue::Number(n) => {
+                                Some(crate::app::state::ConfigValue::Number(*n))
+                            }
+                        };
 
-                    // Auto-persist: apply the edited settings to the live
-                    // config and write config.toml immediately, so the change
-                    // *becomes* the config (and survives a reopen/restart)
-                    // without the user having to remember `S` save-all. `S`
-                    // remains as an explicit save-all; `Esc` still cancels the
-                    // single edit before it reaches here.
-                    state.config_screen_state.apply_to_app_config(&mut state.app_config);
-                    match state.app_config.save() {
-                        Ok(()) => {
-                            state.add_success_notification(
-                                "Setting saved to config.toml".to_string(),
+                        if let Some(updated) = updated {
+                            tracing::info!(
+                                "Config setting {} changed to: {}",
+                                setting_key,
+                                updated.display()
                             );
+                            state.config_screen_state.set_row_value(&setting_key, updated);
                         }
-                        Err(e) => {
-                            state.add_error_notification(format!("Failed to save setting: {}", e));
+
+                        // Auto-persist: write config.toml immediately, so the change
+                        // *becomes* the config (and survives a reopen/restart)
+                        // without the user having to remember `S` save-all. `S`
+                        // remains as an explicit save-all; `Esc` still cancels the
+                        // single edit before it reaches here.
+                        match Self::persist_config_screen(state) {
+                            Ok(_) => {
+                                state.add_success_notification(
+                                    "Setting saved to config.toml".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                state
+                                    .add_error_notification(format!("Failed to save setting: {e}"));
+                            }
                         }
                     }
                 }
@@ -7161,6 +7268,12 @@ impl EventHandler {
             }
             AppEvent::ConfigPopupCancel => {
                 tracing::debug!("Config popup cancelled");
+                // A Ctrl+K prompt that is escaped must not leave the row armed:
+                // the next ordinary edit of that same row would be routed into
+                // the keychain, storing the typed "$MY_TOKEN" as a secret and
+                // rewriting the row to a `keychain:` ref — silently discarding
+                // the env reference the user actually asked for.
+                state.config_screen_state.keychain_target = None;
                 state.config_popup_state.close();
             }
             AppEvent::ConfigPopupInputChar(c) => {

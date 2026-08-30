@@ -14,7 +14,7 @@ version = "0.1.0"
 # =============================================================================
 [authentication]
 # Active CLI provider for agent sessions
-# Options: "claude" | "codex" | "gemini"
+# Options: "claude" | "codex" | "gemini" | "copilot"
 cli_provider = "claude"
 
 # Claude-specific authentication provider
@@ -105,35 +105,88 @@ show_container_status = true
 # Show git changes in session list (+added, -removed, ~modified)
 show_git_status = true
 
+# Show the session menu bar (also toggled live with Shift+M)
+show_session_menu_bar = true
+
+# Which sessions the list shows by default
+# Options: "all" | "active_only" | "stopped_only"
+session_filter = "all"
+
+# Sidebar geometry. Normally written by the TUI as you drag/collapse a pane
+# rather than set by hand; listed here so the keys are discoverable.
+# home_sidebar_width = 40
+# sessions_sidebar_width = 40
+# sessions_sidebar_collapsed = false
+# skill_manager_sources_width = 32
+
+# First-run wizard decisions. "unset" means "ask again next launch"; the TUI
+# writes "declined" or "installed" once you answer, so hand-editing these back
+# to "unset" is how you make the wizard offer them again.
+# Options: "unset" | "declined" | "installed"
+# statusline_decision = "unset"
+# tmux_decision = "unset"
+
 # =============================================================================
 # Container Templates (Advanced)
 # =============================================================================
 # Define custom container templates for different development environments.
 # These override or extend the built-in templates: claude-dev, node, python, rust
 #
+# `image_source` is a tagged enum. `type` is one of:
+#   { type = "Image",        name = "node:20-slim" }
+#   { type = "Dockerfile",   path = "./Dockerfile", build_args = {} }
+#   { type = "ClaudeDocker", base_image = "…", build_args = {} }
+# The tag values are case-sensitive.
+#
 # Example: Custom Node.js template with additional packages
+# --8<-- parse
 # [container_templates.my-node]
-# image_source = { type = "prebuilt", image = "node:20-slim" }
-# working_directory = "/workspace"
+# name = "my-node"
+# description = "Node 20 with extra tooling"
+# required_env = []
+# default_mcp_servers = []
+#
+# [container_templates.my-node.config]
+# image_source = { type = "Image", name = "node:20-slim" }
+# working_dir = "/workspace"
 # system_packages = ["git", "curl", "vim"]
+# npm_packages = []
+# python_packages = []
 # environment = { NODE_ENV = "development" }
-# memory_limit = "4g"
+# ports = [3000]
+# memory_limit = 4096   # megabytes, an integer — NOT a Docker-style "4g" string
 # cpu_limit = 2.0
+# mount_ssh = true
+# mount_git_config = true
+# -->8--
 
 # =============================================================================
 # MCP Servers (Advanced)
 # =============================================================================
 # Configure Model Context Protocol (MCP) servers for enhanced AI capabilities.
 #
+# Both `installation` and `definition` are tagged enums; `type` is
+# case-sensitive.
+#   installation: { type = "Npm", package = "…", version = "…" }
+#                 { type = "Python", package = "…", version = "…" }
+#                 { type = "Git", url = "…", branch = "…", install_command = "…" }
+#                 { type = "PreInstalled" }
+#                 { type = "Custom", script = "…" }
+#   definition:   { type = "Command", command = "…", args = [], env = {} }
+#                 { type = "Json", config = { … } }
+#
 # Example: Context7 documentation server
+# --8<-- parse
 # [mcp_servers.context7]
 # name = "context7"
-# command = "npx"
-# args = ["-y", "@context7/mcp-server"]
-# environment = {}
-# init_strategy = "lazy"  # Options: "lazy", "eager", "none"
+# description = "Up-to-date library documentation"
+# required_env = []
+# enabled_by_default = true
 # shared = true           # Pool this server across sessions (default: true).
 #                         # Set false for stateful servers (browser/db bridges).
+# installation = { type = "Npm", package = "@context7/mcp-server", version = "latest" }
+# definition = { type = "Command", command = "npx", args = ["-y", "@context7/mcp-server"], env = {} }
+# -->8--
 
 # =============================================================================
 # MCP Pool (shared MCP server processes for host/tmux sessions)
@@ -259,3 +312,68 @@ show_git_status = true
 # Optional: channel to reply in when the inbound message carries none.
 # channel_id = "123456789012345678"
 # default_target = "conductor"
+
+# =============================================================================
+# Usage analytics (the Analytics/burndown screen)
+# =============================================================================
+# Written by the burndown plugin (`ainb burndown plan set …`) as well as read
+# by it — hand-edit if you prefer, but note both this file and that command
+# target the same path.
+#
+# --8<-- parse
+# [usage.plan]
+# id = "claude-max"        # "claude-pro" | "claude-max" | "claude-max5x"
+#                          # | "cursor-pro" | "custom" | "none"
+# monthly_usd = 200.0
+# provider = "claude"      # "all" | "claude" | "codex" | "cursor"
+# reset_day = 1            # day of month the allowance resets
+# set_at = "2026-01-01T00:00:00Z"
+#
+# [usage.currency]
+# code = "GBP"
+# symbol = "£"
+# usd_rate = 0.79          # multiply USD figures by this for display
+#
+# # Map a model id reported by an agent onto one ainb knows the rate for.
+# [usage.model_aliases]
+# cursor-auto = "claude-sonnet-4-5"
+# -->8--
+
+# =============================================================================
+# Fleet
+# =============================================================================
+# --8<-- parse
+# [fleet]
+# # Terminal the macOS Fleet app opens when you jump to a session.
+# # Options: "warp" | "iterm" | "ghostty" | "terminal" (default: "warp")
+# terminal = "warp"
+#
+# # Budget caps for `ainb fleet cost`, in USD. Unset means no cap.
+# [fleet.cost]
+# session_usd = 5.0
+# group_usd = 25.0
+#
+# # Per-session and per-group overrides of the caps above.
+# [fleet.cost.session_overrides]
+# "my-long-running-session" = 20.0
+#
+# [fleet.cost.group_overrides]
+# "release-swarm" = 100.0
+#
+# # Which surface answers Claude interviews.
+# # Options: "native" | "fleet" (default: "native")
+# [fleet.interview]
+# surface = "native"
+# -->8--
+
+# =============================================================================
+# Presets
+# =============================================================================
+# Where the single presets.toml lives. Relative paths resolve against this
+# file's directory, so the default lands on ~/.agents-in-a-box/presets.toml.
+# `~` is NOT expanded — use an absolute path or a relative one.
+#
+# --8<-- parse
+# [presets]
+# file = "../presets.toml"
+# -->8--

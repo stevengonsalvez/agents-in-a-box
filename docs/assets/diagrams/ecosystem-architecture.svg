@@ -1,225 +1,135 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1720 1150" width="1720" height="1150">
-  <style>text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif; }</style>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1660 930" width="1660" height="930" role="img" aria-label="agents-in-a-box ecosystem architecture: the TUI host, the v2 plugin host, the daemons it supervises, the separate toolkit and memory repos, and distribution">
+  <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}@media (prefers-color-scheme: dark){.bg{fill:#0F0F18;}.ink{fill:#DCDCE6;}.mute{fill:#9A9AB0;}.accent{fill:#E08A63;}.accentfill{fill:#E08A63;}.card{fill:#191923;stroke:#2E2E3E;}.chip{fill:#20202C;stroke:#2E2E3E;}.line{stroke:#7A7A92;}.alt{stroke:#8FA86B;}.linefill{fill:#7A7A92;}.altfill{fill:#8FA86B;}}</style>
   <defs>
-    <marker id="arr" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" fill="#5A554E"/></marker>
-    <marker id="arrClay" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" fill="#D97757"/></marker>
-    <marker id="arrOlive" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" fill="#788C5D"/></marker>
-    <filter id="soft" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="1.5" stdDeviation="3" flood-color="#141413" flood-opacity="0.07"/></filter>
+    <marker id="arr" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" class="linefill" fill="#8A857C"/></marker>
+    <marker id="arrAlt" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" class="altfill" fill="#5F7048"/></marker>
   </defs>
-  <rect width="1720" height="1150" fill="#FAF9F5"/>
-  <text x="40" y="46" fill="#141413" font-size="27" font-weight="800">agents-in-a-box</text>
-  <rect x="40" y="56" width="252" height="4" rx="2" fill="#D97757"/>
-  <text x="312" y="46" fill="#6B655B" font-size="16">Ecosystem architecture - TUI orchestrator, plugin host, fleet control, portable toolkit, GraphRAG memory</text>
-  <rect x="40" y="100" width="560" height="540" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="64" y="132" fill="#141413" font-size="16.5" font-weight="700">1 - ainb TUI - Rust workspace (11 crates)</text>
-  <text x="64" y="151" fill="#6B655B" font-size="11.5">terminal UI + CLI, single binary, tmux-persistent sessions</text>
-  <rect x="64" y="170" width="512" height="92" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="320.0" y="203" text-anchor="middle" fill="#141413" font-size="15" font-weight="700">ainb-core</text>
-  <text x="320.0" y="224" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">TUI: home - sessions - usage - inbox - code review</text>
-  <text x="320.0" y="242" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">CLI: run - list - attach - usage - plugin - fleet - doctor</text>
-  <path d="M 140,262 V 296" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 320,262 V 296" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 500,262 V 296" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="64" y="300" width="152" height="84" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="140.0" y="329" text-anchor="middle" fill="#141413" font-size="13" font-weight="700">Docker</text>
-  <text x="140.0" y="348" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">Bollard API</text>
-  <text x="140.0" y="364" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">per-session env</text>
-  <rect x="244" y="300" width="152" height="84" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="320.0" y="329" text-anchor="middle" fill="#141413" font-size="13" font-weight="700">Git worktrees</text>
-  <text x="320.0" y="348" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">branch-per-</text>
-  <text x="320.0" y="364" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">session isolation</text>
-  <rect x="424" y="300" width="152" height="84" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="500.0" y="329" text-anchor="middle" fill="#141413" font-size="13" font-weight="700">tmux</text>
-  <text x="500.0" y="348" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">PTY attach</text>
-  <text x="500.0" y="364" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">send-keys</text>
-  <path d="M 140,384 V 410" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 320,384 V 410" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 500,384 V 410" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="64" y="414" width="512" height="66" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="320.0" y="442" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">Provider adapters</text>
-  <text x="320.0" y="462" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">claude - codex - gemini - copilot (Provider trait)</text>
-  <rect x="64" y="508" width="512" height="56" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="320.0" y="531" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.agents-in-a-box/</text>
-  <text x="320.0" y="549" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">config.toml - favorites.yaml - presets - plugin root</text>
-  <text x="320" y="606" text-anchor="middle" fill="#6B655B" font-size="11.5">crates: core + plugin-protocol / runtime / sdk-rust / testkit / cts-v2 / types + 4 plugin binaries</text>
-  <rect x="660" y="100" width="480" height="350" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="684" y="132" fill="#141413" font-size="16.5" font-weight="700">2 - Plugin host - subprocess runtime</text>
-  <text x="684" y="151" fill="#6B655B" font-size="11.5">manifest v2 discovery from ~/.agents-in-a-box/plugins/</text>
-  <rect x="684" y="156" width="432" height="62" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="900.0" y="182" text-anchor="middle" fill="#141413" font-size="14" font-weight="700">ainb-plugin-runtime</text>
-  <text x="900.0" y="202" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">spawn - lifecycle FSM - snapshot/action bus - render frames</text>
-  <path d="M 900,218 V 268" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="824" y="239" width="152" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="900" y="248" text-anchor="middle" fill="#5A554E" font-size="11" font-weight="600">JSON-RPC 2.0 over stdio</text>
-  <rect x="684" y="272" width="99" height="92" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="733.5" y="305" text-anchor="middle" fill="#141413" font-size="12" font-weight="700">burndown</text>
-  <text x="733.5" y="323" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">usage + cost</text>
-  <text x="733.5" y="339" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">analytics</text>
-  <rect x="795" y="272" width="99" height="92" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="844.5" y="305" text-anchor="middle" fill="#141413" font-size="12" font-weight="700">session-reader</text>
-  <text x="844.5" y="323" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">JSONL parse</text>
-  <text x="844.5" y="339" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">SQLite cache</text>
-  <rect x="906" y="272" width="99" height="92" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="955.5" y="305" text-anchor="middle" fill="#141413" font-size="12" font-weight="700">notifyd</text>
-  <text x="955.5" y="323" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">notifications</text>
-  <text x="955.5" y="339" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">inbox feed</text>
-  <rect x="1017" y="272" width="99" height="92" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1066.5" y="305" text-anchor="middle" fill="#141413" font-size="12" font-weight="700">witr</text>
-  <text x="1066.5" y="323" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">process</text>
-  <text x="1066.5" y="339" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">causality</text>
-  <rect x="684" y="386" width="432" height="44" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="900.0" y="411" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="600">SDK + conformance: protocol - sdk-rust - testkit - cts-v2 (21 axes)</text>
-  <rect x="1200" y="100" width="480" height="350" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="1224" y="132" fill="#141413" font-size="16.5" font-weight="700">3 - Toolkit - write once, deploy to 9+ tools</text>
-  <text x="1224" y="151" fill="#6B655B" font-size="11.5">ainb-toolkit (external repo) — github.com/stevengonsalvez/ainb-toolkit</text>
-  <rect x="1224" y="156" width="432" height="64" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1440.0" y="183" text-anchor="middle" fill="#141413" font-size="14" font-weight="700">ainb-toolkit: skills/ agents/ …</text>
-  <text x="1440.0" y="203" text-anchor="middle" fill="#141413" font-size="11.5" font-weight="400">94 skills - 16 agents - 16 hooks - workflows - knowledge</text>
-  <path d="M 1340,220 V 248" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="1224" y="252" width="300" height="70" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1374" y="276" text-anchor="middle" fill="#141413" font-size="14" font-weight="700">bootstrap.js</text>
-  <text x="1374" y="294" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">TOOL_DIR templating</text>
-  <text x="1374" y="310" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">external-dependencies.yaml</text>
-  <path d="M 1340,322 V 342" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="1355" y="323" width="47" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="1378" y="332" text-anchor="middle" fill="#5A554E" font-size="11" font-weight="600">deploy</text>
-  <rect x="1224" y="346" width="432" height="70" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1440.0" y="368" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">Tool homes (9+)</text>
-  <text x="1440.0" y="388" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">~/.claude - ~/.codex - ~/.copilot - ~/.gemini</text>
-  <text x="1440.0" y="404" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">hermes - nanoclaw - cursor - amazon q - ...</text>
-  <path d="M 1580,342 V 224" fill="none" stroke="#5A554E" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arr)"/>
-  <rect x="1531" y="277.5" width="98" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="1580" y="286" text-anchor="middle" fill="#5A554E" font-size="10.5" font-weight="600">/sync-learnings</text>
-  <rect x="660" y="500" width="480" height="310" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="684" y="532" fill="#141413" font-size="16.5" font-weight="700">4 - Fleet orchestration - ainb fleet</text>
-  <text x="684" y="551" fill="#6B655B" font-size="11.5">drive every agent session on the host</text>
-  <rect x="684" y="556" width="94" height="88" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="731.0" y="587" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">discover</text>
-  <text x="731.0" y="606" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">ainb - peers</text>
-  <text x="731.0" y="622" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">db - bg jobs</text>
-  <path d="M 778,600 H 798" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="798" y="556" width="94" height="88" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="845.0" y="587" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">merge</text>
-  <text x="845.0" y="606" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">dedup</text>
-  <text x="845.0" y="622" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">by cwd</text>
-  <path d="M 892,600 H 912" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="912" y="556" width="94" height="88" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="959.0" y="587" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">read</text>
-  <text x="959.0" y="606" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">JSONL tail -</text>
-  <text x="959.0" y="622" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">pane - needs</text>
-  <path d="M 1006,600 H 1026" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="1026" y="556" width="94" height="88" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1073.0" y="587" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">send</text>
-  <text x="1073.0" y="606" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">broker first,</text>
-  <text x="1073.0" y="622" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">tmux fallback</text>
-  <rect x="684" y="668" width="436" height="44" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="902.0" y="693" text-anchor="middle" fill="#141413" font-size="12" font-weight="600">verbs: standup - broadcast - sequence - needs - daemon</text>
-  <rect x="684" y="736" width="436" height="54" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="902.0" y="758" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">claude-peers broker - HTTP :7899</text>
-  <text x="902.0" y="776" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">register - heartbeat - send-message - poll</text>
-  <rect x="1200" y="500" width="480" height="310" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="1224" y="532" fill="#141413" font-size="16.5" font-weight="700">5 - reflect - GraphRAG memory</text>
-  <text x="1224" y="551" fill="#6B655B" font-size="11.5">correct once, never again - cross-tool learnings</text>
-  <rect x="1224" y="556" width="432" height="60" rx="10" fill="#C9D2B8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1440.0" y="581" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">plugins/reflect (Claude plugin)</text>
-  <text x="1440.0" y="601" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">PreCompact drain - SessionStart recall - /reflect skills</text>
-  <path d="M 1400,616 V 644" fill="none" stroke="#788C5D" stroke-width="2" marker-end="url(#arrOlive)"/>
-  <rect x="1413" y="625" width="47" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="1436" y="634" text-anchor="middle" fill="#788C5D" font-size="11" font-weight="600">ingest</text>
-  <rect x="1224" y="648" width="340" height="60" rx="10" fill="#C9D2B8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1394.0" y="674" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">reflect-kb CLI (python)</text>
-  <text x="1394.0" y="693" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">nano-graphrag - nano-vectordb - sidecars</text>
-  <path d="M 1400,708 V 736" fill="none" stroke="#788C5D" stroke-width="2" marker-end="url(#arrOlive)"/>
-  <rect x="1400" y="717" width="96" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="1448" y="726" text-anchor="middle" fill="#788C5D" font-size="11" font-weight="600">index - search</text>
-  <rect x="1224" y="740" width="432" height="54" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1440.0" y="762" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.claude/global-learnings/</text>
-  <text x="1440.0" y="780" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">documents/*.md - *.entities.yaml - graph cache</text>
-  <path d="M 1610,740 V 620" fill="none" stroke="#788C5D" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrOlive)"/>
-  <rect x="1587" y="675.5" width="45" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="1610" y="684" text-anchor="middle" fill="#788C5D" font-size="10.5" font-weight="600">recall</text>
-  <rect x="40" y="690" width="560" height="130" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="64" y="722" fill="#141413" font-size="16.5" font-weight="700">Live agent sessions</text>
-  <text x="64" y="741" fill="#6B655B" font-size="11.5">tmux panes - Docker containers - git worktrees</text>
-  <rect x="64" y="736" width="116" height="60" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="122.0" y="762" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">claude</text>
-  <text x="122.0" y="781" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">Claude Code</text>
-  <rect x="198" y="736" width="116" height="60" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="256.0" y="762" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">codex</text>
-  <text x="256.0" y="781" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">Codex CLI</text>
-  <rect x="332" y="736" width="116" height="60" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="390.0" y="762" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">gemini</text>
-  <text x="390.0" y="781" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">Gemini CLI</text>
-  <rect x="466" y="736" width="116" height="60" rx="10" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="524.0" y="762" text-anchor="middle" fill="#141413" font-size="13.5" font-weight="700">copilot</text>
-  <text x="524.0" y="781" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">Copilot CLI</text>
-  <rect x="40" y="870" width="1100" height="150" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="64" y="902" fill="#141413" font-size="16.5" font-weight="700">Data on disk</text>
-  <rect x="64" y="920" width="250" height="76" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="189.0" y="945" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.claude/projects/</text>
-  <text x="189.0" y="963" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">**/*.jsonl transcripts</text>
-  <text x="189.0" y="980" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">turns - usage - stop_reason</text>
-  <rect x="334" y="920" width="230" height="76" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="449.0" y="945" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.codex/sessions/</text>
-  <text x="449.0" y="963" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">rollout-*.jsonl</text>
-  <text x="449.0" y="980" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">written by codex CLI</text>
-  <rect x="584" y="920" width="220" height="76" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="694.0" y="953" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.claude-peers.db</text>
-  <text x="694.0" y="971" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">peer registry (SQLite)</text>
-  <rect x="824" y="920" width="292" height="76" rx="10" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="970.0" y="945" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">~/.agents-in-a-box/plugins/</text>
-  <text x="970.0" y="963" text-anchor="middle" fill="#141413" font-size="11" font-weight="400">manifests + plugin binaries</text>
-  <text x="970.0" y="980" text-anchor="middle" fill="#141413" font-size="10" font-weight="400">discovered by plugin runtime</text>
-  <rect x="1200" y="870" width="480" height="150" rx="16" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.4" filter="url(#soft)"/>
-  <text x="1224" y="902" fill="#141413" font-size="16.5" font-weight="700">6 - Distribution + docs</text>
-  <rect x="1224" y="920" width="130" height="76" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1289.0" y="953" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">Homebrew</text>
-  <text x="1289.0" y="972" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">tap -> ainb</text>
-  <rect x="1370" y="920" width="130" height="76" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1435.0" y="945" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">docs/ tree</text>
-  <text x="1435.0" y="963" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">tui - toolkit -</text>
-  <text x="1435.0" y="980" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">plugins - kb</text>
-  <rect x="1516" y="920" width="140" height="76" rx="10" fill="#E3DACC" stroke="#3D3A36" stroke-width="1.6"/>
-  <text x="1586.0" y="945" text-anchor="middle" fill="#141413" font-size="12.5" font-weight="700">Starlight site</text>
-  <text x="1586.0" y="963" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">website/site -></text>
-  <text x="1586.0" y="980" text-anchor="middle" fill="#141413" font-size="10.5" font-weight="400">GitHub Pages</text>
-  <path d="M 600,210 H 654" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="594" y="187.5" width="69" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="628" y="196" text-anchor="middle" fill="#5A554E" font-size="10.5" font-weight="600">spawn host</text>
-  <path d="M 600,560 H 654" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="591" y="537.5" width="75" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="628" y="546" text-anchor="middle" fill="#5A554E" font-size="10.5" font-weight="600">fleet verbs</text>
-  <path d="M 320,640 V 684" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="272" y="658" width="96" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="320" y="667" text-anchor="middle" fill="#5A554E" font-size="11" font-weight="600">spawn - attach</text>
-  <path d="M 190,820 V 914" fill="none" stroke="#5A554E" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arr)"/>
-  <rect x="151" y="843" width="78" height="17" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="190" y="852" text-anchor="middle" fill="#5A554E" font-size="11" font-weight="600">write JSONL</text>
-  <path d="M 250,920 V 898 H 628 V 568 A 8 8 0 0 0 628,552 V 330 H 654" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="552" y="473.5" width="151" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="628" y="482" text-anchor="middle" fill="#5A554E" font-size="10.5" font-weight="600">plugins read transcripts</text>
-  <path d="M 290,920 V 905 H 752 A 8 8 0 0 1 768,905 H 1160 V 578 H 1194" fill="none" stroke="#788C5D" stroke-width="2" marker-end="url(#arrOlive)"/>
-  <rect x="877" y="892.5" width="216" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="985" y="901" text-anchor="middle" fill="#788C5D" font-size="10.5" font-weight="600">harvest transcripts -> ingest queue</text>
-  <path d="M 760,790 V 914" fill="none" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <rect x="717" y="836.5" width="86" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="760" y="845" text-anchor="middle" fill="#5A554E" font-size="10.5" font-weight="600">peer registry</text>
-  <path d="M 684,762 H 644 A 8 8 0 0 0 628,762 H 606" fill="none" stroke="#D97757" stroke-width="2" marker-end="url(#arrClay)"/>
-  <rect x="596" y="739.5" width="92" height="16.5" rx="4" fill="#FAF9F5" opacity="0.95"/>
-  <text x="642" y="748" text-anchor="middle" fill="#D97757" font-size="10.5" font-weight="600">deliver prompt</text>
-  <rect x="40" y="1050" width="660" height="64" rx="10" fill="#FFFFFF" stroke="#3D3A36" stroke-width="1.2"/>
-  <text x="60" y="1075" fill="#141413" font-size="12.5" font-weight="700">Legend</text>
-  <line x1="130" y1="1071" x2="166" y2="1071" stroke="#5A554E" stroke-width="2" marker-end="url(#arr)"/>
-  <text x="174" y="1075" fill="#6B655B" font-size="11.5">data / control flow</text>
-  <line x1="130" y1="1097" x2="166" y2="1097" stroke="#5A554E" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arr)"/>
-  <text x="174" y="1101" fill="#6B655B" font-size="11.5">write / feedback</text>
-  <line x1="330" y1="1071" x2="366" y2="1071" stroke="#D97757" stroke-width="2" marker-end="url(#arrClay)"/>
-  <text x="374" y="1075" fill="#6B655B" font-size="11.5">fleet prompt delivery</text>
-  <line x1="330" y1="1097" x2="366" y2="1097" stroke="#788C5D" stroke-width="2" marker-end="url(#arrOlive)"/>
-  <text x="374" y="1101" fill="#6B655B" font-size="11.5">learning loop (reflect)</text>
-  <rect x="530" y="1062" width="14" height="14" rx="4" fill="#F1C0A8" stroke="#3D3A36" stroke-width="1.2"/>
-  <text x="552" y="1073" fill="#6B655B" font-size="11.5">active component</text>
-  <rect x="530" y="1088" width="14" height="14" rx="4" fill="#ECEAE4" stroke="#3D3A36" stroke-width="1.2"/>
-  <text x="552" y="1099" fill="#6B655B" font-size="11.5">storage / state</text>
-  <text x="1680" y="1100" text-anchor="end" fill="#6B655B" font-size="11">agents-in-a-box monorepo - ainb-tui v1.5 - ainb-toolkit (external) - reflect-kb</text>
+  <rect width="1660" height="930" class="bg" fill="#FAF9F5"/>
+  <text x="36" y="44" font-size="26" class="ink" fill="#141413" text-anchor="start" font-weight="800">agents-in-a-box</text>
+  <rect x="36" y="54" width="238" height="4" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="294" y="44" font-size="15" class="mute" fill="#6B655B" text-anchor="start">Ecosystem architecture</text>
+  <text x="1624" y="44" font-size="12" class="mute" fill="#6B655B" text-anchor="end">ainb v1.22.13 · 34-crate Rust workspace</text>
+  <rect x="36" y="84" width="780" height="292" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="84" width="4" height="292" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="112" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">1</text>
+  <text x="74" y="112" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">ainb TUI host</text>
+  <text x="54" y="132" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">one binary · 28 screens · 41 CLI commands · Unix only</text>
+  <rect x="54" y="148" width="367" height="48" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="168" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">git worktrees</text>
+  <text x="65" y="183" font-size="10" class="mute" fill="#6B655B" text-anchor="start">a branch and a directory per session</text>
+  <rect x="430" y="148" width="367" height="48" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="441" y="168" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">tmux / PTY</text>
+  <text x="441" y="183" font-size="10" class="mute" fill="#6B655B" text-anchor="start">attach · send-keys · survives sleep</text>
+  <rect x="54" y="205" width="367" height="48" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="225" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">provider adapters</text>
+  <text x="65" y="240" font-size="10" class="mute" fill="#6B655B" text-anchor="start">claude · codex · gemini · copilot</text>
+  <rect x="430" y="205" width="367" height="48" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="441" y="225" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">session store</text>
+  <text x="441" y="240" font-size="10" class="mute" fill="#6B655B" text-anchor="start">~/.agents-in-a-box/</text>
+  <rect x="54" y="266" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="286" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">screens</text>
+  <text x="65" y="301" font-size="10" class="mute" fill="#6B655B" text-anchor="start">home · sessions · fleet · hangar · inbox · stats · review · daemons · skills</text>
+  <rect x="54" y="318" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="338" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">config</text>
+  <text x="65" y="353" font-size="10" class="mute" fill="#6B655B" text-anchor="start">config.toml · favorites · presets · plugin root</text>
+  <rect x="844" y="84" width="780" height="292" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="844" y="84" width="4" height="292" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="862" y="112" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">2</text>
+  <text x="882" y="112" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Plugin host (v2 ABI)</text>
+  <text x="862" y="132" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">subprocess · JSON-RPC 2.0 over stdio · capabilities default-deny</text>
+  <rect x="862" y="148" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="168" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">burndown</text>
+  <rect x="1113" y="148" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1124" y="168" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">session-reader</text>
+  <rect x="1364" y="148" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1375" y="168" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">witr</text>
+  <rect x="862" y="191" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="211" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">learnings</text>
+  <rect x="1113" y="191" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1124" y="211" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">abtop</text>
+  <rect x="1364" y="191" width="242" height="34" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1375" y="211" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">hangar-tui</text>
+  <rect x="862" y="242" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="262" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">runtime</text>
+  <text x="873" y="277" font-size="10" class="mute" fill="#6B655B" text-anchor="start">spawn · lifecycle FSM · snapshot bus · render frames · -32001 on denial</text>
+  <rect x="862" y="294" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="314" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">SDK + conformance</text>
+  <text x="873" y="329" font-size="10" class="mute" fill="#6B655B" text-anchor="start">protocol · sdk-rust · testkit · cts-v2 (21 axes)</text>
+  <rect x="36" y="396" width="1588" height="164" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="396" width="4" height="164" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="424" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">3</text>
+  <text x="74" y="424" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Daemons</text>
+  <text x="54" y="444" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">long-lived processes the TUI supervises · started, stopped and health-checked from the Daemons screen</text>
+  <rect x="54" y="460" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="480" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">bridge</text>
+  <text x="65" y="495" font-size="10" class="mute" fill="#6B655B" text-anchor="start">Telegram · Slack · Discord</text>
+  <rect x="366" y="460" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="377" y="480" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">notifyd</text>
+  <text x="377" y="495" font-size="10" class="mute" fill="#6B655B" text-anchor="start">notifications into the Inbox</text>
+  <rect x="678" y="460" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="689" y="480" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">approve-broker</text>
+  <text x="689" y="495" font-size="10" class="mute" fill="#6B655B" text-anchor="start">permission prompts</text>
+  <rect x="990" y="460" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1001" y="480" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">atc</text>
+  <text x="1001" y="495" font-size="10" class="mute" fill="#6B655B" text-anchor="start">always-on watcher</text>
+  <rect x="1302" y="460" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1313" y="480" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">fleet-daemon</text>
+  <text x="1313" y="495" font-size="10" class="mute" fill="#6B655B" text-anchor="start">API-error auto-continue</text>
+  <rect x="54" y="513" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="533" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">mcp-pool</text>
+  <text x="65" y="548" font-size="10" class="mute" fill="#6B655B" text-anchor="start">one MCP server, shared</text>
+  <rect x="366" y="513" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="377" y="533" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">hangar-daemon</text>
+  <text x="377" y="548" font-size="10" class="mute" fill="#6B655B" text-anchor="start">boards · tasks · 144 RPC methods</text>
+  <rect x="678" y="513" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="689" y="533" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">headroom-proxy</text>
+  <text x="689" y="548" font-size="10" class="mute" fill="#6B655B" text-anchor="start">context compression</text>
+  <rect x="990" y="513" width="303" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1001" y="533" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">release-checker</text>
+  <text x="1001" y="548" font-size="10" class="mute" fill="#6B655B" text-anchor="start">signed update check</text>
+  <rect x="36" y="580" width="780" height="168" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="580" width="4" height="168" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="608" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">4</text>
+  <text x="74" y="608" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Toolkit (separate repo)</text>
+  <text x="54" y="628" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">stevengonsalvez/ainb-toolkit · consumed as a pinned source</text>
+  <rect x="54" y="644" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="664" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">94 skills · 16 agents</text>
+  <text x="65" y="679" font-size="10" class="mute" fill="#6B655B" text-anchor="start">written once, deployed everywhere</text>
+  <rect x="54" y="694" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="714" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">9 tool homes</text>
+  <text x="65" y="729" font-size="10" class="mute" fill="#6B655B" text-anchor="start">claude · codex · copilot · gemini · cursor · amazonq · claude-desktop · cline · roo</text>
+  <rect x="844" y="580" width="780" height="168" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="844" y="580" width="4" height="168" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="862" y="608" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">5</text>
+  <text x="882" y="608" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Memory (separate repo)</text>
+  <text x="862" y="628" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">stevengonsalvez/ainb-reflect-memory · CLI only, no library API</text>
+  <rect x="862" y="644" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="664" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">reflect</text>
+  <text x="873" y="679" font-size="10" class="mute" fill="#6B655B" text-anchor="start">/reflect captures · /recall retrieves</text>
+  <rect x="862" y="694" width="744" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="873" y="714" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">two-tier index</text>
+  <text x="873" y="729" font-size="10" class="mute" fill="#6B655B" text-anchor="start">GraphRAG across projects · vector search for fast hits</text>
+  <rect x="36" y="768" width="1588" height="100" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="768" width="4" height="100" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="796" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">6</text>
+  <text x="74" y="796" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Distribution</text>
+  <text x="54" y="816" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">how it reaches a machine, and how it is documented</text>
+  <rect x="54" y="830" width="381" height="32" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="850" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">Homebrew</text>
+  <text x="65" y="865" font-size="10" class="mute" fill="#6B655B" text-anchor="start">brew install ainb</text>
+  <rect x="444" y="830" width="381" height="32" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="455" y="850" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">install.sh</text>
+  <text x="455" y="865" font-size="10" class="mute" fill="#6B655B" text-anchor="start">one-liner elsewhere</text>
+  <rect x="834" y="830" width="381" height="32" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="845" y="850" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">docs/</text>
+  <text x="845" y="865" font-size="10" class="mute" fill="#6B655B" text-anchor="start">single source of truth</text>
+  <rect x="1224" y="830" width="381" height="32" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="1235" y="850" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">ainb.app</text>
+  <text x="1235" y="865" font-size="10" class="mute" fill="#6B655B" text-anchor="start">Astro Starlight on Pages</text>
+  <path d="M426 376 L426 392" class="line" fill="none" stroke="#8A857C" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M1234 376 L1234 392" class="line" fill="none" stroke="#8A857C" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M426 560 L426 576" class="alt" fill="none" stroke="#5F7048" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrAlt)"/>
+  <path d="M1234 560 L1234 576" class="alt" fill="none" stroke="#5F7048" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrAlt)"/>
+  <text x="36" y="892" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">Solid: supervises.   Dashed: reads and writes.</text>
+  <text x="1624" y="892" font-size="11.5" class="mute" fill="#6B655B" text-anchor="end">Regenerate: python3 docs/assets/diagrams/generate-diagrams.py</text>
 </svg>

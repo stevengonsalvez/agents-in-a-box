@@ -17,6 +17,7 @@ use std::process::Command;
 
 use super::OutputFormat;
 use crate::config::AppConfig;
+use crate::config::registry::{navigate_toml, set_validated};
 
 /// JSON output for the `path` subcommand
 #[derive(Debug, Serialize)]
@@ -115,20 +116,64 @@ fn cmd_set(key: &str, value: &str) -> Result<()> {
     fs::create_dir_all(&config_dir)?;
     let config_path = config_dir.join("config.toml");
 
-    // Load existing user config or start with empty table
-    let mut root = if config_path.exists() {
-        let content = fs::read_to_string(&config_path).context("Failed to read user config")?;
-        content.parse::<toml::Value>().context("Failed to parse user config")?
-    } else {
+    // Validate against CONFIG_REGISTRY first: a mistyped key or an out-of-range
+    // value fails here rather than landing in the file and being dropped by the
+    // next load, which is how a `set` could look like it worked and do nothing.
+    // `read_existing` maps only "not there" to empty: a present-but-unreadable
+    // file must abort rather than be replaced by a fresh one.
+    let existing = crate::config::read_existing(&config_path)?;
+    let mut probe = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
+    } else {
+        existing.parse::<toml::Value>().context("Failed to parse user config")?
+    };
+    // `[usage]` is owned by the burndown plugin. Its rows are registered and
+    // validated, so without this the value passes every check and then dies
+    // three calls later on "is in a section ainb-core must not write" — a
+    // correct refusal with nothing actionable in it.
+    if crate::config::is_burndown_owned(key) {
+        anyhow::bail!(
+            "'{key}' is owned by the burndown plugin — set it with `ainb burndown plan set`"
+        );
+    }
+    set_validated(&mut probe, key, value)?;
+
+    // An emptied optional key is a REMOVAL, not a value: `set_validated` drops
+    // it from `probe` rather than storing `""`, because `Some("")` is not the
+    // same as unset (an empty `docker.host` means "connect to nothing", not
+    // "autodetect"). Looking it up unconditionally then failed with "Key not
+    // found" and wrote nothing, so there was no way to clear one at all.
+    let validated = match crate::config::registry::navigate_toml(&probe, key) {
+        Ok(value) => Some(value.clone()),
+        Err(_) => None,
     };
 
-    set_toml_value(&mut root, key, value)?;
+    // Write through the shared key-level writer, which edits the document in
+    // place. Serializing `probe` instead would be a whole-file rewrite that
+    // deletes every comment — and this file is meant to be started from
+    // `config/example.config.toml`, which is ~320 lines of comments explaining
+    // the keys. `ainb config set docker.timeout 90` must change one line, not
+    // strip the manual.
+    let cleared = validated.is_none();
+    match validated {
+        Some(value) => {
+            crate::config::write_keys_into(&config_path, &[(key.to_string(), value)])
+                .context("Failed to write user config")?;
+        }
+        None => {
+            crate::config::remove_key_from(&config_path, key)
+                .context("Failed to write user config")?;
+        }
+    }
 
-    let content = toml::to_string_pretty(&root).context("Failed to serialize config")?;
-    fs::write(&config_path, &content).context("Failed to write user config")?;
-
-    println!("Set {key} = {value}");
+    // Keyed off what actually happened: only an OPTIONAL_KEYS row is removed
+    // when emptied. `skills.api_key = ""` stores an empty string, and calling
+    // that "Cleared" would be a lie.
+    if cleared {
+        println!("Cleared {key}");
+    } else {
+        println!("Set {key} = {value}");
+    }
     println!("Saved to {}", config_path.display());
 
     Ok(())
@@ -218,7 +263,8 @@ fn cmd_edit() -> Result<()> {
         let default_config = AppConfig::default();
         let content = toml::to_string_pretty(&default_config)
             .context("Failed to serialize default config")?;
-        fs::write(&config_path, &content).context("Failed to create default config file")?;
+        crate::config::write_atomic(&config_path, &content)
+            .context("Failed to create default config file")?;
         println!("Created default config at {}", config_path.display());
     }
 
@@ -236,90 +282,6 @@ fn cmd_edit() -> Result<()> {
     }
 
     Ok(())
-}
-
-// --- TOML navigation helpers ---
-
-/// Navigate a TOML value tree using dot-notation keys
-fn navigate_toml<'a>(value: &'a toml::Value, key: &str) -> Result<&'a toml::Value> {
-    let parts = parse_dot_key(key);
-    if parts.is_empty() {
-        return Err(anyhow!("Empty key"));
-    }
-
-    let mut current = value;
-    for (i, part) in parts.iter().enumerate() {
-        if let toml::Value::Table(table) = current {
-            current = table.get(part.as_str()).ok_or_else(|| {
-                let path = parts[..=i].join(".");
-                anyhow!("Key '{path}' not found in configuration")
-            })?;
-        } else {
-            let path = parts[..i].join(".");
-            return Err(anyhow!("Cannot index into non-table value at '{path}'"));
-        }
-    }
-
-    Ok(current)
-}
-
-/// Set a value in a TOML tree using dot-notation keys
-fn set_toml_value(root: &mut toml::Value, key: &str, raw_value: &str) -> Result<()> {
-    let parts = parse_dot_key(key);
-    if parts.is_empty() {
-        return Err(anyhow!("Empty key"));
-    }
-
-    // Navigate to parent, creating intermediate tables as needed
-    let mut current = root;
-    for part in &parts[..parts.len() - 1] {
-        current = current
-            .as_table_mut()
-            .ok_or_else(|| anyhow!("Cannot set key in non-table value"))?
-            .entry(part)
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    }
-
-    let table = current
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("Cannot set key in non-table value"))?;
-
-    let leaf_key = &parts[parts.len() - 1];
-    let parsed = parse_toml_scalar(raw_value);
-    table.insert(leaf_key.clone(), parsed);
-
-    Ok(())
-}
-
-/// Parse a dot-notation key into parts
-fn parse_dot_key(key: &str) -> Vec<String> {
-    key.split('.').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-}
-
-/// Parse a raw string value into the most appropriate TOML scalar
-fn parse_toml_scalar(raw: &str) -> toml::Value {
-    // Try boolean
-    if raw.eq_ignore_ascii_case("true") {
-        return toml::Value::Boolean(true);
-    }
-    if raw.eq_ignore_ascii_case("false") {
-        return toml::Value::Boolean(false);
-    }
-
-    // Try integer
-    if let Ok(i) = raw.parse::<i64>() {
-        return toml::Value::Integer(i);
-    }
-
-    // Try float (only if it contains a dot to avoid int-like strings)
-    if raw.contains('.') {
-        if let Ok(f) = raw.parse::<f64>() {
-            return toml::Value::Float(f);
-        }
-    }
-
-    // Default to string
-    toml::Value::String(raw.to_string())
 }
 
 /// Print a TOML value in human-readable text format
@@ -362,6 +324,9 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The dotted-path helpers now live next to the registry that validates
+    // against them; these tests still pin their behaviour from the CLI side.
+    use crate::config::registry::{parse_dot_key, parse_toml_scalar, set_toml_value};
 
     // --- parse_dot_key tests ---
 
@@ -440,6 +405,36 @@ mod tests {
         assert_eq!(
             parse_toml_scalar("agents/"),
             toml::Value::String("agents/".to_string())
+        );
+    }
+
+    // --- `set` validation (the write path cmd_set takes) ---
+
+    #[test]
+    fn set_refuses_a_mistyped_key() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        let err = set_validated(&mut root, "docker.timout", "30").unwrap_err().to_string();
+        assert!(err.contains("Unknown config key"), "{err}");
+        assert!(
+            root.as_table().expect("table").is_empty(),
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn set_refuses_an_out_of_range_value() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        let err = set_validated(&mut root, "docker.timeout", "0").unwrap_err().to_string();
+        assert!(err.contains("between 1 and 3600"), "{err}");
+    }
+
+    #[test]
+    fn set_writes_a_known_key() {
+        let mut root = toml::Value::Table(toml::map::Map::new());
+        set_validated(&mut root, "docker.timeout", "120").unwrap();
+        assert_eq!(
+            navigate_toml(&root, "docker.timeout").unwrap(),
+            &toml::Value::Integer(120)
         );
     }
 
