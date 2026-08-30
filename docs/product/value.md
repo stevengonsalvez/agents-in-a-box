@@ -81,7 +81,7 @@ opening anything.
 
 ### It scripts
 
-Every TUI action has a CLI equivalent across 40 commands, and session state,
+Every TUI action has a CLI equivalent across 41 commands, and session state,
 config, git, usage, fleet and most daemons speak `--format json`. Pipe it to
 `jq`, drive it from CI.
 
