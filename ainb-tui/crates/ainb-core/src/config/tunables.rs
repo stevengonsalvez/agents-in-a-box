@@ -127,7 +127,7 @@ fn is_self_planted(env_var: &str) -> bool {
 
 /// The raw env value for `env_var`, or `None` when it is unset or was planted
 /// by this process's own [`export_env_bridge`].
-fn env_override(env_var: &str) -> Option<String> {
+pub fn env_override(env_var: &str) -> Option<String> {
     if is_self_planted(env_var) {
         return None;
     }

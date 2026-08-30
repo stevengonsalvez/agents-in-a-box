@@ -408,7 +408,11 @@ async fn run_tui_loop(
     // screens via `App::tick_plugin_renders` and its `take_render_dirty`
     // gate. Set to ~30 fps so a keystroke lands in the next iter
     // (< 33 ms) rather than the next 250 ms window.
-    let tick_rate = Duration::from_millis(crate::config::tunables::snapshot().ui.tick_rate_ms);
+    // `.max(1)`: the registry's `min` only gates the settings screen and
+    // `ainb config set`. A hand-edited `tick_rate_ms = 0` gives a zero poll
+    // timeout, so the loop never blocks and repaints continuously at 100% CPU.
+    let tick_rate =
+        Duration::from_millis(crate::config::tunables::snapshot().ui.tick_rate_ms.max(1));
     // App-tick cadence: how often we run the heavy host-side periodic
     // work (mascot animation, OAuth refresh check, tmux preview
     // capture, async action dispatch, log streaming refresh,
@@ -419,7 +423,8 @@ async fn run_tui_loop(
     // to only the event-poll path that actually affects perceived
     // latency. See `last_app_tick` below. Both cadences are
     // `[ui]` keys now: a slow terminal wants a coarser poll.
-    let app_tick_rate = Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms);
+    let app_tick_rate =
+        Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms.max(1));
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 

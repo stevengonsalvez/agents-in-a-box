@@ -119,11 +119,28 @@ async fn cmd_show(format: OutputFormat) -> Result<()> {
 /// Every Hangar daemon knob and its effective value (stored, else the coded
 /// default). Falls back to the coded defaults when the database is missing or
 /// unreadable, because `show` must never fail on an optional backend.
+/// Whether the Hangar database already exists.
+///
+/// Reads must not create it: `Store::open_default` would, and the settings
+/// screen guards the same way before showing daemon rows.
+fn hangar_db_exists() -> bool {
+    ainb_hangar_core::hangar_home()
+        .map(|home| home.join("hangar.db").exists())
+        .unwrap_or(false)
+}
+
 async fn hangar_daemon_values() -> Vec<(String, String)> {
     use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let store = ainb_hangar_store::Store::open_default().await.ok();
+    // Only open an existing database. `Store::open_default` CREATES the file
+    // and runs migrations, so a read-only `ainb config show` would conjure a
+    // hangar.db on a machine that has never run the daemon — migration
+    // ownership belongs to daemon startup. Absent means "show the defaults".
+    let store = match hangar_db_exists() {
+        true => ainb_hangar_store::Store::open_default().await.ok(),
+        false => None,
+    };
     let mut out = Vec::with_capacity(DAEMON_CONFIG_REGISTRY.len());
     for descriptor in DAEMON_CONFIG_REGISTRY {
         let stored = match &store {
@@ -260,12 +277,19 @@ async fn get_hangar_daemon(key: &str, daemon_key: &str, format: OutputFormat) ->
 
     let descriptor = ainb_hangar_core::daemon_config::descriptor(daemon_key)
         .ok_or_else(|| anyhow!("'{key}' is not a Hangar daemon config key"))?;
-    let store = ainb_hangar_store::Store::open_default()
-        .await
-        .context("open the Hangar database")?;
-    let stored = DaemonConfigRepo::get(store.pool(), daemon_key)
-        .await
-        .with_context(|| format!("read daemon_config `{daemon_key}`"))?;
+    // Same rule as `hangar_daemon_values`: a read must not create the database.
+    // `Store::open_default` creates it and runs migrations, so with no daemon
+    // ever started the honest answer is the registry default.
+    let stored = if hangar_db_exists() {
+        let store = ainb_hangar_store::Store::open_default()
+            .await
+            .context("open the Hangar database")?;
+        DaemonConfigRepo::get(store.pool(), daemon_key)
+            .await
+            .with_context(|| format!("read daemon_config `{daemon_key}`"))?
+    } else {
+        None
+    };
     let value = stored.as_deref().unwrap_or(descriptor.default);
 
     match format {
