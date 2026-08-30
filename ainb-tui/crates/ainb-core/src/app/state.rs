@@ -1911,7 +1911,7 @@ pub struct AppliedEdits {
     /// `(daemon_config key, raw value)` for the `hangar_daemon.*` rows, whose
     /// backend is the Hangar SQLite `daemon_config` table rather than
     /// config.toml. Dispatched through
-    /// [`AsyncAction::HangarDaemonConfigSet`](crate::app::state::AsyncAction::HangarDaemonConfigSet),
+    /// `pending_daemon_config_edits`,
     /// because that store is async and this pass is not.
     pub daemon: Vec<(String, String)>,
 }
@@ -2744,7 +2744,7 @@ fn seed_builtin_acp_adapters(seed: &mut toml::Value) {
 /// Without this the rows have no value to render at all and every one of them
 /// would seed as an empty widget, which claims the daemon is unconfigured. The
 /// coded default is the honest placeholder: it IS what the daemon runs when a
-/// key has no stored row. `AsyncAction::HangarDaemonConfigLoad` replaces it with
+/// key has no stored row. `load_hangar_daemon_config` replaces it with
 /// the stored value shortly after startup.
 /// The Hangar SQLite database, when one exists.
 ///
@@ -10382,10 +10382,19 @@ impl AppState {
         // Re-read rather than trust the write: the row now shows what the
         // database holds, including for any write that just failed.
         self.load_hangar_daemon_config().await;
-        // AFTER the re-seed, not before. `seed_hangar_daemon_rows` clears
-        // `dirty` for every key it finds in the store, so marking the row for
-        // retry first meant the flag was erased on the next line for any knob
-        // that already had a row — i.e. everything except a first-ever write.
+        // AFTER the re-seed, not before: `seed_hangar_daemon_rows` clears
+        // `dirty` for every key it finds in the store, so marking the row first
+        // meant the flag was erased on the next line.
+        //
+        // What this does and does not buy: the row now shows the value the
+        // database actually holds, and stays dirty so it is visibly unsaved.
+        // For a key that already had a stored row that means a later `S`
+        // rewrites the STORED value — a no-op — rather than the one the user
+        // typed, because the re-seed has already replaced it. Preserving the
+        // rejected input across a failure needs the row to carry a pending
+        // value distinct from its displayed one, which the widget has no room
+        // for today. The error notification names the row, so the failure is
+        // never silent; re-typing it is the recovery.
         for row_key in failed_rows {
             self.config_screen_state.dirty.insert(row_key);
         }

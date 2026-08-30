@@ -441,7 +441,8 @@ async fn run_tui_loop(
     // latency. See `last_app_tick` below. Both cadences are
     // `[ui]` keys now: a slow terminal wants a coarser poll.
     let app_tick_rate =
-        Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms.max(1));
+        Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms.max(1))
+            .max(tick_rate);
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 

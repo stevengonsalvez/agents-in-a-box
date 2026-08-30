@@ -1078,7 +1078,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "usage_client.headroom_port",
         category: C::Usage,
         label: "Headroom Proxy Port",
-        help: "Port the ainb-managed Headroom compression proxy listens on",
+        help: "Port the ainb-managed Headroom compression proxy listens on (restart)",
         kind: RowKind::Number {
             min: 1,
             max: 65_535,
@@ -1108,7 +1108,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "usage_client.cache_db",
         category: C::Usage,
         label: "Usage Cache DB",
-        help: "Path to the usage cache database; blank derives it under the state dir",
+        help: "Path to the usage cache database; blank derives it under the state dir (restart)",
         kind: RowKind::Text,
     }),
     // ── Daemons ────────────────────────────────────────────────────────────
