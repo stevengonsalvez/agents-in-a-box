@@ -330,7 +330,7 @@ fn context_from_state(kind: &str, context_json: Option<&str>) -> Option<NeedsCon
 mod tests {
     /// Env-mutating tests here serialize against each other.
     /// [reference: ENV_LOCK for parallel tests]
-    static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::config::tunables::TEST_ENV_LOCK as STALE_ENV_LOCK;
 
     /// The legacy `AINB_FLEET_STATE_STALE_MS` override must still disable the
     /// healthy-kind floor.
@@ -352,6 +352,10 @@ mod tests {
         // Startup: the bridge publishes the config default for the NEW variable
         // (300000) because nothing had set it, and leaves the legacy one alone.
         let config = crate::config::AppConfig::default();
+        // Restored below: the snapshot is process-global, so leaving this
+        // installed makes every later test in the binary read it instead of
+        // its own config.
+        let previous = crate::config::tunables::snapshot();
         crate::config::tunables::install_snapshot(config.clone());
         crate::config::tunables::export_env_bridge(&config);
 
@@ -370,6 +374,7 @@ mod tests {
         if let Some(v) = prior_new {
             std::env::set_var("AINB_FLEET_HEALTHY_STATE_STALE_MS", v);
         }
+        crate::config::tunables::install_snapshot((*previous).clone());
     }
 
     /// The two windows are separate knobs with separate defaults, which is the

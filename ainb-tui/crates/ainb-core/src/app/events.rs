@@ -10558,8 +10558,10 @@ mod hangar_daemon_persist_tests {
     /// snapshot that other tests in this binary read. Serialised, because the
     /// environment is process-global and cargo runs tests in parallel.
     fn with_isolated_home<T>(body: impl FnOnce() -> T) -> T {
-        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The crate-wide lock, not a private one: sibling tests call
+        // `AppConfig::load()` and `snapshot()`, which read this same HOME.
+        let _guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir = tempfile::tempdir().expect("tempdir");
         let previous = std::env::var_os("HOME");

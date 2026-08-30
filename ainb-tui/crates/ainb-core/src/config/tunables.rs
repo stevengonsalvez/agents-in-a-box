@@ -88,6 +88,16 @@ pub fn refresh_snapshot() {
 
 /// Install `config` as the snapshot. Test seam, and the escape hatch for a
 /// caller that has already loaded and does not want a second read.
+/// The one lock every test that mutates the environment or the snapshot must
+/// hold.
+///
+/// Both are process-global. A module that declares its own private mutex is
+/// guarding nothing — two different locks around the same `setenv` is still a
+/// `setenv`/`getenv` data race, and a snapshot installed by one test is read by
+/// every other test in the binary. There is exactly one of these on purpose.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn install_snapshot(config: AppConfig) {
     *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(config));
 }
@@ -621,7 +631,7 @@ mod tests {
 
     /// Env-mutating tests in this module serialize against each other.
     /// [reference: ENV_LOCK for parallel tests]
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::TEST_ENV_LOCK as ENV_LOCK;
 
     /// Set `name` for the duration of `body`, restoring it afterwards.
     ///
