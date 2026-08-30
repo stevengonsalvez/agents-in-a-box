@@ -45,9 +45,6 @@ pub struct RepositoryCache {
 impl RepositoryCache {
     const VERSION: u32 = 1;
     const CACHE_FILE: &'static str = "cache/repositories.json";
-    /// Coded default TTL (1 hour), overridden by
-    /// `workspace_defaults.scan_cache_ttl_secs`.
-    const DEFAULT_TTL_SECS: i64 = 3600;
 
     /// The effective freshness window for a cached scan.
     fn ttl_secs() -> i64 {

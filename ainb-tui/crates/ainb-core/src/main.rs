@@ -126,8 +126,18 @@ fn main() -> Result<()> {
     // `migrate_legacy_paths` moves with it rather than staying behind: it folds
     // a stray older config.toml into the canonical one, and the bridge has to
     // read the merged result, not the pre-migration file.
-    config::AppConfig::migrate_legacy_paths();
-    config::tunables::export_env_bridge(&config::tunables::snapshot());
+    // Skipped for the pure-informational invocations. Otherwise `ainb --help`
+    // and `ainb --version` would each do a four-path config load and could
+    // WRITE config.toml through the legacy-path migration — surprising for a
+    // command that is meant to print and exit, and any warning raised during
+    // that load is discarded because the tracing subscriber does not exist yet.
+    let informational_only = std::env::args()
+        .skip(1)
+        .all(|arg| matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help"));
+    if !informational_only {
+        config::AppConfig::migrate_legacy_paths();
+        config::tunables::export_env_bridge(&config::tunables::snapshot());
+    }
 
     if is_skill_manager_cli_invocation() {
         return ainb_cli::run();

@@ -680,11 +680,14 @@ mod tests {
             stream.shutdown().await.unwrap();
         }
 
-        // Give the daemon a tick to drain.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Inspect SQLite directly.
+        // Poll rather than sleeping a fixed 100ms: run_daemon now reads its
+        // config from disk at startup, so under parallel load the row had not
+        // landed by the time the assertion ran. Same fix as the sibling test.
         let store = Store::open(&db).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.count().unwrap() < 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert_eq!(store.count().unwrap(), 1);
 
         // Stop the daemon: send SIGTERM to our own PID — wait, that
