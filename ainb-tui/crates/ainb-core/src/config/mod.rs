@@ -1785,6 +1785,12 @@ impl AppConfig {
 
         match write_atomic(&config_path, &content) {
             Ok(()) => {
+                // The promoted tunables read from a process-wide snapshot, so
+                // without this a save reports success and changes nothing until
+                // the next launch: syntax highlighting stays on, the inbox keeps
+                // its old limit. Re-loads rather than installing `self`, because
+                // `load()` also merges the project and system layers.
+                tunables::refresh_snapshot();
                 // Audit log the successful config save
                 audit::audit_config_saved(
                     &config_path.display().to_string(),

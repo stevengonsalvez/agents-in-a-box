@@ -210,6 +210,12 @@ impl CurrentStateIndex {
 /// `AINB_FLEET_STATE_STALE_MS` stays as the LAST rung so an existing override
 /// keeps doing what it did. Someone who set it to 0 to disable this floor must
 /// not silently get the 5-minute default back.
+///
+/// That rung is only reachable because `tunables::resolved` ignores a variable
+/// this process planted itself: `export_env_bridge` fills
+/// `AINB_FLEET_HEALTHY_STATE_STALE_MS` from config whenever it is unset, so
+/// without that guard the outer call would ALWAYS find a value and the legacy
+/// rung would be dead code. See `tunables::BRIDGED`.
 fn effective_stale_window_ms() -> i64 {
     let config = crate::config::tunables::snapshot();
     let legacy = crate::config::tunables::resolved(
@@ -322,6 +328,60 @@ fn context_from_state(kind: &str, context_json: Option<&str>) -> Option<NeedsCon
 
 #[cfg(test)]
 mod tests {
+    /// Env-mutating tests here serialize against each other.
+    /// [reference: ENV_LOCK for parallel tests]
+    static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The legacy `AINB_FLEET_STATE_STALE_MS` override must still disable the
+    /// healthy-kind floor.
+    ///
+    /// The regression this guards: `export_env_bridge` fills
+    /// `AINB_FLEET_HEALTHY_STATE_STALE_MS` from config whenever it is unset, so
+    /// an operator with `export AINB_FLEET_STATE_STALE_MS=0` in their profile
+    /// silently got the 5-minute floor back that they had turned off on `main`.
+    /// Without the self-planted guard in `tunables` this fails with
+    /// `assertion `left == right` failed: left: 300000, right: 0`.
+    #[test]
+    fn the_legacy_stale_env_var_still_disables_the_healthy_floor() {
+        let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_legacy = std::env::var_os("AINB_FLEET_STATE_STALE_MS");
+        let prior_new = std::env::var_os("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+        std::env::set_var("AINB_FLEET_STATE_STALE_MS", "0");
+        std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+
+        // Startup: the bridge publishes the config default for the NEW variable
+        // (300000) because nothing had set it, and leaves the legacy one alone.
+        let config = crate::config::AppConfig::default();
+        crate::config::tunables::install_snapshot(config.clone());
+        crate::config::tunables::export_env_bridge(&config);
+
+        assert_eq!(
+            effective_stale_window_ms(),
+            0,
+            "the legacy override must still win over a value the bridge planted"
+        );
+
+        crate::config::tunables::clear_bridged_for_test();
+        std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+        match prior_legacy {
+            Some(v) => std::env::set_var("AINB_FLEET_STATE_STALE_MS", v),
+            None => std::env::remove_var("AINB_FLEET_STATE_STALE_MS"),
+        }
+        if let Some(v) = prior_new {
+            std::env::set_var("AINB_FLEET_HEALTHY_STATE_STALE_MS", v);
+        }
+    }
+
+    /// The two windows are separate knobs with separate defaults, which is the
+    /// bug they were split to fix: one env var used to drive both, with a
+    /// hardcoded 0 at one call site and 300000 at the other.
+    #[test]
+    fn the_sticky_and_healthy_windows_have_their_own_defaults() {
+        let bare: crate::config::AppConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.fleet.state_stale_ms, 0);
+        assert_eq!(bare.fleet.healthy_state_stale_ms, 300_000);
+    }
+
     use super::*;
     use crate::fleet::types::SessionSource;
 

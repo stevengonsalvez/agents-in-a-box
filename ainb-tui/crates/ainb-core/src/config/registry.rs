@@ -156,15 +156,8 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "general.skill_install_real_homes",
         category: C::General,
         label: "Install Skills To Real Tool Homes",
-        help: "Write installs to ~/.claude, ~/.codex … instead of ainb's managed sandbox",
+        help: "Write installs to ~/.claude, ~/.codex … not ainb's sandbox (restart to apply)",
         kind: RowKind::Bool,
-    }),
-    Entry::Row(ConfigRow {
-        key: "general.home",
-        category: C::General,
-        label: "State Directory",
-        help: "Base dir for ainb state (<home>/.agents-in-a-box); blank = your home dir",
-        kind: RowKind::Text,
     }),
     Entry::Row(ConfigRow {
         key: "presets.file",
@@ -553,7 +546,8 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
             min: 0,
             max: 604_800,
         },
-    }), // ── UI preferences ─────────────────────────────────────────────────────
+    }),
+    // ── UI preferences ─────────────────────────────────────────────────────
     Entry::Row(ConfigRow {
         key: "ui_preferences.theme",
         category: C::Appearance,
@@ -629,14 +623,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "ui.tick_rate_ms",
         category: C::Appearance,
         label: "Event Poll Interval",
-        help: "Milliseconds between input polls; lower feels snappier and costs CPU",
+        help: "Milliseconds between input polls; lower feels snappier (restart to apply)",
         kind: RowKind::Number { min: 1, max: 1000 },
     }),
     Entry::Row(ConfigRow {
         key: "ui.app_tick_ms",
         category: C::Appearance,
         label: "App Tick Interval",
-        help: "Milliseconds between heavy periodic passes (previews, animation, refreshes)",
+        help: "Milliseconds between heavy periodic passes, e.g. previews (restart to apply)",
         kind: RowKind::Number {
             min: 1,
             max: 60_000,
@@ -843,7 +837,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "fleet.idle_min",
         category: C::Fleet,
         label: "Idle Threshold",
-        help: "Minutes of quiet before a session reads IDLE, for tmux and hook sources alike",
+        help: "Minutes of quiet before a session reads IDLE, tmux and hooks alike (restart)",
         kind: RowKind::Number {
             min: 1,
             max: 10_080,
@@ -853,7 +847,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "fleet.transport",
         category: C::Fleet,
         label: "Send Transport",
-        help: "How `ainb fleet send` delivers: tmux first, tmux only, or the broker",
+        help: "How `ainb fleet send` delivers: tmux first, tmux only, broker (restart)",
         kind: RowKind::Choice(&["tmux", "tmux-only", "broker"]),
     }),
     Entry::Row(ConfigRow {
@@ -887,12 +881,13 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "fleet.tmux_idle_after_secs",
         category: C::Fleet,
         label: "tmux Idle After",
-        help: "Seconds of pane silence before tmux discovery calls a session between turns",
+        help: "Seconds of pane silence before tmux discovery calls a session idle (restart)",
         kind: RowKind::Number {
             min: 1,
             max: 86_400,
         },
-    }), // ── Fleet bridge ───────────────────────────────────────────────────────
+    }),
+    // ── Fleet bridge ───────────────────────────────────────────────────────
     // Parsed by `fleet::bridge::config` off the same file; `ainb-core` carries
     // it as an opaque passthrough, so these rows are declared by hand and are
     // exempt from the schema walk (see EXTERNAL_PREFIXES).
@@ -1141,7 +1136,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "notifyd.os_debounce_secs",
         category: C::Daemons,
         label: "OS Notification Debounce",
-        help: "Seconds one session/event pair waits before it may notify again",
+        help: "Seconds one session/event pair waits before notifying again (daemon restart)",
         kind: RowKind::Number {
             min: 0,
             max: 86_400,
@@ -1151,7 +1146,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "notifyd.approval_timeout_secs",
         category: C::Daemons,
         label: "Approval Timeout",
-        help: "Seconds an unanswered permission request waits before it is auto-DENIED",
+        help: "Seconds an unanswered permission request waits before auto-DENY (daemon restart)",
         kind: RowKind::Number { min: 1, max: 630 },
     }),
     // ── Web dashboard ──────────────────────────────────────────────────────
@@ -1182,14 +1177,14 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "acp.adapters.*.command",
         category: C::Acp,
         label: "Adapter Command",
-        help: "Executable to spawn for this adapter; blank resolves its name on PATH",
+        help: "Executable for this adapter; blank resolves its name on PATH (daemon restart)",
         kind: RowKind::Text,
     }),
     Entry::Row(ConfigRow {
         key: "acp.adapters.*.permission_mode",
         category: C::Acp,
         label: "Permission Mode",
-        help: "Mode pinned at session/new and re-asserted after every session/load",
+        help: "Mode pinned at session/new, re-asserted after session/load (daemon restart)",
         kind: RowKind::Choice(&["default", "acceptEdits", "bypassPermissions", "plan"]),
     }),
     // ── Sections owned by other crates ─────────────────────────────────────
@@ -1330,7 +1325,6 @@ pub const OPTIONAL_KEYS: &[&str] = &[
     "fleet.cost.session_usd",
     "fleet.interview.surface",
     "fleet.terminal",
-    "general.home",
     "ui_preferences.preferred_editor",
     "usage.model_aliases.*",
     "usage_client.cache_db",
@@ -1940,7 +1934,6 @@ mod tests {
             general: GeneralConfig {
                 syntax_highlight: false,
                 skill_install_real_homes: false,
-                home: Some("/tmp/ainb-home".to_string()),
             },
             ui: UiConfig {
                 tick_rate_ms: 16,
