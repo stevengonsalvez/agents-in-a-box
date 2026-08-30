@@ -550,6 +550,14 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
+      # Both hangar suites below drive nextest (one run per package instead of
+      # one `cargo test` per test file). Unlike the `test` job this one has no
+      # other nextest step, so without this install they fail with
+      # `no such command: nextest`.
+      - uses: taiki-e/install-action@nextest
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       # macOS runner images do NOT ship tmux (actions/runner-images macos-15
       # README) — without installing it here the macOS leg is vacuously green:
       # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
