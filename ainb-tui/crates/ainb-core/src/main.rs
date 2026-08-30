@@ -131,9 +131,16 @@ fn main() -> Result<()> {
     // WRITE config.toml through the legacy-path migration — surprising for a
     // command that is meant to print and exit, and any warning raised during
     // that load is discarded because the tracing subscriber does not exist yet.
-    let informational_only = std::env::args()
-        .skip(1)
-        .all(|arg| matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help"));
+    //
+    // `!args.is_empty()` matters: `all()` on an EMPTY iterator is `true`, so
+    // bare `ainb` — the normal way to open the TUI — would classify itself as
+    // informational and skip both the migration and the bridge, leaving every
+    // promoted key inert in the one invocation that most needs them.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let informational_only = !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help"));
     if !informational_only {
         config::AppConfig::migrate_legacy_paths();
         config::tunables::export_env_bridge(&config::tunables::snapshot());
@@ -2157,4 +2164,37 @@ fn command_exists(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod informational_only_tests {
+    /// The predicate `main` uses to decide whether to skip the config load.
+    fn informational_only(args: &[&str]) -> bool {
+        !args.is_empty()
+            && args
+                .iter()
+                .all(|arg| matches!(*arg, "-h" | "--help" | "-V" | "--version" | "help"))
+    }
+
+    /// Bare `ainb` is the normal TUI launch and must NOT be treated as
+    /// informational. `all()` on an empty iterator is `true`, so the obvious
+    /// spelling skipped the config load and env bridge for the one invocation
+    /// that most needs them.
+    #[test]
+    fn bare_ainb_is_not_informational() {
+        assert!(!informational_only(&[]), "bare `ainb` must load config");
+        assert!(!informational_only(&["tui"]));
+        assert!(!informational_only(&["config", "show"]));
+        assert!(!informational_only(&["--help", "config"]));
+    }
+
+    #[test]
+    fn help_and_version_are_informational() {
+        for args in [&["--help"][..], &["-h"], &["--version"], &["-V"], &["help"]] {
+            assert!(
+                informational_only(args),
+                "{args:?} should skip the config load"
+            );
+        }
+    }
 }
