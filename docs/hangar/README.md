@@ -69,3 +69,5 @@ Research produced 2026-05-22 by 6 parallel sub-agents:
 - `project-analyst` — ainb capability inventory + gap mapping
 
 Diagrams generated via `/fireworks-tech-graph`. Final HTML assembled via `/explain-to-me` with the `16-implementation-plan` template + Claude theme overlay.
+
+<!-- skip-path probe, branch is disposable -->
