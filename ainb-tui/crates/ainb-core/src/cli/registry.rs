@@ -1656,6 +1656,7 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("insecure-bind")
                         .long("insecure-bind")
                         .action(clap::ArgAction::SetTrue)
+                        .overrides_with("no-insecure-bind")
                         .help(
                             "Allow a non-loopback bind with no token. DANGEROUS: an \
                              unauthenticated bind exposes a control surface — the live WS \
@@ -1668,9 +1669,31 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("read-only")
                         .long("read-only")
                         .action(clap::ArgAction::SetTrue)
+                        .overrides_with("no-read-only")
                         .help(
                             "Viewer-only: disable the live terminal write surface \
                              (the WS terminal is refused with 403)",
+                        ),
+                )
+                // Negations exist because `[web]` can now turn these on by
+                // default. A SetTrue flag can only ever say "on", so without
+                // these there is no way to run one invocation with the write
+                // surface enabled once `web.read_only = true` is in the file.
+                .arg(
+                    clap::Arg::new("no-read-only")
+                        .long("no-read-only")
+                        .action(clap::ArgAction::SetTrue)
+                        .overrides_with("read-only")
+                        .help("Serve the write surface for this run, overriding web.read_only"),
+                )
+                .arg(
+                    clap::Arg::new("no-insecure-bind")
+                        .long("no-insecure-bind")
+                        .action(clap::ArgAction::SetTrue)
+                        .overrides_with("insecure-bind")
+                        .help(
+                            "Refuse an unauthenticated non-loopback bind for this run, \
+                             overriding web.insecure_bind",
                         ),
                 )
                 .after_help(
@@ -1690,20 +1713,34 @@ impl CliCommand for WebCommand {
         // a decision about THIS invocation and a file is a standing preference.
         // `--listen` therefore carries no clap default any more: with one, an
         // unset flag was indistinguishable from an explicit loopback and the
-        // config value could never be reached. The two booleans are
-        // `SetTrue`-only, so a flag can turn them on and a file is the only way
-        // to have them on by default.
+        // config value could never be reached.
+        //
+        // Each boolean reads as three states, not two: an explicit `--no-x`
+        // turns it off, an explicit `--x` turns it on, and neither defers to
+        // the file. `flag || config` is what a SetTrue pair cannot express, and
+        // it made `insecure_bind` in particular a one-way door: once true in
+        // config there was no invocation that could refuse it again.
         //
         // The token is deliberately not configurable here: `--token` is the
         // only way in, and it never touches config.toml.
-        let defaults = &crate::config::tunables::snapshot().web;
+        let defaults = crate::config::tunables::snapshot();
+        let defaults = &defaults.web;
+        let flag_or = |on: &str, off: &str, from_config: bool| {
+            if matches.get_flag(off) {
+                false
+            } else if matches.get_flag(on) {
+                true
+            } else {
+                from_config
+            }
+        };
         let listen_raw = matches
             .get_one::<String>("listen")
             .cloned()
             .unwrap_or_else(|| defaults.listen.clone());
         let token = matches.get_one::<String>("token").cloned();
-        let insecure_bind = matches.get_flag("insecure-bind") || defaults.insecure_bind;
-        let read_only = matches.get_flag("read-only") || defaults.read_only;
+        let insecure_bind = flag_or("insecure-bind", "no-insecure-bind", defaults.insecure_bind);
+        let read_only = flag_or("read-only", "no-read-only", defaults.read_only);
 
         Box::pin(async move {
             use std::net::ToSocketAddrs;

@@ -2703,7 +2703,39 @@ fn seed_value(config: &AppConfig) -> toml::Value {
         merge_external_sections(&mut seed, &toml::Value::Table(on_disk));
     }
     seed_hangar_daemon_defaults(&mut seed);
+    seed_builtin_acp_adapters(&mut seed);
     seed
+}
+
+/// Plant the built-in ACP adapters into the seed so their rows exist.
+///
+/// `acp.adapters.*` rows are wildcards, and `AcpConfig::adapters` defaults empty
+/// with `skip_serializing_if`, so the key was absent from the seed, `expand_key`
+/// returned nothing, and the whole "ACP Adapters" category was filtered out for
+/// having zero rows. It could never render, and there was no way to reach the
+/// adapters from the screen at all.
+///
+/// The built-ins live in `PoolConfig::default()`, not in config.toml, so they
+/// have to be named here for the same reason the Hangar daemon knobs do: the
+/// row has to exist before a user can be the first person to configure it. Only
+/// planted where the user has not already declared the adapter, so a configured
+/// `command` is never overwritten by a default.
+fn seed_builtin_acp_adapters(seed: &mut toml::Value) {
+    for name in ainb_hangar_daemon::acp_pool::PoolConfig::default().adapters.keys() {
+        let base = format!("acp.adapters.{}", registry::quote_key_segment(name));
+        for (field, value) in [
+            ("command", toml::Value::String(String::new())),
+            (
+                "permission_mode",
+                toml::Value::String("default".to_string()),
+            ),
+        ] {
+            let key = format!("{base}.{field}");
+            if registry::navigate_toml(seed, &key).is_err() {
+                let _ = registry::insert_at(seed, &key, value);
+            }
+        }
+    }
 }
 
 /// Plant every Hangar daemon knob's coded default under `hangar_daemon.` in the
@@ -3147,6 +3179,15 @@ pub struct AppState {
     pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
+    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
+    /// written to the daemon's SQLite table.
+    ///
+    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
+    /// one action and is drained once per app tick, so two settings edits
+    /// confirmed inside the same 250 ms tick would silently lose the first
+    /// while toasting success for both. Appended to, drained in
+    /// `process_async_action`.
+    pub pending_daemon_config_edits: Vec<(String, String)>,
     /// Whether the Hangar daemon's stored `daemon_config` values have been read
     /// into the settings rows yet.
     ///
@@ -3722,14 +3763,6 @@ pub enum NewSessionStep {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsyncAction {
-    /// Write `(daemon_config key, raw value)` pairs to the Hangar daemon's
-    /// `daemon_config` SQLite table.
-    ///
-    /// A SECOND write backend, so it gets its own action rather than riding on
-    /// `AppConfig::save`. A rejected value or an unreachable database raises an
-    /// error notification; it is never a silent no-op, which for a row the user
-    /// just edited is indistinguishable from success.
-    HangarDaemonConfigSet(Vec<(String, String)>),
     // Phase 6 (new-session redesign): legacy `StartNewSession`,
     // `StartWorkspaceSearch`, `NewSessionInCurrentDir`, `NewSessionNormal`,
     // `NewSessionWithRepoInput`, `ValidateRepoSource`, `CloneRemoteRepo`,
@@ -3817,6 +3850,7 @@ impl Default for AppState {
             help_visible: false,
             new_session_state: None,
             pending_async_action: None,
+            pending_daemon_config_edits: Vec::new(),
             hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
@@ -10315,6 +10349,10 @@ impl AppState {
             self.hangar_daemon_config_loaded = true;
             self.load_hangar_daemon_config().await;
         }
+        if !self.pending_daemon_config_edits.is_empty() {
+            let edits = std::mem::take(&mut self.pending_daemon_config_edits);
+            self.set_hangar_daemon_config(edits).await;
+        }
         if let Some(action) = self.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
@@ -10323,9 +10361,6 @@ impl AppState {
             match action {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
-                }
-                AsyncAction::HangarDaemonConfigSet(edits) => {
-                    self.set_hangar_daemon_config(edits).await;
                 }
                 AsyncAction::CheckGitAuth => {
                     self.check_git_auth().await;
@@ -11438,9 +11473,9 @@ impl AppState {
         // Only events within this rolling window can mark a session, and only
         // this many rows are read per refresh. Both bound query cost on a large
         // notifications DB; `[ui]` raises them for a very large fleet.
-        let tunables = &crate::config::tunables::snapshot().ui;
-        let lookback_ms = i64::from(tunables.session_lookback_hours) * 60 * 60 * 1000;
-        let query_limit = tunables.session_query_limit;
+        let config = crate::config::tunables::snapshot();
+        let lookback_ms = i64::from(config.ui.session_lookback_hours) * 60 * 60 * 1000;
+        let query_limit = config.ui.session_query_limit;
 
         let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
         if !db.exists() {
@@ -13119,5 +13154,86 @@ mod panel_close_tests {
     #[test]
     fn rejects_malformed_payload() {
         assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}
+
+#[cfg(test)]
+mod seeded_category_tests {
+    use super::*;
+
+    /// Categories that describe something already IN FORCE, and so must render
+    /// on a machine that has configured nothing.
+    ///
+    /// `McpServers` is deliberately absent: its rows describe user-created
+    /// servers, and having none until you add one is the honest state. The
+    /// three below are not like that. The ACP built-ins are spawning sessions
+    /// right now and the Hangar daemon knobs are governing it, but neither
+    /// lives in config.toml, so unless the seed plants them `expand_key`
+    /// returns nothing and the category is dropped for having zero rows.
+    const ALWAYS_REACHABLE: &[ConfigCategory] = &[
+        ConfigCategory::Acp,
+        ConfigCategory::HangarDaemon,
+        ConfigCategory::ContainerTemplates,
+    ];
+
+    /// A category whose subject already exists must be openable out of the box.
+    ///
+    /// `every_category_has_at_least_one_row` in the registry proves each
+    /// category has an ENTRY; it cannot prove the entry expands. Before
+    /// `seed_builtin_acp_adapters` this fails with
+    /// `these categories seed no rows and can never be opened: ["ACP Adapters"]`.
+    #[test]
+    fn categories_describing_live_things_seed_rows_out_of_the_box() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let empty: Vec<&str> = ALWAYS_REACHABLE
+            .iter()
+            .filter(|category| rows.get(category).is_none_or(|r| r.is_empty()))
+            .map(|category| category.label())
+            .collect();
+        assert!(
+            empty.is_empty(),
+            "these categories seed no rows and can never be opened: {empty:?}"
+        );
+    }
+
+    /// The built-in ACP adapters are reachable by name, not just as a count.
+    #[test]
+    fn the_builtin_acp_adapters_get_rows() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let keys: Vec<&str> = rows
+            .get(&ConfigCategory::Acp)
+            .expect("the ACP category has rows")
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect();
+        for adapter in ["claude-agent-acp", "codex-acp"] {
+            assert!(
+                keys.iter().any(|key| key.contains(adapter)),
+                "no row for the built-in adapter {adapter}: {keys:?}"
+            );
+        }
+    }
+
+    /// A user-declared adapter's own values survive the seeding, which only
+    /// fills in built-ins the config has not already described.
+    #[test]
+    fn a_configured_adapter_is_not_overwritten_by_the_builtin_seed() {
+        let mut config = AppConfig::default();
+        config.acp.adapters.insert(
+            "claude-agent-acp".to_string(),
+            crate::config::AcpAdapterConfig {
+                command: Some("/opt/mine".to_string()),
+                permission_mode: "plan".to_string(),
+            },
+        );
+        let seed = seed_value(&config);
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "acp.adapters.claude-agent-acp.command")
+                .unwrap()
+                .as_str(),
+            Some("/opt/mine")
+        );
     }
 }

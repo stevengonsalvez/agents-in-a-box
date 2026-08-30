@@ -58,8 +58,8 @@ pub enum ConfigCommands {
 /// Execute a config subcommand
 pub async fn execute(command: ConfigCommands, format: OutputFormat) -> Result<()> {
     match command {
-        ConfigCommands::Show => cmd_show(format),
-        ConfigCommands::Get { key } => cmd_get(&key, format),
+        ConfigCommands::Show => cmd_show(format).await,
+        ConfigCommands::Get { key } => cmd_get(&key, format).await,
         ConfigCommands::Set { key, value } => cmd_set(&key, &value).await,
         ConfigCommands::Reset { force } => cmd_reset(force),
         ConfigCommands::Path => cmd_path(format),
@@ -67,28 +67,87 @@ pub async fn execute(command: ConfigCommands, format: OutputFormat) -> Result<()
     }
 }
 
-/// Display the full merged configuration
-fn cmd_show(format: OutputFormat) -> Result<()> {
+/// Display the full merged configuration.
+///
+/// Includes the `hangar_daemon.*` knobs, which are NOT in config.toml: they live
+/// in the Hangar daemon's SQLite table. `show` used to be silent about them, so
+/// a key `ainb config set` accepts did not appear in the dump of "the merged
+/// config", which reads as the key not existing.
+async fn cmd_show(format: OutputFormat) -> Result<()> {
     let config = AppConfig::load().context("Failed to load configuration")?;
+    let daemon = hangar_daemon_values().await;
 
     match format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&config)
-                .context("Failed to serialize config as JSON")?;
-            println!("{json}");
+            let mut json =
+                serde_json::to_value(&config).context("Failed to serialize config as JSON")?;
+            if let Some(object) = json.as_object_mut() {
+                object.insert(
+                    "hangar_daemon".to_string(),
+                    serde_json::Value::Object(
+                        daemon
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json)
+                    .context("Failed to serialize config as JSON")?
+            );
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let toml_str =
                 toml::to_string_pretty(&config).context("Failed to serialize config as TOML")?;
             println!("{toml_str}");
+            // A comment block, not a `[hangar_daemon]` table: the text form is
+            // valid TOML a user may paste back into config.toml, where these
+            // keys do nothing at all.
+            println!("# Hangar daemon knobs (stored in hangar.db, NOT in this file).");
+            println!("# Read/write with `ainb config get|set hangar_daemon.<key>`.");
+            for (key, value) in &daemon {
+                println!("#   hangar_daemon.{key} = {value}");
+            }
         }
     }
 
     Ok(())
 }
 
+/// Every Hangar daemon knob and its effective value (stored, else the coded
+/// default). Falls back to the coded defaults when the database is missing or
+/// unreadable, because `show` must never fail on an optional backend.
+async fn hangar_daemon_values() -> Vec<(String, String)> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let store = ainb_hangar_store::Store::open_default().await.ok();
+    let mut out = Vec::with_capacity(DAEMON_CONFIG_REGISTRY.len());
+    for descriptor in DAEMON_CONFIG_REGISTRY {
+        let stored = match &store {
+            Some(store) => DaemonConfigRepo::get(store.pool(), descriptor.key).await.ok().flatten(),
+            None => None,
+        };
+        out.push((
+            descriptor.key.to_string(),
+            stored.unwrap_or_else(|| descriptor.default.to_string()),
+        ));
+    }
+    out
+}
+
 /// Get a specific config value by dot-notation key
-fn cmd_get(key: &str, format: OutputFormat) -> Result<()> {
+async fn cmd_get(key: &str, format: OutputFormat) -> Result<()> {
+    // Same routing as `cmd_set`. Without it, the very sequence
+    // `example.config.toml` prescribes ("config set hangar_daemon.x, then read
+    // it back") wrote successfully and then errored with "Key not found",
+    // which reads as the write having failed.
+    if let Some(daemon_key) = crate::config::registry::hangar_daemon_key(key) {
+        return get_hangar_daemon(key, daemon_key, format).await;
+    }
+
     let config = AppConfig::load().context("Failed to load configuration")?;
     let toml_value =
         toml::Value::try_from(&config).context("Failed to convert config to TOML value")?;
@@ -176,6 +235,11 @@ async fn cmd_set(key: &str, value: &str) -> Result<()> {
     // Keyed off what actually happened: only an OPTIONAL_KEYS row is removed
     // when emptied. `skills.api_key = ""` stores an empty string, and calling
     // that "Cleared" would be a lie.
+    // The promoted tunables read a process-wide snapshot; refresh it so a
+    // long-lived embedding of this crate does not keep serving the old value.
+    // Free in the one-shot CLI, where the process exits next.
+    crate::config::tunables::refresh_snapshot();
+
     if cleared {
         println!("Cleared {key}");
     } else {
@@ -183,6 +247,43 @@ async fn cmd_set(key: &str, value: &str) -> Result<()> {
     }
     println!("Saved to {}", config_path.display());
 
+    Ok(())
+}
+
+/// Read one knob back out of the Hangar daemon's `daemon_config` table.
+///
+/// A key with no stored row prints its coded default, which is what the daemon
+/// actually runs: reporting "not found" would be a claim about the daemon's
+/// behaviour that is not true.
+async fn get_hangar_daemon(key: &str, daemon_key: &str, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let descriptor = ainb_hangar_core::daemon_config::descriptor(daemon_key)
+        .ok_or_else(|| anyhow!("'{key}' is not a Hangar daemon config key"))?;
+    let store = ainb_hangar_store::Store::open_default()
+        .await
+        .context("open the Hangar database")?;
+    let stored = DaemonConfigRepo::get(store.pool(), daemon_key)
+        .await
+        .with_context(|| format!("read daemon_config `{daemon_key}`"))?;
+    let value = stored.as_deref().unwrap_or(descriptor.default);
+
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::json!({
+                "key": key,
+                "value": value,
+                "is_default": stored.is_none(),
+                "default": descriptor.default,
+                "source": "hangar daemon_config",
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json).context("serialize value as JSON")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => println!("{value}"),
+    }
     Ok(())
 }
 

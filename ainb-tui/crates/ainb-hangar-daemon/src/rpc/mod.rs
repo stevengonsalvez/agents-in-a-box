@@ -13016,7 +13016,10 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
             listener,
-            ainb_plugin_notifyd::broker::BrokerState::default(),
+            // Not `::default()`, which reads the developer's real config.toml.
+            ainb_plugin_notifyd::broker::BrokerState::with_timeout(
+                ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT,
+            ),
         ));
         set_approve_socket_for_test(Some(socket));
         let created = FleetRepo::apply_event(
