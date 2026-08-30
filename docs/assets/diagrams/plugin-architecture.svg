@@ -1,96 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 700" width="960" height="700">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 800" width="1500" height="800" role="img" aria-label="ainb v2 plugin architecture: host, wire protocol, in-tree plugins and the two render modes">
+  <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}@media (prefers-color-scheme: dark){.bg{fill:#0F0F18;}.ink{fill:#DCDCE6;}.mute{fill:#9A9AB0;}.accent{fill:#E08A63;}.accentfill{fill:#E08A63;}.card{fill:#191923;stroke:#2E2E3E;}.chip{fill:#20202C;stroke:#2E2E3E;}.line{stroke:#7A7A92;}.alt{stroke:#8FA86B;}.linefill{fill:#7A7A92;}.altfill{fill:#8FA86B;}}</style>
   <defs>
-    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
-    </marker>
-    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
-    </marker>
-    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
-    </marker>
-    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
-    </marker>
-    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
-    </marker>
-    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
-    </marker>
-    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
-    </marker>
-    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
-    </filter>
-    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
-    </filter>
-    <style>
-    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-    .title { font-size: 30px; font-weight: 700; fill: #111827; }
-    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
-    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
-    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
-    .node-title { font-size: 18px; font-weight: 700; fill: #111827; }
-    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
-    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
-    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
-    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
-    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
-    </style>
+    <marker id="arr" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" class="linefill" fill="#8A857C"/></marker>
+    <marker id="arrAlt" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><polygon points="0 0, 8.5 4, 0 8" class="altfill" fill="#5F7048"/></marker>
   </defs>
-  <rect width="960.0" height="700.0" fill="#ffffff"/>
-  <text x="480.0" y="56" text-anchor="middle" class="title">ainb v2 plugin architecture</text>
-  <text x="480.0" y="82" text-anchor="middle" class="subtitle">native subprocess · JSON-RPC 2.0 over Content-Length stdio</text>
-  <path d="M 480.0,152.0 L 480.0,176.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <path d="M 480.0,242.0 L 480.0,286.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <path d="M 480.0,330.0 L 480.0,350.4 L 190.0,371.6 L 190.0,392.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <path d="M 480.0,330.0 L 480.0,392.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <path d="M 480.0,330.0 L 480.0,350.4 L 770.0,371.6 L 770.0,392.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <path d="M 344.0,451.0 L 326.0,451.0" fill="none" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)" stroke-dasharray="6,4"/>
-  <path d="M 770.0,510.0 L 770.0,566.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)" stroke-dasharray="6,4"/>
-  <rect x="290.0" y="78.0" width="380.0" height="74.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="480.0" y="96.0" text-anchor="middle" class="node-type">binary: ainb</text>
-  <text x="480.0" y="121.0" text-anchor="middle" class="node-title">ainb-core  ·  host</text>
-  <text x="480.0" y="143.0" text-anchor="middle" class="node-sub">ratatui TUI — owns the terminal</text>
-  <rect x="290.0" y="176.0" width="380.0" height="66.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="480.0" y="209.0" text-anchor="middle" class="node-title">ainb-plugin-runtime</text>
-  <text x="480.0" y="231.0" text-anchor="middle" class="node-sub">discover · spawn · route · capability gate (-32001)</text>
-  <rect x="120.0" y="286.0" width="720.0" height="44.0" rx="10.0" fill="#1f2937" stroke="#374151" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="480.0" y="308.0" text-anchor="middle" class="node-title">JSON-RPC 2.0   ·   Content-Length framed stdio</text>
-  <rect x="54.0" y="392.0" width="272.0" height="118.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="190.0" y="410.0" text-anchor="middle" class="node-type">WireBuffer render</text>
-  <text x="190.0" y="457.0" text-anchor="middle" class="node-title">burndown</text>
-  <text x="190.0" y="479.0" text-anchor="middle" class="node-sub">Analytics screen · ainb usage</text>
-  <rect x="344.0" y="392.0" width="272.0" height="118.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="480.0" y="410.0" text-anchor="middle" class="node-type">sessions.usage_data</text>
-  <text x="480.0" y="457.0" text-anchor="middle" class="node-title">session-reader</text>
-  <text x="480.0" y="479.0" text-anchor="middle" class="node-sub">publisher · no screen</text>
-  <rect x="634.0" y="392.0" width="272.0" height="118.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="770.0" y="410.0" text-anchor="middle" class="node-type">caps: spawn_subprocess</text>
-  <text x="770.0" y="457.0" text-anchor="middle" class="node-title">witr</text>
-  <text x="770.0" y="479.0" text-anchor="middle" class="node-sub">ainb witr CLI + /witr slash</text>
-  <rect x="634.0" y="566.0" width="272.0" height="64.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
-  <text x="770.0" y="598.0" text-anchor="middle" class="node-title">witr -i  (foreign TTY)</text>
-  <text x="770.0" y="620.0" text-anchor="middle" class="node-sub">host suspends → tmux attach → resume</text>
-  <rect x="459.0" y="150.0" width="42" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="480.0" y="164.0" text-anchor="middle" class="arrow-label">owns</text>
-  <rect x="399.0" y="250.0" width="126" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="462.0" y="264.0" text-anchor="middle" class="arrow-label">plugin/* methods</text>
-  <rect x="261.5" y="331.0" width="147" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="335.0" y="345.0" text-anchor="middle" class="arrow-label">render · handle_key</text>
-  <rect x="576.0" y="331.0" width="98" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="625.0" y="345.0" text-anchor="middle" class="arrow-label">cli_dispatch</text>
-  <rect x="244.0" y="437.0" width="182" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="335.0" y="451.0" text-anchor="middle" class="arrow-label">usage_data via event bus</text>
-  <rect x="685.5" y="524.0" width="133" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
-  <text x="752.0" y="538.0" text-anchor="middle" class="arrow-label">press w → handoff</text>
-  <line x1="42.0" y1="600.0" x2="72.0" y2="600.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <text x="82.0" y="604.0" class="legend">JSON-RPC (render / keys / cli)</text>
-  <line x1="42.0" y1="622.0" x2="72.0" y2="622.0" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
-  <text x="82.0" y="626.0" class="legend">event-bus snapshot data</text>
-  <line x1="42.0" y1="644.0" x2="72.0" y2="644.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
-  <text x="82.0" y="648.0" class="legend">foreign-TTY handoff (dashed)</text>
+  <rect width="1500" height="800" class="bg" fill="#FAF9F5"/>
+  <text x="36" y="44" font-size="24" class="ink" fill="#141413" text-anchor="start" font-weight="800">ainb v2 plugin architecture</text>
+  <rect x="36" y="54" width="238" height="4" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="36" y="74" font-size="13" class="mute" fill="#6B655B" text-anchor="start">native subprocess · JSON-RPC 2.0 over Content-Length stdio</text>
+  <rect x="36" y="98" width="1428" height="134" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="98" width="4" height="134" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="126" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">1</text>
+  <text x="74" y="126" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Host (binary: ainb)</text>
+  <text x="54" y="146" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">owns the terminal · discovers, spawns and supervises every plugin</text>
+  <rect x="54" y="162" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="182" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">ainb-core</text>
+  <text x="65" y="197" font-size="10" class="mute" fill="#6B655B" text-anchor="start">ratatui TUI, owns the terminal</text>
+  <rect x="521" y="162" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="532" y="182" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">ainb-plugin-runtime</text>
+  <text x="532" y="197" font-size="10" class="mute" fill="#6B655B" text-anchor="start">discover · spawn · route · restart</text>
+  <rect x="988" y="162" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="999" y="182" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">capability gate</text>
+  <text x="999" y="197" font-size="10" class="mute" fill="#6B655B" text-anchor="start">default-deny, refuses with -32001</text>
+  <rect x="36" y="252" width="1428" height="128" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="252" width="4" height="128" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="280" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">2</text>
+  <text x="74" y="280" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">The wire</text>
+  <text x="54" y="300" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">one process per plugin, framed stdio, no shared memory</text>
+  <rect x="54" y="314" width="691" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="334" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">plugin/*</text>
+  <text x="65" y="349" font-size="10" class="mute" fill="#6B655B" text-anchor="start">init · render · handle_key · handle_event · cli_dispatch · shutdown</text>
+  <rect x="754" y="314" width="691" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="765" y="334" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">host/*</text>
+  <text x="765" y="349" font-size="10" class="mute" fill="#6B655B" text-anchor="start">snapshot get/publish/subscribe · action invoke · log · fs · fetch</text>
+  <rect x="36" y="400" width="1428" height="178" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="400" width="4" height="178" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="428" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">3</text>
+  <text x="74" y="428" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Plugins (6 ship in-tree)</text>
+  <text x="54" y="448" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">each declares its capabilities in manifest.toml; the host enforces them</text>
+  <rect x="54" y="462" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="482" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">burndown</text>
+  <text x="65" y="497" font-size="10" class="mute" fill="#6B655B" text-anchor="start">Stats screen · ainb usage</text>
+  <rect x="521" y="462" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="532" y="482" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">session-reader</text>
+  <text x="532" y="497" font-size="10" class="mute" fill="#6B655B" text-anchor="start">publisher, no screen</text>
+  <rect x="988" y="462" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="999" y="482" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">witr</text>
+  <text x="999" y="497" font-size="10" class="mute" fill="#6B655B" text-anchor="start">ainb witr · foreign TTY</text>
+  <rect x="54" y="515" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="535" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">learnings</text>
+  <text x="65" y="550" font-size="10" class="mute" fill="#6B655B" text-anchor="start">Memory screen · search</text>
+  <rect x="521" y="515" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="532" y="535" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">abtop</text>
+  <text x="532" y="550" font-size="10" class="mute" fill="#6B655B" text-anchor="start">agent monitor · foreign TTY</text>
+  <rect x="988" y="515" width="458" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="999" y="535" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">hangar-tui</text>
+  <text x="999" y="550" font-size="10" class="mute" fill="#6B655B" text-anchor="start">Hangar screen · daemon client</text>
+  <rect x="36" y="598" width="1428" height="122" rx="10" class="card" fill="#FFFFFF" stroke="#E4E0D8" stroke-width="1"/>
+  <rect x="36" y="598" width="4" height="122" rx="2" class="accentfill" fill="#C25A38"/>
+  <text x="54" y="626" font-size="15" class="accent" fill="#C25A38" text-anchor="start" font-weight="800">4</text>
+  <text x="74" y="626" font-size="15" class="ink" fill="#141413" text-anchor="start" font-weight="700">Two ways to draw</text>
+  <text x="54" y="646" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">in-process frames, or hand the terminal over entirely</text>
+  <rect x="54" y="660" width="691" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="65" y="680" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">WireBuffer</text>
+  <text x="65" y="695" font-size="10" class="mute" fill="#6B655B" text-anchor="start">plugin returns frames, host composites them</text>
+  <rect x="754" y="660" width="691" height="44" rx="7" class="chip" fill="#F4F1EA" stroke="#E4E0D8" stroke-width="1"/>
+  <text x="765" y="680" font-size="12" class="ink" fill="#141413" text-anchor="start" font-weight="600">foreign TTY</text>
+  <text x="765" y="695" font-size="10" class="mute" fill="#6B655B" text-anchor="start">host suspends, tmux attaches the real binary, host resumes</text>
+  <path d="M750 232 L750 248" class="line" fill="none" stroke="#8A857C" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M750 380 L750 396" class="line" fill="none" stroke="#8A857C" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="36" y="762" font-size="11.5" class="mute" fill="#6B655B" text-anchor="start">Capabilities are default-deny: a plugin reaches the network, the filesystem or your secrets only if its manifest asks and you agree.</text>
+  <text x="1464" y="762" font-size="11.5" class="mute" fill="#6B655B" text-anchor="end">Regenerate: python3 docs/assets/diagrams/generate-diagrams.py</text>
 </svg>
