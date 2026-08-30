@@ -2763,18 +2763,29 @@ fn hangar_db_path() -> Option<std::path::PathBuf> {
 /// bookkeeping) is not config and must never reach a settings row.
 async fn read_daemon_config() -> anyhow::Result<Option<Vec<(String, String)>>> {
     use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
-    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
     if hangar_db_path().is_none() {
         return Ok(None);
     }
-    let store = ainb_hangar_store::Store::open_default().await?;
-    let mut stored = Vec::new();
-    for descriptor in DAEMON_CONFIG_REGISTRY {
-        if let Some(value) = DaemonConfigRepo::get(store.pool(), descriptor.key).await? {
-            stored.push((descriptor.key.to_string(), value));
-        }
-    }
+    // Read-only. `Store::open_default` takes a whole-database backup and
+    // applies pending migrations, and this runs on the first app tick of every
+    // launch — so after an upgrade it migrated a running daemon's live schema
+    // out from under it, and blocked the event loop for the length of the copy.
+    // The existence guard above stops creation, not migration.
+    let Some(rows) = ainb_hangar_store::Store::read_daemon_config_read_only().await? else {
+        return Ok(None);
+    };
+    let known: std::collections::HashMap<&str, String> =
+        rows.into_iter()
+            .fold(std::collections::HashMap::new(), |mut acc, (key, value)| {
+                if let Some(descriptor) = DAEMON_CONFIG_REGISTRY.iter().find(|d| d.key == key) {
+                    acc.insert(descriptor.key, value);
+                }
+                acc
+            });
+    let mut stored: Vec<(String, String)> =
+        known.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    stored.sort();
     Ok(Some(stored))
 }
 
