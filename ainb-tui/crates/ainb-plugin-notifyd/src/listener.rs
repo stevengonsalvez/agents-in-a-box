@@ -719,9 +719,21 @@ mod tests {
             stream.write_all(b"\n").await.unwrap();
             stream.shutdown().await.unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
+        // Poll for the expected count rather than sleeping a fixed 150ms. The
+        // daemon reads its config from disk at startup, so under parallel load
+        // a fixed wait is not enough and the assertion fires before the writes
+        // land — the test then fails claiming telemetry was kept, which is the
+        // opposite of what went wrong.
         let store = Store::open(&db).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.count().unwrap() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Settle briefly so a wrongly-kept telemetry event has a chance to
+        // appear too — otherwise this would pass the moment the two actionable
+        // ones land, and never catch an extra third.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Only Stop + Notification:idle_prompt survived.
         assert_eq!(store.count().unwrap(), 2, "telemetry should be dropped");
         let events: std::collections::HashSet<String> = store

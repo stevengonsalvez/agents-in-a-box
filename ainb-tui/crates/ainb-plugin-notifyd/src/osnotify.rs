@@ -314,6 +314,16 @@ fn quote_applescript(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A debouncer pinned to the CODED window.
+    ///
+    /// Never `Debouncer::new()` here: that reads the developer's real
+    /// `~/.agents-in-a-box/config/config.toml`, so anyone who has set
+    /// `notifyd.os_debounce_secs = 0` fails this suite locally while CI, with no
+    /// config file, passes. A unit test must not depend on the machine it runs on.
+    fn test_debouncer() -> Debouncer {
+        Debouncer::with_window(DEBOUNCE)
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -494,7 +504,7 @@ mod tests {
         ])));
         let fired = notify(
             &env("Stop", "claude"),
-            &Debouncer::new(),
+            &test_debouncer(),
             &resolver,
             &transport,
         )
@@ -512,7 +522,7 @@ mod tests {
         ])));
         let fired = notify(
             &env("Stop", "claude"),
-            &Debouncer::new(),
+            &test_debouncer(),
             &resolver,
             &transport,
         )
@@ -528,7 +538,7 @@ mod tests {
         let resolver = StubResolver(ChannelResolution::Unknown);
         let fired = notify(
             &env("Notification:idle_prompt", "claude"),
-            &Debouncer::new(),
+            &test_debouncer(),
             &resolver,
             &transport,
         )
@@ -550,7 +560,7 @@ mod tests {
         ])));
         let fired = notify(
             &env("PostToolUse", "claude"),
-            &Debouncer::new(),
+            &test_debouncer(),
             &resolver,
             &transport,
         )
@@ -565,7 +575,7 @@ mod tests {
         // its (session, raw_event) key: a subsequent Os-routed event for the same
         // key still fires. This proves the Os gate is evaluated before the debounce.
         let transport = StubTransport::default();
-        let debouncer = Debouncer::new(); // 60s window
+        let debouncer = test_debouncer(); // the coded 60s window
         let e = env("Stop", "claude");
 
         let suppressed = notify(
