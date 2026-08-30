@@ -105,6 +105,10 @@ pub fn refresh_snapshot() {
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Install `config` as the snapshot.
+///
+/// Test seam, and the escape hatch for a caller that has already loaded and
+/// does not want a second read.
 pub fn install_snapshot(config: AppConfig) {
     *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(config));
 }
@@ -209,6 +213,10 @@ pub fn parse_bool_token(raw: &str) -> Option<bool> {
 /// while others join `.agents-in-a-box` onto it. A config key would have to
 /// pick one and silently relocate the other's files. The variable keeps working
 /// exactly as it does today; resolving the ambiguity is its own change.
+/// Name of the variable listing what this process's bridge planted.
+///
+/// Entries are `NAME=value`, separated by `\u{1}`. A child reads it to tell an
+/// inherited plant from a real user export.
 pub const INHERITED_MARKER: &str = "AINB_BRIDGED_VARS";
 
 pub fn export_env_bridge(config: &AppConfig) {
@@ -218,14 +226,22 @@ pub fn export_env_bridge(config: &AppConfig) {
     // see it in its own `BRIDGED`, and lets that stale value beat its own
     // config.toml — permanently, since only the parent ever republishes. A
     // session pane could never change a bridged key.
-    let inherited: BTreeSet<String> = std::env::var(INHERITED_MARKER)
-        .unwrap_or_default()
-        .split(',')
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect();
-    for name in &inherited {
-        std::env::remove_var(name);
+    // NAME=value, not just NAME. With names alone this could not tell "still
+    // the parent's plant" from "the user overrode it in this shell", and
+    // removed both — so `AINB_FLEET_TRANSPORT=broker ainb fleet send` in a pane
+    // the TUI spawned had its override silently dropped, breaking the very
+    // `env > config` contract this module exists to guarantee. Only a value
+    // that still matches what the parent planted is cleared.
+    for entry in std::env::var(INHERITED_MARKER).unwrap_or_default().split('\u{1}') {
+        let Some((name, planted_value)) = entry.split_once('=') else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if std::env::var(name).as_deref() == Ok(planted_value) {
+            std::env::remove_var(name);
+        }
     }
     let mut publish = |name: &'static str, value: String| {
         if std::env::var_os(name).is_none() {
@@ -273,11 +289,16 @@ pub fn export_env_bridge(config: &AppConfig) {
 
     // Hand the list to children so they can tell an inherited plant from a
     // real user export.
-    let names: Vec<&str> = planted.iter().copied().collect();
-    if names.is_empty() {
+    // `\u{1}` separates entries and never appears in a value, so a path or a
+    // comma-bearing setting cannot split an entry in half.
+    let entries: Vec<String> = planted
+        .iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| format!("{name}={value}")))
+        .collect();
+    if entries.is_empty() {
         std::env::remove_var(INHERITED_MARKER);
     } else {
-        std::env::set_var(INHERITED_MARKER, names.join(","));
+        std::env::set_var(INHERITED_MARKER, entries.join("\u{1}"));
     }
     *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = Some(planted);
 }
@@ -706,7 +727,7 @@ mod tests {
 
         // What a parent left behind.
         std::env::set_var("AINB_HEADROOM_PORT", "8787");
-        std::env::set_var(INHERITED_MARKER, "AINB_HEADROOM_PORT");
+        std::env::set_var(INHERITED_MARKER, "AINB_HEADROOM_PORT=8787");
 
         let mut config = AppConfig::default();
         config.usage_client.headroom_port = 9000;
@@ -716,6 +737,45 @@ mod tests {
             resolved("AINB_HEADROOM_PORT", config.usage_client.headroom_port),
             9000,
             "the parent's inherited plant beat this process's own config"
+        );
+
+        clear_bridged_for_test();
+        match prior_port {
+            Some(v) => std::env::set_var("AINB_HEADROOM_PORT", v),
+            None => std::env::remove_var("AINB_HEADROOM_PORT"),
+        }
+        match prior_marker {
+            Some(v) => std::env::set_var(INHERITED_MARKER, v),
+            None => std::env::remove_var(INHERITED_MARKER),
+        }
+    }
+
+    /// The case the marker exists to get right: BOTH an inherited plant and a
+    /// real override in the child's own shell.
+    ///
+    /// With names alone the child could not tell them apart and cleared the
+    /// override too, so `AINB_FLEET_TRANSPORT=broker ainb ...` in a pane the
+    /// TUI spawned silently fell back to config.
+    #[test]
+    fn a_child_override_survives_an_inherited_marker() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prior_port = std::env::var_os("AINB_HEADROOM_PORT");
+        let prior_marker = std::env::var_os(INHERITED_MARKER);
+        clear_bridged_for_test();
+
+        // The parent planted 8787 and said so; the user then overrode it here.
+        std::env::set_var(INHERITED_MARKER, "AINB_HEADROOM_PORT=8787");
+        std::env::set_var("AINB_HEADROOM_PORT", "7777");
+
+        let mut config = AppConfig::default();
+        config.usage_client.headroom_port = 9000;
+        export_env_bridge(&config);
+
+        assert_eq!(
+            resolved("AINB_HEADROOM_PORT", config.usage_client.headroom_port),
+            7777,
+            "the child's own override was discarded along with the inherited plant"
         );
 
         clear_bridged_for_test();
