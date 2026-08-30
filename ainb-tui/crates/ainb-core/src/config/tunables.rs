@@ -34,8 +34,9 @@
 //! (plugin subprocesses, the hangar daemon) inherit it for free, which is the
 //! same path their config already travels.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,17 +44,94 @@ use super::AppConfig;
 
 // ── The resolver ────────────────────────────────────────────────────────────
 
-/// The process-wide merged config, loaded once.
+/// The process-wide merged config the promoted read sites consult.
+///
+/// `RwLock`, not `OnceLock`. A value frozen at startup would make every
+/// promoted key settable and inert: the settings screen would report "saved"
+/// for `general.syntax_highlight` and code blocks would stay coloured until the
+/// next launch, which is the opposite of what promoting them was for. Writers
+/// call [`refresh_snapshot`] so a save takes effect on the next read.
+///
+/// `Arc` so a reader holds a cheap owned handle rather than the lock: a render
+/// path that kept the guard alive across a repaint would block the save it is
+/// racing.
+static SNAPSHOT: RwLock<Option<Arc<AppConfig>>> = RwLock::new(None);
+
+/// The current config.
 ///
 /// Read sites like `headroom::proxy_port()` are free functions with no
 /// `&AppConfig` in hand and are called from render paths, so re-reading four
-/// files per call is not an option. A failed load falls back to defaults rather
-/// than panicking: a broken config.toml must not take the port resolver with
-/// it.
+/// files per call is not an option. The first call loads; a failed load falls
+/// back to defaults rather than panicking, because a broken config.toml must
+/// not take the port resolver with it.
 #[must_use]
-pub fn snapshot() -> &'static AppConfig {
-    static SNAPSHOT: OnceLock<AppConfig> = OnceLock::new();
-    SNAPSHOT.get_or_init(|| AppConfig::load().unwrap_or_default())
+pub fn snapshot() -> Arc<AppConfig> {
+    if let Some(config) = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return Arc::clone(config);
+    }
+    let mut slot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
+    // Another thread may have loaded while this one waited for the write lock.
+    Arc::clone(slot.get_or_insert_with(|| Arc::new(AppConfig::load().unwrap_or_default())))
+}
+
+/// Re-read config.toml into the snapshot.
+///
+/// Call after any successful write to the user config, so an edit made from the
+/// settings screen or `ainb config set` is live on the next read instead of on
+/// the next launch. Deliberately re-loads rather than taking the caller's
+/// in-memory struct: `load()` also merges the project and system layers, and
+/// the caller only ever holds the user one.
+pub fn refresh_snapshot() {
+    let loaded = Arc::new(AppConfig::load().unwrap_or_default());
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
+}
+
+/// Install `config` as the snapshot. Test seam, and the escape hatch for a
+/// caller that has already loaded and does not want a second read.
+pub fn install_snapshot(config: AppConfig) {
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(config));
+}
+
+/// Variables [`export_env_bridge`] planted into this process's own environment.
+///
+/// The bridge exists for readers in OTHER crates and in child processes, but it
+/// writes into the environment this process also reads. Without this set, the
+/// bridge would defeat its own ladder: publishing `AINB_HEADROOM_PORT=8787` at
+/// startup makes [`resolved`] find an env value on every later call, so
+/// `usage_client.headroom_port` could never change again and
+/// [`refresh_snapshot`] would have nothing to do. A name in here is treated as
+/// unset BY US and honoured by everyone else.
+///
+/// An operator's own export is never in this set, because the bridge only
+/// plants a variable that was unset.
+static BRIDGED: RwLock<Option<BTreeSet<&'static str>>> = RwLock::new(None);
+
+/// Forget which variables the bridge planted.
+///
+/// Tests only: `export_env_bridge` is once-per-process in production, but a test
+/// that plants `AINB_HEADROOM_PORT` would otherwise leave every later test in
+/// the binary ignoring that variable.
+#[cfg(test)]
+pub(crate) fn clear_bridged_for_test() {
+    *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Whether this process planted `env_var` itself, and so must not read it back.
+fn is_self_planted(env_var: &str) -> bool {
+    BRIDGED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|planted| planted.contains(env_var))
+}
+
+/// The raw env value for `env_var`, or `None` when it is unset or was planted
+/// by this process's own [`export_env_bridge`].
+fn env_override(env_var: &str) -> Option<String> {
+    if is_self_planted(env_var) {
+        return None;
+    }
+    std::env::var(env_var).ok()
 }
 
 /// `env_var`, else `from_config`.
@@ -64,9 +142,9 @@ pub fn snapshot() -> &'static AppConfig {
 /// a typo in a shell profile must not brick the reader that consumes it.
 #[must_use]
 pub fn resolved<T: FromStr>(env_var: &str, from_config: T) -> T {
-    match std::env::var(env_var) {
-        Ok(raw) => raw.trim().parse().unwrap_or(from_config),
-        Err(_) => from_config,
+    match env_override(env_var) {
+        Some(raw) => raw.trim().parse().unwrap_or(from_config),
+        None => from_config,
     }
 }
 
@@ -79,9 +157,9 @@ pub fn resolved<T: FromStr>(env_var: &str, from_config: T) -> T {
 /// `AGENTS_BOX_SYNTAX_HIGHLIGHT` treated everything but `true` as off.
 #[must_use]
 pub fn resolved_bool(env_var: &str, from_config: bool) -> bool {
-    match std::env::var(env_var) {
-        Ok(raw) => parse_bool_token(&raw).unwrap_or(from_config),
-        Err(_) => from_config,
+    match env_override(env_var) {
+        Some(raw) => parse_bool_token(&raw).unwrap_or(from_config),
+        None => from_config,
     }
 }
 
@@ -104,19 +182,27 @@ pub fn parse_bool_token(raw: &str) -> Option<bool> {
 ///
 /// Only sets a variable that is currently unset, which is what keeps `env >
 /// config`: an operator who exported `AINB_FLEET_TRANSPORT=broker` for this
-/// shell still beats the file. `general.home` and `usage_client.cache_db` are
-/// `Option` and are skipped when unset, because exporting a derived default
-/// would freeze a path the readers deliberately compute themselves.
+/// shell still beats the file. `usage_client.cache_db` is `Option` and is
+/// skipped when unset, because exporting a derived default would freeze a path
+/// the reader deliberately computes itself.
+///
+/// `AINB_HOME` is deliberately NOT bridged. Its readers disagree about what it
+/// means: `ainb_skill_core::default_ainb_home` and
+/// `fleet::plumbing::paths::ainb_home` treat it as the state directory ITSELF,
+/// while others join `.agents-in-a-box` onto it. A config key would have to
+/// pick one and silently relocate the other's files. The variable keeps working
+/// exactly as it does today; resolving the ambiguity is its own change.
 pub fn export_env_bridge(config: &AppConfig) {
-    let publish = |name: &str, value: String| {
+    let mut planted = BTreeSet::new();
+    let mut publish = |name: &'static str, value: String| {
         if std::env::var_os(name).is_none() {
             std::env::set_var(name, value);
+            // Remembered so this process does not read its own plant back and
+            // pin the value for the rest of the run. See `BRIDGED`.
+            planted.insert(name);
         }
     };
 
-    if let Some(home) = &config.general.home {
-        publish("AINB_HOME", home.clone());
-    }
     publish(
         "AINB_USE_REAL_HOMES",
         config.general.skill_install_real_homes.to_string(),
@@ -151,6 +237,8 @@ pub fn export_env_bridge(config: &AppConfig) {
     if let Some(db) = &config.usage_client.cache_db {
         publish("AINB_USAGE_CACHE_DB", db.clone());
     }
+
+    *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = Some(planted);
 }
 
 // ── [general] ───────────────────────────────────────────────────────────────
@@ -161,7 +249,6 @@ pub fn export_env_bridge(config: &AppConfig) {
 /// ```toml
 /// [general]
 /// syntax_highlight = true
-/// home = "/Volumes/work/ainb"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GeneralConfig {
@@ -172,7 +259,7 @@ pub struct GeneralConfig {
     pub syntax_highlight: bool,
 
     /// Install skills into each tool's REAL config dir (`~/.claude`,
-    /// `~/.codex`, …) rather than the managed sandbox under `home`.
+    /// `~/.codex`, …) rather than ainb's managed sandbox.
     ///
     /// True is the shipped behaviour: an installed skill has to be where the
     /// tool actually looks or it may as well not exist. False routes every
@@ -180,14 +267,6 @@ pub struct GeneralConfig {
     /// hand-managed `~/.claude` wants.
     #[serde(default = "crate::config::default_true")]
     pub skill_install_real_homes: bool,
-
-    /// Base directory ainb keeps its state under: `<home>/.agents-in-a-box/…`.
-    ///
-    /// `None` means the OS home directory. This does NOT move config.toml,
-    /// which is always read from the OS home. A config file that said where
-    /// to find itself could not be found.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<String>,
 }
 
 impl Default for GeneralConfig {
@@ -195,7 +274,6 @@ impl Default for GeneralConfig {
         Self {
             syntax_highlight: true,
             skill_install_real_homes: true,
-            home: None,
         }
     }
 }
@@ -546,6 +624,10 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Set `name` for the duration of `body`, restoring it afterwards.
+    ///
+    /// Also clears `BRIDGED` on the way out. That set is process-global, so a
+    /// test that runs `export_env_bridge` would otherwise leave every later
+    /// test in the binary silently ignoring the variables it planted.
     fn with_env<T>(name: &str, value: Option<&str>, body: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os(name);
@@ -558,6 +640,7 @@ mod tests {
             Some(v) => std::env::set_var(name, v),
             None => std::env::remove_var(name),
         }
+        clear_bridged_for_test();
         out
     }
 
@@ -568,6 +651,12 @@ mod tests {
     /// The full ladder for a numeric knob, one rung at a time.
     #[test]
     fn headroom_port_ladder_is_env_then_config_then_default() {
+        // `AINB_HEADROOM_PORT` is also mutated by `headroom::tests` and
+        // `interactive::session_manager::tests`, which serialize on
+        // HEADROOM_ENV_LOCK. A second, private mutex guards nothing: both locks
+        // have to be the same one for the variable to be safe.
+        let _headroom =
+            crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // default: nothing set anywhere
         let bare = from_toml("");
         assert_eq!(bare.usage_client.headroom_port, 8787);
@@ -673,6 +762,79 @@ mod tests {
         assert_eq!(parse_bool_token("perhaps"), None);
     }
 
+    /// The bridge must not pin the value it publishes.
+    ///
+    /// It writes into the environment this process also reads, so without the
+    /// self-planted guard `resolved` finds the startup value on every later
+    /// call: `usage_client.headroom_port` could never change again and
+    /// `refresh_snapshot` would have nothing to do. Fails before the guard with
+    /// `assertion `left == right` failed: left: 8787, right: 9001`.
+    #[test]
+    fn the_bridge_does_not_pin_the_value_it_published() {
+        // Deliberately NOT the headroom port: that variable is shared with two
+        // other test modules. `AINB_USAGE_TIMEOUT_SECS` has one reader and no
+        // other test.
+        let startup = AppConfig::default();
+        with_env("AINB_USAGE_TIMEOUT_SECS", None, || {
+            export_env_bridge(&startup);
+            assert_eq!(
+                std::env::var("AINB_USAGE_TIMEOUT_SECS").as_deref(),
+                Ok("120"),
+                "the bridge must publish for readers in other crates"
+            );
+            // A later config says 300. Nothing re-runs the bridge, so the
+            // planted 120 is still in the environment.
+            let edited = from_toml("[usage_client]\nfetch_timeout_secs = 300\n");
+            assert_eq!(
+                resolved(
+                    "AINB_USAGE_TIMEOUT_SECS",
+                    edited.usage_client.fetch_timeout_secs
+                ),
+                300,
+                "a value this process planted itself must not outrank the config"
+            );
+            std::env::remove_var("AINB_USAGE_TIMEOUT_SECS");
+        });
+    }
+
+    /// An operator's OWN export still wins, because the bridge never plants a
+    /// variable that was already set and so never records it.
+    #[test]
+    fn an_operator_export_still_outranks_the_config() {
+        with_env("AINB_USAGE_TIMEOUT_SECS", Some("4242"), || {
+            export_env_bridge(&AppConfig::default());
+            let edited = from_toml("[usage_client]\nfetch_timeout_secs = 300\n");
+            assert_eq!(
+                resolved(
+                    "AINB_USAGE_TIMEOUT_SECS",
+                    edited.usage_client.fetch_timeout_secs
+                ),
+                4242
+            );
+        });
+    }
+
+    /// `snapshot()` must reflect a config that changed after startup.
+    ///
+    /// With the old `OnceLock` this fails with
+    /// `assertion failed: !snapshot().general.syntax_highlight`: the first read
+    /// froze the value, so every promoted key was settable and inert.
+    #[test]
+    fn the_snapshot_picks_up_a_later_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        install_snapshot(AppConfig::default());
+        assert!(snapshot().general.syntax_highlight, "the shipped default");
+
+        install_snapshot(from_toml("[general]\nsyntax_highlight = false\n"));
+        assert!(
+            !snapshot().general.syntax_highlight,
+            "a config installed after the first read must be visible"
+        );
+
+        // And `refresh_snapshot` re-reads from disk rather than keeping it.
+        refresh_snapshot();
+    }
+
     #[test]
     fn the_env_bridge_never_overwrites_an_existing_variable() {
         let mut config = AppConfig::default();
@@ -702,13 +864,24 @@ mod tests {
     #[test]
     fn an_unset_optional_is_not_published() {
         let config = AppConfig::default();
-        assert!(config.general.home.is_none());
-        with_env("AINB_HOME", None, || {
+        assert!(config.usage_client.cache_db.is_none());
+        with_env("AINB_USAGE_CACHE_DB", None, || {
             export_env_bridge(&config);
             assert!(
-                std::env::var_os("AINB_HOME").is_none(),
-                "an absent general.home must not freeze AINB_HOME to a derived default"
+                std::env::var_os("AINB_USAGE_CACHE_DB").is_none(),
+                "an absent usage_client.cache_db must not freeze the derived path"
             );
+        });
+    }
+
+    /// `AINB_HOME` relocates the whole state directory and its readers do not
+    /// agree on what it names, so nothing here may set it. See
+    /// [`export_env_bridge`].
+    #[test]
+    fn the_bridge_never_touches_ainb_home() {
+        with_env("AINB_HOME", None, || {
+            export_env_bridge(&AppConfig::default());
+            assert!(std::env::var_os("AINB_HOME").is_none());
         });
     }
 }

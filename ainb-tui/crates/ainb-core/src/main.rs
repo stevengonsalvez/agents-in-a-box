@@ -110,6 +110,25 @@ fn is_skill_manager_cli_invocation() -> bool {
 }
 
 fn main() -> Result<()> {
+    // BEFORE the `ainb-cli` short-circuit and before any runtime exists.
+    //
+    // Two reasons, both bugs when this lived in `tokio_main`:
+    //
+    // 1. `skill` / `source` / `search` return through `ainb_cli::run()` above
+    //    without ever entering `tokio_main`, and `ainb-cli` does not depend on
+    //    this crate. So `general.skill_install_real_homes` never reached
+    //    `ainb skill install`, the one command it exists to govern.
+    // 2. `export_env_bridge` calls `std::env::set_var`. Inside `#[tokio::main]`
+    //    the worker threads and the tracing subscriber already exist, and a
+    //    `setenv` racing another thread's `getenv` is a data race (which is why
+    //    Rust 2024 made it `unsafe`). Here, `main` is still the only thread.
+    //
+    // `migrate_legacy_paths` moves with it rather than staying behind: it folds
+    // a stray older config.toml into the canonical one, and the bridge has to
+    // read the merged result, not the pre-migration file.
+    config::AppConfig::migrate_legacy_paths();
+    config::tunables::export_env_bridge(&config::tunables::snapshot());
+
     if is_skill_manager_cli_invocation() {
         return ainb_cli::run();
     }
@@ -121,21 +140,6 @@ async fn tokio_main() -> Result<()> {
     crate::perf::init();
     setup_logging();
     setup_panic_handler();
-
-    // Once per process, before anything calls AppConfig::load(). Older builds
-    // let the burndown and session-reader plugins keep a second config.toml one
-    // directory above the real one; this folds any leftover into the canonical
-    // file. Deliberately here rather than inside load(), which also runs in
-    // daemons and inside the TUI event loop.
-    config::AppConfig::migrate_legacy_paths();
-
-    // Publish the config-sourced values that crates outside `ainb` read as env
-    // vars (`AINB_HOME`, the fleet knobs, the headroom port), and that child
-    // processes (plugin subprocesses, the hangar daemon) inherit. Only fills
-    // variables that are unset, so an exported override still wins. Here, on
-    // the single-threaded startup path, because it mutates the process
-    // environment; see `config::tunables::export_env_bridge`.
-    config::tunables::export_env_bridge(config::tunables::snapshot());
 
     // Build the clap surface from the CommandRegistry. The base `ainb` command
     // (--format, after-help, etc.) lives in cli::root_clap_command(); each
