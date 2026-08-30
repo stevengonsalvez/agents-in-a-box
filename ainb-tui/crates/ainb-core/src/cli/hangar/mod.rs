@@ -8708,6 +8708,48 @@ fn open_daemon_stderr_log(log_dir: &std::path::Path) -> Result<std::fs::File> {
         .with_context(|| format!("open daemon stderr log {}", path.display()))
 }
 
+/// True when `path` sits under the system temp dir.
+///
+/// Both sides are canonicalized on the second attempt because macOS `$TMPDIR`
+/// (`/var/folders/...`) is reached through a symlink to `/private/var/...`, so a
+/// caller that resolved its home would otherwise slip past a raw prefix test.
+fn is_under_temp_dir(path: &std::path::Path) -> bool {
+    let temp = std::env::temp_dir();
+    if path.starts_with(&temp) {
+        return true;
+    }
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    real(path).starts_with(real(&temp))
+}
+
+/// Bind a daemon we are about to spawn to our own lifetime when its home is
+/// ephemeral.
+///
+/// A daemon whose hangar home lives under the system temp dir can never be
+/// found again: `single_instance`, `hangar daemon stop` and the pid file are all
+/// home-scoped, and the home dies with whoever created it (any harness running
+/// under `HOME=$(mktemp -d)`). macOS has no `PR_SET_PDEATHSIG` and the child is
+/// detached into its own process group, so it reparents to launchd and runs
+/// forever. Arming the daemon's parent-death watchdog makes it exit with us.
+///
+/// Inert in production: a real home under `$HOME` never sits under `temp_dir()`,
+/// so the Homebrew daemon and a deliberate dev-build daemon are untouched.
+/// Issue #784.
+fn arm_watchdog_for_ephemeral_home(
+    command: &mut std::process::Command,
+    hangar_home: &std::path::Path,
+) {
+    if !is_under_temp_dir(hangar_home) {
+        return;
+    }
+    let pid = std::process::id().to_string();
+    // Both names: the daemon binary we launch may be an installed build that
+    // predates the rename and only knows the legacy one.
+    command
+        .env(ainb_hangar_daemon::PARENT_PID_ENV, &pid)
+        .env(ainb_hangar_daemon::LEGACY_PARENT_PID_ENV, &pid);
+}
+
 /// Spawn the daemon as a detached background child unless it is already running,
 /// recording its EXACT pid. When `announce` is true the outcome is printed
 /// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
@@ -8785,6 +8827,9 @@ pub(crate) fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    if let Ok(home) = ainb_hangar_daemon::hangar_dir() {
+        arm_watchdog_for_ephemeral_home(&mut command, &home);
     }
     let mut child = command.spawn().with_context(|| format!("spawn daemon `{launched}`"))?;
 
@@ -9204,6 +9249,9 @@ fn respawn_once(bin: &std::path::Path, args: &[&str]) -> Result<Option<u32>> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    if let Ok(home) = ainb_hangar_daemon::hangar_dir() {
+        arm_watchdog_for_ephemeral_home(&mut command, &home);
     }
     let child = command.spawn().context("respawn daemon")?;
     std::thread::sleep(std::time::Duration::from_millis(400));
@@ -10707,6 +10755,94 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod ephemeral_home_watchdog_tests {
+    //! Issue #784: a daemon autostarted under `HOME=$(mktemp -d)` outlives
+    //! every guard in the system, because all of them are home-scoped and the
+    //! home is deleted with its creator. The spawner arms the daemon's
+    //! parent-death watchdog for exactly those homes, and for no other.
+    //!
+    //! Nothing here spawns a process: the assertion is on the `Command` the
+    //! spawner would have run.
+
+    use super::arm_watchdog_for_ephemeral_home;
+
+    /// The value the spawned daemon would see for `key`, if any.
+    fn env_of(command: &std::process::Command, key: &str) -> Option<String> {
+        command.get_envs().find_map(|(name, value)| {
+            (name == key).then(|| {
+                value
+                    .expect("watchdog env is set, never removed")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+    }
+
+    fn armed_for(hangar_home: &std::path::Path) -> Option<String> {
+        let mut command = std::process::Command::new("/bin/true");
+        arm_watchdog_for_ephemeral_home(&mut command, hangar_home);
+        env_of(&command, ainb_hangar_daemon::PARENT_PID_ENV)
+    }
+
+    #[test]
+    fn arms_the_watchdog_for_a_home_under_the_temp_dir() {
+        let home = std::env::temp_dir().join(".tmpQ9x7fk").join(".agents-in-a-box");
+        assert_eq!(
+            armed_for(&home).as_deref(),
+            Some(std::process::id().to_string().as_str()),
+            "a daemon under {} must be bound to this process",
+            home.display()
+        );
+    }
+
+    #[test]
+    fn arms_the_legacy_name_too_for_an_older_daemon_binary() {
+        // The installed daemon we launch can predate the rename; it would
+        // ignore the new name and become immortal again.
+        let home = std::env::temp_dir().join(".tmpQ9x7fk").join(".agents-in-a-box");
+        let mut command = std::process::Command::new("/bin/true");
+        arm_watchdog_for_ephemeral_home(&mut command, &home);
+        assert_eq!(
+            env_of(&command, ainb_hangar_daemon::LEGACY_PARENT_PID_ENV),
+            env_of(&command, ainb_hangar_daemon::PARENT_PID_ENV)
+        );
+    }
+
+    #[test]
+    fn leaves_a_real_home_alone() {
+        // The Homebrew daemon and a deliberate dev-build daemon must keep
+        // outliving the `ainb` invocation that started them.
+        let home = std::path::Path::new("/Users/example/.agents-in-a-box");
+        assert_eq!(
+            armed_for(home),
+            None,
+            "a real home must not arm the watchdog"
+        );
+    }
+
+    #[test]
+    fn leaves_the_running_users_real_home_alone() {
+        // Same claim, against the home this machine actually resolves, so the
+        // test fails if `temp_dir()` ever starts prefixing it.
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let home = home.join(".agents-in-a-box");
+        if super::is_under_temp_dir(&home) {
+            // This very suite is running under an ephemeral `$HOME`, which is
+            // the case the other test covers. Nothing to assert here.
+            return;
+        }
+        assert_eq!(
+            armed_for(&home),
+            None,
+            "{} must not arm the watchdog",
+            home.display()
+        );
+    }
 }
 
 #[cfg(test)]
