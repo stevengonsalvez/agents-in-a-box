@@ -191,6 +191,23 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
 
+    // Keep the pane readable after the CLI exits. Without this tmux destroys
+    // the session the instant the process dies, and a CLI that fails in one
+    // second takes its own error message with it -- the launch then surfaces
+    // only as whatever timeout the caller happens to hit. `start_cli_in_tmux`
+    // already does this for every session the TUI starts; `ainb run` did not.
+    let _ = tokio::process::Command::new("tmux")
+        .args([
+            "set-option",
+            "-w", // remain-on-exit is a window option
+            "-t",
+            &format!("={tmux_name}"),
+            "remain-on-exit",
+            "on",
+        ])
+        .output()
+        .await;
+
     let codex_remote = match codex_remote {
         Some(remote) if remote.thread_id.is_none() => match claim_codex_remote_thread(
             session_id,
