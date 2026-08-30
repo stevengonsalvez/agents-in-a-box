@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -54,6 +55,7 @@ jobs:
 
   deploy:
     needs: build
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     environment:
       name: github-pages

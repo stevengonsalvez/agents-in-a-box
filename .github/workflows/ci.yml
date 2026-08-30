@@ -16,6 +16,14 @@ on:
   # is how an operator asks for it without labelling a PR.
   workflow_dispatch:
 
+# Superseded pushes used to run to completion: four pushes to one branch in
+# half an hour queued four full runs, and the last one spent 190 minutes
+# waiting for a runner rather than working. Group per ref and cancel only on
+# pull_request — a push to main must still get its own complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   WORKING_DIR: ainb-tui
@@ -37,6 +45,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   changes:
     name: Detect relevant changes
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
@@ -79,6 +88,7 @@ jobs:
     if: >-
       always() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +121,7 @@ jobs:
     if: >-
       always() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,6 +171,10 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: changes
+    # 40 against a 28.7min p95. A macOS leg once sat here for 97 minutes with
+    # the nextest step never recording a completion, and with no budget set
+    # nothing would have killed it before GitHub's 360min default.
+    timeout-minutes: 40
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -311,6 +326,7 @@ jobs:
     if: >-
       always() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -352,6 +368,7 @@ jobs:
   ainb-hooks:
     name: ainb-hooks (${{ matrix.os }})
     needs: changes
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -447,6 +464,7 @@ jobs:
   fleet-send-tmux:
     name: fleet send integrity (${{ matrix.os }})
     needs: changes
+    timeout-minutes: 15
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -506,6 +524,7 @@ jobs:
   hangar-e2e:
     name: hangar-e2e (${{ matrix.os }})
     needs: changes
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -649,6 +668,7 @@ jobs:
     if: >-
       always() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.acp != 'false')
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -669,6 +689,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   recordings:
     name: Recording artifacts are not empty
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -708,6 +729,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       vars.AINB_CHAT_BUS_SMOKE == '1' ||
       contains(github.event.pull_request.labels.*.name, 'chat-bus-smoke')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -736,6 +758,7 @@ jobs:
     if: >-
       always() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

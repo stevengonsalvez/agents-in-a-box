@@ -3176,15 +3176,14 @@ mod tests {
 
     #[test]
     fn built_ins_registers_all_commands() {
-        let r = CommandRegistry::built_ins();
-        let names = r.names();
-        // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
-        // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
-        // notifyd + hangar) + headroom + rtk + the web dashboard + the daemon
-        // lifecycle surface + signed self-updates = 36. The TUI is NOT in the registry, main.rs
-        // handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 36, "expected 36 entries, got {names:?}");
-        for required in [
+        // The registry's exact surface. Adding or removing a command MUST update
+        // this list, and the list is the ONLY place that needs it, because the
+        // count comes from `expected.len()`. A separate hardcoded total is how
+        // this test kept reddening CI on both runners every time a command
+        // landed, for no signal the set comparison does not already give.
+        // The TUI is NOT in the registry; main.rs handles `tui` /
+        // no-subcommand inline.
+        let mut expected = vec![
             "daemon",
             "run",
             "list",
@@ -3221,12 +3220,13 @@ mod tests {
             "headroom",
             "rtk",
             "update",
-        ] {
-            assert!(
-                names.contains(&required),
-                "missing required command: {required}"
-            );
-        }
+        ];
+        expected.sort_unstable();
+
+        let mut names = CommandRegistry::built_ins().names();
+        names.sort_unstable();
+
+        assert_eq!(names, expected);
     }
 
     #[test]
