@@ -83,7 +83,31 @@ pub fn snapshot() -> Arc<AppConfig> {
 /// the caller only ever holds the user one.
 pub fn refresh_snapshot() {
     let loaded = Arc::new(AppConfig::load().unwrap_or_default());
-    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&loaded));
+    // Re-publish, or the values children inherit stay frozen at startup. A
+    // child does not see them as self-planted, so the stale value OUTRANKS the
+    // child's own config: saving `fleet.idle_min` in the TUI would leave every
+    // plugin and subprocess on the old number until the TUI itself restarted.
+    republish_env_bridge(&loaded);
+}
+
+/// Re-plant the bridged variables after a config change.
+///
+/// Only the ones this process planted itself are overwritten — a variable the
+/// user exported still outranks config, which is the whole precedence
+/// contract.
+fn republish_env_bridge(config: &AppConfig) {
+    let planted: Vec<&'static str> = BRIDGED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|set| set.iter().copied().collect())
+        .unwrap_or_default();
+    for name in planted {
+        std::env::remove_var(name);
+    }
+    *BRIDGED.write().unwrap_or_else(|e| e.into_inner()) = None;
+    export_env_bridge(config);
 }
 
 /// Install `config` as the snapshot. Test seam, and the escape hatch for a

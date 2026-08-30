@@ -218,11 +218,24 @@ impl CurrentStateIndex {
 /// rung would be dead code. See `tunables::BRIDGED`.
 fn effective_stale_window_ms() -> i64 {
     let config = crate::config::tunables::snapshot();
-    let legacy = crate::config::tunables::resolved(
-        "AINB_FLEET_STATE_STALE_MS",
+    // Order matters. The legacy variable is only a fallback for someone who
+    // has NOT set the new key: consulting it first made
+    // `fleet.healthy_state_stale_ms` unreachable for anyone with the old
+    // variable exported, so the settings row reported saved and the window
+    // never moved. One env var driving both clocks is the coupling the split
+    // exists to break.
+    let from_new = crate::config::tunables::resolved(
+        "AINB_FLEET_HEALTHY_STATE_STALE_MS",
         config.fleet.healthy_state_stale_ms,
     );
-    crate::config::tunables::resolved("AINB_FLEET_HEALTHY_STATE_STALE_MS", legacy).max(0)
+    let explicit_new = crate::config::tunables::env_override("AINB_FLEET_HEALTHY_STATE_STALE_MS")
+        .is_some()
+        || config.fleet.healthy_state_stale_ms
+            != crate::config::default_fleet_healthy_state_stale_ms();
+    if explicit_new {
+        return from_new.max(0);
+    }
+    crate::config::tunables::resolved("AINB_FLEET_STATE_STALE_MS", from_new).max(0)
 }
 
 /// Outcome of resolving one session against `current_state`.

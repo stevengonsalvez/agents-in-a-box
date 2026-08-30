@@ -577,7 +577,7 @@ fn default_fleet_transport() -> String {
     "tmux".to_string()
 }
 
-fn default_fleet_healthy_state_stale_ms() -> i64 {
+pub(crate) fn default_fleet_healthy_state_stale_ms() -> i64 {
     5 * 60_000
 }
 
