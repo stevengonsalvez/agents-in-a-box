@@ -247,8 +247,13 @@ fn daemon_start_under_a_temp_home_outlives_the_cli_invocation() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let pid = read_pid(home).expect("daemon start wrote a pid file");
-    let _cleanup = ExactPidCleanup(pid);
+    // Cleanup BEFORE the unwrap: this daemon is deliberately spawned with no
+    // parent binding, and `reap_orphaned_test_daemons` cannot find it (it runs
+    // the sibling daemon binary, not `<ainb> hangar daemon run`), so a panic
+    // between here and the stop below would leak it permanently.
+    let pid = read_pid(home);
+    let _cleanup = pid.map(ExactPidCleanup);
+    let pid = pid.expect("daemon start wrote a pid file");
     assert!(
         wait_until(Duration::from_secs(10), || home
             .join("hangar.sock")

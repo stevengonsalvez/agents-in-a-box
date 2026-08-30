@@ -8645,9 +8645,8 @@ fn run_daemon_start() -> Result<()> {
 /// and swallowed so the TUI still launches (it shows the offline panel until the
 /// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
 /// `mcp_pool`'s `ensure_daemon` warn-and-continue.
-pub fn ensure_hangar_daemon() {
-    // Persistent: the TUI is the daemon's consumer and outlives it.
-    if let Err(e) = start_or_upgrade_daemon(false, LauncherLifetime::Persistent) {
+pub fn ensure_hangar_daemon(launcher: LauncherLifetime) {
+    if let Err(e) = start_or_upgrade_daemon(false, launcher) {
         tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
     }
 }
@@ -8729,6 +8728,9 @@ fn is_under_temp_dir(path: &std::path::Path) -> bool {
         std::path::PathBuf::from("/var/tmp"),
     ]
     .iter()
+    // A `TMPDIR=/` makes every path on the machine read as ephemeral, the real
+    // home included. Nothing is learned from a root that contains everything.
+    .filter(|root| root.parent().is_some())
     .any(|root| path.starts_with(root) || resolved.starts_with(real(root)))
 }
 
@@ -8764,6 +8766,12 @@ pub(crate) enum LauncherLifetime {
 /// Inert for a home under a real `$HOME`, so the Homebrew daemon is untouched.
 /// A deliberate dev-build daemon on a temp `AINB_HANGAR_HOME` IS in scope, but
 /// only when started by a persistent launcher. Issue #784.
+///
+/// Known gap: a restart carries no binding forward. `ainb doctor` or
+/// `hangar daemon restart` replacing a daemon that the TUI had bound leaves an
+/// unbound one behind, which is the pre-#784 behaviour rather than a new leak.
+/// Reading the incumbent's environment to inherit its parent is the fix, and it
+/// is deliberately not attempted here.
 fn should_bind_daemon_to_parent(
     hangar_home: &std::path::Path,
     launcher: LauncherLifetime,

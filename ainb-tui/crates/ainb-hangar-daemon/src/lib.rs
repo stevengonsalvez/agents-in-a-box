@@ -667,9 +667,14 @@ pub const LEGACY_PARENT_PID_ENV: &str = "HANGAR_TEST_PARENT_PID";
 /// launchd, so normal Rust drop cleanup cannot run. Signal this process through
 /// its existing Ctrl-C shutdown path instead.
 fn spawn_parent_watchdog() {
+    // `filter` before the fallback: a set-but-EMPTY new name would otherwise
+    // read as a declaration, hide the legacy name, and arm nothing. The spawner
+    // treats empty as undeclared too.
     let Some(parent_pid) = std::env::var(PARENT_PID_ENV)
-        .or_else(|_| std::env::var(LEGACY_PARENT_PID_ENV))
         .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var(LEGACY_PARENT_PID_ENV).ok())
+        .filter(|value| !value.is_empty())
         .and_then(|value| value.parse::<i32>().ok())
         .filter(|pid| *pid > 1)
     else {
