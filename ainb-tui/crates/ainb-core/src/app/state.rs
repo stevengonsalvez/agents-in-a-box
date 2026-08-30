@@ -10629,8 +10629,10 @@ impl AppState {
         {
             Ok(mut child) => match wait_or_reap(&mut child, std::time::Duration::from_secs(3)) {
                 Some(succeeded) => succeeded,
+                // Timed out, or could not be polled: either way the child has
+                // been killed and reaped, and Docker has not answered.
                 None => {
-                    warn!("docker info timed out after 3s - Docker not available");
+                    warn!("docker info did not answer within 3s - Docker not available");
                     false
                 }
             },
@@ -11853,25 +11855,39 @@ impl AppState {
 /// exit: 117 such `com.docker.cli` processes, aged up to four days, were reaped
 /// from one machine. Issue #785.
 fn wait_or_reap(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<bool> {
+    /// Kill the child and reap it. A signalled child that is never waited on
+    /// stays a zombie; one that outlives the signal reparents to launchd when
+    /// we exit.
+    fn kill_and_reap(child: &mut std::process::Child) {
+        if let Err(e) = child.kill() {
+            warn!("could not kill probe (pid {}): {}", child.id(), e);
+        }
+        // SIGKILL cannot be ignored, so this returns as soon as the kernel has
+        // torn the child down.
+        if let Err(e) = child.wait() {
+            warn!("could not reap probe: {}", e);
+        }
+    }
+
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status.success()),
             Ok(None) => {
                 if start.elapsed() > timeout {
-                    if let Err(e) = child.kill() {
-                        warn!("could not kill timed-out probe (pid {}): {}", child.id(), e);
-                    }
-                    // SIGKILL cannot be ignored, so this returns as soon as the
-                    // kernel has torn the child down.
-                    if let Err(e) = child.wait() {
-                        warn!("could not reap timed-out probe: {}", e);
-                    }
+                    kill_and_reap(child);
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(_) => return Some(false),
+            // A failed `try_wait` says nothing about the child, so it is still
+            // running and still ours to clean up. Returning here without the
+            // kill leaves exactly the orphan this function exists to prevent.
+            Err(e) => {
+                warn!("could not poll probe (pid {}): {}", child.id(), e);
+                kill_and_reap(child);
+                return None;
+            }
         }
     }
 }
