@@ -357,7 +357,7 @@ pub fn default_db_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("AINB_USAGE_CACHE_DB") {
         return Some(PathBuf::from(p));
     }
-    if let Some(p) = &crate::config::tunables::snapshot().usage_client.cache_db {
+    if let Some(p) = crate::config::tunables::snapshot().usage_client.cache_db.as_deref() {
         return Some(PathBuf::from(p));
     }
     dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("cache").join("usage.db"))

@@ -1715,12 +1715,14 @@ Serve an SSE-live web dashboard (live terminal + web-push) for the fleet
 Usage: ainb web [OPTIONS]
 
 Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-      --listen <ADDR>    Address to bind (default loopback; non-loopback needs --token) [default: 127.0.0.1:8420]
-      --token <SECRET>   Bearer token required on every /api/* route (enables non-loopback bind)
-      --insecure-bind    Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
-      --read-only        Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
-  -h, --help             Print help
+      --format <format>   Output format [default: text] [possible values: text, json, csv, markdown]
+      --listen <ADDR>     Address to bind (default: web.listen, or 127.0.0.1:8420; non-loopback needs --token)
+      --token <SECRET>    Bearer token required on every /api/* route (enables non-loopback bind)
+      --insecure-bind     Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
+      --read-only         Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
+      --no-read-only      Serve the write surface for this run, overriding web.read_only
+      --no-insecure-bind  Refuse an unauthenticated non-loopback bind for this run, overriding web.insecure_bind
+  -h, --help              Print help
 
 EXAMPLES:
   ainb web                                       Serve on 127.0.0.1:8420 (loopback)

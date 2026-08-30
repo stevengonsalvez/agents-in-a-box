@@ -283,7 +283,8 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     // the exact JSON Claude receives to resume its AskUserQuestion tool call.
     let paths = Paths::under(&hangar_home);
     let broker_runtime = tokio::runtime::Runtime::new().expect("broker runtime");
-    let broker_state = BrokerState::new();
+    let broker_state =
+        BrokerState::with_timeout(ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT);
     {
         let sock = paths.approve_socket.clone();
         let state = broker_state.clone();

@@ -22,12 +22,12 @@ version = "0.1.0"
 # ## rather than ainb's managed sandbox. True is the shipped behaviour: an
 # ## installed skill has to be where the tool actually looks.
 # skill_install_real_homes = true
-#
-# ## Base directory for ainb state: <home>/.agents-in-a-box/...
-# ## Unset means your OS home directory. This does NOT move config.toml, which
-# ## is always read from the OS home.
-# home = "/Volumes/work"
 # -->8--
+#
+# The AINB_HOME env var still relocates ainb's state directory and is unchanged.
+# It has deliberately NOT been promoted to a config key: its readers disagree
+# about whether it names the state directory itself or its parent, so a key here
+# would have to pick one and silently scatter the other's files.
 
 # =============================================================================
 # Authentication
