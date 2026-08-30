@@ -200,3 +200,14 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = "z"
+
+# Fast-spawn release profile for the CI live-binary tripwires (Layer 4).
+# Those tests only need a binary that starts quickly, not one optimized for
+# size. The full release profile above was costing ~15 CI minutes of LTO
+# per PR to buy nothing the tripwires measure. This profile drops LTO and
+# runs codegen in parallel, trading binary size for build speed.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1
