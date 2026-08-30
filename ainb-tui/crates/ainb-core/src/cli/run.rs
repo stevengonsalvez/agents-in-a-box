@@ -215,6 +215,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             model.as_deref(),
             args.dangerously_skip_permissions,
             false,
+            &tmux_name,
         )
         .await
         {
