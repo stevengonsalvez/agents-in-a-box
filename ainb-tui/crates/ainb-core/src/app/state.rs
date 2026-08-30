@@ -2794,15 +2794,44 @@ async fn read_daemon_config() -> anyhow::Result<Option<Vec<(String, String)>>> {
 /// Validation goes through the descriptor, not the core registry: the daemon's
 /// own registry is the authority on what its table accepts, and it is the gate
 /// the RPC handler and the CLI both use.
-async fn write_daemon_config(key: &str, raw: &str) -> anyhow::Result<()> {
+async fn write_daemon_config_batch(edits: &[(String, String)]) -> Vec<(String, anyhow::Error)> {
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let descriptor = ainb_hangar_core::daemon_config::descriptor(key)
-        .ok_or_else(|| anyhow::anyhow!("not a daemon config key"))?;
-    let normalized = descriptor.validate(raw).map_err(|why| anyhow::anyhow!(why))?;
-    let store = ainb_hangar_store::Store::open_default().await?;
-    DaemonConfigRepo::set(store.pool(), key, &normalized).await?;
-    Ok(())
+    let mut failures = Vec::new();
+    // Validate before opening anything: a batch of only-invalid values should
+    // not open the store at all.
+    let mut valid = Vec::with_capacity(edits.len());
+    for (key, raw) in edits {
+        match ainb_hangar_core::daemon_config::descriptor(key) {
+            Some(descriptor) => match descriptor.validate(raw) {
+                Ok(normalized) => valid.push((key.clone(), normalized)),
+                Err(why) => failures.push((key.clone(), anyhow::anyhow!(why))),
+            },
+            None => failures.push((key.clone(), anyhow::anyhow!("not a daemon config key"))),
+        }
+    }
+    if valid.is_empty() {
+        return failures;
+    }
+
+    // ONE open for the whole batch. `open_default` runs a whole-database
+    // VACUUM INTO backup plus migrations, and this runs on the UI task — doing
+    // it per key meant saving three rows paid that cost three times.
+    let store = match ainb_hangar_store::Store::open_default().await {
+        Ok(store) => store,
+        Err(error) => {
+            let message = error.to_string();
+            failures
+                .extend(valid.into_iter().map(|(key, _)| (key, anyhow::anyhow!(message.clone()))));
+            return failures;
+        }
+    };
+    for (key, normalized) in valid {
+        if let Err(error) = DaemonConfigRepo::set(store.pool(), &key, &normalized).await {
+            failures.push((key, error.into()));
+        }
+    }
+    failures
 }
 
 fn seed_hangar_daemon_defaults(seed: &mut toml::Value) {
@@ -10338,14 +10367,19 @@ impl AppState {
     /// raises its own error notification naming the row: a write the user asked
     /// for that quietly did not happen is worse than one that visibly failed.
     async fn set_hangar_daemon_config(&mut self, edits: Vec<(String, String)>) {
-        for (key, raw) in edits {
-            match write_daemon_config(&key, &raw).await {
-                Ok(()) => {}
-                Err(error) => {
-                    warn!(key, %error, "hangar daemon config write failed");
-                    self.add_error_notification(format!("hangar_daemon.{key}: {error}"));
-                }
-            }
+        let failures = write_daemon_config_batch(&edits).await;
+        for (key, error) in &failures {
+            warn!(key, %error, "hangar daemon config write failed");
+            self.add_error_notification(format!("hangar_daemon.{key}: {error}"));
+        }
+        // Put a failed row back to the value the database actually holds, and
+        // mark it dirty again so a later `S` retries it. `read_daemon_config`
+        // only returns rows that EXIST, so a first-time write that failed left
+        // the rejected value on screen with `dirty` already cleared: the row
+        // claimed the setting had landed and no later save would ever write it.
+        for (key, _) in &failures {
+            let row_key = format!("hangar_daemon.{key}");
+            self.config_screen_state.dirty.insert(row_key);
         }
         // Re-read rather than trust the write: the row now shows what the
         // database holds, including for any write that just failed.

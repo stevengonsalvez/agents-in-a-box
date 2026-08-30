@@ -313,7 +313,11 @@ impl PoolConfig {
                 .adapters
                 .entry(name.clone())
                 .or_insert_with(|| AdapterConfig::new(name, DEFAULT_PERMISSION_MODE));
-            if let Some(command) = adapter.command {
+            // `filter(|c| !c.trim().is_empty())`: the registry seeds this row with
+            // `""` and its help says blank resolves the adapter's name on PATH. A
+            // hand-edited empty string would otherwise become an empty program path
+            // that cannot spawn.
+            if let Some(command) = adapter.command.filter(|c| !c.trim().is_empty()) {
                 entry.command = std::path::PathBuf::from(command);
             }
             if let Some(mode) = adapter.permission_mode {

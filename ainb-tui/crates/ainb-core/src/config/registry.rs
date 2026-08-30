@@ -1169,7 +1169,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "web.insecure_bind",
         category: C::Web,
         label: "Allow Insecure Bind",
-        help: "Permit a non-loopback bind with no token; honoured only with read-only",
+        help: "DANGEROUS: serves an unauthenticated control surface to the network. Only with read-only; prefer a token",
         kind: RowKind::Bool,
     }),
     // ── ACP adapters ───────────────────────────────────────────────────────
