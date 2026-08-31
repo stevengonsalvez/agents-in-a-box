@@ -767,7 +767,32 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
 /// provisioned instance with `heartbeat_enabled` whose last heartbeat is within
 /// the cadence window. Reads, never re-emits.
 #[must_use]
+/// Whether a tmux session with this exact name exists.
+///
+/// Sync on purpose: the probe is sync and runs on the render path, so this
+/// stays a single `tmux has-session` (~2ms) rather than dragging an async
+/// runtime into the daemons screen.
+pub(crate) fn tmux_session_alive(session: &str) -> bool {
+    std::process::Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
+    probe_atc_with(home, now_ms, &tmux_session_alive)
+}
+
+/// [`probe_atc`] with the session check injected.
+///
+/// Split out so the liveness branch is testable: a temp-home fixture has no
+/// tmux session, so a hard-wired `tmux has-session` would report every test
+/// instance as degraded and the healthy path could never be asserted.
+pub(crate) fn probe_atc_with(
+    home: &Path,
+    now_ms: i64,
+    session_alive: &dyn Fn(&str) -> bool,
+) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
     use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
@@ -865,6 +890,27 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
                     age / 60_000
                 ),
             )
+        };
+    }
+
+    // ATC has TWO halves and the heartbeat file only evidences one of them.
+    // The OS timer writes that file whether or not the Claude session it beats
+    // into still exists, so a dead `tmux_<name>` reports Running forever: the
+    // timer fires, finds nothing, exits 0, and task-log.md silently stops
+    // growing. Probing the session is the only way to tell the halves apart —
+    // the same split the bridge already models with inbound vs outbound.
+    let session = crate::tmux::sanitize_session_name(&name);
+    if !session_alive(&session) {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            connected: false,
+            channel: Some(format!("{name} (every {interval_min}m)")),
+            last_activity_at: hbs.last_active_ms,
+            reason: format!(
+                "heartbeat firing every {interval_min}m but session {session} is GONE — beats are landing nowhere; `ainb fleet atc setup {name}` respawns it"
+            ),
+            ..DaemonStatus::running(kind)
         };
     }
 
@@ -2084,7 +2130,7 @@ mod tests {
     #[test]
     fn probe_atc_no_instance_is_stopped() {
         let home = TempDir::new().unwrap();
-        let s = probe_atc(home.path(), 0);
+        let s = probe_atc_with(home.path(), 0, &|_| true);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
     }
@@ -2109,10 +2155,62 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| true);
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
+    }
+
+    /// The regression this split exists for: the OS timer writes the heartbeat
+    /// file whether or not the session it beats into is alive, so a fresh beat
+    /// is NOT evidence ATC is working. Observed in the wild as a green row over
+    /// a session that had been gone three days.
+    #[test]
+    fn probe_atc_fresh_heartbeat_with_dead_session_is_degraded() {
+        let home = TempDir::new().unwrap();
+        let atc_dir = home.path().join("atc").join("primary");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(
+            atc_dir.join("meta.json"),
+            r#"{"name":"primary","heartbeat_enabled":true,"heartbeat_interval_min":10,"idle_pause_min":60}"#,
+        )
+        .unwrap();
+        let now = super::super::heartbeat::now_ms();
+        std::fs::write(
+            atc_dir.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 2000
+            ),
+        )
+        .unwrap();
+        let s = probe_atc_with(home.path(), now, &|_| false);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "dead session must not read as Running"
+        );
+        assert!(!s.connected);
+        assert!(
+            s.reason.contains("tmux_primary") && s.reason.contains("GONE"),
+            "reason must name the missing session: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("atc setup primary"),
+            "reason must name the fix: {}",
+            s.reason
+        );
+    }
+
+    /// A session check is only meaningful if it can actually fail; a name this
+    /// long cannot exist as a tmux session on any host running the suite.
+    #[test]
+    fn tmux_session_alive_is_false_for_an_impossible_name() {
+        assert!(!super::tmux_session_alive(
+            "ainb-probe-selftest-session-that-cannot-exist-0000"
+        ));
     }
 
     #[test]
@@ -2138,7 +2236,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| true);
         assert_eq!(
             s.state,
             DaemonState::Stopped,
@@ -2178,7 +2276,7 @@ mod tests {
             )
             .unwrap();
         }
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| true);
         assert_eq!(s.state, DaemonState::Running);
         assert!(
             s.channel.as_deref().unwrap().contains("on"),
@@ -2207,7 +2305,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| true);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale"));
     }
