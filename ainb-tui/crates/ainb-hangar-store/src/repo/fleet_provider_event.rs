@@ -27,15 +27,9 @@
 //! envelope older than 7 days; that is the trade the measurement forces, and
 //! 7 days is where it was struck (~450 MB of the measured corpus retained).
 //!
-//! Two accepted consequences, both of them visible rather than silent:
+//! One accepted consequence, visible rather than silent:
 //!
-//! 1. After eviction `raw_blake3` no longer digests `raw_payload`, so
-//!    re-appending the SAME `event_id` with its original payload would be
-//!    rejected as [`FleetProviderEventError::EventIdCollision`] instead of
-//!    absorbed as a replay. Ingest replays happen live, never across a 7-day
-//!    gap, and the digest is deliberately kept as the record of what the
-//!    payload WAS.
-//! 2. [`Self::list_by_session_after`] pages by `session_key` alone, so a
+//! 1. [`Self::list_by_session_after`] pages by `session_key` alone, so a
 //!    transcript read of a non-ACP session older than the TTL returns rows
 //!    whose payload is `""`. That is the retention policy being visible, not a
 //!    fault: the row, its order and its type still render, and
@@ -64,6 +58,23 @@
 //! real profile without the export-then-delete command having been run, or ACP
 //! write volume visibly contending the single `SQLite` writer (watch the
 //! commits-issued counter).
+//!
+//! Revisit trigger for the PROJECTION-source regime, which the 7-day sweep now
+//! bounds: live `raw_payload` for `source <> 'acp'` exceeding ~500 MB on a real
+//! profile, or the measured accrual rate exceeding ~150 MB/day (it was ~64
+//! MB/day when the sweep was written, and the 7-day window holds roughly seven
+//! times the daily rate).
+//!
+//! This trigger exists because its absence is what let the previous model rot.
+//! From 0071 to 0093 this header asserted ~1.3 MB per YEAR from a ~344 byte
+//! mean, with nothing to check it against; the real figures were 372k rows /
+//! 2207 MB at a ~5.9 KB mean, and the gap only surfaced when the writer
+//! saturated and session spawn began failing. An age cutoff alone fixes the
+//! WINDOW and lets the arrival rate pick the size, so a rate that doubles
+//! doubles the residue with no other signal — the same argument
+//! [`crate::repo::fleet_retention`] makes for keeping a byte ceiling as a
+//! co-equal control on `fleet_event`. No ceiling is implemented here yet; this
+//! trigger is the manual stand-in for one, and reaching it means writing it.
 //!
 //! The pending-recovery partial index keeps its predicate
 //! (`WHERE projection_revision IS NULL`) across 0079; ACP rows are pushed out
@@ -123,9 +134,17 @@ pub struct FleetProviderEventRow {
     pub received_at: i64,
     /// Provider event discriminator.
     pub event_type: String,
-    /// Exact source payload.
+    /// Exact source payload, or `""` once retention has evicted it.
+    ///
+    /// Read it as "the body, if we still hold it". A projected row older than
+    /// the retention TTL keeps its identity and loses its bytes; see the module
+    /// header. Use [`Self::raw_blake3`] when you need to compare or verify a
+    /// payload, since that survives eviction.
     pub raw_payload: String,
-    /// Content digest of raw payload.
+    /// Content digest of the payload as originally received.
+    ///
+    /// Always the digest of the ORIGINAL body, never of an evicted `""`, so it
+    /// stays a usable identity for a row whose bytes are gone.
     pub raw_blake3: String,
     /// Fleet projection revision once reduced.
     pub projection_revision: Option<i64>,
@@ -493,14 +512,10 @@ impl FleetProviderEventRepo {
         before_ms: i64,
         limit: i64,
     ) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE fleet_provider_event SET raw_payload = '' \
-             WHERE ingest_order IN (\
-                SELECT ingest_order FROM fleet_provider_event \
-                WHERE raw_payload <> '' AND projection_revision IS NOT NULL \
-                  AND source <> 'acp' AND observed_at < ? \
-                ORDER BY observed_at ASC LIMIT ?)",
-        )
+             WHERE ingest_order IN ({EVICTION_SELECT})"
+        ))
         .bind(before_ms)
         .bind(limit.max(0))
         .execute(pool)
@@ -515,6 +530,23 @@ fn digest(payload: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// The rows one eviction batch claims, as ONE definition.
+///
+/// Shared by `evict_projected_payloads_before` and by the plan test rather than
+/// written out twice: a test that re-types the statement it is meant to guard
+/// cannot see the statement drift away from it. Binds `observed_at` cutoff then
+/// row limit.
+///
+/// Every term of the WHERE is a literal, not a bound parameter, so SQLite can
+/// prove it implies `idx_fleet_provider_event_retention`'s predicate and use the
+/// partial index. Binding `source = ?` instead would silently lose the index.
+/// `ORDER BY observed_at` must stay paired with that index's key; ordering by
+/// `ingest_order` degrades the plan to a full scan with no other symptom.
+const EVICTION_SELECT: &str = "SELECT ingest_order FROM fleet_provider_event \
+     WHERE raw_payload <> '' AND projection_revision IS NOT NULL \
+       AND source <> 'acp' AND observed_at < ? \
+     ORDER BY observed_at ASC LIMIT ?";
+
 fn matches_event(
     row: &FleetProviderEventRow,
     event: &NewFleetProviderEvent,
@@ -526,7 +558,23 @@ fn matches_event(
         && row.provider_session_id == event.provider_session_id
         && row.observed_at == event.observed_at
         && row.event_type == event.event_type
-        && row.raw_payload == event.raw_payload
+        // An EVICTED row has no payload to compare, so comparing one would call
+        // every replay of it a collision. `raw_blake3` survives eviction and is
+        // the stronger check anyway -- it is the digest OF that payload, so
+        // equal digests mean equal bodies without needing the body. Skipping
+        // the byte comparison for an empty stored payload therefore loses no
+        // identity, and keeping it would break the caller below.
+        //
+        // Not cosmetic: `attention_ingest` replays `events.jsonl` from the
+        // cursor, and its cursor resets to 0 whenever the file is missing,
+        // corrupt or truncated (`read_cursor`; `write_cursor` is best-effort).
+        // A replayed line older than the retention TTL would rebuild the
+        // original payload, mismatch the blanked row, and come back as
+        // `EventIdCollision` -- which `process_line` maps to `LineOutcome::Retry`
+        // and `ingest_once` turns into a `break` that never advances
+        // `committed_end`. The pipeline would then stall on that one line
+        // forever, every pass, behind a single `warn!`.
+        && (row.raw_payload.is_empty() || row.raw_payload == event.raw_payload)
         && row.raw_blake3 == raw_blake3
 }
 
@@ -724,7 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_row_carries_a_valid_raw_blake3_digest() {
+    async fn an_appended_row_carries_a_valid_raw_blake3_digest() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
         let row = FleetProviderEventRepo::append(store.pool(), &acp_event("acp-1", "acp:s-1"))
@@ -732,6 +780,93 @@ mod tests {
             .unwrap();
         assert_eq!(row.raw_blake3.len(), 64);
         assert_eq!(row.raw_blake3, digest(&row.raw_payload));
+    }
+
+    /// Replaying an EVICTED event is a no-op, not a collision.
+    ///
+    /// The regression this guards is a permanent pipeline stall, not a lost
+    /// row. `attention_ingest` replays `events.jsonl` from a cursor that resets
+    /// to 0 whenever the file is missing, corrupt or truncated. A replayed line
+    /// older than the retention TTL rebuilds the original payload; if that were
+    /// compared against the blanked row it would raise `EventIdCollision`,
+    /// which `process_line` maps to `LineOutcome::Retry` and `ingest_once`
+    /// turns into a `break` that never advances the cursor. Hook ingest would
+    /// then stall on that one line forever, behind a single `warn!`.
+    #[tokio::test]
+    async fn replaying_an_evicted_event_is_absorbed_not_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let original = seed_projected(&store, "proj-replay", 100).await;
+
+        FleetProviderEventRepo::evict_projected_payloads_before(store.pool(), 1_000, 100)
+            .await
+            .unwrap();
+
+        // Exactly what the hook replay reconstructs: same id, same body.
+        let replay = NewFleetProviderEvent {
+            event_id: original.event_id.clone(),
+            provider: original.provider.clone(),
+            source: original.source.clone(),
+            session_key: original.session_key.clone(),
+            provider_session_id: original.provider_session_id.clone(),
+            observed_at: original.observed_at,
+            received_at: original.received_at + 5_000,
+            event_type: original.event_type.clone(),
+            raw_payload: original.raw_payload.clone(),
+        };
+        let row = FleetProviderEventRepo::append(store.pool(), &replay)
+            .await
+            .expect("an evicted row must absorb its own replay, not collide");
+        assert_eq!(row.ingest_order, original.ingest_order, "no new row");
+        assert_eq!(
+            row.raw_payload, "",
+            "the replay must not resurrect the body"
+        );
+
+        // A genuinely DIFFERENT body under the same id is still a collision:
+        // relaxing the payload check must not relax identity.
+        let conflicting = NewFleetProviderEvent {
+            raw_payload: "{\"different\":true}".to_string(),
+            ..replay
+        };
+        assert!(
+            FleetProviderEventRepo::append(store.pool(), &conflicting).await.is_err(),
+            "a different payload under the same event_id must still collide"
+        );
+    }
+
+    /// The digest is the identity that OUTLIVES the payload.
+    ///
+    /// Renamed from "every row": since 0093 that is no longer a whole-table
+    /// invariant, and a test asserting it under the old name would have gone on
+    /// passing purely because it seeds one fresh row. This pins what actually
+    /// holds after eviction, which is what consumers now depend on.
+    #[tokio::test]
+    async fn eviction_keeps_the_digest_of_the_original_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let original = seed_projected(&store, "proj-digest", 100).await;
+        let original_digest = original.raw_blake3.clone();
+        assert_eq!(original_digest, digest(&original.raw_payload));
+
+        FleetProviderEventRepo::evict_projected_payloads_before(store.pool(), 1_000, 100)
+            .await
+            .unwrap();
+
+        let evicted = FleetProviderEventRepo::get(store.pool(), "proj-digest")
+            .await
+            .unwrap()
+            .expect("eviction never deletes the row");
+        assert_eq!(evicted.raw_payload, "", "payload is evicted");
+        assert_eq!(
+            evicted.raw_blake3, original_digest,
+            "the digest must still describe the ORIGINAL body, not the blank"
+        );
+        assert_ne!(
+            evicted.raw_blake3,
+            digest(&evicted.raw_payload),
+            "digest of the blank would make the row unidentifiable on replay"
+        );
     }
 
     /// I10: the REAL consumer query still plans onto the recreated partial
@@ -1119,18 +1254,23 @@ mod tests {
     /// The plan for the exact subquery `evict_projected_payloads_before` runs,
     /// with only its ORDER BY varied.
     async fn retention_plan(pool: &SqlitePool, order_by: &str) -> String {
-        let rows = sqlx::query(&format!(
-            "EXPLAIN QUERY PLAN \
-             SELECT ingest_order FROM fleet_provider_event \
-             WHERE raw_payload <> '' AND projection_revision IS NOT NULL \
-               AND source <> 'acp' AND observed_at < ? \
-             ORDER BY {order_by} ASC LIMIT ?"
-        ))
-        .bind(1_000_i64)
-        .bind(500_i64)
-        .fetch_all(pool)
-        .await
-        .unwrap();
+        // Derived from the production constant, never re-typed: the negative
+        // case varies ONLY the ORDER BY, so a drift in the predicate cannot
+        // leave this test green while the sweep starts scanning.
+        let select = super::EVICTION_SELECT.replace(
+            "ORDER BY observed_at ASC",
+            &format!("ORDER BY {order_by} ASC"),
+        );
+        assert!(
+            select.contains(&format!("ORDER BY {order_by} ASC")),
+            "EVICTION_SELECT no longer contains the ORDER BY this test rewrites"
+        );
+        let rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {select}"))
+            .bind(1_000_i64)
+            .bind(500_i64)
+            .fetch_all(pool)
+            .await
+            .unwrap();
         rows.iter()
             .map(|row| row.try_get::<String, _>("detail").unwrap())
             .collect::<Vec<_>>()
@@ -1150,9 +1290,16 @@ mod tests {
         sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
 
         let detail = retention_plan(store.pool(), "observed_at").await;
+        // SEARCH and the range term, not merely the index NAME: a full index
+        // scan (`SCAN ... USING INDEX idx_fleet_provider_event_retention`) also
+        // contains the name, and is exactly the degradation this test exists to
+        // catch.
         assert!(
-            detail.contains("idx_fleet_provider_event_retention"),
-            "the retention sweep must seek its partial index, plan was:\n{detail}"
+            detail.contains("SEARCH")
+                && detail.contains("idx_fleet_provider_event_retention")
+                && detail.contains("observed_at<?"),
+            "the retention sweep must SEEK its partial index on the \
+             observed_at range, not scan it, plan was:\n{detail}"
         );
         let by_ingest_order = retention_plan(store.pool(), "ingest_order").await;
         assert!(
