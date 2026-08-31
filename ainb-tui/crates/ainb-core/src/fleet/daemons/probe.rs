@@ -767,33 +767,17 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
 /// provisioned instance with `heartbeat_enabled` whose last heartbeat is within
 /// the cadence window. Reads, never re-emits.
 #[must_use]
-/// Whether a tmux session with this exact name exists.
-///
-/// Sync on purpose: the probe is sync and runs on the render path, so this
-/// stays a single `tmux has-session` (~2ms) rather than dragging an async
-/// runtime into the daemons screen.
-pub(crate) fn tmux_session_alive(session: &str) -> bool {
-    std::process::Command::new("tmux")
-        .args(["has-session", "-t", session])
-        .output()
-        .is_ok_and(|out| out.status.success())
-}
-
-/// The inputs [`hangar_status_for`] reads, mirroring the fields it used to take
-/// straight off `daemon_runtime_status()`.
-struct HangarRuntime {
-    pid: Option<u32>,
-    version: Option<String>,
-    old: bool,
-}
-
 /// Count of `hangar daemon run` processes visible on this host.
 ///
 /// CONTEXT ONLY, never on its own an error. The single-instance guard is
 /// PER-HOME: a machine running N ainb homes (worktrees, temp homes in tests)
 /// legitimately has N daemons, and treating that as a fault was the exact
-/// false positive a earlier orphan hunt had to unpick. The authoritative
+/// false positive an earlier orphan hunt had to unpick. The authoritative
 /// signal for THIS home stays `running_daemon_pid()`.
+///
+/// Matched on argv shape rather than a substring: `ps` output also carries
+/// shell wrappers and greps whose command line merely mentions the phrase, and
+/// a count shown to an operator mid-diagnosis has to be the real one.
 fn hangar_daemon_census() -> usize {
     std::process::Command::new("ps")
         .args(["-axo", "args="])
@@ -802,14 +786,14 @@ fn hangar_daemon_census() -> usize {
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .filter(|line| line.contains("hangar daemon run"))
+                .filter(|line| crate::cli::hangar::argv_credits_a_daemon(line))
                 .count()
         })
         .unwrap_or(0)
 }
 
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
-    probe_atc_with(home, now_ms, &tmux_session_alive)
+    probe_atc_with(home, now_ms, &crate::tmux::session_alive)
 }
 
 /// [`probe_atc`] with the session check injected.
@@ -820,7 +804,7 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
 pub(crate) fn probe_atc_with(
     home: &Path,
     now_ms: i64,
-    session_alive: &dyn Fn(&str) -> bool,
+    session_alive: &dyn Fn(&str) -> Option<bool>,
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
@@ -926,10 +910,19 @@ pub(crate) fn probe_atc_with(
     // The OS timer writes that file whether or not the Claude session it beats
     // into still exists, so a dead `tmux_<name>` reports Running forever: the
     // timer fires, finds nothing, exits 0, and task-log.md silently stops
-    // growing. Probing the session is the only way to tell the halves apart —
+    // growing. Probing the session is the only way to tell the halves apart,
     // the same split the bridge already models with inbound vs outbound.
-    let session = crate::tmux::sanitize_session_name(&name);
-    if !session_alive(&session) {
+    let session = AtcMeta::new(&name).tmux_session();
+    // The advice names `daemon atc start`, not `fleet atc setup`: bare setup
+    // rebuilds meta from defaults, so it would silently reset a 10m instance to
+    // 15m while "fixing" it. `daemon atc start` reads the current settings and
+    // passes them back.
+    //
+    // Only a PROVEN dead session degrades the row. `None` means the check
+    // itself could not run (tmux off PATH, a wedged server), and reporting an
+    // environment problem as an ATC fault would send the operator to a repair
+    // that rewrites a healthy instance.
+    if session_alive(&session) == Some(false) {
         return DaemonStatus {
             kind,
             state: DaemonState::Degraded,
@@ -937,7 +930,7 @@ pub(crate) fn probe_atc_with(
             channel: Some(format!("{name} (every {interval_min}m)")),
             last_activity_at: hbs.last_active_ms,
             reason: format!(
-                "heartbeat firing every {interval_min}m but session {session} is GONE — beats are landing nowhere; `ainb fleet atc setup {name}` respawns it"
+                "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; `ainb daemon atc start` respawns it"
             ),
             ..DaemonStatus::running(kind)
         };
@@ -1067,7 +1060,6 @@ pub fn probe_mcp_pool() -> DaemonStatus {
 /// socket connect answers the separate question of whether it is still serving.
 #[must_use]
 pub fn probe_hangar_daemon() -> DaemonStatus {
-    let kind = DaemonKind::HangarDaemon;
     let runtime = crate::cli::hangar::daemon_runtime_status();
     let serving = crate::fleet::bridge::daemon::socket_path()
         .is_some_and(|socket| socket_is_listening(&socket));
@@ -1093,23 +1085,22 @@ pub(crate) fn hangar_status_for(
     census: impl Fn() -> usize,
 ) -> DaemonStatus {
     let kind = DaemonKind::HangarDaemon;
-    let runtime = HangarRuntime { pid, version, old };
-    match (runtime.pid, serving) {
+    match (pid, serving) {
         (None, false) => DaemonStatus::stopped(kind, "not running".to_string()),
         // A recorded owner with a dead socket is the half-alive case the
         // Daemons screen exists to make visible.
         (Some(pid), false) => DaemonStatus {
             state: DaemonState::Degraded,
             pid: Some(pid),
-            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
-            version: runtime.version,
+            version_current: version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version,
             reason: format!("pid {pid} owns this home but the socket is not accepting"),
             ..DaemonStatus::running(kind)
         },
         // Socket answering while this home records NO owner: something else is
         // serving our socket. That is the split-brain that makes
         // `ainb fleet atc repair` bail with "the daemon did NOT accept the
-        // unregister" — the verb dials the socket, a daemon this home does not
+        // unregister": the verb dials the socket, a daemon this home does not
         // own answers, and the registration lives somewhere else entirely.
         (None, true) => DaemonStatus {
             state: DaemonState::Degraded,
@@ -1117,18 +1108,18 @@ pub(crate) fn hangar_status_for(
             channel: Some("unix socket".to_string()),
             reason: format!(
                 "socket is served by a daemon this home does not own ({} running \
-host-wide) — `ainb hangar daemon restart` re-takes ownership",
+host-wide); `ainb hangar daemon restart` re-takes ownership",
                 census()
             ),
             ..DaemonStatus::running(kind)
         },
         (pid, true) => DaemonStatus {
             pid,
-            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
-            version: runtime.version,
+            version_current: version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version,
             connected: true,
             channel: Some("unix socket".to_string()),
-            reason: if runtime.old {
+            reason: if old {
                 "serving — older than this ainb, restart to upgrade".to_string()
             } else {
                 "socket serving".to_string()
@@ -2198,7 +2189,7 @@ mod tests {
     #[test]
     fn probe_atc_no_instance_is_stopped() {
         let home = TempDir::new().unwrap();
-        let s = probe_atc_with(home.path(), 0, &|_| true);
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true));
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
     }
@@ -2223,7 +2214,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| true);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
@@ -2253,7 +2244,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(false));
         assert_eq!(
             s.state,
             DaemonState::Degraded,
@@ -2266,7 +2257,7 @@ mod tests {
             s.reason
         );
         assert!(
-            s.reason.contains("atc setup primary"),
+            s.reason.contains("ainb daemon atc start"),
             "reason must name the fix: {}",
             s.reason
         );
@@ -2319,13 +2310,32 @@ mod tests {
         assert!(s.reason.contains("not accepting"), "{}", s.reason);
     }
 
-    /// A session check is only meaningful if it can actually fail; a name this
-    /// long cannot exist as a tmux session on any host running the suite.
+    /// The check has to be able to say BOTH things, and it has to compare
+    /// exactly: bare `has-session -t foo` resolves by prefix, so it exits 0 for
+    /// a live `foo-fix` while `foo` itself is long gone. That is precisely the
+    /// false green this module exists to stop, so the prefix case is asserted.
     #[test]
-    fn tmux_session_alive_is_false_for_an_impossible_name() {
-        assert!(!super::tmux_session_alive(
-            "ainb-probe-selftest-session-that-cannot-exist-0000"
-        ));
+    fn session_alive_is_exact_and_answers_both_ways() {
+        let name = "ainb_probe_selftest_alpha";
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+        let spawned = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", name])
+            .output();
+        if !spawned.is_ok_and(|o| o.status.success()) {
+            return; // no usable tmux on this host; nothing to assert
+        }
+        assert_eq!(crate::tmux::session_alive(name), Some(true), "live session");
+        assert_eq!(
+            crate::tmux::session_alive("ainb_probe_selftest_alph"),
+            Some(false),
+            "a prefix of a live session must NOT count as that session"
+        );
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+        assert_eq!(crate::tmux::session_alive(name), Some(false), "after kill");
     }
 
     #[test]
@@ -2351,7 +2361,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| true);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
         assert_eq!(
             s.state,
             DaemonState::Stopped,
@@ -2391,7 +2401,7 @@ mod tests {
             )
             .unwrap();
         }
-        let s = probe_atc_with(home.path(), now, &|_| true);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
         assert_eq!(s.state, DaemonState::Running);
         assert!(
             s.channel.as_deref().unwrap().contains("on"),
@@ -2420,7 +2430,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| true);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale"));
     }
