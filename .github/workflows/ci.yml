@@ -629,9 +629,9 @@ jobs:
         # routes through `budget_scale()` here; single-run rigor is kept (a real
         # regression still fails at the scaled deadline).
         #
-        # The Linux leg runs the FULL 34-tripwire matrix (authoritative — the
+        # The Linux leg runs the FULL 68-tripwire matrix (authoritative — the
         # tmux tripwires exercise OS-agnostic render/protocol/daemon logic). The
-        # macOS hosted runner is too small to finish all 34 heavy serial tmux
+        # macOS hosted runner is too small to finish all 68 heavy serial tmux
         # tripwires even at 3x budget (~4 random timeouts — runner capacity, not
         # a code fault), so the macOS leg runs a launch-smoke SUBSET that proves
         # the macOS-staged binaries actually launch + the basic stack works

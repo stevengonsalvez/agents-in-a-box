@@ -46,7 +46,7 @@ skips=0
 # `<STATUS> [ 1.234s] (3/68) pkg::target test_name`, so the binary id is the
 # first field containing `::`.
 failed_binaries() {
-    awk '/^ *(FAIL|TIMEOUT|ABORT|SIGSEGV|SIGABRT|LEAK-FAIL) \[/ {
+    awk '/^ *(FAIL|TIMEOUT|LEAK-FAIL|SIG[A-Z]+) \[/ {
         for (i = 1; i <= NF; i++) if ($i ~ /::/) { print $i; break }
     }' | sort -u
 }
@@ -92,10 +92,16 @@ run_group() {
     # timeout); `tee` keeps the full text on disk for the counts below. awk
     # prints the run verbatim and then, from the trailing success block, only
     # the tests that skipped.
-    cargo nextest run --no-fail-fast --test-threads=1 --success-output final "$@" 2>&1 \
+    # `--color never` is LOAD-BEARING, not cosmetic. ci.yml sets
+    # `CARGO_TERM_COLOR: always` workflow-wide, so without this every status
+    # line arrives ANSI-wrapped and each parser below anchors at `^ *(FAIL|PASS|
+    # Summary)` against an ESC byte instead. Failures then attribute to nothing,
+    # `skips` is permanently 0, and the vacuous-green trap this script exists to
+    # spring reports `failed=0 skipped=0` on a leg where every tripwire SKIPped.
+    cargo nextest run --color never --no-fail-fast --test-threads=1 --success-output final "$@" 2>&1 \
         | tee "$log" \
         | awk '
-            !tail { print; if ($0 ~ /^ *Summary \[/) tail = 1; next }
+            !tail { print; fflush(); if ($0 ~ /^ *Summary \[/) tail = 1; next }
             /^ *(PASS|SLOW) \[/ { hdr = $0; shown = 0; next }
             /SKIP:/ { if (!shown++) print hdr; if (shown <= 3) print }
         '
