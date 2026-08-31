@@ -8035,7 +8035,7 @@ fn pid_owns_a_home(pid: u32, socket: &std::path::Path) -> bool {
 /// fallback's exact credit rule is testable without spawning a process.
 ///
 /// A recognised daemon shape counts, EXCEPT from a `cargo test` binary.
-fn argv_credits_a_daemon(args: &str) -> bool {
+pub(crate) fn argv_credits_a_daemon(args: &str) -> bool {
     !is_cargo_test_binary(args) && ainb_hangar_daemon::single_instance::is_hangar_daemon_args(args)
 }
 
