@@ -188,6 +188,8 @@ pub enum FleetProvider {
     Claude,
     /// OpenAI Codex.
     Codex,
+    /// Google Antigravity.
+    Antigravity,
     /// GitHub Copilot CLI.
     Copilot,
     /// ACP-backed headless session; the concrete adapter lives in the
@@ -2305,6 +2307,13 @@ mod tests {
         assert_eq!(serde_json::json!(FleetProvider::Acp), "acp");
         let decoded: FleetProvider = serde_json::from_str("\"acp\"").unwrap();
         assert_eq!(decoded, FleetProvider::Acp);
+    }
+
+    #[test]
+    fn antigravity_provider_uses_snake_case_wire_token() {
+        assert_eq!(serde_json::json!(FleetProvider::Antigravity), "antigravity");
+        let decoded: FleetProvider = serde_json::from_str("\"antigravity\"").unwrap();
+        assert_eq!(decoded, FleetProvider::Antigravity);
     }
 
     #[test]

@@ -182,6 +182,7 @@ bytes = "1.6"
 # dev-only dep edge — see also crates/ainb-skill-core/Cargo.toml where
 # the same self-dev-dep enables tests in skill-core itself.
 ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = ["test-fixtures"] }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

@@ -4803,6 +4803,7 @@ fn provider_bar_label(filter: UsageProviderFilter) -> &'static str {
         UsageProviderFilter::Cursor => "▸ Cursor",
         UsageProviderFilter::Copilot => "🐙 Copilot",
         UsageProviderFilter::Gemini => "✨ Gemini CLI",
+        UsageProviderFilter::Antigravity => "▲ Antigravity",
     }
 }
 
@@ -4922,6 +4923,7 @@ mod period_strip_tests {
             UsageProviderFilter::Cursor,
             UsageProviderFilter::Copilot,
             UsageProviderFilter::Gemini,
+            UsageProviderFilter::Antigravity,
             UsageProviderFilter::All,
         ];
         for expected in ring {

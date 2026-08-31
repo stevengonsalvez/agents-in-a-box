@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which provider backend a card's task dispatches through (spec F1 / D7).
 ///
-/// The wire + DB token is lowercase (`claude` / `codex` / `copilot`), matching
+/// The wire + DB token is lowercase (`claude` / `codex` / `antigravity` / `copilot`), matching
 /// the runner backend names so a stored `agent_kind` round-trips byte-identically
 /// through JSON and the `agent_task_queue.agent_kind` column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,9 +37,11 @@ pub enum AgentKind {
     Claude,
     /// OpenAI Codex (`codex exec` / codex interactive). Dispatches today.
     Codex,
+    /// Google Antigravity (`agy -p` headless / YOLO interactive). Dispatches today.
+    Antigravity,
     /// GitHub Copilot. Selectable in the picker; dispatch returns a clear
     /// "provider not yet wired" error until the third runner backend lands
-    /// (spec F8, D7 — claude + codex first).
+    /// (spec F8, D7: claude + codex first).
     Copilot,
 }
 
@@ -48,27 +50,35 @@ impl AgentKind {
     /// no board/workspace/global default and no last-used history).
     pub const DEFAULT: Self = Self::Claude;
 
-    /// The lowercase wire/DB token (`claude` / `codex` / `copilot`).
+    /// The lowercase wire/DB token (`claude` / `codex` / `antigravity` / `copilot`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => "antigravity",
             Self::Copilot => "copilot",
         }
     }
 
     /// Parse a wire/DB token into an [`AgentKind`], or `None` for an unknown
-    /// token. Case-insensitive so a hand-edited config value (`Claude`, `CODEX`)
+    /// token. Case-insensitive so a hand-edited config value (`Claude`, `CODEX`, `AGY`)
     /// still resolves rather than silently falling through the cascade.
     #[must_use]
     pub fn parse(token: &str) -> Option<Self> {
         match token.trim().to_ascii_lowercase().as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "antigravity" | "agy" => Some(Self::Antigravity),
             "copilot" => Some(Self::Copilot),
             _ => None,
         }
+    }
+
+    /// Return the default model identifier for this agent backend.
+    #[must_use]
+    pub const fn default_model(self) -> &'static str {
+        "default"
     }
 
     /// Whether this backend can be DISPATCHED today. `copilot` is selectable in
@@ -76,14 +86,22 @@ impl AgentKind {
     /// dispatch on it with a clear error rather than stranding the task.
     #[must_use]
     pub const fn is_dispatchable(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(self, Self::Claude | Self::Codex | Self::Antigravity)
     }
 
-    /// Every kind, in picker order — the chips the create overlay renders
-    /// (claude, codex, copilot).
+    /// Every kind, in picker order: the chips the create overlay renders
+    /// (claude, codex, antigravity, copilot).
     #[must_use]
-    pub const fn all() -> [Self; 3] {
-        [Self::Claude, Self::Codex, Self::Copilot]
+    pub const fn all() -> [Self; 4] {
+        [Self::Claude, Self::Codex, Self::Antigravity, Self::Copilot]
+    }
+}
+
+impl std::str::FromStr for AgentKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("unknown agent kind: {s}"))
     }
 }
 
@@ -131,15 +149,42 @@ mod tests {
     fn parse_is_tolerant_and_rejects_unknown() {
         assert_eq!(AgentKind::parse("  Claude "), Some(AgentKind::Claude));
         assert_eq!(AgentKind::parse("CODEX"), Some(AgentKind::Codex));
+        assert_eq!(
+            AgentKind::parse("Antigravity"),
+            Some(AgentKind::Antigravity)
+        );
+        assert_eq!(AgentKind::parse("agy"), Some(AgentKind::Antigravity));
+        assert_eq!(AgentKind::parse(" AGY "), Some(AgentKind::Antigravity));
         assert_eq!(AgentKind::parse("cursor"), None);
         assert_eq!(AgentKind::parse(""), None);
     }
 
-    /// Only claude + codex dispatch; copilot is picker-visible but not wired.
+    /// FromStr parses tokens and aliases.
+    #[test]
+    fn from_str_parsing() {
+        assert_eq!(
+            "antigravity".parse::<AgentKind>().unwrap(),
+            AgentKind::Antigravity
+        );
+        assert_eq!("agy".parse::<AgentKind>().unwrap(), AgentKind::Antigravity);
+        assert_eq!("claude".parse::<AgentKind>().unwrap(), AgentKind::Claude);
+        assert!("unknown".parse::<AgentKind>().is_err());
+    }
+
+    /// Default model is default across kinds.
+    #[test]
+    fn default_model_is_default() {
+        for kind in AgentKind::all() {
+            assert_eq!(kind.default_model(), "default");
+        }
+    }
+
+    /// Claude, Codex, and Antigravity dispatch; copilot is picker-visible but not wired.
     #[test]
     fn dispatchability() {
         assert!(AgentKind::Claude.is_dispatchable());
         assert!(AgentKind::Codex.is_dispatchable());
+        assert!(AgentKind::Antigravity.is_dispatchable());
         assert!(!AgentKind::Copilot.is_dispatchable());
     }
 
@@ -156,7 +201,7 @@ mod tests {
             ),
             AgentKind::Copilot,
         );
-        // no last-used → board default wins.
+        // no last-used: board default wins.
         assert_eq!(
             resolve_agent_cascade(None, Some(AgentKind::Codex), Some(AgentKind::Claude), None,),
             AgentKind::Codex,
@@ -189,6 +234,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AgentKind::Copilot).unwrap(),
             "\"copilot\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Antigravity).unwrap(),
+            "\"antigravity\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentKind>("\"antigravity\"").unwrap(),
+            AgentKind::Antigravity
         );
         assert_eq!(
             serde_json::from_str::<AgentKind>("\"codex\"").unwrap(),

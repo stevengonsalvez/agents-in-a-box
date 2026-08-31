@@ -31,6 +31,7 @@ const BRAND_CLAUDE: Color = Color::Rgb(217, 119, 87); // Anthropic clay-orange
 const BRAND_CODEX: Color = Color::Rgb(236, 236, 241); // OpenAI near-white
 const BRAND_COPILOT: Color = Color::Rgb(46, 160, 67); // GitHub green
 const BRAND_GEMINI: Color = Color::Rgb(66, 133, 244); // Google blue
+const BRAND_ANTIGRAVITY: Color = Color::Rgb(66, 133, 244); // Google blue
 const BRAND_KIRO: Color = Color::Rgb(171, 121, 224); // crystal purple
 const BRAND_SHELL: Color = Color::Rgb(150, 150, 165); // muted slate
 const BRAND_SSH: Color = Color::Rgb(255, 165, 0); // amber
@@ -1019,6 +1020,7 @@ fn agent_brand_color(agent: &SessionAgentType) -> Color {
         SessionAgentType::Codex => BRAND_CODEX,
         SessionAgentType::Copilot => BRAND_COPILOT,
         SessionAgentType::Gemini => BRAND_GEMINI,
+        SessionAgentType::Antigravity => BRAND_ANTIGRAVITY,
         SessionAgentType::Kiro => BRAND_KIRO,
         SessionAgentType::Shell => BRAND_SHELL,
         SessionAgentType::Ssh => BRAND_SSH,

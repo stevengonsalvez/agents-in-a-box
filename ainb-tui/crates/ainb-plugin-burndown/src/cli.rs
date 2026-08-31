@@ -237,6 +237,7 @@ pub enum ProviderArg {
     Cursor,
     Copilot,
     Gemini,
+    Antigravity,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -256,6 +257,7 @@ pub enum PlanProviderArg {
     Claude,
     Codex,
     Cursor,
+    Antigravity,
 }
 
 /// Plugin-mode entry point. Uses a pre-loaded [`UsageData`] snapshot
@@ -1518,6 +1520,7 @@ fn provider_filter_from_args(args: &UsageReportArgs) -> UsageProviderFilter {
         ProviderArg::Cursor => UsageProviderFilter::Cursor,
         ProviderArg::Copilot => UsageProviderFilter::Copilot,
         ProviderArg::Gemini => UsageProviderFilter::Gemini,
+        ProviderArg::Antigravity => UsageProviderFilter::Antigravity,
     }
 }
 
@@ -1891,6 +1894,7 @@ fn plan_provider(provider: PlanProviderArg) -> UsagePlanProvider {
         PlanProviderArg::Claude => UsagePlanProvider::Claude,
         PlanProviderArg::Codex => UsagePlanProvider::Codex,
         PlanProviderArg::Cursor => UsagePlanProvider::Cursor,
+        PlanProviderArg::Antigravity => UsagePlanProvider::Antigravity,
     }
 }
 
@@ -1899,6 +1903,7 @@ fn provider_arg_for_plan(provider: UsagePlanProvider) -> ProviderArg {
         UsagePlanProvider::All | UsagePlanProvider::Cursor => ProviderArg::All,
         UsagePlanProvider::Claude => ProviderArg::Claude,
         UsagePlanProvider::Codex => ProviderArg::Codex,
+        UsagePlanProvider::Antigravity => ProviderArg::Antigravity,
     }
 }
 

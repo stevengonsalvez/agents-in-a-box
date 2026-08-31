@@ -125,6 +125,7 @@ pub fn render_title(env: &Envelope) -> String {
         "claude" => "Claude",
         "codex" => "Codex",
         "copilot" => "Copilot",
+        "antigravity" => "Antigravity",
         other => other,
     };
     match head {

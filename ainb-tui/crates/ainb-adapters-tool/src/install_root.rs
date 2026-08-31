@@ -107,6 +107,7 @@ fn real_home_for(tool: &str) -> Option<PathBuf> {
         "claude" => PathBuf::from(".claude"),
         "codex" => PathBuf::from(".codex"),
         "copilot" => PathBuf::from(".copilot"),
+        "antigravity" | "agy" => PathBuf::from(".gemini").join("antigravity-cli"),
         "gemini" => PathBuf::from(".gemini"),
         "cursor" => PathBuf::from(".cursor"),
         "amazonq" => PathBuf::from(".aws").join("amazonq"),
@@ -189,6 +190,23 @@ mod tests {
         assert_eq!(
             p,
             PathBuf::from("/tmp/fake-home-for-test").join(".aws").join("amazonq")
+        );
+    }
+
+    #[test]
+    fn install_antigravity_uses_gemini_subdir() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOME", "/tmp/fake-home-for-test");
+        std::env::remove_var("AINB_TOOL_HOME_ANTIGRAVITY");
+        let p = install_root_for("antigravity");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/fake-home-for-test").join(".gemini").join("antigravity-cli")
+        );
+        let p_agy = install_root_for("agy");
+        assert_eq!(
+            p_agy,
+            PathBuf::from("/tmp/fake-home-for-test").join(".gemini").join("antigravity-cli")
         );
     }
 

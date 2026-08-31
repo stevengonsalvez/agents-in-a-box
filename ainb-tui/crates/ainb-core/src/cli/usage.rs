@@ -239,6 +239,7 @@ pub enum ProviderArg {
     Cursor,
     Copilot,
     Gemini,
+    Antigravity,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -258,6 +259,7 @@ pub enum PlanProviderArg {
     Claude,
     Codex,
     Cursor,
+    Antigravity,
 }
 
 /// Phase 6c-cli + 6d: host-side `ainb usage <subcommand>` execution.
@@ -475,6 +477,7 @@ fn plan_provider(provider: PlanProviderArg) -> UsagePlanProvider {
         PlanProviderArg::Claude => UsagePlanProvider::Claude,
         PlanProviderArg::Codex => UsagePlanProvider::Codex,
         PlanProviderArg::Cursor => UsagePlanProvider::Cursor,
+        PlanProviderArg::Antigravity => UsagePlanProvider::Antigravity,
     }
 }
 

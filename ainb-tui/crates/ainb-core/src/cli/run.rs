@@ -236,6 +236,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         CliProvider::Codex => SessionAgentType::Codex,
         CliProvider::Gemini => SessionAgentType::Gemini,
         CliProvider::Copilot => SessionAgentType::Copilot,
+        CliProvider::Antigravity => SessionAgentType::Antigravity,
     };
 
     let codex_thread_id = codex_remote.and_then(|remote| remote.thread_id);
@@ -527,6 +528,7 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
             CliProvider::Codex => "https://github.com/openai/codex",
             CliProvider::Gemini => "https://github.com/google-gemini/gemini-cli",
             CliProvider::Copilot => "https://githubnext.com/projects/copilot-cli",
+            CliProvider::Antigravity => "https://github.com/google/antigravity",
         };
         anyhow::bail!(
             "{} CLI ('{}') not found in PATH. Install it first.\nSee: {}",
@@ -541,16 +543,16 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
 /// Build the agent CLI command with appropriate flags for the selected provider.
 ///
 /// **Model emission semantics:**
-///   * Claude / Codex — pass any non-empty, non-`default` value through
+///   * Claude / Codex / Antigravity: pass any non-empty, non-`default` value through
 ///     unchanged. Provider CLI owns model validation and future model IDs.
-///   * Gemini / Copilot — never emit `--model` (those CLIs don't accept it
+///   * Gemini / Copilot: never emit `--model` (those CLIs don't accept it
 ///     in this codebase).
 fn build_agent_command(args: &RunArgs) -> String {
     let provider = args.tool.to_cli_provider();
     let mut cmd_parts = vec![provider.command().to_string()];
 
     match provider {
-        CliProvider::Claude | CliProvider::Codex => {
+        CliProvider::Claude | CliProvider::Codex | CliProvider::Antigravity => {
             if let Some(model) = launch_model(args) {
                 cmd_parts.push("--model".to_string());
                 cmd_parts.push(model);

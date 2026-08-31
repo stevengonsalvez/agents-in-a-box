@@ -351,6 +351,7 @@ mod tests {
     fn test_is_builtin_name_matches_shipped_defaults() {
         assert!(is_builtin_name("claude-interactive-yolo"));
         assert!(is_builtin_name("codex-interactive-yolo"));
+        assert!(is_builtin_name("antigravity-interactive-yolo"));
     }
 
     #[test]
@@ -370,6 +371,7 @@ mod tests {
         let names: Vec<String> = create_default_presets().into_iter().map(|p| p.name).collect();
         assert!(names.contains(&"claude-interactive-yolo".to_string()));
         assert!(names.contains(&"codex-interactive-yolo".to_string()));
+        assert!(names.contains(&"antigravity-interactive-yolo".to_string()));
     }
 
     // --- build_new_preset ---

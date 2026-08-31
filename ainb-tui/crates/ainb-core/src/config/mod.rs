@@ -113,6 +113,8 @@ pub enum CliProvider {
     Gemini,
     /// GitHub Copilot CLI
     Copilot,
+    /// Google Antigravity CLI
+    Antigravity,
 }
 
 impl CliProvider {
@@ -123,6 +125,7 @@ impl CliProvider {
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
             CliProvider::Copilot => "copilot",
+            CliProvider::Antigravity => "agy",
         }
     }
 
@@ -131,7 +134,7 @@ impl CliProvider {
         match self {
             CliProvider::Claude => "ANTHROPIC_API_KEY",
             CliProvider::Codex => "OPENAI_API_KEY",
-            CliProvider::Gemini => "GEMINI_API_KEY",
+            CliProvider::Gemini | CliProvider::Antigravity => "GEMINI_API_KEY",
             CliProvider::Copilot => "GITHUB_TOKEN", // Uses gh OAuth, token optional
         }
     }
@@ -143,6 +146,7 @@ impl CliProvider {
             CliProvider::Codex => "OpenAI Codex",
             CliProvider::Gemini => "Google Gemini",
             CliProvider::Copilot => "GitHub Copilot",
+            CliProvider::Antigravity => "Google Antigravity",
         }
     }
 
@@ -152,6 +156,7 @@ impl CliProvider {
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
             CliProvider::Copilot => "copilot",
+            CliProvider::Antigravity => "antigravity",
         }
     }
 
@@ -160,6 +165,7 @@ impl CliProvider {
             "codex" | "openai" => CliProvider::Codex,
             "gemini" | "google" => CliProvider::Gemini,
             "copilot" | "github" => CliProvider::Copilot,
+            "antigravity" | "agy" => CliProvider::Antigravity,
             _ => CliProvider::Claude,
         }
     }
@@ -167,7 +173,7 @@ impl CliProvider {
     /// Get the flag to skip permission prompts for this CLI
     pub fn skip_permissions_flag(&self) -> &'static str {
         match self {
-            CliProvider::Claude => "--dangerously-skip-permissions",
+            CliProvider::Claude | CliProvider::Antigravity => "--dangerously-skip-permissions",
             CliProvider::Codex => "--dangerously-bypass-approvals-and-sandbox",
             CliProvider::Gemini => "-y",
             CliProvider::Copilot => "--yolo",
@@ -782,6 +788,7 @@ pub enum UsagePlanProvider {
     Claude,
     Codex,
     Cursor,
+    Antigravity,
 }
 
 impl Default for UsagePlanProvider {

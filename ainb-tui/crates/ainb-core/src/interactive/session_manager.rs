@@ -899,7 +899,8 @@ impl InteractiveSessionManager {
             SessionAgentType::Claude
             | SessionAgentType::Codex
             | SessionAgentType::Gemini
-            | SessionAgentType::Copilot => {
+            | SessionAgentType::Copilot
+            | SessionAgentType::Antigravity => {
                 info!(
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
@@ -1145,7 +1146,8 @@ impl InteractiveSessionManager {
             SessionAgentType::Claude
             | SessionAgentType::Codex
             | SessionAgentType::Gemini
-            | SessionAgentType::Copilot => {
+            | SessionAgentType::Copilot
+            | SessionAgentType::Antigravity => {
                 info!(
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
@@ -1458,6 +1460,8 @@ impl InteractiveSessionManager {
                 return Some(SessionAgentType::Claude);
             } else if cmd.contains("codex") {
                 return Some(SessionAgentType::Codex);
+            } else if cmd.contains("agy") || cmd.contains("antigravity") {
+                return Some(SessionAgentType::Antigravity);
             } else if cmd.contains("gemini") {
                 return Some(SessionAgentType::Gemini);
             } else if cmd.contains("copilot") {
@@ -2144,7 +2148,7 @@ impl InteractiveSessionManager {
         // provider's blocking migration modal and never start.
         if matches!(
             agent_type,
-            SessionAgentType::Claude | SessionAgentType::Codex
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Antigravity
         ) {
             if let Some(model) = model.map(str::trim).filter(|model| !is_default_model(model)) {
                 let model = if agent_type == SessionAgentType::Codex {
@@ -2164,19 +2168,19 @@ impl InteractiveSessionManager {
         }
 
         // Claude resume: `--continue` re-opens the most recent conversation in
-        // the cwd (worktrees are 1-session-per-dir → "the last session"). Only
+        // the cwd (worktrees are 1-session-per-dir -> "the last session"). Only
         // add it when the caller found prior history, as `claude --continue`
         // with no history errors and leaves a dead pane. NOTE: the current
         // claude CLI `--resume` takes a *session id*, not a path, so the old
         // `--resume <jsonl path>` silently fell through to the interactive
-        // picker instead of resuming — `--continue` is the correct "resume
+        // picker instead of resuming - `--continue` is the correct "resume
         // latest" for a cwd-scoped session.
         if agent_type == SessionAgentType::Claude && resume_requested && has_history {
             cmd_parts.push("--continue".to_string());
         }
 
         // Copilot resume: `--continue` re-opens the most recent copilot session.
-        // Unguarded (no cheap cwd-history probe exists yet) — mirrors codex's
+        // Unguarded (no cheap cwd-history probe exists yet) - mirrors codex's
         // tradeoff. NOTE: copilot's "most recent session" is not strictly
         // cwd-scoped the way claude's is, so with several copilot worktrees this
         // can resume the globally-newest session; acceptable for the first pass.
@@ -2184,25 +2188,31 @@ impl InteractiveSessionManager {
             cmd_parts.push("--continue".to_string());
         }
 
+        // Antigravity resume: `--continue` re-opens the most recent session.
+        if agent_type == SessionAgentType::Antigravity && resume_requested {
+            cmd_parts.push("--continue".to_string());
+        }
+
         cmd_parts
     }
 
-    /// Start AI CLI in the tmux session (Claude, Codex, or Gemini)
+    /// Start AI CLI in the tmux session (Claude, Codex, Antigravity, or Gemini)
     ///
     /// **Resume** (`resume_requested == true`): re-open the most recent
     /// conversation in the session's cwd instead of starting fresh. Worktrees
     /// are 1-session-per-dir, so "most recent in cwd" == "the last session".
     ///   * Claude: emits `--continue`, but only when `resume_transcript.is_some()`
-    ///     (the caller found prior history) — `claude --continue` with no
+    ///     (the caller found prior history) - `claude --continue` with no
     ///     history errors and leaves a dead pane. `resume_transcript`'s *path*
     ///     is no longer used as an argument (the current claude CLI `--resume`
     ///     wants a session id, not a path); its presence is the history guard.
     ///   * Codex: emits the `resume --last` subcommand form.
     ///   * Copilot: emits `--continue` (most recent copilot session; unguarded).
-    ///   * Gemini: no resume flag wired — always starts fresh.
+    ///   * Antigravity: emits `--continue`.
+    ///   * Gemini: no resume flag wired - always starts fresh.
     ///
     /// **Model flag emission:**
-    ///   * Claude / Codex: pass the raw persisted value through unchanged.
+    ///   * Claude / Codex / Antigravity: pass the raw persisted value through unchanged.
     ///     `None`, empty, or `default` omits the flag.
     ///   * Gemini / Copilot: never emit `--model`.
     pub async fn start_cli_in_tmux(
@@ -2220,7 +2230,7 @@ impl InteractiveSessionManager {
         use crate::config::CliProvider;
 
         // No more send-keys + wait_for_shell_ready dance. Heavy `.zshrc`
-        // setups (Powerlevel10k instant-prompt + conda + nvm + …) can stream
+        // setups (Powerlevel10k instant-prompt + conda + nvm + ...) can stream
         // content for 15+s, racing keystrokes that get eaten mid-startup.
         // Stevie 2026-05-27 hit this twice. Cure: `tmux respawn-pane -k`
         // REPLACES the pane's shell process with the CLI command directly.
@@ -2233,6 +2243,7 @@ impl InteractiveSessionManager {
             SessionAgentType::Codex => CliProvider::Codex,
             SessionAgentType::Gemini => CliProvider::Gemini,
             SessionAgentType::Copilot => CliProvider::Copilot,
+            SessionAgentType::Antigravity => CliProvider::Antigravity,
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
@@ -2463,9 +2474,9 @@ impl InteractiveSessionManager {
                     String::new()
                 }
             }
-            SessionAgentType::Gemini => {
+            SessionAgentType::Gemini | SessionAgentType::Antigravity => {
                 if let Ok(Some(api_key)) = credentials::get_gemini_api_key() {
-                    info!("Injecting GEMINI_API_KEY for Gemini CLI");
+                    info!("Injecting GEMINI_API_KEY for {:?} CLI", agent_type);
                     format!("export GEMINI_API_KEY='{}' && ", api_key)
                 } else {
                     String::new()
@@ -4166,5 +4177,77 @@ trust_level = "trusted"
             false,
         );
         assert_eq!(p, vec!["copilot", "--yolo"]);
+    }
+
+    #[test]
+    fn antigravity_fresh_launch_has_no_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(p, vec!["agy", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn antigravity_resume_appends_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            None,
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec!["agy", "--dangerously-skip-permissions", "--continue"]
+        );
+    }
+
+    #[test]
+    fn antigravity_launch_with_model() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            Some("gemini-3.7-flash"),
+            false,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "agy",
+                "--model",
+                "gemini-3.7-flash",
+                "--dangerously-skip-permissions",
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_resume_with_model_and_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            Some("gemini-2.5-pro"),
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "agy",
+                "--model",
+                "gemini-2.5-pro",
+                "--dangerously-skip-permissions",
+                "--continue",
+            ]
+        );
     }
 }

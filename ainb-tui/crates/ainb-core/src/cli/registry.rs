@@ -1327,6 +1327,12 @@ impl CliCommand for NotifydCommand {
                     .help("Target GitHub Copilot CLI"),
             )
             .arg(
+                clap::Arg::new("antigravity")
+                    .long("antigravity")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Google Antigravity CLI"),
+            )
+            .arg(
                 clap::Arg::new("all")
                     .long("all")
                     .action(clap::ArgAction::SetTrue)
@@ -1375,7 +1381,7 @@ impl CliCommand for NotifydCommand {
                         .arg(
                             clap::Arg::new("agent")
                                 .long("agent")
-                                .help("Filter by agent (claude|codex|copilot)"),
+                                .help("Filter by agent (claude|codex|copilot|antigravity)"),
                         )
                         .arg(
                             clap::Arg::new("project")
@@ -1428,6 +1434,7 @@ impl CliCommand for NotifydCommand {
                 m.get_flag("claude"),
                 m.get_flag("codex"),
                 m.get_flag("copilot"),
+                m.get_flag("antigravity"),
                 m.get_flag("all"),
             )
         };
