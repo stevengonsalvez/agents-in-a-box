@@ -177,7 +177,14 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Step 7: Create tmux session
-    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone()).with_env(session_env);
+    // `keeping_dead_pane` only for Codex: its startup failures are one line
+    // written to the pane a second before it exits, and without the pane the
+    // launch surfaces as a bare claim timeout that names nothing. It is NOT on
+    // for every provider, because a held pane keeps the session alive and
+    // `tmux has-session` is the only liveness signal several callers have.
+    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone())
+        .with_env(session_env)
+        .keeping_dead_pane(codex_remote.is_some());
     if let Err(error) = tmux.start(&work_dir).await {
         rollback_failed_interactive_launch(
             session_id,
@@ -190,23 +197,6 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
-
-    // Keep the pane readable after the CLI exits. Without this tmux destroys
-    // the session the instant the process dies, and a CLI that fails in one
-    // second takes its own error message with it -- the launch then surfaces
-    // only as whatever timeout the caller happens to hit. `start_cli_in_tmux`
-    // already does this for every session the TUI starts; `ainb run` did not.
-    let _ = tokio::process::Command::new("tmux")
-        .args([
-            "set-option",
-            "-w", // remain-on-exit is a window option
-            "-t",
-            &format!("={tmux_name}"),
-            "remain-on-exit",
-            "on",
-        ])
-        .output()
-        .await;
 
     let codex_remote = match codex_remote {
         Some(remote) if remote.thread_id.is_none() => match claim_codex_remote_thread(

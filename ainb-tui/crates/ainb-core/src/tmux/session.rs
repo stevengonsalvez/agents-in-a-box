@@ -38,6 +38,9 @@ pub struct TmuxSession {
     /// Environment variables to seed into the session at creation time (passed
     /// as `tmux new-session -e KEY=VAL`). Empty for the common case.
     env: Vec<(String, String)>,
+    /// Hold the pane open after `program` exits, so a startup failure stays
+    /// readable. Off by default: it is not free (see [`Self::keeping_dead_pane`]).
+    remain_on_exit: bool,
 }
 
 impl std::fmt::Debug for TmuxSession {
@@ -69,7 +72,27 @@ impl TmuxSession {
             pty: None,
             attach_state: AttachState::Detached,
             env: Vec::new(),
+            remain_on_exit: false,
         }
+    }
+
+    /// Keep the pane after `program` exits, so a startup failure stays readable.
+    ///
+    /// Requires starting the session on its default shell and then
+    /// `respawn-pane -k`ing the real program, because a window option cannot be
+    /// set before `new-session` has already launched its command -- and a CLI
+    /// that dies in under a second dies inside exactly that gap.
+    ///
+    /// Opt-in rather than the default, because a dead pane keeps the SESSION
+    /// alive, and `tmux has-session` is the only liveness signal several
+    /// callers have (`cli/recover.rs`, `components/session_recovery.rs`,
+    /// `app/snapshot.rs`, `InteractiveSessionManager::is_session_alive`). Turn
+    /// it on for a launch whose failure mode is worth the pane, not for every
+    /// session, or normally-finished sessions stop being reclaimable.
+    #[must_use]
+    pub fn keeping_dead_pane(mut self, remain_on_exit: bool) -> Self {
+        self.remain_on_exit = remain_on_exit;
+        self
     }
 
     /// Seed environment variables into the session at creation (`-e KEY=VAL`).
@@ -129,7 +152,13 @@ impl TmuxSession {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
         }
-        args.push(self.program.clone());
+        // With `remain_on_exit` the program is deliberately NOT the session's
+        // initial command: it is respawned below, once the option is in place.
+        // Passing it here would race the option against a CLI that exits in
+        // under a second, which is the whole case this exists for.
+        if !self.remain_on_exit {
+            args.push(self.program.clone());
+        }
         let status = Command::new("tmux")
             .args(&args)
             .status()
@@ -138,6 +167,25 @@ impl TmuxSession {
 
         if !status.success() {
             anyhow::bail!("Failed to create tmux session '{}'", self.sanitized_name);
+        }
+
+        if self.remain_on_exit {
+            let target = format!("={}", self.sanitized_name);
+            Command::new("tmux")
+                .args(["set-option", "-w", "-t", &target, "remain-on-exit", "on"])
+                .status()
+                .await
+                .context("Failed to set remain-on-exit")?;
+            // `-k` kills the holder shell. The pane keeps the cwd it was created
+            // with, so `-c` is not needed here.
+            let status = Command::new("tmux")
+                .args(["respawn-pane", "-k", "-t", &target, &self.program])
+                .status()
+                .await
+                .context("Failed to respawn tmux pane with the program")?;
+            if !status.success() {
+                anyhow::bail!("Failed to launch '{}' in tmux", self.sanitized_name);
+            }
         }
 
         // Configure tmux session settings
