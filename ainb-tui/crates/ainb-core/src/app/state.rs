@@ -10916,73 +10916,51 @@ impl AppState {
             .stderr(Stdio::null())
             .spawn()
         {
-            Ok(mut child) => {
-                // Wait up to 3 seconds for docker info to respond
-                let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_secs(3);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => return status.success(),
-                        Ok(None) => {
-                            if start.elapsed() > timeout {
-                                let _ = child.kill();
-                                warn!("docker info timed out after 3s - Docker not available");
-                                return false;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        Err(_) => return false,
-                    }
+            Ok(mut child) => match wait_or_reap(&mut child, std::time::Duration::from_secs(3)) {
+                Some(succeeded) => succeeded,
+                // Timed out, or could not be polled: either way the child has
+                // been killed and reaped, and Docker has not answered.
+                None => {
+                    warn!("docker info did not answer within 3s - Docker not available");
+                    false
                 }
-            }
+            },
             Err(_) => false,
         }
     }
 
     /// Check if Docker is available and running
     async fn is_docker_available(&self) -> bool {
-        // Use spawn + timeout to avoid hanging when Docker daemon isn't responding
-        match std::process::Command::new("docker")
+        // `tokio::process` rather than `std::process`: on timeout the future is
+        // dropped, and `kill_on_drop` then signals the child and lets tokio's
+        // reaper collect it. A `std::process::Child` dropped here would be left
+        // running against a wedged Docker socket and orphaned to launchd when
+        // the TUI exits, which is how 117 `com.docker.cli` processes piled up.
+        let output = tokio::process::Command::new("docker")
             .args(["version", "--format", "{{.Server.Version}}"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => {
-                // Wrap in tokio timeout
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || child.wait_with_output()),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(output))) => {
-                        if output.status.success() {
-                            let version = String::from_utf8_lossy(&output.stdout);
-                            info!("Docker is available, version: {}", version.trim());
-                            true
-                        } else {
-                            let error = String::from_utf8_lossy(&output.stderr);
-                            warn!("Docker command failed: {}", error);
-                            false
-                        }
-                    }
-                    Ok(Ok(Err(e))) => {
-                        warn!("Docker command error: {}", e);
-                        false
-                    }
-                    Ok(Err(e)) => {
-                        warn!("Docker task join error: {}", e);
-                        false
-                    }
-                    Err(_) => {
-                        warn!("Docker version timed out after 3s - Docker not available");
-                        false
-                    }
+            .kill_on_drop(true)
+            .output();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(3), output).await {
+            Ok(Ok(output)) => {
+                if output.status.success() {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    info!("Docker is available, version: {}", version.trim());
+                    true
+                } else {
+                    let error = String::from_utf8_lossy(&output.stderr);
+                    warn!("Docker command failed: {}", error);
+                    false
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("Docker not found or not accessible: {}", e);
+                false
+            }
+            Err(_) => {
+                warn!("Docker version timed out after 3s - Docker not available");
                 false
             }
         }
@@ -12159,6 +12137,52 @@ impl AppState {
     }
 }
 
+/// Wait up to `timeout` for `child`, returning whether it exited successfully,
+/// or `None` when it had to be killed.
+///
+/// The kill path also `wait()`s. A signalled child that is never waited on stays
+/// a zombie held by this process, and one that outlives the signal (a `docker
+/// info` blocked on an unresponsive Docker socket) reparents to launchd when we
+/// exit: 117 such `com.docker.cli` processes, aged up to four days, were reaped
+/// from one machine. Issue #785.
+fn wait_or_reap(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<bool> {
+    /// Kill the child and reap it. A signalled child that is never waited on
+    /// stays a zombie; one that outlives the signal reparents to launchd when
+    /// we exit.
+    fn kill_and_reap(child: &mut std::process::Child) {
+        if let Err(e) = child.kill() {
+            warn!("could not kill probe (pid {}): {}", child.id(), e);
+        }
+        // SIGKILL cannot be ignored, so this returns as soon as the kernel has
+        // torn the child down.
+        if let Err(e) = child.wait() {
+            warn!("could not reap probe: {}", e);
+        }
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    kill_and_reap(child);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // A failed `try_wait` says nothing about the child, so it is still
+            // running and still ours to clean up. Returning here without the
+            // kill leaves exactly the orphan this function exists to prevent.
+            Err(e) => {
+                warn!("could not poll probe (pid {}): {}", child.id(), e);
+                kill_and_reap(child);
+                return None;
+            }
+        }
+    }
+}
+
 /// `true` when a `ui.close_request` payload names the currently-focused
 /// plugin screen AND was published by the plugin that owns it. Rejects:
 /// requests while a non-plugin screen is focused (a plugin can't close
@@ -13297,6 +13321,81 @@ mod seeded_category_tests {
                 .unwrap()
                 .as_str(),
             Some("/opt/mine")
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_reap_tests {
+    //! Issue #785: the probe's timeout path killed its child without reaping
+    //! it, leaving a zombie, and a child that outlived the signal orphaned to
+    //! launchd. Repeated probes against a Docker that never answers must leave
+    //! nothing behind.
+
+    use std::time::Duration;
+
+    use super::wait_or_reap;
+
+    /// The `ps` state letter for `pid`, or `None` when no such process exists.
+    /// A survivor reads `S`/`R`; a killed-but-unreaped child reads `Z`.
+    fn process_state(pid: u32) -> Option<String> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!state.is_empty()).then_some(state)
+    }
+
+    /// Stands in for `docker info` against a wedged socket: a child that will
+    /// not answer inside the probe's budget. Every pid asserted on below is one
+    /// this test spawned itself.
+    fn unresponsive_probe() -> std::process::Child {
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn probe stand-in")
+    }
+
+    #[test]
+    fn repeated_timed_out_probes_leave_no_child_and_no_zombie() {
+        let mut pids = Vec::new();
+        for _ in 0..5 {
+            let mut child = unresponsive_probe();
+            pids.push(child.id());
+            assert_eq!(
+                wait_or_reap(&mut child, Duration::from_millis(100)),
+                None,
+                "an unresponsive probe must report a timeout"
+            );
+        }
+
+        for pid in pids {
+            let state = process_state(pid);
+            assert!(
+                state.is_none(),
+                "pid {pid} outlived the probe (ps state {state:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_that_answers_in_time_reports_its_status() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn probe");
+        assert_eq!(wait_or_reap(&mut child, Duration::from_secs(5)), Some(true));
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn probe");
+        assert_eq!(
+            wait_or_reap(&mut child, Duration::from_secs(5)),
+            Some(false)
         );
     }
 }
