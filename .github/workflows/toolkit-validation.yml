@@ -78,10 +78,12 @@ jobs:
           workspaces: ainb-tui
 
       - name: Clone pinned ainb-toolkit
+        env:
+          TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
         run: |
           git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
             https://github.com/stevengonsalvez/ainb-toolkit.git \
-            "${{ github.workspace }}/ainb-toolkit"
+            "${TOOLKIT_DIR}"
 
       - name: Enforce every embedded template skill resolves in ainb-toolkit
         env:
@@ -93,10 +95,12 @@ jobs:
           cargo test -p ainb-hangar-core --test template_registry_tests -- --nocapture
 
       - name: Generate catalog index from the pinned ainb-toolkit (sanity)
+        env:
+          TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
         run: |
           cd ainb-tui
           cargo run -p xtask -- gen-catalog-index \
-            --toolkit-root "${{ github.workspace }}/ainb-toolkit" \
+            --toolkit-root "${TOOLKIT_DIR}" \
             --release-tag "${AINB_TOOLKIT_REF}" \
             --out "${RUNNER_TEMP}/catalog-index.json"
           # Owned URIs must pin the cloned ainb-toolkit ref.

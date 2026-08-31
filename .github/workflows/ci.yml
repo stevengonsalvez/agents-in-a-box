@@ -178,6 +178,15 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    if: '!cancelled()'
     # 40 against a 28.7min p95. A macOS leg once sat here for 97 minutes with
     # the nextest step never recording a completion, and with no budget set
     # nothing would have killed it before GitHub's 360min default.
@@ -375,6 +384,15 @@ jobs:
   ainb-hooks:
     name: ainb-hooks (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    if: '!cancelled()'
     timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
@@ -401,7 +419,10 @@ jobs:
       # nothing is ever proven and reaping silently becomes a no-op, which fails
       # `reap_signals_a_notifyd_serving_this_home` on Linux while macOS passes.
       - name: Install tmux and lsof (Linux only; macOS runner ships them)
-        if: matrix.os == 'ubuntu-latest'
+        if: >-
+          matrix.os == 'ubuntu-latest' && !cancelled() &&
+          (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
       - name: Verify hook script parses on the runner
         if: >-
@@ -471,6 +492,15 @@ jobs:
   fleet-send-tmux:
     name: fleet send integrity (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    if: '!cancelled()'
     timeout-minutes: 15
     runs-on: ${{ matrix.os }}
     strategy:
@@ -531,6 +561,15 @@ jobs:
   hangar-e2e:
     name: hangar-e2e (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    if: '!cancelled()'
     timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     strategy:
