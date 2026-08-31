@@ -58,6 +58,10 @@ jobs:
       relevant: ${{ steps.filter.outputs.relevant }}
       acp: ${{ steps.filter.outputs.acp }}
     steps:
+      # THROWAWAY PROBE, DO NOT MERGE. Forces the `changes` job to FAIL before
+      # the filter can set `relevant`, so downstream jobs see a missing output.
+      - name: Force changes to fail (probe)
+        run: exit 1
       - uses: dorny/paths-filter@v3
         if: github.event_name == 'pull_request'
         id: filter
