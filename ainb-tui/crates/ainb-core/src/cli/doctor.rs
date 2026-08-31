@@ -151,9 +151,11 @@ fn repair_stale_daemons(daemons: &[crate::fleet::daemons::DaemonStatus]) -> Vec<
     }
     let hangar = crate::cli::hangar::daemon_runtime_status();
     if hangar.old {
-        let outcome = crate::cli::hangar::start_or_upgrade_daemon_from_current()
-            .map(|_| "Hangar restarted against current Ainb".to_string())
-            .unwrap_or_else(|error| format!("Hangar restart failed: {error:#}"));
+        let outcome = crate::cli::hangar::start_or_upgrade_daemon_from_current(
+            crate::cli::hangar::LauncherLifetime::Ephemeral,
+        )
+        .map(|_| "Hangar restarted against current Ainb".to_string())
+        .unwrap_or_else(|error| format!("Hangar restart failed: {error:#}"));
         outcomes.push(outcome);
     }
     if outcomes.is_empty() {

@@ -43,7 +43,7 @@
   </defs>
   <rect width="960.0" height="700.0" fill="#ffffff"/>
   <text x="480.0" y="56" text-anchor="middle" class="title">ainb-hooks — lifecycle events to the notification inbox</text>
-  <text x="480.0" y="82" text-anchor="middle" class="subtitle">CLAUDE CODE / CODEX PLUGIN · v0.1.0</text>
+  <text x="480.0" y="82" text-anchor="middle" class="subtitle">CLAUDE CODE / CODEX PLUGIN · v0.4.8</text>
   <path d="M 280.0,180.0 L 380.0,180.0" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
   <path d="M 590.0,180.0 L 690.0,180.0" fill="none" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
   <path d="M 790.0,225.0 L 790.0,330.0" fill="none" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>

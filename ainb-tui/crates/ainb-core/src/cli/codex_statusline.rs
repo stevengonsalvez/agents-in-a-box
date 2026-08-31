@@ -98,12 +98,13 @@ pub fn codex_cache_path() -> Option<PathBuf> {
     Some(dir.join("ainb").join("codex-live.json"))
 }
 
-/// Effective throttle TTL (env override → default).
+/// Effective throttle TTL: `AINB_CODEX_USAGE_TTL_SECS`, else
+/// `usage_client.codex_ttl_secs`, else [`CODEX_USAGE_TTL_SECS`].
 fn ttl_secs() -> u64 {
-    std::env::var("AINB_CODEX_USAGE_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(CODEX_USAGE_TTL_SECS)
+    crate::config::tunables::resolved(
+        "AINB_CODEX_USAGE_TTL_SECS",
+        crate::config::tunables::snapshot().usage_client.codex_ttl_secs,
+    )
 }
 
 // ---- wham/usage response shape (only the fields we read) ----

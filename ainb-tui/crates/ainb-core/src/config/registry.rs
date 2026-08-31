@@ -146,6 +146,20 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         kind: RowKind::Text,
     }),
     Entry::Row(ConfigRow {
+        key: "general.syntax_highlight",
+        category: C::General,
+        label: "Syntax Highlighting",
+        help: "Colourise fenced code blocks in agent output (NO_COLOR still wins)",
+        kind: RowKind::Bool,
+    }),
+    Entry::Row(ConfigRow {
+        key: "general.skill_install_real_homes",
+        category: C::General,
+        label: "Install Skills To Real Tool Homes",
+        help: "Write installs to ~/.claude, ~/.codex … not ainb's sandbox (restart to apply)",
+        kind: RowKind::Bool,
+    }),
+    Entry::Row(ConfigRow {
         key: "presets.file",
         category: C::Presets,
         label: "Presets File",
@@ -516,6 +530,23 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         help: "When a worktree path already exists: rename automatically, or fail",
         kind: RowKind::Choice(&["auto_rename", "error"]),
     }),
+    Entry::Row(ConfigRow {
+        key: "workspace_defaults.scan_max_depth",
+        category: C::Workspace,
+        label: "Scan Depth",
+        help: "Directory levels below each scan path the repo scanner descends",
+        kind: RowKind::Number { min: 1, max: 16 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "workspace_defaults.scan_cache_ttl_secs",
+        category: C::Workspace,
+        label: "Scan Cache TTL",
+        help: "Seconds a cached repository scan stays fresh before walking disk again",
+        kind: RowKind::Number {
+            min: 0,
+            max: 604_800,
+        },
+    }),
     // ── UI preferences ─────────────────────────────────────────────────────
     Entry::Row(ConfigRow {
         key: "ui_preferences.theme",
@@ -584,6 +615,61 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "ui_preferences.config_tree_expanded",
         why: "which nodes of this very screen's tree are open; written by the expand keypress, like the sidebar widths",
     },
+    // ── UI tunables ────────────────────────────────────────────────────────
+    // `[ui]`, not `[ui_preferences]`: that section is what the interface LOOKS
+    // like and the TUI writes it back; these are cadences and query bounds a
+    // user tunes for a slow terminal or a very large fleet.
+    Entry::Row(ConfigRow {
+        key: "ui.tick_rate_ms",
+        category: C::Appearance,
+        label: "Event Poll Interval",
+        help: "Milliseconds between input polls; lower feels snappier (restart to apply)",
+        kind: RowKind::Number { min: 1, max: 1000 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "ui.app_tick_ms",
+        category: C::Appearance,
+        label: "App Tick Interval",
+        help: "Milliseconds between heavy periodic passes, e.g. previews (restart to apply)",
+        kind: RowKind::Number {
+            min: 1,
+            max: 60_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "ui.session_query_limit",
+        category: C::Appearance,
+        label: "Attention Query Limit",
+        help: "Rows the attention-marker query reads per refresh",
+        kind: RowKind::Number {
+            min: 1,
+            max: 100_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "ui.session_lookback_hours",
+        category: C::Appearance,
+        label: "Attention Lookback",
+        help: "Hours back an event may still raise a session's attention marker",
+        kind: RowKind::Number { min: 1, max: 8760 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "ui.inbox_list_limit",
+        category: C::Appearance,
+        label: "Inbox Row Limit",
+        help: "Rows the Inbox lists; the query runs every render, so keep it modest",
+        kind: RowKind::Number {
+            min: 1,
+            max: 100_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "ui.double_click_ms",
+        category: C::Appearance,
+        label: "Double-Click Window",
+        help: "Milliseconds in which two clicks count as one double-click",
+        kind: RowKind::Number { min: 50, max: 2000 },
+    }),
     // ── Docker ─────────────────────────────────────────────────────────────
     Entry::Row(ConfigRow {
         key: "docker.host",
@@ -746,6 +832,60 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         label: "Jump-To Terminal",
         help: "Terminal the macOS Fleet app opens when you jump to a session",
         kind: RowKind::Choice(&["warp", "iterm", "ghostty", "terminal"]),
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.idle_min",
+        category: C::Fleet,
+        label: "Idle Threshold",
+        help: "Minutes of quiet before a session reads IDLE, tmux and hooks alike (restart)",
+        kind: RowKind::Number {
+            min: 1,
+            max: 10_080,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.transport",
+        category: C::Fleet,
+        label: "Send Transport",
+        help: "How `ainb fleet send` delivers: tmux first, tmux only, broker (restart)",
+        kind: RowKind::Choice(&["tmux", "tmux-only", "broker"]),
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.enrich",
+        category: C::Fleet,
+        label: "Row Enrichment",
+        help: "Attach cost/hint enrichment to fleet rows; off spends no tokens",
+        kind: RowKind::Bool,
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.state_stale_ms",
+        category: C::Fleet,
+        label: "Sticky State Staleness",
+        help: "Milliseconds before an ASK/ERR/WAIT/IDLE row falls back to a live scan; 0 = never",
+        kind: RowKind::Number {
+            min: 0,
+            max: 86_400_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.healthy_state_stale_ms",
+        category: C::Fleet,
+        label: "Healthy State Staleness",
+        help: "Milliseconds before a RUNNING/DONE row stops suppressing the live scan",
+        kind: RowKind::Number {
+            min: 0,
+            max: 86_400_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "fleet.tmux_idle_after_secs",
+        category: C::Fleet,
+        label: "tmux Idle After",
+        help: "Seconds of pane silence before tmux discovery calls a session idle (restart)",
+        kind: RowKind::Number {
+            min: 1,
+            max: 86_400,
+        },
     }),
     // ── Fleet bridge ───────────────────────────────────────────────────────
     // Parsed by `fleet::bridge::config` off the same file; `ainb-core` carries
@@ -931,6 +1071,122 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
             max: 604_800,
         },
     }),
+    // ── Usage client ───────────────────────────────────────────────────────
+    // Core's half of usage. `[usage]` above is the burndown plugin's and is
+    // read-only here; see `UsageClientConfig` for why these are not folded in.
+    Entry::Row(ConfigRow {
+        key: "usage_client.headroom_port",
+        category: C::Usage,
+        label: "Headroom Proxy Port",
+        help: "Port the ainb-managed Headroom compression proxy listens on (restart)",
+        kind: RowKind::Number {
+            min: 1,
+            max: 65_535,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "usage_client.fetch_timeout_secs",
+        category: C::Usage,
+        label: "Usage Fetch Timeout",
+        help: "Seconds `ainb usage` waits for data; raise it against a huge session archive",
+        kind: RowKind::Number {
+            min: 1,
+            max: 86_400,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "usage_client.codex_ttl_secs",
+        category: C::Usage,
+        label: "Codex Statusline TTL",
+        help: "Seconds between Codex statusline usage refreshes",
+        kind: RowKind::Number {
+            min: 1,
+            max: 86_400,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "usage_client.cache_db",
+        category: C::Usage,
+        label: "Usage Cache DB",
+        help: "Path to the usage cache database; blank derives it under the state dir (restart)",
+        kind: RowKind::Text,
+    }),
+    // ── Daemons ────────────────────────────────────────────────────────────
+    Entry::Row(ConfigRow {
+        key: "daemons.stale_after_ms",
+        category: C::Daemons,
+        label: "Heartbeat Staleness",
+        help: "Milliseconds without a heartbeat before a live-pid daemon reads stale",
+        kind: RowKind::Number {
+            min: 1_000,
+            max: 86_400_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "daemons.attention_stale_after_ms",
+        category: C::Daemons,
+        label: "Bridge Push Staleness",
+        help: "Milliseconds without a successful attention poll before the bridge reads broken",
+        kind: RowKind::Number {
+            min: 1_000,
+            max: 86_400_000,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "notifyd.os_debounce_secs",
+        category: C::Daemons,
+        label: "OS Notification Debounce",
+        help: "Seconds one session/event pair waits before notifying again (daemon restart)",
+        kind: RowKind::Number {
+            min: 0,
+            max: 86_400,
+        },
+    }),
+    Entry::Row(ConfigRow {
+        key: "notifyd.approval_timeout_secs",
+        category: C::Daemons,
+        label: "Approval Timeout",
+        help: "Seconds an unanswered permission request waits before auto-DENY (daemon restart)",
+        kind: RowKind::Number { min: 1, max: 630 },
+    }),
+    // ── Web dashboard ──────────────────────────────────────────────────────
+    // No token row: `--token` puts it in the OS keychain, never in this file.
+    Entry::Row(ConfigRow {
+        key: "web.listen",
+        category: C::Web,
+        label: "Listen Address",
+        help: "host:port `ainb web` binds by default; --listen still overrides",
+        kind: RowKind::Text,
+    }),
+    Entry::Row(ConfigRow {
+        key: "web.read_only",
+        category: C::Web,
+        label: "Read-Only",
+        help: "Serve viewer-only: the live terminal and POST /api/answer are refused",
+        kind: RowKind::Bool,
+    }),
+    Entry::Row(ConfigRow {
+        key: "web.insecure_bind",
+        category: C::Web,
+        label: "Allow Insecure Bind",
+        help: "DANGEROUS: serves an unauthenticated control surface to the network. Only with read-only; prefer a token",
+        kind: RowKind::Bool,
+    }),
+    // ── ACP adapters ───────────────────────────────────────────────────────
+    Entry::Row(ConfigRow {
+        key: "acp.adapters.*.command",
+        category: C::Acp,
+        label: "Adapter Command",
+        help: "Executable for this adapter; blank resolves its name on PATH (daemon restart)",
+        kind: RowKind::Text,
+    }),
+    Entry::Row(ConfigRow {
+        key: "acp.adapters.*.permission_mode",
+        category: C::Acp,
+        label: "Permission Mode",
+        help: "Mode pinned at session/new, re-asserted after session/load (daemon restart)",
+        kind: RowKind::Choice(&["default", "acceptEdits", "bypassPermissions", "plan"]),
+    }),
     // ── Sections owned by other crates ─────────────────────────────────────
     // Same file, different parser. See EXTERNAL_PREFIXES.
     Entry::Row(ConfigRow {
@@ -957,7 +1213,69 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
             max: 36_500,
         },
     }),
+    // ── Hangar daemon ──────────────────────────────────────────────────────
+    // A SECOND write backend: these live in the `daemon_config` SQLite table,
+    // not in config.toml, and are written over the daemon's control socket.
+    // Mirrored from `ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`
+    // (which cannot be iterated into a `const`), and pinned to it by
+    // `hangar_daemon_rows_match_the_daemon_registry`.
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.autostandup.enabled",
+        category: C::HangarDaemon,
+        label: "Auto-standup",
+        help: "Globally enable the auto-standup watcher (opt-in)",
+        kind: RowKind::Bool,
+    }),
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.autostandup.stagnant_min",
+        category: C::HangarDaemon,
+        label: "Stagnant Minutes",
+        help: "Minutes a session must be idle before a standup fires",
+        kind: RowKind::Number { min: 1, max: 1440 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.autostandup.cooldown_min",
+        category: C::HangarDaemon,
+        label: "Cooldown Minutes",
+        help: "Per-session minutes between successive standups",
+        kind: RowKind::Number { min: 1, max: 1440 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.autostandup.max_concurrent",
+        category: C::HangarDaemon,
+        label: "Max Concurrent",
+        help: "Maximum simultaneous in-flight standups",
+        kind: RowKind::Number { min: 1, max: 64 },
+    }),
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.card_agent.default",
+        category: C::HangarDaemon,
+        label: "Default Agent",
+        help: "Host-wide default provider backend for new cards",
+        kind: RowKind::Choice(&["claude", "codex", "copilot"]),
+    }),
+    Entry::Row(ConfigRow {
+        key: "hangar_daemon.workspace.creation_disabled",
+        category: C::HangarDaemon,
+        label: "Lock Workspace Creation",
+        help: "Refuse every new-workspace create on this instance (self-host lockdown)",
+        kind: RowKind::Bool,
+    }),
 ];
+
+/// The registry-key prefix for a knob backed by the Hangar daemon's
+/// `daemon_config` SQLite table rather than config.toml.
+///
+/// Strip it to get the `daemon_config` key
+/// (`hangar_daemon.autostandup.enabled` → `autostandup.enabled`).
+pub const HANGAR_DAEMON_PREFIX: &str = "hangar_daemon.";
+
+/// The `daemon_config` key a `hangar_daemon.*` registry key names, or `None`
+/// for any other key.
+#[must_use]
+pub fn hangar_daemon_key(key: &str) -> Option<&str> {
+    key.strip_prefix(HANGAR_DAEMON_PREFIX)
+}
 
 /// Top-level prefixes that live in `config.toml` but not in
 /// [`AppConfig`](crate::config::AppConfig)'s serde shape.
@@ -965,10 +1283,17 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
 /// `[fleet.bridge]` is carried as an opaque `toml::Value` passthrough (its
 /// tokens are parsed by `fleet::bridge::config`), and `[skills]` /
 /// `[session_reader]` are parsed off the same file by `ainb-cli` and the
-/// session-reader plugin. Their leaves are registered by hand above and are
-/// skipped by the schema walk in both directions: nothing here can prove they
-/// exist, so nothing here should claim they don't.
-pub const EXTERNAL_PREFIXES: &[&str] = &["fleet.bridge.", "skills.", "session_reader."];
+/// session-reader plugin. `hangar_daemon.` is not in this file at all: it is
+/// the Hangar daemon's `daemon_config` SQLite table, reached over the control
+/// socket. Their leaves are registered by hand above and are skipped by the
+/// schema walk in both directions: nothing here can prove they exist, so
+/// nothing here should claim they don't.
+pub const EXTERNAL_PREFIXES: &[&str] = &[
+    "fleet.bridge.",
+    "skills.",
+    "session_reader.",
+    "hangar_daemon.",
+];
 
 /// Registry keys whose schema field is an `Option`: clearing the widget must
 /// REMOVE the key rather than store an empty value.
@@ -983,6 +1308,7 @@ pub const EXTERNAL_PREFIXES: &[&str] = &["fleet.bridge.", "skills.", "session_re
 /// by `optional_keys_match_the_schema` — which DERIVES the true set by dropping
 /// each leaf and checking whether serde puts it back.
 pub const OPTIONAL_KEYS: &[&str] = &[
+    "acp.adapters.*.command",
     "authentication.github_method",
     "container_templates.*.config.command",
     "container_templates.*.config.cpu_limit",
@@ -1001,6 +1327,7 @@ pub const OPTIONAL_KEYS: &[&str] = &[
     "fleet.terminal",
     "ui_preferences.preferred_editor",
     "usage.model_aliases.*",
+    "usage_client.cache_db",
 ];
 
 /// True when clearing this row's widget should remove the key.
@@ -1012,6 +1339,7 @@ pub fn is_optional(key: &str) -> bool {
 /// Registry paths whose direct children are user-chosen map keys rather than
 /// schema field names. The child segment normalises to `*`.
 const MAP_PARENTS: &[&str] = &[
+    "acp.adapters",
     "container_templates",
     "container_templates.*.config.environment",
     "container_templates.*.config.image_source.build_args",
@@ -1484,11 +1812,13 @@ mod tests {
     use crate::app::state::SessionFilter;
     use crate::config::container::{ImageSource, VolumeMount};
     use crate::config::{
-        AppConfig, AuthenticationConfig, ClaudeAuthProvider, CliProvider, ContainerTemplate,
-        ContainerTemplateConfig, CostBudgetConfig, CurrencyConfig, DockerConfig, FleetConfig,
-        InterviewConfig, McpInstallation, McpPoolConfig, McpServerConfig, McpServerDefinition,
-        PluginsConfig, PresetsConfig, StatuslineDecision, TmuxDecision, UiPreferences, UsageConfig,
-        UsagePlan, UsagePlanId, UsagePlanProvider, WorkspaceDefaults, WorktreeCollisionBehavior,
+        AcpAdapterConfig, AcpConfig, AppConfig, AuthenticationConfig, ClaudeAuthProvider,
+        CliProvider, ContainerTemplate, ContainerTemplateConfig, CostBudgetConfig, CurrencyConfig,
+        DaemonsConfig, DockerConfig, FleetConfig, GeneralConfig, InterviewConfig, McpInstallation,
+        McpPoolConfig, McpServerConfig, McpServerDefinition, NotifydConfig, PluginsConfig,
+        PresetsConfig, StatuslineDecision, TmuxDecision, UiConfig, UiPreferences,
+        UsageClientConfig, UsageConfig, UsagePlan, UsagePlanId, UsagePlanProvider, WebServerConfig,
+        WorkspaceDefaults, WorktreeCollisionBehavior,
     };
     use std::collections::{BTreeMap, HashMap};
 
@@ -1522,6 +1852,8 @@ mod tests {
                 workspace_scan_paths: vec!["/tmp/repos".into()],
                 max_repositories: 500,
                 worktree_collision_behavior: WorktreeCollisionBehavior::Error,
+                scan_max_depth: 4,
+                scan_cache_ttl_secs: 1800,
             },
             ui_preferences: UiPreferences {
                 theme: "light".to_string(),
@@ -1582,6 +1914,12 @@ mod tests {
                     surface: Some("fleet".to_string()),
                 },
                 terminal: Some("ghostty".to_string()),
+                idle_min: 7,
+                transport: "broker".to_string(),
+                enrich: false,
+                state_stale_ms: 120_000,
+                healthy_state_stale_ms: 240_000,
+                tmux_idle_after_secs: 90,
                 // `[fleet.bridge]` is an opaque passthrough parsed elsewhere;
                 // its rows are hand-declared and walk-exempt. See
                 // EXTERNAL_PREFIXES.
@@ -1592,6 +1930,46 @@ mod tests {
                 idle_grace_secs: 300,
                 monitor_refresh_secs: 2,
                 daemon_idle_grace_secs: 900,
+            },
+            general: GeneralConfig {
+                syntax_highlight: false,
+                skill_install_real_homes: false,
+            },
+            ui: UiConfig {
+                tick_rate_ms: 16,
+                app_tick_ms: 500,
+                session_query_limit: 250,
+                session_lookback_hours: 12,
+                inbox_list_limit: 100,
+                double_click_ms: 400,
+            },
+            daemons: DaemonsConfig {
+                stale_after_ms: 120_000,
+                attention_stale_after_ms: 60_000,
+            },
+            usage_client: UsageClientConfig {
+                headroom_port: 9787,
+                fetch_timeout_secs: 300,
+                codex_ttl_secs: 30,
+                cache_db: Some("/tmp/usage.db".to_string()),
+            },
+            notifyd: NotifydConfig {
+                os_debounce_secs: 30,
+                approval_timeout_secs: 300,
+            },
+            web: WebServerConfig {
+                listen: "0.0.0.0:8420".to_string(),
+                read_only: true,
+                insecure_bind: true,
+            },
+            acp: AcpConfig {
+                adapters: HashMap::from([(
+                    "claude-agent-acp".to_string(),
+                    AcpAdapterConfig {
+                        command: Some("/opt/bin/claude-agent-acp".to_string()),
+                        permission_mode: "acceptEdits".to_string(),
+                    },
+                )]),
             },
         }
     }
@@ -2018,6 +2396,70 @@ mod tests {
             "workspace_defaults.worktree_collision_behavior",
             &collisions,
         );
+    }
+
+    /// The `hangar_daemon.*` rows must name exactly the daemon's own knobs, in
+    /// the same shape.
+    ///
+    /// They cannot be generated: `CONFIG_REGISTRY` is a `static` of const
+    /// values and `DAEMON_CONFIG_REGISTRY` cannot be iterated into one. So they
+    /// are hand-mirrored and pinned here instead. Adding a daemon knob without
+    /// adding a row leaves it unreachable from the settings screen and from
+    /// `ainb config set`, which is the drift this whole registry exists to
+    /// stop, one backend over.
+    #[test]
+    fn hangar_daemon_rows_match_the_daemon_registry() {
+        use ainb_hangar_core::daemon_config::{ConfigKind, DAEMON_CONFIG_REGISTRY};
+
+        let mirrored: Vec<&str> = CONFIG_REGISTRY
+            .iter()
+            .filter_map(|entry| hangar_daemon_key(entry.key()))
+            .collect();
+        let declared: Vec<&str> = DAEMON_CONFIG_REGISTRY.iter().map(|d| d.key).collect();
+        assert_eq!(
+            mirrored, declared,
+            "the hangar_daemon.* rows have drifted from DAEMON_CONFIG_REGISTRY"
+        );
+
+        for descriptor in DAEMON_CONFIG_REGISTRY {
+            let key = format!("{HANGAR_DAEMON_PREFIX}{}", descriptor.key);
+            let row = row(&key).unwrap_or_else(|| panic!("{key} is registered"));
+            match descriptor.kind {
+                ConfigKind::Bool => assert_eq!(
+                    row.kind,
+                    RowKind::Bool,
+                    "{key} is a bool in the daemon registry"
+                ),
+                ConfigKind::Int { min, max, .. } => assert_eq!(
+                    row.kind,
+                    RowKind::Number { min, max },
+                    "{key} must carry the daemon's own range"
+                ),
+                ConfigKind::Enum { variants } => match row.kind {
+                    RowKind::Choice(options) => assert_eq!(
+                        options, variants,
+                        "{key} must offer the daemon's own variants"
+                    ),
+                    other => panic!("{key} must be a choice row, got {other:?}"),
+                },
+            }
+            // The mirrored default has to be one the daemon would itself accept,
+            // or the row seeds with a value the store would reject on save.
+            descriptor
+                .validate(descriptor.default)
+                .unwrap_or_else(|why| panic!("{key} default is invalid: {why}"));
+        }
+    }
+
+    /// A `hangar_daemon.*` key is walk-exempt: it is not in config.toml at all.
+    #[test]
+    fn hangar_daemon_keys_are_external() {
+        assert!(is_external("hangar_daemon.autostandup.enabled"));
+        assert_eq!(
+            hangar_daemon_key("hangar_daemon.card_agent.default"),
+            Some("card_agent.default")
+        );
+        assert_eq!(hangar_daemon_key("docker.timeout"), None);
     }
 
     // --- key normalisation ---

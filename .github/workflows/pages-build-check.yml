@@ -14,9 +14,14 @@ on:
       - "docs/**"
       - ".github/workflows/pages-build-check.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build site
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     defaults:
       run:

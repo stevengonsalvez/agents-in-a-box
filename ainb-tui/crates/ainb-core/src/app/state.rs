@@ -1613,6 +1613,10 @@ pub enum ConfigCategory {
     Skills,
     SessionReader,
     Presets,
+    Daemons,
+    Web,
+    Acp,
+    HangarDaemon,
 }
 
 impl ConfigCategory {
@@ -1634,6 +1638,10 @@ impl ConfigCategory {
             ConfigCategory::Skills,
             ConfigCategory::SessionReader,
             ConfigCategory::Presets,
+            ConfigCategory::Daemons,
+            ConfigCategory::Web,
+            ConfigCategory::Acp,
+            ConfigCategory::HangarDaemon,
         ]
     }
 
@@ -1655,6 +1663,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Skills",
             ConfigCategory::SessionReader => "Session Reader",
             ConfigCategory::Presets => "Presets",
+            ConfigCategory::Daemons => "Daemons",
+            ConfigCategory::Web => "Web Dashboard",
+            ConfigCategory::Acp => "ACP Adapters",
+            ConfigCategory::HangarDaemon => "Hangar Daemon",
         }
     }
 
@@ -1676,6 +1688,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "🎓",
             ConfigCategory::SessionReader => "📖",
             ConfigCategory::Presets => "🗂️",
+            ConfigCategory::Daemons => "🛎️",
+            ConfigCategory::Web => "🌐",
+            ConfigCategory::Acp => "🔗",
+            ConfigCategory::HangarDaemon => "🏗️",
         }
     }
 
@@ -1697,6 +1713,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Catalog release, API key",
             ConfigCategory::SessionReader => "Incremental scan window",
             ConfigCategory::Presets => "Where presets.toml lives",
+            ConfigCategory::Daemons => "Staleness windows, notification debounce, approvals",
+            ConfigCategory::Web => "`ainb web` bind address and read-only mode",
+            ConfigCategory::Acp => "Per-adapter command and pinned permission mode",
+            ConfigCategory::HangarDaemon => "Auto-standup and lockdown (stored in the daemon DB)",
         }
     }
 }
@@ -1888,6 +1908,12 @@ pub struct AppliedEdits {
     /// then dropped, so a value that can never be written cannot wedge every
     /// subsequent save.
     pub rejected: Vec<(String, String)>,
+    /// `(daemon_config key, raw value)` for the `hangar_daemon.*` rows, whose
+    /// backend is the Hangar SQLite `daemon_config` table rather than
+    /// config.toml. Dispatched through
+    /// `pending_daemon_config_edits`,
+    /// because that store is async and this pass is not.
+    pub daemon: Vec<(String, String)>,
 }
 
 /// The settings screen: a section tree on the left, the rows of the selected
@@ -2276,6 +2302,32 @@ impl ConfigScreenState {
         }
     }
 
+    /// Overwrite the `hangar_daemon.*` rows from the daemon's stored values,
+    /// WITHOUT marking them dirty.
+    ///
+    /// `stored` is `(daemon_config key, value)`; a key absent from it keeps the
+    /// coded default the row was seeded with, which is what the daemon applies
+    /// for a key with no row. Deliberately not `set_row_value`: that marks the
+    /// row dirty, and the next save would write these values straight back into
+    /// a database that already holds them.
+    pub fn seed_hangar_daemon_rows(&mut self, stored: &[(String, String)]) {
+        for (daemon_key, value) in stored {
+            let key = format!("{}{daemon_key}", registry::HANGAR_DAEMON_PREFIX);
+            let Some(row) = registry::row(&key) else {
+                continue;
+            };
+            let seeded = row.to_value(Some(&registry::parse_toml_scalar(value)));
+            for rows in self.settings.values_mut() {
+                if let Some(existing) = rows.iter_mut().find(|r| r.key == key) {
+                    existing.value = seeded;
+                    self.dirty.remove(&key);
+                    break;
+                }
+            }
+        }
+        self.refresh_visible_rows();
+    }
+
     pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
         for rows in self.settings.values_mut() {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
@@ -2353,6 +2405,13 @@ impl ConfigScreenState {
 
         let mut applied = AppliedEdits::default();
         for (key, raw) in self.pending_edits() {
+            if let Some(daemon_key) = registry::hangar_daemon_key(&key) {
+                // Not config.toml at all: `save_external_keys` would happily
+                // write a `[hangar_daemon]` section that nothing ever reads,
+                // which is the silent no-op this category exists to avoid.
+                applied.daemon.push((daemon_key.to_string(), raw));
+                continue;
+            }
             if registry::is_external(&key) {
                 // These go through the key-level writer rather than the struct.
                 // `[skills]` and `[session_reader]` are parsed off this file by
@@ -2643,7 +2702,143 @@ fn seed_value(config: &AppConfig) -> toml::Value {
     if let Some(on_disk) = on_disk {
         merge_external_sections(&mut seed, &toml::Value::Table(on_disk));
     }
+    seed_hangar_daemon_defaults(&mut seed);
+    seed_builtin_acp_adapters(&mut seed);
     seed
+}
+
+/// Plant the built-in ACP adapters into the seed so their rows exist.
+///
+/// `acp.adapters.*` rows are wildcards, and `AcpConfig::adapters` defaults empty
+/// with `skip_serializing_if`, so the key was absent from the seed, `expand_key`
+/// returned nothing, and the whole "ACP Adapters" category was filtered out for
+/// having zero rows. It could never render, and there was no way to reach the
+/// adapters from the screen at all.
+///
+/// The built-ins live in `PoolConfig::default()`, not in config.toml, so they
+/// have to be named here for the same reason the Hangar daemon knobs do: the
+/// row has to exist before a user can be the first person to configure it. Only
+/// planted where the user has not already declared the adapter, so a configured
+/// `command` is never overwritten by a default.
+fn seed_builtin_acp_adapters(seed: &mut toml::Value) {
+    for name in ainb_hangar_daemon::acp_pool::PoolConfig::default().adapters.keys() {
+        let base = format!("acp.adapters.{}", registry::quote_key_segment(name));
+        for (field, value) in [
+            ("command", toml::Value::String(String::new())),
+            (
+                "permission_mode",
+                toml::Value::String("default".to_string()),
+            ),
+        ] {
+            let key = format!("{base}.{field}");
+            if registry::navigate_toml(seed, &key).is_err() {
+                let _ = registry::insert_at(seed, &key, value);
+            }
+        }
+    }
+}
+
+/// Plant every Hangar daemon knob's coded default under `hangar_daemon.` in the
+/// seed.
+///
+/// Without this the rows have no value to render at all and every one of them
+/// would seed as an empty widget, which claims the daemon is unconfigured. The
+/// coded default is the honest placeholder: it IS what the daemon runs when a
+/// key has no stored row. `load_hangar_daemon_config` replaces it with
+/// the stored value shortly after startup.
+/// The Hangar SQLite database, when one exists.
+///
+/// `Store::open_default` CREATES the database and runs migrations, which is the
+/// right behaviour for the daemon and the wrong one for a settings screen
+/// painting itself: opening the TUI must not conjure a hangar.db on a machine
+/// that has never run the daemon. So the file is probed first.
+fn hangar_db_path() -> Option<std::path::PathBuf> {
+    let path = ainb_hangar_core::hangar_home()?.join("hangar.db");
+    path.exists().then_some(path)
+}
+
+/// Every stored `daemon_config` value, or `None` when there is no database yet.
+///
+/// Only the keys the registry knows: an internal-state row (the daemon's own
+/// bookkeeping) is not config and must never reach a settings row.
+async fn read_daemon_config() -> anyhow::Result<Option<Vec<(String, String)>>> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+
+    if hangar_db_path().is_none() {
+        return Ok(None);
+    }
+    // Read-only. `Store::open_default` takes a whole-database backup and
+    // applies pending migrations, and this runs on the first app tick of every
+    // launch — so after an upgrade it migrated a running daemon's live schema
+    // out from under it, and blocked the event loop for the length of the copy.
+    // The existence guard above stops creation, not migration.
+    let Some(rows) = ainb_hangar_store::Store::read_daemon_config_read_only().await? else {
+        return Ok(None);
+    };
+    let known: std::collections::HashMap<&str, String> =
+        rows.into_iter()
+            .fold(std::collections::HashMap::new(), |mut acc, (key, value)| {
+                if let Some(descriptor) = DAEMON_CONFIG_REGISTRY.iter().find(|d| d.key == key) {
+                    acc.insert(descriptor.key, value);
+                }
+                acc
+            });
+    let mut stored: Vec<(String, String)> =
+        known.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    stored.sort();
+    Ok(Some(stored))
+}
+
+/// Validate one `daemon_config` edit and write it.
+///
+/// Validation goes through the descriptor, not the core registry: the daemon's
+/// own registry is the authority on what its table accepts, and it is the gate
+/// the RPC handler and the CLI both use.
+async fn write_daemon_config_batch(edits: &[(String, String)]) -> Vec<(String, anyhow::Error)> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let mut failures = Vec::new();
+    // Validate before opening anything: a batch of only-invalid values should
+    // not open the store at all.
+    let mut valid = Vec::with_capacity(edits.len());
+    for (key, raw) in edits {
+        match ainb_hangar_core::daemon_config::descriptor(key) {
+            Some(descriptor) => match descriptor.validate(raw) {
+                Ok(normalized) => valid.push((key.clone(), normalized)),
+                Err(why) => failures.push((key.clone(), anyhow::anyhow!(why))),
+            },
+            None => failures.push((key.clone(), anyhow::anyhow!("not a daemon config key"))),
+        }
+    }
+    if valid.is_empty() {
+        return failures;
+    }
+
+    // ONE open for the whole batch. `open_default` runs a whole-database
+    // VACUUM INTO backup plus migrations, and this runs on the UI task — doing
+    // it per key meant saving three rows paid that cost three times.
+    let store = match ainb_hangar_store::Store::open_default().await {
+        Ok(store) => store,
+        Err(error) => {
+            let message = error.to_string();
+            failures
+                .extend(valid.into_iter().map(|(key, _)| (key, anyhow::anyhow!(message.clone()))));
+            return failures;
+        }
+    };
+    for (key, normalized) in valid {
+        if let Err(error) = DaemonConfigRepo::set(store.pool(), &key, &normalized).await {
+            failures.push((key, error.into()));
+        }
+    }
+    failures
+}
+
+fn seed_hangar_daemon_defaults(seed: &mut toml::Value) {
+    for descriptor in ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY {
+        let key = format!("{}{}", registry::HANGAR_DAEMON_PREFIX, descriptor.key);
+        let _ = registry::insert_at(seed, &key, registry::parse_toml_scalar(descriptor.default));
+    }
 }
 
 /// Copy each [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES) section from the
@@ -3024,6 +3219,22 @@ pub struct AppState {
     pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
+    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
+    /// written to the daemon's SQLite table.
+    ///
+    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
+    /// one action and is drained once per app tick, so two settings edits
+    /// confirmed inside the same 250 ms tick would silently lose the first
+    /// while toasting success for both. Appended to, drained in
+    /// `process_async_action`.
+    pub pending_daemon_config_edits: Vec<(String, String)>,
+    /// Whether the Hangar daemon's stored `daemon_config` values have been read
+    /// into the settings rows yet.
+    ///
+    /// A one-shot of its own rather than a seeded `pending_async_action`: that
+    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
+    /// first keystroke and makes "no action is pending" untestable.
+    pub hangar_daemon_config_loaded: bool,
     // Flag to track if user cancelled during async operation
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
@@ -3679,6 +3890,8 @@ impl Default for AppState {
             help_visible: false,
             new_session_state: None,
             pending_async_action: None,
+            pending_daemon_config_edits: Vec::new(),
+            hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
@@ -5303,7 +5516,9 @@ impl AppState {
                 // Quiet: this runs while the TUI holds the alternate screen, so
                 // the announcing variant's stdout lands on top of the frame.
                 Self::spawn_blocking_restart(tx, kind, || {
-                    crate::cli::hangar::run_daemon_restart_quiet()
+                    crate::cli::hangar::run_daemon_restart_quiet(
+                        crate::cli::hangar::LauncherLifetime::Persistent,
+                    )
                 })
             }
             DaemonRow::Mcp => {
@@ -5425,9 +5640,11 @@ impl AppState {
         o.hangar_start_status = Some("starting / upgrading Hangar daemon…".to_string());
         tokio::spawn(async move {
             let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::start_or_upgrade_daemon_from_current()
-                    .map(|_| "Hangar running against current Ainb".to_string())
-                    .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
+                crate::cli::hangar::start_or_upgrade_daemon_from_current(
+                    crate::cli::hangar::LauncherLifetime::Persistent,
+                )
+                .map(|_| "Hangar running against current Ainb".to_string())
+                .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
             })
             .await
             .unwrap_or_else(|e| format!("Hangar start failed: {e}"));
@@ -10126,7 +10343,79 @@ impl AppState {
         Ok(())
     }
 
+    /// Reseed the `Hangar Daemon` settings rows from the `daemon_config` table.
+    ///
+    /// A missing database is the normal state on a machine that has never run
+    /// the daemon, so it is silent: the rows keep their coded defaults, which is
+    /// what the daemon would apply anyway. A database that exists but cannot be
+    /// read IS reported, because then the rows are showing values that may not
+    /// be what is stored.
+    async fn load_hangar_daemon_config(&mut self) {
+        match read_daemon_config().await {
+            Ok(Some(stored)) => self.config_screen_state.seed_hangar_daemon_rows(&stored),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(%error, "hangar daemon config: could not read stored values");
+                self.add_warning_notification(format!(
+                    "Hangar Daemon settings show defaults: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Write edited `hangar_daemon.*` rows back to the `daemon_config` table.
+    ///
+    /// Every value passes `ConfigDescriptor::validate` first, which is the same
+    /// gate the RPC handler and the `ainb hangar daemon config set` CLI use, so
+    /// the three surfaces cannot disagree about what is legal. Each failure
+    /// raises its own error notification naming the row: a write the user asked
+    /// for that quietly did not happen is worse than one that visibly failed.
+    async fn set_hangar_daemon_config(&mut self, edits: Vec<(String, String)>) {
+        let failures = write_daemon_config_batch(&edits).await;
+        for (key, error) in &failures {
+            warn!(key, %error, "hangar daemon config write failed");
+            self.add_error_notification(format!("hangar_daemon.{key}: {error}"));
+        }
+        // Put a failed row back to the value the database actually holds, and
+        // mark it dirty again so a later `S` retries it. `read_daemon_config`
+        // only returns rows that EXIST, so a first-time write that failed left
+        // the rejected value on screen with `dirty` already cleared: the row
+        // claimed the setting had landed and no later save would ever write it.
+        let failed_rows: Vec<String> =
+            failures.iter().map(|(key, _)| format!("hangar_daemon.{key}")).collect();
+        // Re-read rather than trust the write: the row now shows what the
+        // database holds, including for any write that just failed.
+        self.load_hangar_daemon_config().await;
+        // AFTER the re-seed, not before: `seed_hangar_daemon_rows` clears
+        // `dirty` for every key it finds in the store, so marking the row first
+        // meant the flag was erased on the next line.
+        //
+        // What this does and does not buy: the row now shows the value the
+        // database actually holds, and stays dirty so it is visibly unsaved.
+        // For a key that already had a stored row that means a later `S`
+        // rewrites the STORED value — a no-op — rather than the one the user
+        // typed, because the re-seed has already replaced it. Preserving the
+        // rejected input across a failure needs the row to carry a pending
+        // value distinct from its displayed one, which the widget has no room
+        // for today. The error notification names the row, so the failure is
+        // never silent; re-typing it is the recovery.
+        for row_key in failed_rows {
+            self.config_screen_state.dirty.insert(row_key);
+        }
+    }
+
     pub async fn process_async_action(&mut self) -> anyhow::Result<()> {
+        // Once, on the first app tick: the `Hangar Daemon` settings rows are
+        // seeded with coded defaults synchronously (the store is async and the
+        // screen is not), and this replaces them with what is actually stored.
+        if !self.hangar_daemon_config_loaded {
+            self.hangar_daemon_config_loaded = true;
+            self.load_hangar_daemon_config().await;
+        }
+        if !self.pending_daemon_config_edits.is_empty() {
+            let edits = std::mem::take(&mut self.pending_daemon_config_edits);
+            self.set_hangar_daemon_config(edits).await;
+        }
         if let Some(action) = self.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
@@ -11222,18 +11511,20 @@ impl AppState {
         &self,
         now_ms: i64,
     ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
-        // Only events within this rolling window can mark a session.
-        const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
-        // Bounds query cost; ample for any realistic active fleet.
-        const QUERY_LIMIT: u32 = 500;
+        // Only events within this rolling window can mark a session, and only
+        // this many rows are read per refresh. Both bound query cost on a large
+        // notifications DB; `[ui]` raises them for a very large fleet.
+        let config = crate::config::tunables::snapshot();
+        let lookback_ms = i64::from(config.ui.session_lookback_hours) * 60 * 60 * 1000;
+        let query_limit = config.ui.session_query_limit;
 
         let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
         if !db.exists() {
             return None;
         }
         let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
-        let floor = now_ms - LOOKBACK_MS;
-        match store.recent_since(floor, QUERY_LIMIT) {
+        let floor = now_ms - lookback_ms;
+        match store.recent_since(floor, query_limit) {
             Ok(rows) => Some(rows),
             Err(e) => {
                 debug!("attention: notifications store read failed: {e}");
@@ -12950,6 +13241,87 @@ mod panel_close_tests {
     #[test]
     fn rejects_malformed_payload() {
         assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}
+
+#[cfg(test)]
+mod seeded_category_tests {
+    use super::*;
+
+    /// Categories that describe something already IN FORCE, and so must render
+    /// on a machine that has configured nothing.
+    ///
+    /// `McpServers` is deliberately absent: its rows describe user-created
+    /// servers, and having none until you add one is the honest state. The
+    /// three below are not like that. The ACP built-ins are spawning sessions
+    /// right now and the Hangar daemon knobs are governing it, but neither
+    /// lives in config.toml, so unless the seed plants them `expand_key`
+    /// returns nothing and the category is dropped for having zero rows.
+    const ALWAYS_REACHABLE: &[ConfigCategory] = &[
+        ConfigCategory::Acp,
+        ConfigCategory::HangarDaemon,
+        ConfigCategory::ContainerTemplates,
+    ];
+
+    /// A category whose subject already exists must be openable out of the box.
+    ///
+    /// `every_category_has_at_least_one_row` in the registry proves each
+    /// category has an ENTRY; it cannot prove the entry expands. Before
+    /// `seed_builtin_acp_adapters` this fails with
+    /// `these categories seed no rows and can never be opened: ["ACP Adapters"]`.
+    #[test]
+    fn categories_describing_live_things_seed_rows_out_of_the_box() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let empty: Vec<&str> = ALWAYS_REACHABLE
+            .iter()
+            .filter(|category| rows.get(category).is_none_or(|r| r.is_empty()))
+            .map(|category| category.label())
+            .collect();
+        assert!(
+            empty.is_empty(),
+            "these categories seed no rows and can never be opened: {empty:?}"
+        );
+    }
+
+    /// The built-in ACP adapters are reachable by name, not just as a count.
+    #[test]
+    fn the_builtin_acp_adapters_get_rows() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let keys: Vec<&str> = rows
+            .get(&ConfigCategory::Acp)
+            .expect("the ACP category has rows")
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect();
+        for adapter in ["claude-agent-acp", "codex-acp"] {
+            assert!(
+                keys.iter().any(|key| key.contains(adapter)),
+                "no row for the built-in adapter {adapter}: {keys:?}"
+            );
+        }
+    }
+
+    /// A user-declared adapter's own values survive the seeding, which only
+    /// fills in built-ins the config has not already described.
+    #[test]
+    fn a_configured_adapter_is_not_overwritten_by_the_builtin_seed() {
+        let mut config = AppConfig::default();
+        config.acp.adapters.insert(
+            "claude-agent-acp".to_string(),
+            crate::config::AcpAdapterConfig {
+                command: Some("/opt/mine".to_string()),
+                permission_mode: "plan".to_string(),
+            },
+        );
+        let seed = seed_value(&config);
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "acp.adapters.claude-agent-acp.command")
+                .unwrap()
+                .as_str(),
+            Some("/opt/mine")
+        );
     }
 }
 

@@ -57,8 +57,10 @@
   <text x="140.0" y="376.0" text-anchor="middle" class="node-sub">agent loads the skills</text>
   <rect x="300.0" y="120.0" width="290.0" height="200.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
   <text x="445.0" y="138.0" text-anchor="middle" class="node-type">TEACHING LAYER</text>
-  <text x="445.0" y="226.0" text-anchor="middle" class="node-title">ainb-fleet skills</text>
-  <text x="445.0" y="248.0" text-anchor="middle" class="node-sub">standup · broadcast · sequence · needs · fleet-needs · daemon</text>
+  <text x="445.0" y="212.0" text-anchor="middle" class="node-title">ainb-fleet skills (12)</text>
+  <text x="445.0" y="234.0" text-anchor="middle" class="node-sub">standup · broadcast · sequence · needs</text>
+  <text x="445.0" y="252.0" text-anchor="middle" class="node-sub">fleet-needs · daemon · daemons · cost</text>
+  <text x="445.0" y="270.0" text-anchor="middle" class="node-sub">atc · bridge · ainb-fleet · ainb-spawn</text>
   <rect x="320.0" y="380.0" width="250.0" height="90.0" rx="10.0" fill="#ffffff" stroke="#d1d5db" stroke-width="1.8" filter="url(#shadowSoft)"/>
   <text x="445.0" y="398.0" text-anchor="middle" class="node-type">DETERMINISTIC</text>
   <text x="445.0" y="431.0" text-anchor="middle" class="node-title">hangar workflow</text>

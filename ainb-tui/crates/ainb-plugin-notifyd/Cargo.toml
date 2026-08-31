@@ -31,6 +31,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+# Reads the host's `[notifyd]` table off config.toml, the same way
+# ainb-plugin-session-reader reads `[session_reader]`.
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

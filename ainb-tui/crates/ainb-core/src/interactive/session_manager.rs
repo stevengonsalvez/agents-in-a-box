@@ -131,7 +131,9 @@ pub(crate) async fn ensure_codex_remote_thread(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
-    crate::cli::hangar::ensure_hangar_daemon();
+    // Ephemeral: `ainb run` prints its summary and exits, while the daemon has
+    // to keep serving the tmux session it just created.
+    crate::cli::hangar::ensure_hangar_daemon(crate::cli::hangar::LauncherLifetime::Ephemeral);
     let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
         .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
     client
@@ -740,13 +742,11 @@ impl SessionStore {
 /// Default port for the ainb-managed Headroom compression proxy.
 pub const HEADROOM_DEFAULT_PORT: u16 = 8787;
 
-/// Base URL of the local Headroom proxy. Port overridable via `AINB_HEADROOM_PORT`.
+/// Base URL of the local Headroom proxy. One resolver with
+/// [`crate::headroom::proxy_port`], so the URL a session is pointed at and the
+/// port the proxy is spawned on cannot disagree.
 pub fn headroom_base_url() -> String {
-    let port = std::env::var("AINB_HEADROOM_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(HEADROOM_DEFAULT_PORT);
-    format!("http://127.0.0.1:{port}")
+    format!("http://127.0.0.1:{}", crate::headroom::proxy_port())
 }
 
 /// Shell `export … && ` prefix that routes a session's CLI through the local

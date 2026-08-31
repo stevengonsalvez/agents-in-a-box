@@ -14,7 +14,7 @@ Plugins only see the host capabilities they declare in their manifest, and they 
 
 ## Architecture at a glance
 
-![ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus](../assets/diagrams/plugin-architecture.svg)
+![ainb v2 plugin architecture: the host and its runtime, the JSON-RPC method sets on each side of the wire, the six in-tree plugins, and the two ways a plugin can draw](../assets/diagrams/plugin-architecture.svg)
 
 The host (`ainb-core`) spawns each plugin as a child process and drives it over **JSON-RPC 2.0 / Content-Length-framed stdio**. Host→plugin methods: `plugin/init` (with the granted capabilities), `plugin/render` (host sends a `Viewport`, plugin returns a `WireBuffer`), `plugin/handle_key`, `plugin/handle_event`, `plugin/cli_dispatch`, `plugin/shutdown`. Plugin→host (reverse) calls: `host/snapshot/publish` + `host/snapshot/subscribe` (the **event bus**) and `host/action/invoke`. The `ainb-plugin-runtime` enforces capabilities — an ungranted host-fn call comes back as JSON-RPC `-32001` (`CAPABILITY_DENIED`).
 

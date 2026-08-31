@@ -45,7 +45,11 @@ pub struct RepositoryCache {
 impl RepositoryCache {
     const VERSION: u32 = 1;
     const CACHE_FILE: &'static str = "cache/repositories.json";
-    const DEFAULT_TTL_SECS: i64 = 3600; // 1 hour
+
+    /// The effective freshness window for a cached scan.
+    fn ttl_secs() -> i64 {
+        crate::config::tunables::snapshot().workspace_defaults.scan_cache_ttl_secs
+    }
 
     /// Get the cache file path
     fn cache_path() -> PathBuf {
@@ -150,7 +154,7 @@ impl RepositoryCache {
 
         // 4. TTL check (fallback)
         let age = Utc::now() - self.last_scan;
-        if age.num_seconds() > Self::DEFAULT_TTL_SECS {
+        if age.num_seconds() > Self::ttl_secs() {
             debug!("Cache invalid: expired (age {} seconds)", age.num_seconds());
             return false;
         }
@@ -246,6 +250,19 @@ impl WorkspaceScanner {
     pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self
+    }
+
+    /// Apply `workspace_defaults` to a scanner: the exclude patterns it already
+    /// took, plus the scan depth.
+    ///
+    /// `with_max_depth` has existed since the scanner did and was never called
+    /// from anywhere, so the depth was effectively a constant 3 no matter what
+    /// a user configured. Both call sites go through here now, so the two
+    /// cannot configure a scan differently.
+    #[must_use]
+    pub fn with_workspace_defaults(self, defaults: &crate::config::WorkspaceDefaults) -> Self {
+        self.with_exclude_paths(defaults.exclude_paths.clone())
+            .with_max_depth(defaults.scan_max_depth)
     }
 
     /// Add additional exclude patterns from config
