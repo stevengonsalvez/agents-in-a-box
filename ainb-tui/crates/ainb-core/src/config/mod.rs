@@ -1088,7 +1088,7 @@ fn default_scan_cache_ttl_secs() -> i64 {
 /// and friends are complete statements of intent; a layer has to be able to
 /// shorten one, which concatenation would make impossible.
 fn merge_config_tables(lower: &mut toml::Table, higher: toml::Table) {
-    merge_config_tables_at(lower, higher, "");
+    merge_config_tables_at(lower, higher, &[]);
 }
 
 /// Dotted paths whose VALUE tables are replaced wholesale, not merged into.
@@ -1111,6 +1111,10 @@ fn merge_config_tables(lower: &mut toml::Table, higher: toml::Table) {
 /// A `*` segment matches any single map key.
 const REPLACE_WHOLE: &[&str] = &[
     "usage.plan",
+    // Its fields DO have serde defaults, so unlike `plan` it fails silently: a
+    // layer writing only `code = "EUR"` inherits the other layer's symbol and
+    // rate, and reports euros at a sterling rate with a pound sign.
+    "usage.currency",
     "mcp_servers.*.installation",
     "mcp_servers.*.definition",
     "container_templates.*.config.image_source",
@@ -1119,22 +1123,25 @@ const REPLACE_WHOLE: &[&str] = &[
 ];
 
 /// Whether `path` names a table that replaces rather than merges.
-fn replaces_wholesale(path: &str) -> bool {
+///
+/// Matches on SEGMENTS, never a joined string. A TOML key may legitimately
+/// contain a dot when quoted — `[mcp_servers."github.com"]` — and joining then
+/// re-splitting turns that one key into two, so `mcp_servers.*.definition`
+/// stopped matching and the credential guard silently did not apply. The
+/// inverse misfired too: a server literally named `a.installation` matched a
+/// pattern meant for a different depth.
+fn replaces_wholesale(path: &[&str]) -> bool {
     REPLACE_WHOLE.iter().any(|pattern| {
         let pattern_parts: Vec<&str> = pattern.split('.').collect();
-        let path_parts: Vec<&str> = path.split('.').collect();
-        pattern_parts.len() == path_parts.len()
-            && pattern_parts.iter().zip(&path_parts).all(|(p, a)| *p == "*" || p == a)
+        pattern_parts.len() == path.len()
+            && pattern_parts.iter().zip(path).all(|(p, a)| *p == "*" || p == a)
     })
 }
 
-fn merge_config_tables_at(lower: &mut toml::Table, higher: toml::Table, path: &str) {
+fn merge_config_tables_at(lower: &mut toml::Table, higher: toml::Table, path: &[&str]) {
     for (key, higher_value) in higher {
-        let child = if path.is_empty() {
-            key.clone()
-        } else {
-            format!("{path}.{key}")
-        };
+        let mut child: Vec<&str> = path.to_vec();
+        child.push(key.as_str());
         // Take the lower value out so the recursive call owns its table; the
         // merged result goes back under the same key either way.
         let merged = match (lower.remove(&key), higher_value) {
@@ -3374,7 +3381,7 @@ group_usd = 25.0
     /// dropping one nobody asked to drop is the wrong failure — so each cap is
     /// now overridden only by a layer that states that cap.
     #[test]
-    fn test_fleet_cost_project_layer_overrides_user_layer() {
+    fn fleet_cost_caps_merge_per_cap_across_layers() {
         let user = "[fleet.cost]\nsession_usd = 5.0\ngroup_usd = 25.0\n";
 
         // A project layer silent about costs preserves both caps.
@@ -3516,6 +3523,68 @@ timeout = 60
     /// Merging into `env` meant a token an earlier layer set survived a
     /// redefinition that deliberately omitted it, and was injected into the
     /// session anyway.
+    /// The credential guard must survive a map key that contains a dot.
+    ///
+    /// Paths were matched as joined strings, so `[mcp_servers."github.com"]`
+    /// produced four segments where the pattern has three, stopped matching,
+    /// and deep-merged the definition — leaking exactly the token the guard
+    /// exists to drop.
+    #[test]
+    fn the_replace_guard_survives_a_dotted_map_key() {
+        let earlier = r#"
+[mcp_servers."github.com"]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { GITHUB_TOKEN = "sk-user", KEEP = "1" } }
+"#;
+        let later = r#"
+[mcp_servers."github.com"]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { KEEP = "1" } }
+"#;
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+        let server = config.mcp_servers.get("github.com").expect("server");
+        let McpServerDefinition::Command { env, .. } = &server.definition else {
+            panic!("expected a Command definition");
+        };
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "a dotted server name defeated the replace guard: {env:?}"
+        );
+    }
+
+    /// `[usage.currency]` must come from one file.
+    ///
+    /// Its fields have serde defaults, so a partial layer does not error the
+    /// way `[usage.plan]` does — it silently splices, and reports one currency
+    /// converted at another's rate.
+    #[test]
+    fn a_partial_currency_does_not_splice_across_layers() {
+        let earlier = r#"
+[usage.currency]
+code = "GBP"
+symbol = "£"
+usd_rate = 0.79
+"#;
+        let later = "[usage.currency]\ncode = \"EUR\"\n";
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        assert_eq!(config.usage.currency.code, "EUR");
+        assert_eq!(
+            config.usage.currency.symbol, "$",
+            "the earlier layer's symbol spliced into a currency it does not describe"
+        );
+        assert!(
+            (config.usage.currency.usd_rate - 1.0).abs() < f64::EPSILON,
+            "the earlier layer's rate spliced in: {}",
+            config.usage.currency.usd_rate
+        );
+    }
+
     #[test]
     fn a_redefined_mcp_server_does_not_inherit_the_old_env() {
         let earlier = r#"
@@ -3568,6 +3637,8 @@ set_at = "2026-01-01T00:00:00Z"
         );
     }
 
+    /// Arrays are complete statements, not accumulators: a later layer must be
+    /// able to shorten or empty one.
     #[test]
     fn arrays_replace_rather_than_concatenate() {
         let earlier = r#"
