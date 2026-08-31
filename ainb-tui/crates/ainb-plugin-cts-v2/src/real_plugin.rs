@@ -137,8 +137,8 @@ pub fn resolve_binary(plugin: &PluginUnderTest) -> Result<PathBuf, String> {
         .env_remove("CARGO_MAKEFLAGS")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    if is_release_profile() {
-        cmd.arg("--release");
+    if let Some(profile) = nested_build_profile() {
+        cmd.args(["--profile", &profile]);
     }
 
     let out = cmd
@@ -169,11 +169,29 @@ pub fn resolve_binary(plugin: &PluginUnderTest) -> Result<PathBuf, String> {
         })
 }
 
-/// Whether the test binary itself was built in the release profile, so the
-/// nested build produces artifacts alongside it rather than a second copy.
-fn is_release_profile() -> bool {
-    std::env::current_exe()
-        .is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("release")))
+/// The cargo `--profile` this test binary was built with, so the nested build
+/// lands its artifacts alongside it rather than staging a second copy under a
+/// different profile.
+///
+/// A test binary lives at `<target>/<profile-dir>/deps/<name>`, and the profile
+/// dir is the profile's own name for every profile except `dev`, which cargo
+/// writes to `debug`. Matching the literal string "release" was wrong the
+/// moment a named profile appeared: under `release-fast` it reported false and
+/// the nested build staged DEBUG plugins next to an optimized harness.
+fn nested_build_profile() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let profile_dir = if dir.file_name()?.to_str()? == "deps" {
+        dir.parent()?
+    } else {
+        dir
+    };
+    let name = profile_dir.file_name()?.to_str()?;
+    Some(if name == "debug" {
+        "dev".to_owned()
+    } else {
+        name.to_owned()
+    })
 }
 
 // =====================================================================
@@ -408,5 +426,29 @@ fn write_frame(stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>, value: &Val
     let body = serde_json::to_vec(value).expect("serialize frame");
     if framing::write_frame(w, &body).is_ok() {
         let _ = w.flush();
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::nested_build_profile;
+
+    /// This test binary is itself built by cargo, so the derivation has a real
+    /// path to work on. Under a normal `cargo test` that is the `dev` profile,
+    /// which cargo writes to `target/debug`, and the mapping back to `dev` is
+    /// the part a plain directory-name read would get wrong.
+    #[test]
+    fn the_profile_comes_back_as_a_name_cargo_accepts() {
+        let profile = nested_build_profile().expect("a cargo-built test binary has a profile dir");
+        assert!(
+            !profile.is_empty() && profile != "deps",
+            "derived {profile:?}, which is not a profile cargo would accept"
+        );
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                profile, "dev",
+                "target/debug is the `dev` profile, not `debug`"
+            );
+        }
     }
 }

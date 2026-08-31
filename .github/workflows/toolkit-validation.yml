@@ -144,8 +144,8 @@ jobs:
         run: |
           cd ainb-tui
           # Build with release-fast (no LTO, parallel codegen) so tripwires
-          # get a fast spawn time without paying full release-profile LTO,
-          # which cost ~15 of this job's 16 CI minutes for no measurable gain.
+          # get a fast spawn time without paying full release-profile LTO.
+          # This step measured ~15 of the job's 16 minutes under `--release`.
           cargo build --profile release-fast -p ainb
 
           # CLI tripwires run without tmux; TUI tripwires self-skip when
