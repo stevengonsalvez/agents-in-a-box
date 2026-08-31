@@ -131,7 +131,9 @@ pub(crate) async fn ensure_codex_remote_thread(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
-    crate::cli::hangar::ensure_hangar_daemon();
+    // Ephemeral: `ainb run` prints its summary and exits, while the daemon has
+    // to keep serving the tmux session it just created.
+    crate::cli::hangar::ensure_hangar_daemon(crate::cli::hangar::LauncherLifetime::Ephemeral);
     let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
         .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
     client

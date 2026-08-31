@@ -209,7 +209,8 @@ async fn tokio_main() -> Result<()> {
                 // a fresh home shows a runtime + a seeded agent (the boot seed runs in
                 // the daemon) instead of an offline panel. Idempotent + non-fatal — a
                 // spawn failure is logged and the TUI still launches.
-                cli::hangar::ensure_hangar_daemon();
+                // Persistent: the TUI is the daemon's consumer and outlives it.
+                cli::hangar::ensure_hangar_daemon(cli::hangar::LauncherLifetime::Persistent);
                 // Same contract for the rest: clear heartbeats left by daemons
                 // that are already gone, and hand a drifted notifyd to this
                 // binary. Without it an upgraded ainb kept talking to the
