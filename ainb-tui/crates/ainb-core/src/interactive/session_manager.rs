@@ -299,8 +299,20 @@ async fn log_failed_launch_pane(exact_target: &str) {
 /// nothing at all, so a caller can tell "no output" apart from "output we can
 /// show the user".
 async fn capture_failed_launch_pane(exact_target: &str) -> Option<String> {
+    // `capture-pane` needs a PANE target, and `exact_target` is a SESSION one
+    // (`=name`), which it rejects with "can't find pane". Appending `:` keeps
+    // the exact-match `=` and resolves to the session's current window. Without
+    // it this returns `None` every single time and the pane text -- the entire
+    // point of capturing it -- never reaches the caller.
+    let pane_target = format!("{exact_target}:");
+    // `-S -` starts at the beginning of HISTORY, not the visible screen. On a
+    // dead pane tmux paints "Pane is dead (status N, ...)" over the viewport, so
+    // a program that printed one line and exited leaves a capture containing
+    // only that marker -- which is the same nameless failure this whole path
+    // exists to end. Verified against tmux 3.6a: without `-S -` the error line
+    // is gone, with it the line and the marker both come back.
     let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", exact_target])
+        .args(["capture-pane", "-p", "-S", "-", "-t", &pane_target])
         .output()
         .await
         .ok()?;
