@@ -1591,7 +1591,7 @@ impl SessionActor {
             }
         }
         self.pump().await;
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // Close the queue BEFORE the last drain: after this a `submit_prompt`
         // gets `Closed` (answered `session_gone`) rather than landing a job in a
         // buffer nobody will ever read.
@@ -2006,7 +2006,7 @@ impl SessionActor {
         // first moment the turn is known to be over, not a second copy of the
         // repair. The process-exit route gets here an `EXIT_QUIESCE` later at
         // best, and only once this actor finishes the write set below.
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-turn-end").await;
         // ONE transaction (I4): the reply, its receipt and the released session
         // land together or not at all. Four separate commits left a daemon
         // death between them showing an answer with no receipt, or a receipt
@@ -2492,7 +2492,7 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // BEFORE the shared routine, so each drained prompt carries its own
         // enumerated cause instead of being swept up as an anonymous stuck leg.
         self.drain_queue(cause.detail()).await;
@@ -2511,6 +2511,16 @@ impl SessionActor {
 
     /// Raise the attention row R8 exists for, and PARK the responder.
     async fn raise_permission(&mut self, permission: PermissionRequest) {
+        // No open turn means nothing is left to answer this. The request was
+        // already in the actor's channel when `finish_turn` retired the parked
+        // set, so raising it now would insert an attention row AFTER the
+        // receipt committed and the session went IDLE: the same ghost row
+        // `finish_turn` closes, through a narrower window. Refuse it at the
+        // door instead of parking a responder nobody will ever reach.
+        if self.turn.is_none() {
+            let _ = permission.answer_cancelled();
+            return;
+        }
         let fingerprint = permission_fingerprint(&self.session_key, &permission);
         let payload = serde_json::json!({
             "kind": "acp_permission",
@@ -2708,15 +2718,19 @@ impl SessionActor {
     }
 
     /// Answer every parked permission `Cancelled` and close its row.
-    /// Convergence's job: a permission whose adapter is gone must never survive
-    /// as a ghost row.
-    async fn cancel_parked(&mut self) {
+    /// A permission whose adapter is gone must never survive as a ghost row.
+    ///
+    /// `answered_by` is the caller's own name, not a constant: turn end and
+    /// convergence both retire parked permissions, and a row stamped
+    /// `hangar-converge` by the turn-end path would report a repair that never
+    /// ran, over-counting adapter crashes in any audit over that column.
+    async fn cancel_parked(&mut self, answered_by: &str) {
         let parked: Vec<ParkedPermission> = self.parked.drain().map(|(_, value)| value).collect();
         self.stats.pending_permissions.store(0, Ordering::Relaxed);
         for permission in parked {
             let attention_id = permission.attention_id;
             let _ = permission.request.answer_cancelled();
-            self.retire_attention(&attention_id, "hangar-converge", "cancelled").await;
+            self.retire_attention(&attention_id, answered_by, "cancelled").await;
         }
     }
 
