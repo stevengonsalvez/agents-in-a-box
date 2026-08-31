@@ -2054,27 +2054,35 @@ impl AppConfig {
         )
     }
 
-    /// Every config file location, in the order [`Self::load`] merges them.
+    /// Every config file location, LOWEST precedence first.
     ///
-    /// Each file overrides the last, so the LAST entry wins — which today means
-    /// the system config outranks the user's and a project's. That is the
-    /// inverse of what the docs and `ainb config path` describe, and it is not
-    /// fixed here: `merge_loaded` assigns several fields unconditionally
-    /// (`authentication.cli_provider`, `ui_preferences.statusline_decision`,
-    /// `workspace_defaults.max_repositories`, …), so "last file wins" currently
-    /// means "the last file's serde DEFAULTS win" for those. Reordering without
-    /// first making the merge per-field lets a project file containing only
-    /// `[docker] timeout = 22` reset a user's provider, wizard decisions and
-    /// scan limit — and the next `save()` writes that reset into their file.
+    /// [`Self::load`] merges them in this order and each layer overrides the
+    /// last, so the final entry wins. That makes this list the definition of
+    /// precedence: system, then user, then the project files — most specific
+    /// wins, which is what `config/example.config.toml`, `CLAUDE.md` and
+    /// `ainb config path` have always described.
     ///
-    /// See `agents-in-a-box-l0sq`: the reorder lands with that change,
-    /// not before it.
+    /// It ran the other way until now, with the system file strongest.
+    /// Flipping it was unsafe while the merge was field-by-field: several
+    /// fields were assigned unconditionally, so "last file wins" meant "the
+    /// last file's serde DEFAULTS win" for them, and a project config holding
+    /// only `[docker] timeout` reset a user's provider and wizard decisions.
+    /// The per-key TOML merge removed that: a key absent from a layer simply is
+    /// not in that layer's table, so a file can only override what it writes.
     ///
-    /// Returns the scope with each path. They used to be parallel arrays zipped
-    /// at the call site, where four paths met three labels and the last one was
-    /// silently dropped.
+    /// Within the project pair, `.agents-box/` is the legacy location and
+    /// `.ainb/` is canonical, so `.ainb/` comes last and wins when both exist.
+    ///
+    /// Returns the scope with each path so a caller cannot mislabel them.
     pub fn get_config_paths() -> Vec<(ConfigScope, PathBuf)> {
-        let mut paths = vec![];
+        let mut paths = vec![(
+            ConfigScope::System,
+            PathBuf::from("/etc/agents-in-a-box/config.toml"),
+        )];
+
+        if let Ok(config_dir) = Self::get_user_config_dir() {
+            paths.push((ConfigScope::User, config_dir.join("config.toml")));
+        }
 
         if let Ok(cwd) = std::env::current_dir() {
             paths.push((
@@ -2083,15 +2091,6 @@ impl AppConfig {
             ));
             paths.push((ConfigScope::Project, cwd.join(".ainb").join("config.toml")));
         }
-
-        if let Ok(config_dir) = Self::get_user_config_dir() {
-            paths.push((ConfigScope::User, config_dir.join("config.toml")));
-        }
-
-        paths.push((
-            ConfigScope::System,
-            PathBuf::from("/etc/agents-in-a-box/config.toml"),
-        ));
 
         paths
     }
@@ -3207,6 +3206,77 @@ cursor-auto = "claude-sonnet-4-5"
         assert_eq!(
             config.usage.model_aliases.get("cursor-auto"),
             Some(&"claude-sonnet-4-5".to_string())
+        );
+    }
+
+    /// Precedence is most-specific-wins, and this list's ORDER is what defines
+    /// it: `load` merges in order and each layer overrides the last.
+    ///
+    /// It used to run the other way, so the system config beat the user's and a
+    /// project's — the inverse of what every document and `ainb config path`
+    /// described.
+    #[test]
+    fn config_paths_run_from_lowest_to_highest_precedence() {
+        let scopes: Vec<ConfigScope> =
+            AppConfig::get_config_paths().into_iter().map(|(scope, _)| scope).collect();
+
+        let position = |wanted: ConfigScope| {
+            scopes
+                .iter()
+                .position(|scope| *scope == wanted)
+                .unwrap_or_else(|| panic!("{wanted:?} missing from {scopes:?}"))
+        };
+
+        assert!(
+            position(ConfigScope::System) < position(ConfigScope::User),
+            "the user config must override the system's, got {scopes:?}"
+        );
+        assert!(
+            position(ConfigScope::User) < position(ConfigScope::ProjectLegacy),
+            "a project config must override the user's, got {scopes:?}"
+        );
+        assert!(
+            position(ConfigScope::ProjectLegacy) < position(ConfigScope::Project),
+            "canonical .ainb must override legacy .agents-box, got {scopes:?}"
+        );
+    }
+
+    /// The pair of properties this change depends on, asserted together: the
+    /// project layer wins for what it writes, and does NOT touch what it omits.
+    ///
+    /// The second half is why this reorder had to wait for the per-key merge.
+    /// With the old field-by-field merge, this same project file reset
+    /// `cli_provider` to `claude` and `statusline_decision` to `unset`.
+    #[test]
+    fn a_project_layer_wins_only_for_the_keys_it_writes() {
+        let user = r#"
+[authentication]
+cli_provider = "codex"
+
+[ui_preferences]
+statusline_decision = "declined"
+
+[workspace_defaults]
+max_repositories = 99
+
+[docker]
+timeout = 11
+"#;
+        let project = "[docker]\ntimeout = 22\n";
+
+        // In `load()` order: system, user, then project.
+        let config = AppConfig::from_layers([user, project]).expect("layers");
+
+        assert_eq!(
+            config.docker.timeout, 22,
+            "the project layer must win its own key"
+        );
+        assert_eq!(config.authentication.cli_provider, CliProvider::Codex);
+        assert_eq!(config.workspace_defaults.max_repositories, 99);
+        assert_eq!(
+            config.ui_preferences.statusline_decision,
+            StatuslineDecision::Declined,
+            "a project file that never mentions the wizard decision must not reset it"
         );
     }
 
