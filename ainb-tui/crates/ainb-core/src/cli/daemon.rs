@@ -278,6 +278,43 @@ fn atc_instance() -> Result<String> {
     }
 }
 
+/// Respawn a dead ATC session WITHOUT resetting the instance's configuration.
+///
+/// `fleet atc setup` rebuilds meta from `AtcMeta::new` and applies only the
+/// flags it is given, so a bare `setup <name>` silently resets an instance
+/// provisioned at 10m back to the 15m default, and flips a deliberately
+/// disabled heartbeat back on. Pressing Start must not reconfigure anything,
+/// so the current values are read off meta.json and passed straight back.
+fn respawn_atc_session(name: &str) -> Result<String> {
+    let home = crate::fleet::plumbing::paths::ainb_home()?;
+    let paths = crate::fleet::atc::paths::AtcPaths::under_root(&home.join("atc"), name);
+    let meta = std::fs::read_to_string(&paths.meta)
+        .ok()
+        .and_then(|raw| crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok())
+        .with_context(|| {
+            format!(
+                "reading {} to respawn without reconfiguring it",
+                paths.meta.display()
+            )
+        })?;
+    let interval = meta.heartbeat_interval_min.to_string();
+    let idle_pause = meta.idle_pause_min.to_string();
+    let mut argv = vec![
+        "fleet",
+        "atc",
+        "setup",
+        name,
+        "--interval",
+        &interval,
+        "--idle-pause",
+        &idle_pause,
+    ];
+    if !meta.heartbeat_enabled {
+        argv.push("--no-heartbeat");
+    }
+    delegate(&argv)
+}
+
 fn atc(action: Action) -> Result<String> {
     let name = atc_instance()?;
     match action {
@@ -285,18 +322,21 @@ fn atc(action: Action) -> Result<String> {
         // the SCHEDULER (OS timer + daemon registration); it does nothing about
         // the Claude session the scheduler beats into. Starting an ATC whose
         // session has died must respawn the session, and `setup` is the verb
-        // that does it — idempotent, and it preserves state.json / task-log.md.
+        // that does it: idempotent, and it preserves state.json / task-log.md.
         //
         // Routing everything through `repair` is why "start" failed with
         // "the daemon did NOT accept the unregister" on a host whose only
         // actual fault was a dead tmux session: the wrong half was being fixed,
         // and the scheduler guard then refused a change it did not need.
         Action::Start | Action::Restart => {
-            let session = crate::tmux::sanitize_session_name(&name);
-            if crate::fleet::daemons::probe::tmux_session_alive(&session) {
-                delegate(&["fleet", "atc", "repair", &name])
+            let session = crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session();
+            // Only a PROVEN dead session takes the respawn path. `None` means
+            // the check could not run, and guessing "dead" there would rewrite
+            // a healthy instance's config for an environment problem.
+            if crate::tmux::session_alive(&session) == Some(false) {
+                respawn_atc_session(&name)
             } else {
-                delegate(&["fleet", "atc", "setup", &name])
+                delegate(&["fleet", "atc", "repair", &name])
             }
         }
         // No confirmation flag: `fleet atc teardown` takes only <name> and
@@ -515,6 +555,29 @@ mod tests {
             &["notifyd", "restart"],
             &["notifyd", "stop"],
             &["fleet", "atc", "repair", "main"],
+            // Start on a dead session respawns it, passing the instance's own
+            // settings back so nothing is reconfigured.
+            &[
+                "fleet",
+                "atc",
+                "setup",
+                "main",
+                "--interval",
+                "10",
+                "--idle-pause",
+                "60",
+            ],
+            &[
+                "fleet",
+                "atc",
+                "setup",
+                "main",
+                "--interval",
+                "10",
+                "--idle-pause",
+                "60",
+                "--no-heartbeat",
+            ],
             &["fleet", "atc", "teardown", "main"],
             &["fleet", "bridge", "install"],
             &["fleet", "bridge", "uninstall"],
