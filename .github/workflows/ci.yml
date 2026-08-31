@@ -19,7 +19,14 @@ on:
 # Superseded pushes used to run to completion: four pushes to one branch in
 # half an hour queued four full runs, and the last one spent 190 minutes
 # waiting for a runner rather than working. Group per ref and cancel only on
-# pull_request — a push to main must still get its own complete run.
+# pull_request, a push to main must still get its own complete run.
+#
+# The gates below say `!cancelled()`, never `always()`. `always()` runs a job
+# or step even when the run has been CANCELLED, so with `always()` in place
+# this concurrency group would cancel a superseded run and then watch it keep
+# building anyway. `!cancelled()` keeps the same fail-open behaviour when the
+# `changes` job errors, which is the only reason the gates reach for a status
+# function at all.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -86,7 +93,7 @@ jobs:
     name: Rustfmt
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 10
     runs-on: ubuntu-latest
@@ -119,7 +126,7 @@ jobs:
     name: CLI reference freshness
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 15
     runs-on: ubuntu-latest
@@ -183,7 +190,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       # Linux only: these paths and `df --output` are GNU/Linux, and the macOS
       # leg of this matrix has never hit the wall.
@@ -206,7 +213,7 @@ jobs:
       # the margin from ~1G to ~21G.
       - name: Reclaim runner disk
         if: >-
-          runner.os == 'Linux' && always() &&
+          runner.os == 'Linux' && !cancelled() &&
           (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
@@ -217,7 +224,7 @@ jobs:
       # 20 minutes later as a linker crash nobody can attribute.
       - name: Assert disk headroom for the --all-features build
         if: >-
-          runner.os == 'Linux' && always() &&
+          runner.os == 'Linux' && !cancelled() &&
           (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
@@ -230,11 +237,11 @@ jobs:
           echo "$((avail/1048576))G free, need ~85G"
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -251,7 +258,7 @@ jobs:
           save-if: false
       - uses: taiki-e/install-action@nextest
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       # `--lib` alone builds ONLY in-source `#[cfg(test)]` modules, so every
       # integration target under `crates/*/tests/` was invisible here: whole test
@@ -283,7 +290,7 @@ jobs:
       # widens WHICH crates they are built from.
       - run: "cargo nextest run --workspace --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         working-directory: ${{ env.WORKING_DIR }}
 
@@ -324,7 +331,7 @@ jobs:
     name: Contracts
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 30
     runs-on: ubuntu-latest
@@ -377,15 +384,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -398,31 +405,31 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
       - name: Verify hook script parses on the runner
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash -n plugins/ainb-hooks/hooks/notify.sh
       - name: Stall guard compiles + self-check passes
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           python3 -m py_compile plugins/ainb-hooks/hooks/stall_guard.py
           python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test
       - name: Build + lib tests (ainb-plugin-notifyd)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --lib --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: End-to-end hook → socket → SQLite
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --test end_to_end --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Tripwire — Inbox screen open + render
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
@@ -432,13 +439,13 @@ jobs:
         # to `unknown` in silence. Without this, that line has no coverage on
         # the screen an operator actually looks at.
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_fleet_panel_shows_acp_session --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
@@ -473,15 +480,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -489,7 +496,7 @@ jobs:
       # README), the same reason `hangar-e2e` brew-installs it.
       - name: Install tmux (apt-get on Linux, brew on macOS)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -499,7 +506,7 @@ jobs:
           fi
       - name: Send-path integrity against a real tmux pane
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           set -o pipefail
@@ -533,11 +540,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           # This action installs with rustup's MINIMAL profile, which omits
@@ -546,7 +553,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -555,7 +562,7 @@ jobs:
       # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
       - name: Install tmux (apt-get on Linux, brew on macOS)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -565,25 +572,25 @@ jobs:
           fi
       - name: Build hangar daemon binary
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon
         working-directory: ${{ env.WORKING_DIR }}
       - name: Build ainb binary
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb --bin ainb
         working-directory: ${{ env.WORKING_DIR }}
       - name: Stage bundled plugins (incl. hangar-tui)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash scripts/build-plugins.sh
         working-directory: ${{ env.WORKING_DIR }}
       - name: CI-lint — assert ci.yml hangar-e2e contract
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo xtask ci-lint
         working-directory: ${{ env.WORKING_DIR }}
@@ -605,7 +612,7 @@ jobs:
       # thousands of lines away from the cause.
       - name: No tracing span guard held across an await
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: >
           cargo clippy -p ainb-hangar-daemon -p ainb-acp --lib
@@ -613,7 +620,7 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
       - name: Run all hangar tripwires
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         # Hosted runners render the TUI much slower than a dev box, so the
         # dev-tuned tmux poll budgets time out under the full serial suite (a
@@ -640,7 +647,7 @@ jobs:
       # nor the tripwire suite runs them, so they were CI-ungated. Gate them here.
       - name: Run hangar acceptance tests (framed-socket + CLI)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash ../scripts/hangar/run_acceptance_tests.sh
         working-directory: ${{ env.WORKING_DIR }}
@@ -666,7 +673,7 @@ jobs:
     name: ainb-acp
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.acp != 'false')
     timeout-minutes: 15
     runs-on: ubuntu-latest
@@ -756,7 +763,7 @@ jobs:
     name: Cargo Machete
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 10
     runs-on: ubuntu-latest
