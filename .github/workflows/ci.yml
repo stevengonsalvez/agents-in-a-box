@@ -495,6 +495,75 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Codex launch-pane behaviour against a REAL tmux server
+  #
+  # Same trap as `fleet-send-tmux` above, same remedy. `Test` compiles and
+  # selects these tests, but neither runner image ships tmux, so `require_tmux!`
+  # self-skips and they pass vacuously. That is not hypothetical here: three
+  # separate defects shipped in this area behind 24-of-24 green CI, including
+  # one that would have failed every Codex launch outright, because nothing in
+  # CI ever started a tmux session.
+  #
+  # The trailing grep is the point: a suite that degrades to SKIP must fail the
+  # job, or the guard is theatre.
+  # ────────────────────────────────────────────────────────────────────────────
+  codex-launch-tmux:
+    name: codex launch pane (${{ matrix.os }})
+    needs: changes
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: Swatinem/rust-cache@v2
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        with:
+          workspaces: "ainb-tui -> target"
+      # macOS runner images do NOT ship tmux, same as fleet-send-tmux above.
+      - name: Install tmux (apt-get on Linux, brew on macOS)
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
+      - name: Launch-pane behaviour against a real tmux pane
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          set -o pipefail
+          cargo test -p ainb --test behavioral keeping_dead_pane \
+            --no-fail-fast -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/codex-launch-tmux.log"
+          cargo test -p ainb --lib capture_failed_launch_pane_reads_a_dead_pane \
+            --no-fail-fast -- --nocapture \
+            2>&1 | tee -a "$RUNNER_TEMP/codex-launch-tmux.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/codex-launch-tmux.log"; then
+            echo "::error::codex launch-pane suite SKIPped, so the launch path was never exercised on this runner"
+            exit 1
+          fi
+          if ! grep -q 'test result: ok. 2 passed' "$RUNNER_TEMP/codex-launch-tmux.log"; then
+            echo "::error::expected both keeping_dead_pane tests to run; filter may have stopped matching"
+            exit 1
+          fi
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Hangar control-plane end-to-end tripwires (P0-P9)
   #
   # Mirrors the `ainb-hooks` per-feature pattern: install tmux on Linux, build
