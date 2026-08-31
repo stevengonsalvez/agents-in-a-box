@@ -1088,12 +1088,60 @@ fn default_scan_cache_ttl_secs() -> i64 {
 /// and friends are complete statements of intent; a layer has to be able to
 /// shorten one, which concatenation would make impossible.
 fn merge_config_tables(lower: &mut toml::Table, higher: toml::Table) {
+    merge_config_tables_at(lower, higher, "");
+}
+
+/// Dotted paths whose VALUE tables are replaced wholesale, not merged into.
+///
+/// Recursing into these unions two layers' entries, which is wrong in three
+/// distinct ways:
+///
+/// * A later layer cannot DROP a key. An `env` that deliberately omits
+///   `GITHUB_TOKEN` would still inherit the earlier layer's, and the
+///   credential is injected into the session anyway. Same for a container
+///   template's `environment` and the bridge's untyped table.
+/// * A tagged enum (`installation`, `definition`, `image_source`, all
+///   `#[serde(tag = "type")]`) would carry the previous variant's keys
+///   alongside the new `type`.
+/// * `[usage.plan]`'s fields have NO serde defaults, so a layer writing only
+///   `id` used to be a loud deserialization error. Merged, it silently inherits
+///   the other layer's `monthly_usd` and `reset_day` and reports a plan neither
+///   file describes.
+///
+/// A `*` segment matches any single map key.
+const REPLACE_WHOLE: &[&str] = &[
+    "usage.plan",
+    "mcp_servers.*.installation",
+    "mcp_servers.*.definition",
+    "container_templates.*.config.image_source",
+    "container_templates.*.config.environment",
+    "fleet.bridge",
+];
+
+/// Whether `path` names a table that replaces rather than merges.
+fn replaces_wholesale(path: &str) -> bool {
+    REPLACE_WHOLE.iter().any(|pattern| {
+        let pattern_parts: Vec<&str> = pattern.split('.').collect();
+        let path_parts: Vec<&str> = path.split('.').collect();
+        pattern_parts.len() == path_parts.len()
+            && pattern_parts.iter().zip(&path_parts).all(|(p, a)| *p == "*" || p == a)
+    })
+}
+
+fn merge_config_tables_at(lower: &mut toml::Table, higher: toml::Table, path: &str) {
     for (key, higher_value) in higher {
+        let child = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
         // Take the lower value out so the recursive call owns its table; the
         // merged result goes back under the same key either way.
         let merged = match (lower.remove(&key), higher_value) {
-            (Some(toml::Value::Table(mut lower_table)), toml::Value::Table(higher_table)) => {
-                merge_config_tables(&mut lower_table, higher_table);
+            (Some(toml::Value::Table(mut lower_table)), toml::Value::Table(higher_table))
+                if !replaces_wholesale(&child) =>
+            {
+                merge_config_tables_at(&mut lower_table, higher_table, &child);
                 toml::Value::Table(lower_table)
             }
             (_, higher_value) => higher_value,
@@ -3386,7 +3434,7 @@ qmd_collection = "base-only"
     /// own file.
     #[test]
     fn a_layer_only_changes_the_keys_it_writes() {
-        let user = r#"
+        let earlier = r#"
 [authentication]
 cli_provider = "codex"
 
@@ -3397,9 +3445,9 @@ show_git_status = false
 [workspace_defaults]
 max_repositories = 99
 "#;
-        let project = "[docker]\ntimeout = 22\n";
+        let later = "[docker]\ntimeout = 22\n";
 
-        let config = AppConfig::from_layers([user, project]).expect("layers");
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
 
         assert_eq!(config.docker.timeout, 22, "the project layer's own key");
         assert_eq!(config.authentication.cli_provider, CliProvider::Codex);
@@ -3415,8 +3463,8 @@ max_repositories = 99
     /// explicitly written default unreachable, so a project layer could never
     /// pull a knob back to its shipped value once the user had moved it.
     #[test]
-    fn an_explicit_default_in_a_higher_layer_beats_a_lower_non_default() {
-        let user = r#"
+    fn an_explicit_default_in_a_later_layer_beats_an_earlier_non_default() {
+        let earlier = r#"
 [authentication]
 cli_provider = "codex"
 default_model = "opus"
@@ -3431,8 +3479,11 @@ max_repositories = 99
 [docker]
 timeout = 90
 "#;
-        // Every value here IS the coded default, written out on purpose.
-        let project = r#"
+        // Every value here IS the coded default, written out on purpose —
+        // `branch_prefix` included, which `default_branch_prefix()` returns as
+        // "agents/". It said "ainb/" before, which made that one field an
+        // ordinary override and not a test of this property at all.
+        let later = r#"
 [authentication]
 cli_provider = "claude"
 default_model = "sonnet"
@@ -3441,28 +3492,85 @@ default_model = "sonnet"
 theme = "dark"
 
 [workspace_defaults]
-branch_prefix = "ainb/"
+branch_prefix = "agents/"
 max_repositories = 500
 
 [docker]
 timeout = 60
 "#;
 
-        let config = AppConfig::from_layers([user, project]).expect("layers");
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
 
         assert_eq!(config.authentication.cli_provider, CliProvider::Claude);
         assert_eq!(config.authentication.default_model, "sonnet");
         assert_eq!(config.ui_preferences.theme, "dark");
-        assert_eq!(config.workspace_defaults.branch_prefix, "ainb/");
+        assert_eq!(config.workspace_defaults.branch_prefix, "agents/");
         assert_eq!(config.workspace_defaults.max_repositories, 500);
         assert_eq!(config.docker.timeout, 60);
     }
 
     /// Arrays are complete statements, not accumulators: a higher layer must
     /// be able to shorten or empty one.
+    /// A later layer must be able to DROP a key from a credential map.
+    ///
+    /// Merging into `env` meant a token an earlier layer set survived a
+    /// redefinition that deliberately omitted it, and was injected into the
+    /// session anyway.
+    #[test]
+    fn a_redefined_mcp_server_does_not_inherit_the_old_env() {
+        let earlier = r#"
+[mcp_servers.github]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { GITHUB_TOKEN = "sk-user", KEEP = "1" } }
+"#;
+        let later = r#"
+[mcp_servers.github]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { KEEP = "1" } }
+"#;
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+        let server = config.mcp_servers.get("github").expect("server");
+        let McpServerDefinition::Command { env, .. } = &server.definition else {
+            panic!("expected a Command definition");
+        };
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "a dropped credential survived the merge: {env:?}"
+        );
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("1"));
+    }
+
+    /// `[usage.plan]`'s fields have no serde defaults, so a partial plan used
+    /// to be a loud error. Merging made it silently inherit the other layer's
+    /// numbers and report a plan neither file wrote.
+    #[test]
+    fn a_partial_usage_plan_does_not_inherit_the_other_layers_numbers() {
+        let earlier = r#"
+[usage.plan]
+id = "claude-max"
+monthly_usd = 200.0
+provider = "claude"
+reset_day = 1
+set_at = "2026-01-01T00:00:00Z"
+"#;
+        let later = "[usage.plan]\nid = \"claude-pro\"\n";
+
+        let result = AppConfig::from_layers([earlier, later]);
+
+        assert!(
+            result.is_err(),
+            "a partial [usage.plan] silently inherited the earlier layer's numbers: {:?}",
+            result.map(|c| c.usage.plan)
+        );
+    }
+
     #[test]
     fn arrays_replace_rather_than_concatenate() {
-        let user = r#"
+        let earlier = r#"
 [workspace_defaults]
 exclude_paths = ["node_modules", "target", "vendor"]
 workspace_scan_paths = ["/home/u/a", "/home/u/b"]
@@ -3474,7 +3582,7 @@ disabled = ["skills"]
 [ui_preferences]
 config_tree_expanded = ["Fleet|fleet", "MCP Pool|mcp_pool"]
 "#;
-        let project = r#"
+        let later = r#"
 [workspace_defaults]
 exclude_paths = ["target"]
 workspace_scan_paths = []
@@ -3486,7 +3594,7 @@ enabled = ["learnings"]
 config_tree_expanded = ["Docker|docker"]
 "#;
 
-        let config = AppConfig::from_layers([user, project]).expect("layers");
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
 
         assert_eq!(config.workspace_defaults.exclude_paths, vec!["target"]);
         assert!(
@@ -3519,7 +3627,7 @@ config_tree_expanded = ["Docker|docker"]
     /// restating the entry, and entries it never names survive untouched.
     #[test]
     fn map_entries_merge_by_name_and_by_field() {
-        let user = r#"
+        let earlier = r#"
 [acp.adapters.gemini]
 command = "gemini"
 permission_mode = "accept_edits"
@@ -3527,9 +3635,9 @@ permission_mode = "accept_edits"
 [acp.adapters.codex]
 command = "codex"
 "#;
-        let project = "[acp.adapters.gemini]\ncommand = \"/opt/gemini\"\n";
+        let later = "[acp.adapters.gemini]\ncommand = \"/opt/gemini\"\n";
 
-        let config = AppConfig::from_layers([user, project]).expect("layers");
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
 
         let gemini = &config.acp.adapters["gemini"];
         assert_eq!(gemini.command.as_deref(), Some("/opt/gemini"));
