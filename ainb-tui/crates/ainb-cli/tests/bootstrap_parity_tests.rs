@@ -34,6 +34,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
     "AINB_TOOL_HOME_CLAUDE",
     "AINB_TOOL_HOME_CODEX",
     "AINB_TOOL_HOME_COPILOT",
+    "AINB_TOOL_HOME_ANTIGRAVITY",
     "AINB_TOOL_HOME_GEMINI",
     "AINB_TOOL_HOME_CURSOR",
     "AINB_TOOL_HOME_AMAZONQ",
@@ -384,8 +385,8 @@ fn default_install_fans_out_to_all_accepting_adapters() {
         );
         res.expect("install ok");
         let out = String::from_utf8(buf).unwrap();
-        // 8 of 9 tools accept Skill (claude-desktop declines).
-        assert!(out.contains("8 tool(s)"), "got: {out}");
+        // 9 of 10 tools accept Skill (claude-desktop declines).
+        assert!(out.contains("9 tool(s)"), "got: {out}");
         assert!(out.contains("1 skipped"), "got: {out}");
         let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert!(matches!(

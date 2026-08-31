@@ -72,6 +72,7 @@ pub enum UsageProviderFilter {
     Cursor,
     Copilot,
     Gemini,
+    Antigravity,
 }
 
 impl UsageProviderFilter {
@@ -83,6 +84,7 @@ impl UsageProviderFilter {
             Self::Cursor => provider == "cursor",
             Self::Copilot => provider == "copilot",
             Self::Gemini => provider == "gemini",
+            Self::Antigravity => provider == "antigravity",
         }
     }
 
@@ -96,6 +98,7 @@ impl UsageProviderFilter {
             Self::Cursor,
             Self::Copilot,
             Self::Gemini,
+            Self::Antigravity,
         ]
     }
 
@@ -107,19 +110,21 @@ impl UsageProviderFilter {
             Self::Codex => Self::Cursor,
             Self::Cursor => Self::Copilot,
             Self::Copilot => Self::Gemini,
-            Self::Gemini => Self::All,
+            Self::Gemini => Self::Antigravity,
+            Self::Antigravity => Self::All,
         }
     }
 
     /// Step backward through [`Self::all`] (wraps). Drives `◀`.
     pub(crate) fn prev(self) -> Self {
         match self {
-            Self::All => Self::Gemini,
+            Self::All => Self::Antigravity,
             Self::Claude => Self::All,
             Self::Codex => Self::Claude,
             Self::Cursor => Self::Codex,
             Self::Copilot => Self::Cursor,
             Self::Gemini => Self::Copilot,
+            Self::Antigravity => Self::Gemini,
         }
     }
 
@@ -127,7 +132,10 @@ impl UsageProviderFilter {
     /// `Gemini` are stubs today; everything else (incl. `All`) has data.
     /// Gates the "not yet available" empty-state message.
     pub(crate) fn has_data(self) -> bool {
-        matches!(self, Self::All | Self::Claude | Self::Codex | Self::Copilot)
+        matches!(
+            self,
+            Self::All | Self::Claude | Self::Codex | Self::Copilot | Self::Antigravity
+        )
     }
 }
 
@@ -2609,6 +2617,7 @@ fn plan_provider_includes(provider: crate::config::UsagePlanProvider, call_provi
         crate::config::UsagePlanProvider::Claude => call_provider == "claude",
         crate::config::UsagePlanProvider::Codex => call_provider == "codex",
         crate::config::UsagePlanProvider::Cursor => call_provider == "cursor",
+        crate::config::UsagePlanProvider::Antigravity => call_provider == "antigravity",
     }
 }
 

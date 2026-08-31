@@ -98,6 +98,7 @@ pub enum Tool {
     Codex,
     Gemini,
     Copilot,
+    Antigravity,
 }
 
 impl Tool {
@@ -108,6 +109,7 @@ impl Tool {
             Tool::Codex => crate::config::CliProvider::Codex,
             Tool::Gemini => crate::config::CliProvider::Gemini,
             Tool::Copilot => crate::config::CliProvider::Copilot,
+            Tool::Antigravity => crate::config::CliProvider::Antigravity,
         }
     }
 }

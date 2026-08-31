@@ -528,11 +528,13 @@ impl DaemonSession {
     /// session. The session name embeds the pid + a nanosecond timestamp so
     /// parallel test binaries never collide.
     pub fn spawn(bin: &Path, _home: &Path, env: &[(&str, &str)]) -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         reap_orphaned_tripwire_daemons(bin);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let name = format!("hangar-trip-{}-{nanos}", std::process::id());
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("hangar-trip-{}-{nanos}-{seq}", std::process::id());
 
         // Build the shell command: export each env var, then exec the daemon.
         // The daemon is the genuine binary; tmux keeps it alive across the poll.

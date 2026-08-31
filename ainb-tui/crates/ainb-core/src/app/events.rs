@@ -796,6 +796,37 @@ fn secret_reference_is_set(reference: &str) -> bool {
     !crate::fleet::bridge::secrets::resolve_secret(reference).trim().is_empty()
 }
 
+/// What one pass of `persist_config_screen` did.
+///
+/// Two counts, not one, because the two backends succeed at different moments:
+/// `written` is already in config.toml when this returns, while
+/// `queued_for_daemon` has not been attempted yet: it goes to the Hangar
+/// daemon's SQLite table on the next app tick, and can still fail there with
+/// its own error toast. Reporting "Setting saved to config.toml" for a daemon
+/// row was wrong twice over: wrong file, and wrong tense.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PersistOutcome {
+    /// Rows written to config.toml.
+    pub written: usize,
+    /// Rows handed to the Hangar daemon queue, not yet written.
+    pub queued_for_daemon: usize,
+}
+
+impl PersistOutcome {
+    /// The success line to show, or `None` when nothing happened at all.
+    #[must_use]
+    pub fn message(self) -> Option<String> {
+        match (self.written, self.queued_for_daemon) {
+            (0, 0) => None,
+            (0, queued) => Some(format!("Sending {queued} setting(s) to the Hangar daemon")),
+            (written, 0) => Some(format!("Saved {written} setting(s) to config.toml")),
+            (written, queued) => Some(format!(
+                "Saved {written} setting(s) to config.toml, sending {queued} to the Hangar daemon"
+            )),
+        }
+    }
+}
+
 impl EventHandler {
     fn persist_sessions_pane_preferences(state: &mut AppState) {
         state.app_config.ui_preferences.sessions_sidebar_width =
@@ -3770,10 +3801,25 @@ impl EventHandler {
     /// the file so unknown sections survive), then `save_external_keys` writes the
     /// rest. On success the edits are cleared, so a later save cannot rewrite a
     /// value another process has since changed.
-    fn persist_config_screen(state: &mut AppState) -> anyhow::Result<usize> {
+    fn persist_config_screen(state: &mut AppState) -> anyhow::Result<PersistOutcome> {
         let pending = state.config_screen_state.pending_edits().len();
-        let dirty_before = !state.config_screen_state.dirty.is_empty();
-        let applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        // Daemon rows are excluded: they go to SQLite, and
+        // `apply_to_app_config` deliberately skips them, so a save that touched
+        // only daemon rows changed nothing in `app_config`. Counting them here
+        // let it fall through and rewrite config.toml from the startup
+        // snapshot — the exact revert this guard exists to prevent.
+        let dirty_before = state
+            .config_screen_state
+            .dirty
+            .iter()
+            .any(|key| !key.starts_with("hangar_daemon."));
+        let plugin_written = state
+            .config_screen_state
+            .dirty
+            .iter()
+            .filter(|key| key.starts_with("plugin:") || key.starts_with("plugin-enabled:"))
+            .count();
+        let mut applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
         // Nothing to write: return before touching the file. `save()` renders
         // the whole AppConfig from the snapshot loaded at startup, so pressing
         // `S` with no edits would revert anything `ainb config set` or another
@@ -3783,9 +3829,21 @@ impl EventHandler {
         // excludes plugin rows and read-only rows, so a plugin-only edit has
         // `pending == 0` while still having work to do. `dirty` is the honest
         // "did the user change anything" signal.
+        // The Hangar daemon rows land in a SQLite table, not this file, and
+        // that store is async while this pass is not. APPENDED to a queue, not
+        // assigned to `pending_async_action`: that slot holds one action and is
+        // drained once per app tick, so two popup confirms inside the same
+        // 250 ms tick silently threw the first edit away and toasted "saved"
+        // for both. Queue them before the early return, so a save that touched
+        // only daemon rows still writes.
+        let queued_for_daemon = applied.daemon.len();
+        state.pending_daemon_config_edits.append(&mut applied.daemon);
         if !dirty_before && applied.external.is_empty() {
             state.config_screen_state.mark_saved();
-            return Ok(0);
+            return Ok(PersistOutcome {
+                written: 0,
+                queued_for_daemon,
+            });
         }
         state.app_config.save()?;
         // Collected, not propagated — the same rule the modelled rows already
@@ -3809,7 +3867,15 @@ impl EventHandler {
             tracing::warn!(key, error = %why, "settings edit rejected");
             state.add_error_notification(format!("{key}: {why}"));
         }
-        Ok(pending.saturating_sub(rejected.len()))
+        Ok(PersistOutcome {
+            // The daemon rows are counted separately: they are not in
+            // config.toml, and their write has not been attempted yet.
+            // `pending_edits()` deliberately skips plugin rows, but
+            // `apply_plugin_rows` DOES write them — counting only pending
+            // meant editing any plugin setting completed in total silence.
+            written: pending.saturating_sub(rejected.len() + queued_for_daemon) + plugin_written,
+            queued_for_daemon,
+        })
     }
 
     /// Store a credential literal in the OS keychain and point the row at it.
@@ -4090,10 +4156,10 @@ impl EventHandler {
                 // detached `std::thread` it is not torn down mid-write at
                 // shutdown.
                 let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
-                let exclude_paths = state.app_config.workspace_defaults.exclude_paths.clone();
+                let defaults = state.app_config.workspace_defaults.clone();
                 tokio::task::spawn_blocking(move || {
                     let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
-                        .with_exclude_paths(exclude_paths);
+                        .with_workspace_defaults(&defaults);
                     if let Err(err) = scanner.scan() {
                         tracing::warn!(error = %err, "pick_repo: background repo rescan failed");
                     }
@@ -6954,9 +7020,10 @@ impl EventHandler {
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
                 match Self::persist_config_screen(state) {
-                    Ok(0) => state.add_info_notification("No changes to save".to_string()),
-                    Ok(n) => state
-                        .add_success_notification(format!("Saved {n} setting(s) to config.toml")),
+                    Ok(outcome) => match outcome.message() {
+                        Some(message) => state.add_success_notification(message),
+                        None => state.add_info_notification("No changes to save".to_string()),
+                    },
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save settings: {}", e));
                         tracing::error!("Failed to save config: {}", e);
@@ -7252,10 +7319,10 @@ impl EventHandler {
                         // remains as an explicit save-all; `Esc` still cancels the
                         // single edit before it reaches here.
                         match Self::persist_config_screen(state) {
-                            Ok(_) => {
-                                state.add_success_notification(
-                                    "Setting saved to config.toml".to_string(),
-                                );
+                            Ok(outcome) => {
+                                if let Some(message) = outcome.message() {
+                                    state.add_success_notification(message);
+                                }
                             }
                             Err(e) => {
                                 state
@@ -10474,5 +10541,112 @@ mod configure_back_persist_tests {
         let mut defaults = SessionDefaults::default();
         defaults.per_repo.insert("owner/repo".to_string(), Default::default());
         assert!(worth_persisting_repo_defaults("", &defaults, "owner/repo"));
+    }
+}
+
+#[cfg(test)]
+mod hangar_daemon_persist_tests {
+    use super::*;
+    use crate::app::state::{AppState, ConfigValue};
+
+    /// Point HOME at a tempdir for the duration of the test.
+    ///
+    /// `AppState::default()` calls the real `AppConfig::load()`, and
+    /// `persist_config_screen` can reach `save()` — so without this these tests
+    /// wrote the developer's own `~/.agents-in-a-box/config/config.toml`,
+    /// appended real audit entries, and mutated the process-wide tunables
+    /// snapshot that other tests in this binary read. Serialised, because the
+    /// environment is process-global and cargo runs tests in parallel.
+    fn with_isolated_home<T>(body: impl FnOnce() -> T) -> T {
+        // The crate-wide lock, not a private one: sibling tests call
+        // `AppConfig::load()` and `snapshot()`, which read this same HOME.
+        let _guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        let out = body();
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    /// Two Hangar-daemon edits confirmed inside one app tick must BOTH be
+    /// written.
+    ///
+    /// `persist_config_screen` used to assign `pending_async_action`, a slot
+    /// that holds exactly one action and is drained once per 250 ms tick, while
+    /// persist runs on every popup confirm. So the first edit was silently
+    /// dropped and both got a success toast. Before the queue this fails with
+    /// `assertion `left == right` failed: left: 1, right: 2`.
+    #[test]
+    fn two_daemon_edits_in_one_tick_are_both_queued() {
+        with_isolated_home(|| {
+            let mut state = AppState::default();
+
+            state
+                .config_screen_state
+                .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
+            EventHandler::persist_config_screen(&mut state).expect("first persist");
+
+            state.config_screen_state.set_row_value(
+                "hangar_daemon.autostandup.stagnant_min",
+                ConfigValue::Number(30),
+            );
+            EventHandler::persist_config_screen(&mut state).expect("second persist");
+
+            let queued: Vec<&str> =
+                state.pending_daemon_config_edits.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(
+                queued.len(),
+                2,
+                "both edits must survive until the tick drains them, got {queued:?}"
+            );
+            assert!(queued.contains(&"autostandup.enabled"), "{queued:?}");
+            assert!(queued.contains(&"autostandup.stagnant_min"), "{queued:?}");
+        });
+    }
+
+    /// A daemon row is NOT reported as saved to config.toml: it has not been
+    /// written anywhere yet, and its SQLite write can still fail with its own
+    /// error toast on the next tick.
+    #[test]
+    fn a_daemon_row_is_not_reported_as_saved_to_config_toml() {
+        with_isolated_home(|| {
+            let mut state = AppState::default();
+            state
+                .config_screen_state
+                .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
+
+            let outcome = EventHandler::persist_config_screen(&mut state).expect("persist");
+            assert_eq!(outcome.written, 0, "nothing reached config.toml");
+            assert_eq!(outcome.queued_for_daemon, 1);
+            let message = outcome.message().expect("a daemon edit is still a change");
+            assert!(
+                !message.contains("config.toml"),
+                "a daemon row must not claim config.toml: {message}"
+            );
+            assert!(message.contains("Hangar daemon"), "{message}");
+        });
+    }
+
+    /// A config.toml row keeps its own wording, so the split does not make the
+    /// ordinary case vaguer.
+    #[test]
+    fn a_config_toml_row_still_reports_config_toml() {
+        with_isolated_home(|| {
+            let outcome = PersistOutcome {
+                written: 2,
+                queued_for_daemon: 0,
+            };
+            assert_eq!(
+                outcome.message().unwrap(),
+                "Saved 2 setting(s) to config.toml"
+            );
+            assert!(PersistOutcome::default().message().is_none());
+        });
     }
 }

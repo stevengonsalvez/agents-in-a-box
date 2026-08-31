@@ -71,6 +71,7 @@ fn cfg_with_codex(codex_path: PathBuf) -> RunnerConfig {
         claude_path: PathBuf::from("/nonexistent/claude"),
         codex_path,
         copilot_path: PathBuf::from("/nonexistent/copilot"),
+        antigravity_path: PathBuf::from("/nonexistent/agy"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,

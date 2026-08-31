@@ -26,6 +26,7 @@ pub enum Provider {
     Claude,
     Codex,
     Copilot,
+    Antigravity,
     Unknown,
 }
 
@@ -36,6 +37,7 @@ impl Provider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
             Self::Unknown => "unknown",
         }
     }
@@ -384,6 +386,22 @@ mod fleet_identity_tests {
             SessionKey::managed(Provider::Claude, "session-456").as_str(),
             "claude:session-456"
         );
+        assert_eq!(
+            SessionKey::managed(Provider::Antigravity, "session-789").as_str(),
+            "antigravity:session-789"
+        );
+    }
+
+    #[test]
+    fn provider_round_trips_and_string_conversions() {
+        assert_eq!(Provider::Antigravity.as_str(), "antigravity");
+        assert_eq!(Provider::Antigravity.to_string(), "antigravity");
+        assert_eq!(
+            serde_json::to_string(&Provider::Antigravity).unwrap(),
+            "\"antigravity\""
+        );
+        let decoded: Provider = serde_json::from_str("\"antigravity\"").unwrap();
+        assert_eq!(decoded, Provider::Antigravity);
     }
 
     #[test]

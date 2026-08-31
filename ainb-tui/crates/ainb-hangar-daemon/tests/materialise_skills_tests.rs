@@ -150,7 +150,7 @@ async fn codex_materialises_under_dot_codex_with_codex_home() {
     );
 }
 
-// 3. gemini / default → `{workdir}/.agent_context/skills/...`, no home env.
+// 3. gemini / default -> `{workdir}/.agent_context/skills/...`, no home env.
 #[tokio::test]
 async fn gemini_and_default_materialise_under_agent_context() {
     let (store, home, _db) = fresh().await;
@@ -164,6 +164,25 @@ async fn gemini_and_default_materialise_under_agent_context() {
         assert!(
             target.workdir.join(".agent_context/skills/commit/SKILL.md").exists(),
             "{provider}: skill must land under workdir/.agent_context"
+        );
+        assert_eq!(report.home_env, None, "{provider}: no home env var");
+    }
+}
+
+// 3b. antigravity -> `{workdir}/.agents/skills/...`, no home env.
+#[tokio::test]
+async fn antigravity_materialises_under_dot_agents_skills() {
+    let (store, home, _db) = fresh().await;
+    let pool = store.pool();
+    let (ws, agent) = seed(pool).await;
+    attach_skill(pool, &ws, &agent, "commit", Some("body"), vec![]).await;
+
+    for provider in ["antigravity", "agy"] {
+        let (target, _) = target_in(&home.path().join(provider), provider);
+        let report = materialise_for_agent(pool, &agent, &target).await.unwrap();
+        assert!(
+            target.workdir.join(".agents/skills/commit/SKILL.md").exists(),
+            "{provider}: skill must land under workdir/.agents/skills"
         );
         assert_eq!(report.home_env, None, "{provider}: no home env var");
     }

@@ -107,6 +107,7 @@ struct FleetWindowView: View {
                 Divider()
                 Button("Claude") { presentation.filters.provider = .claude }
                 Button("Codex") { presentation.filters.provider = .codex }
+                Button("Antigravity") { presentation.filters.provider = .antigravity }
                 Button("Unknown") { presentation.filters.provider = .unknown }
             } label: {
                 Label(providerFilterLabel, systemImage: "slider.horizontal.3")
@@ -185,6 +186,7 @@ struct FleetWindowView: View {
         case .codex: "Codex"
         case .copilot: "Copilot"
         case .acp: "ACP"
+        case .antigravity: "Antigravity"
         case .unknown: "Unknown"
         case nil: "All providers"
         }

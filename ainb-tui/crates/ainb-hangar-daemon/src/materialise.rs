@@ -81,6 +81,8 @@ pub enum ProviderSkillLayout {
     Cursor,
     /// `copilot`: `{workdir}/.github/skills`, no env var.
     Copilot,
+    /// `antigravity`: `{workdir}/.agents/skills`, no env var.
+    Antigravity,
     /// `gemini` / anything unrecognised: `{workdir}/.agent_context/skills`, no
     /// env var. The catch-all keeps an unknown provider working (skills written
     /// to a neutral, in-workdir location) rather than silently materialising
@@ -100,6 +102,7 @@ impl ProviderSkillLayout {
             "codex" => Self::Codex,
             "cursor" => Self::Cursor,
             "copilot" => Self::Copilot,
+            "antigravity" | "agy" => Self::Antigravity,
             _ => Self::GeminiOrDefault,
         }
     }
@@ -117,6 +120,7 @@ impl ProviderSkillLayout {
             Self::Codex => task_root.join(".codex").join(SKILLS_DIR),
             Self::Cursor => task_root.join(".cursor").join(SKILLS_DIR),
             Self::Copilot => workdir.join(".github").join(SKILLS_DIR),
+            Self::Antigravity => workdir.join(".agents").join(SKILLS_DIR),
             Self::GeminiOrDefault => workdir.join(".agent_context").join(SKILLS_DIR),
         }
     }
@@ -133,7 +137,7 @@ impl ProviderSkillLayout {
             Self::Claude => Some(("CLAUDE_HOME".to_string(), task_root.to_path_buf())),
             Self::Codex => Some(("CODEX_HOME".to_string(), task_root.join(".codex"))),
             Self::Cursor => Some(("CURSOR_HOME".to_string(), task_root.join(".cursor"))),
-            Self::Copilot | Self::GeminiOrDefault => None,
+            Self::Copilot | Self::Antigravity | Self::GeminiOrDefault => None,
         }
     }
 }
@@ -331,4 +335,35 @@ fn set_executable(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_layout_from_provider_and_paths() {
+        assert_eq!(
+            ProviderSkillLayout::from_provider("antigravity"),
+            ProviderSkillLayout::Antigravity
+        );
+        assert_eq!(
+            ProviderSkillLayout::from_provider("agy"),
+            ProviderSkillLayout::Antigravity
+        );
+        assert_eq!(
+            ProviderSkillLayout::from_provider("ANTIGRAVITY"),
+            ProviderSkillLayout::Antigravity
+        );
+
+        let task_root = Path::new("/tmp/task_123");
+        let workdir = Path::new("/tmp/task_123/workdir");
+
+        let layout = ProviderSkillLayout::Antigravity;
+        assert_eq!(
+            layout.skills_root(task_root, workdir),
+            workdir.join(".agents/skills")
+        );
+        assert_eq!(layout.home_env(task_root), None);
+    }
 }

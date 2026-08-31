@@ -14,6 +14,14 @@ on:
       - '.github/workflows/toolkit-validation.yml'
   pull_request:
 
+# Superseded pushes used to run to completion: four pushes to one branch in
+# half an hour queued four full runs, and the last one spent 190 minutes
+# waiting for a runner rather than working. Group per ref and cancel only on
+# pull_request — a push to main must still get its own complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The pinned ainb-toolkit ref this build of ainb consumes. Keep in lockstep
 # with release.yml's AINB_TOOLKIT_REF.
 env:
@@ -35,6 +43,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   changes:
     name: Detect relevant changes
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
@@ -52,8 +61,9 @@ jobs:
     name: Validate template skill refs against ainb-toolkit
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 15
     runs-on: ubuntu-latest
 
     steps:
@@ -68,10 +78,12 @@ jobs:
           workspaces: ainb-tui
 
       - name: Clone pinned ainb-toolkit
+        env:
+          TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
         run: |
           git clone --depth 1 --branch "${AINB_TOOLKIT_REF}" \
             https://github.com/stevengonsalvez/ainb-toolkit.git \
-            "${{ github.workspace }}/ainb-toolkit"
+            "${TOOLKIT_DIR}"
 
       - name: Enforce every embedded template skill resolves in ainb-toolkit
         env:
@@ -83,10 +95,12 @@ jobs:
           cargo test -p ainb-hangar-core --test template_registry_tests -- --nocapture
 
       - name: Generate catalog index from the pinned ainb-toolkit (sanity)
+        env:
+          TOOLKIT_DIR: ${{ github.workspace }}/ainb-toolkit
         run: |
           cd ainb-tui
           cargo run -p xtask -- gen-catalog-index \
-            --toolkit-root "${{ github.workspace }}/ainb-toolkit" \
+            --toolkit-root "${TOOLKIT_DIR}" \
             --release-tag "${AINB_TOOLKIT_REF}" \
             --out "${RUNNER_TEMP}/catalog-index.json"
           # Owned URIs must pin the cloned ainb-toolkit ref.
@@ -99,8 +113,9 @@ jobs:
     name: Test ainb installations (replaces bootstrap.js parity tests)
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     steps:
@@ -132,8 +147,10 @@ jobs:
       - name: Run live-binary tripwires (Layer 4)
         run: |
           cd ainb-tui
-          # Release-build the binary so tripwires get a fast spawn time.
-          cargo build --release -p ainb
+          # Build with release-fast (no LTO, parallel codegen) so tripwires
+          # get a fast spawn time without paying full release-profile LTO.
+          # This step measured ~15 of the job's 16 minutes under `--release`.
+          cargo build --profile release-fast -p ainb
 
           # CLI tripwires run without tmux; TUI tripwires self-skip when
           # tmux is missing (sudo-installed step above ensures it's
@@ -150,7 +167,7 @@ jobs:
           # full CI cycle just to reveal the next failure. Surfacing every
           # failure in one run is what makes the next such gap cheap to
           # recover from.
-          cargo test -p ainb --release --no-fail-fast \
+          cargo test -p ainb --profile release-fast --no-fail-fast \
               --test 'tripwire_cli_*' \
               --test 'tripwire_core_skill_manager_*' \
               --test 'tripwire_core_home_tile_lists_skill_manager'
@@ -158,7 +175,7 @@ jobs:
       - name: "Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME"
         run: |
           cd ainb-tui
-          BIN="$PWD/target/release/ainb"
+          BIN="$PWD/target/release-fast/ainb"
 
           # Pretend HOME is a clean tempdir so the real-home tier
           # writes into it instead of the runner's actual home.

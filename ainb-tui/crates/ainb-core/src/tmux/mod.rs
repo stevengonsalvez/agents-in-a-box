@@ -19,6 +19,49 @@ use anyhow::Result;
 use tokio::process::Command;
 use tracing::debug;
 
+/// Whether a tmux session with EXACTLY this name exists.
+///
+/// `Some(true)` / `Some(false)` are proven answers. `None` means the question
+/// could not be answered: tmux missing from PATH (a launchd-spawned process
+/// gets a minimal one), a wedged server, or a fork that failed under load.
+/// Callers must not read `None` as "dead": a liveness check that turns an
+/// environment problem into a fault would report a healthy session as broken.
+///
+/// The `=` prefix is load-bearing. Bare `has-session -t foo` resolves by
+/// prefix and fnmatch, so it exits 0 for `foo-fix` when `foo` itself is long
+/// gone. Only `-t =foo` compares exactly.
+///
+/// Bounded: a wedged tmux server never returns, and every caller here sits on
+/// a collector loop that must keep publishing.
+#[must_use]
+pub fn session_alive(session: &str) -> Option<bool> {
+    let mut child = std::process::Command::new("tmux")
+        .args(["has-session", "-t", &format!("={session}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + SESSION_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Wedged or unreadable: kill the child so it cannot outlive the
+            // probe, and report "unknown" rather than guessing.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// How long [`session_alive`] waits before calling the answer unknown.
+const SESSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Sanitize a name into the tmux session name `ainb` actually spawns under.
 ///
 /// This is the single source of truth shared by [`session::TmuxSession`] (the

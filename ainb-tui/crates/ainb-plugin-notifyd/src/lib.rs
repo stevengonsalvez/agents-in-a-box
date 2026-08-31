@@ -25,6 +25,7 @@
 
 pub mod broker;
 pub mod cli;
+pub mod config;
 pub mod envelope;
 pub mod fallback;
 pub mod ingest;

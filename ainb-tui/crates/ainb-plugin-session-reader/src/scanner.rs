@@ -123,14 +123,14 @@ impl ProgressReporter {
     }
 }
 
-/// Source roots for the five providers. `None` skips that provider
+/// Source roots for the providers. `None` skips that provider
 /// entirely; `Some(path)` is walked even if the directory doesn't exist
 /// (parsers degrade to empty in that case).
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRoots {
-    /// `~/.claude/projects/` — outer dir is per-project subdirs.
+    /// `~/.claude/projects/` -- outer dir is per-project subdirs.
     pub claude_projects: Option<PathBuf>,
-    /// `~/.codex/sessions/` — `<YYYY>/<MM>/<DD>/rollout-*.jsonl`.
+    /// `~/.codex/sessions/` -- `<YYYY>/<MM>/<DD>/rollout-*.jsonl`.
     pub codex_sessions: Option<PathBuf>,
     /// Gemini Code Assist sessions root.
     pub gemini_sessions: Option<PathBuf>,
@@ -142,12 +142,15 @@ pub struct ProviderRoots {
     /// `~/Library/Application Support/Cursor/User/workspaceStorage`;
     /// linux: `~/.config/Cursor/User/workspaceStorage`.
     pub cursor_sessions: Option<PathBuf>,
+    /// Google Antigravity brain sessions: `~/.gemini/antigravity-cli/brain/`
+    /// (`$ANTIGRAVITY_HOME/brain` or `$GEMINI_HOME/brain` when set).
+    pub antigravity_brain: Option<PathBuf>,
 }
 
 impl ProviderRoots {
     /// Construct with the canonical default paths under the current
     /// user's home directory. Falls back silently when `$HOME` is not
-    /// set — every provider becomes `None`.
+    /// set -- every provider becomes `None`.
     #[must_use]
     pub fn defaults() -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -158,6 +161,7 @@ impl ProviderRoots {
                 gemini_sessions: Some(home.join(".gemini/sessions")),
                 copilot_sessions: Some(copilot_default_root(&home)),
                 cursor_sessions: Some(cursor_default_root(&home)),
+                antigravity_brain: Some(antigravity_default_root(&home)),
             },
             None => Self::default(),
         }
@@ -185,6 +189,17 @@ fn copilot_default_root(home: &Path) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".copilot"));
     base.join("session-state")
+}
+
+/// Root of the Google Antigravity CLI brain tree:
+/// `~/.gemini/antigravity-cli/brain/`. `ANTIGRAVITY_HOME` / `GEMINI_HOME`
+/// relocates the base tree, so honor them first.
+fn antigravity_default_root(home: &Path) -> PathBuf {
+    let base = std::env::var_os("ANTIGRAVITY_HOME")
+        .or_else(|| std::env::var_os("GEMINI_HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".gemini/antigravity-cli"));
+    base.join("brain")
 }
 
 /// Per-scan instrumentation. Counted in the per-file read path so
@@ -442,7 +457,12 @@ pub(crate) fn scan_with_cache_and_progress(
     // matches the parser's per-session `note_file` cadence and can't
     // over-count on stray `.jsonl` elsewhere under the tree.
     let copilot_files = roots.copilot_sessions.as_deref().map_or(0, count_copilot_events);
-    let total = claude_files.saturating_add(codex_files).saturating_add(copilot_files);
+    let antigravity_files =
+        roots.antigravity_brain.as_deref().map_or(0, count_antigravity_transcripts);
+    let total = claude_files
+        .saturating_add(codex_files)
+        .saturating_add(copilot_files)
+        .saturating_add(antigravity_files);
     if total > 0 {
         // Saturate at u32::MAX — unlikely in practice (would require
         // ~4 billion .jsonl files) but keeps the cast explicit.
@@ -454,7 +474,7 @@ pub(crate) fn scan_with_cache_and_progress(
     aggregate(all_calls)
 }
 
-/// Walk every provider through `ctx`. Claude, Codex and Copilot go
+/// Walk every provider through `ctx`. Claude, Codex, Copilot, and Antigravity go
 /// through the cached, watermark-aware per-file path; Gemini / Cursor
 /// parsers are uncached and always contribute to the returned (recent)
 /// calls — identically in the full and incremental paths, so the
@@ -470,11 +490,8 @@ fn walk_providers(
     calls
 }
 
-/// The cache-aware half of [`walk_providers`]: Claude, Codex, and
-/// Copilot, through the watermark-partitioned per-file path. Each of
-/// their session files (Claude/Codex `.jsonl`, Copilot `events.jsonl`)
-/// has a stable `(mtime, size)` once its session ends, so the per-file
-/// cache + stable/recent partition apply uniformly.
+/// The cache-aware half of [`walk_providers`]: Claude, Codex,
+/// Copilot, and Antigravity, through the watermark-partitioned per-file path.
 #[cfg(not(target_arch = "wasm32"))]
 fn walk_cached_providers(
     roots: &ProviderRoots,
@@ -494,6 +511,11 @@ fn walk_cached_providers(
     }
     if let Some(root) = &roots.copilot_sessions {
         calls.extend(crate::parsers::copilot::parse_dir_cached_with_progress(
+            root, ctx, reporter,
+        ));
+    }
+    if let Some(root) = &roots.antigravity_brain {
+        calls.extend(crate::parsers::antigravity::parse_dir_cached_with_progress(
             root, ctx, reporter,
         ));
     }
@@ -1109,6 +1131,28 @@ fn count_copilot_events(root: &Path) -> usize {
         let dir = entry.path();
         if dir.is_dir() && dir.join("events.jsonl").is_file() {
             count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+/// Count Antigravity brain transcripts: `<root>/<uuid>/.system_generated/logs/transcript.jsonl`
+/// (or `transcript_full.jsonl`).
+#[cfg(not(target_arch = "wasm32"))]
+fn count_antigravity_transcripts(root: &Path) -> usize {
+    let mut count = 0usize;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if dir.is_dir() {
+            let logs = dir.join(".system_generated/logs");
+            if logs.join("transcript.jsonl").is_file()
+                || logs.join("transcript_full.jsonl").is_file()
+            {
+                count = count.saturating_add(1);
+            }
         }
     }
     count
@@ -2610,6 +2654,7 @@ mod tests {
         assert_eq!(count_jsonl_in_two_level_tree(&missing), 0);
         assert_eq!(count_jsonl_recursive(&missing), 0);
         assert_eq!(count_copilot_events(&missing), 0);
+        assert_eq!(count_antigravity_transcripts(&missing), 0);
     }
 
     #[test]
@@ -2631,6 +2676,28 @@ mod tests {
         std::fs::write(root.join("b-2/checkpoints/note.jsonl"), b"{}").unwrap();
 
         assert_eq!(count_copilot_events(root), 2);
+    }
+
+    #[test]
+    fn count_antigravity_transcripts_counts_only_valid_session_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Session 1: transcript.jsonl
+        let s1_logs = root.join("uuid-1/.system_generated/logs");
+        std::fs::create_dir_all(&s1_logs).unwrap();
+        std::fs::write(s1_logs.join("transcript.jsonl"), b"{}").unwrap();
+
+        // Session 2: transcript_full.jsonl
+        let s2_logs = root.join("uuid-2/.system_generated/logs");
+        std::fs::create_dir_all(&s2_logs).unwrap();
+        std::fs::write(s2_logs.join("transcript_full.jsonl"), b"{}").unwrap();
+
+        // Session 3: no transcript
+        let s3_logs = root.join("uuid-3/.system_generated/logs");
+        std::fs::create_dir_all(&s3_logs).unwrap();
+        std::fs::write(s3_logs.join("other.txt"), b"x").unwrap();
+
+        assert_eq!(count_antigravity_transcripts(root), 2);
     }
 
     #[test]

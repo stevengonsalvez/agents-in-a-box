@@ -15,6 +15,7 @@ use ainb_adapters_source::ResolvedUnit;
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 pub mod amazonq;
+pub mod antigravity;
 pub mod claude;
 pub mod claude_desktop;
 pub mod cline;
@@ -28,6 +29,7 @@ pub mod plan;
 pub mod roo;
 
 pub use amazonq::AmazonqAdapter;
+pub use antigravity::AntigravityAdapter;
 pub use claude::ClaudeAdapter;
 pub use claude_desktop::ClaudeDesktopAdapter;
 pub use cline::ClineAdapter;
@@ -46,6 +48,7 @@ pub fn all_adapters() -> Vec<Box<dyn ToolAdapter>> {
         Box::new(ClaudeAdapter::new()),
         Box::new(CodexAdapter::new()),
         Box::new(CopilotAdapter::new()),
+        Box::new(AntigravityAdapter::new()),
         Box::new(GeminiAdapter::new()),
         Box::new(CursorAdapter::new()),
         Box::new(AmazonqAdapter::new()),
@@ -61,6 +64,7 @@ pub fn adapter_by_name(name: &str) -> Option<Box<dyn ToolAdapter>> {
         "claude" => Some(Box::new(ClaudeAdapter::new())),
         "codex" => Some(Box::new(CodexAdapter::new())),
         "copilot" => Some(Box::new(CopilotAdapter::new())),
+        "antigravity" | "agy" => Some(Box::new(AntigravityAdapter::new())),
         "gemini" => Some(Box::new(GeminiAdapter::new())),
         "cursor" => Some(Box::new(CursorAdapter::new())),
         "amazonq" => Some(Box::new(AmazonqAdapter::new())),

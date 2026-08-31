@@ -246,10 +246,10 @@ pub fn parse_bool_token(s: &str) -> Option<bool> {
     }
 }
 
-/// The card-agent enum variants (`claude`/`codex`/`copilot`), matching
+/// The card-agent enum variants (`claude`/`codex`/`antigravity`/`copilot`), matching
 /// [`crate::agent_kind::AgentKind::all`]. Kept as a `const` so the registry
 /// entry is `const`; a unit test asserts it stays in lock-step with `AgentKind`.
-const CARD_AGENT_VARIANTS: &[&str] = &["claude", "codex", "copilot"];
+const CARD_AGENT_VARIANTS: &[&str] = &["claude", "codex", "antigravity", "copilot"];
 
 /// The authoritative list of user-configurable daemon knobs. Both the TUI and
 /// the CLI iterate this; adding an entry surfaces the knob in both.
@@ -483,7 +483,8 @@ mod tests {
         let d = descriptor(KEY_CARD_AGENT_DEFAULT).unwrap();
         assert_eq!(d.validate("CODEX").unwrap(), "codex");
         assert_eq!(d.validate("Claude").unwrap(), "claude");
-        assert!(d.validate("gemini").is_err());
+        assert_eq!(d.validate("ANTIGRAVITY").unwrap(), "antigravity");
+        assert!(d.validate("cursor").is_err());
     }
 
     #[test]

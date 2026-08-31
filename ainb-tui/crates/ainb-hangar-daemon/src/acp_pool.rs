@@ -57,7 +57,9 @@
 //! * **A blocked permission is answerable.** `session/request_permission` parks
 //!   its responder here and raises an attention row; the answer arrives through
 //!   `fleet/action` and reaches the adapter's pending JSON-RPC id. A permission
-//!   whose adapter dies is resolved by convergence, never left as a ghost row.
+//!   whose adapter dies is retired the moment its turn ends, and by convergence
+//!   when no turn was open to end, never left as a ghost row for an operator to
+//!   click at a delivery they can already see resolved.
 //!   EVERY parked ask is answerable, not just the newest: an adapter running
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
@@ -163,6 +165,55 @@ const EXIT_QUIESCE: Duration = Duration::from_millis(50);
 
 // --------------------------------------------------------------------- config
 
+/// The permission mode an adapter gets when neither the built-in registry nor
+/// config names one.
+const DEFAULT_PERMISSION_MODE: &str = "default";
+
+/// One `[acp.adapters.<name>]` table, as written.
+///
+/// Both fields are `Option` so an absent key means "leave the built-in alone"
+/// rather than "reset it to a default": a table that only repoints `command`
+/// must not silently unpin the permission mode, which is the setting that stops
+/// an adapter inheriting `bypassPermissions` from ambient state.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AcpAdapterToml {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    permission_mode: Option<String>,
+}
+
+/// Read `[acp.adapters]` from `~/.agents-in-a-box/config/config.toml`.
+///
+/// Empty on any failure (no file, no `$HOME`, bad TOML, malformed table), with
+/// a warning: the built-in adapters are always the floor.
+fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterToml> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return HashMap::new();
+    };
+    let path = std::path::PathBuf::from(home)
+        .join(".agents-in-a-box")
+        .join("config")
+        .join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let root: toml::Value = match toml::from_str(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "acp: config.toml does not parse; using the built-in adapters");
+            return HashMap::new();
+        }
+    };
+    let Some(table) = root.get("acp").and_then(|acp| acp.get("adapters")).cloned() else {
+        return HashMap::new();
+    };
+    table.try_into().unwrap_or_else(|error| {
+        tracing::warn!(%error, "acp: [acp.adapters] is malformed; using the built-in adapters");
+        HashMap::new()
+    })
+}
+
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -196,7 +247,7 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        let mode = "default".to_string();
+        let mode = DEFAULT_PERMISSION_MODE.to_string();
         let adapters = [
             ainb_acp::config::CLAUDE_ADAPTER,
             ainb_acp::config::CODEX_ADAPTER,
@@ -230,7 +281,7 @@ impl PoolConfig {
     /// untouched when the variable is unset or junk.
     #[must_use]
     pub fn from_env() -> Self {
-        let mut config = Self::default();
+        let mut config = Self::from_config();
         if let Some(ms) = std::env::var("AINB_ACP_TURN_DEADLINE_MS")
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -240,6 +291,53 @@ impl PoolConfig {
             config.sweep_interval = config
                 .sweep_interval
                 .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+        }
+        config
+    }
+
+    /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config
+    /// applied.
+    ///
+    /// The adapter registry was a hardcoded two-entry map with no user surface
+    /// at all: a provider absent from it simply could not be created, and an
+    /// adapter installed anywhere but `PATH` could not be reached. A named
+    /// adapter here overrides the built-in entry; a new name adds one.
+    ///
+    /// Read directly off config.toml rather than through `ainb`, which this
+    /// crate does not depend on, mirroring how the session-reader plugin reads
+    /// `[session_reader]`. Every failure degrades to the built-ins: a malformed
+    /// table must not leave the daemon with no adapters at all.
+    #[must_use]
+    pub fn from_config() -> Self {
+        let mut config = Self::default();
+        for (name, adapter) in acp_adapters_from_config() {
+            let entry = config
+                .adapters
+                .entry(name.clone())
+                .or_insert_with(|| AdapterConfig::new(name, DEFAULT_PERMISSION_MODE));
+            // `filter(|c| !c.trim().is_empty())`: the registry seeds this row with
+            // `""` and its help says blank resolves the adapter's name on PATH. A
+            // hand-edited empty string would otherwise become an empty program path
+            // that cannot spawn.
+            if let Some(command) = adapter.command.filter(|c| !c.trim().is_empty()) {
+                entry.command = std::path::PathBuf::from(command);
+            }
+            if let Some(mode) = adapter.permission_mode {
+                // Validated here, not just in the settings screen: the row's
+                // Choice list gates the UI and `ainb config set`, but a hand-edited
+                // typo would otherwise reach `session/new` unchecked — and an
+                // unpinned adapter has been observed inheriting
+                // `bypassPermissions`, so a silent fall-through is not safe.
+                const MODES: &[&str] = &["default", "acceptEdits", "bypassPermissions", "plan"];
+                if MODES.contains(&mode.as_str()) {
+                    entry.permission_mode = mode;
+                } else {
+                    tracing::warn!(
+                        %mode,
+                        "unknown acp permission_mode in config; using \"default\""
+                    );
+                }
+            }
         }
         config
     }
@@ -1493,7 +1591,7 @@ impl SessionActor {
             }
         }
         self.pump().await;
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // Close the queue BEFORE the last drain: after this a `submit_prompt`
         // gets `Closed` (answered `session_gone`) rather than landing a job in a
         // buffer nobody will ever read.
@@ -1896,6 +1994,19 @@ impl SessionActor {
                 body,
                 created_at: now,
             });
+        // A permission still parked when the turn ENDS has no answerable
+        // responder left: the adapter either died holding it (the `Err` leg) or
+        // finished the turn without waiting for it. It is retired HERE, BEFORE
+        // the receipt lands, because the receipt is what every reader treats as
+        // "this turn is over": left to convergence, the attention list keeps
+        // advertising an approval to click for a delivery the operator can
+        // already see resolved (R8/I7's ghost row). Convergence still does this
+        // and must, for a session with no open turn and for a daemon that died
+        // mid-turn; this is that same `cancel_parked` pulled forward to the
+        // first moment the turn is known to be over, not a second copy of the
+        // repair. The process-exit route gets here an `EXIT_QUIESCE` later at
+        // best, and only once this actor finishes the write set below.
+        self.cancel_parked("hangar-turn-end").await;
         // ONE transaction (I4): the reply, its receipt and the released session
         // land together or not at all. Four separate commits left a daemon
         // death between them showing an answer with no receipt, or a receipt
@@ -2381,7 +2492,7 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // BEFORE the shared routine, so each drained prompt carries its own
         // enumerated cause instead of being swept up as an anonymous stuck leg.
         self.drain_queue(cause.detail()).await;
@@ -2400,6 +2511,16 @@ impl SessionActor {
 
     /// Raise the attention row R8 exists for, and PARK the responder.
     async fn raise_permission(&mut self, permission: PermissionRequest) {
+        // No open turn means nothing is left to answer this. The request was
+        // already in the actor's channel when `finish_turn` retired the parked
+        // set, so raising it now would insert an attention row AFTER the
+        // receipt committed and the session went IDLE: the same ghost row
+        // `finish_turn` closes, through a narrower window. Refuse it at the
+        // door instead of parking a responder nobody will ever reach.
+        if self.turn.is_none() {
+            let _ = permission.answer_cancelled();
+            return;
+        }
         let fingerprint = permission_fingerprint(&self.session_key, &permission);
         let payload = serde_json::json!({
             "kind": "acp_permission",
@@ -2597,15 +2718,19 @@ impl SessionActor {
     }
 
     /// Answer every parked permission `Cancelled` and close its row.
-    /// Convergence's job: a permission whose adapter is gone must never survive
-    /// as a ghost row.
-    async fn cancel_parked(&mut self) {
+    /// A permission whose adapter is gone must never survive as a ghost row.
+    ///
+    /// `answered_by` is the caller's own name, not a constant: turn end and
+    /// convergence both retire parked permissions, and a row stamped
+    /// `hangar-converge` by the turn-end path would report a repair that never
+    /// ran, over-counting adapter crashes in any audit over that column.
+    async fn cancel_parked(&mut self, answered_by: &str) {
         let parked: Vec<ParkedPermission> = self.parked.drain().map(|(_, value)| value).collect();
         self.stats.pending_permissions.store(0, Ordering::Relaxed);
         for permission in parked {
             let attention_id = permission.attention_id;
             let _ = permission.request.answer_cancelled();
-            self.retire_attention(&attention_id, "hangar-converge", "cancelled").await;
+            self.retire_attention(&attention_id, answered_by, "cancelled").await;
         }
     }
 

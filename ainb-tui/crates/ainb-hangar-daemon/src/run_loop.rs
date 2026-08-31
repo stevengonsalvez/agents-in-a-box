@@ -149,6 +149,8 @@ pub struct DaemonConfig {
     pub codex_path: PathBuf,
     /// Path to the `copilot` provider binary (GitHub Copilot CLI).
     pub copilot_path: PathBuf,
+    /// Path to the `antigravity` provider binary (Google Antigravity).
+    pub antigravity_path: PathBuf,
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Hard wall-clock deadline for each provider run; the subprocess is killed
@@ -188,7 +190,7 @@ impl DaemonConfig {
         let runtime_id = Some(ainb_hangar_store::bootstrap::default_runtime_id());
         // Resolve each provider path to an absolute, symlink-canonicalized
         // binary ONCE here, before it ever reaches `RunnerConfig` and the
-        // sandbox profile generator. A bare default (`claude`/`codex`/`copilot`)
+        // sandbox profile generator. A bare default (`claude`/`codex`/`copilot`/`agy`)
         // is otherwise emitted into the Seatbelt profile as a meaningless
         // `(literal "claude")` rule that the kernel never matches, so the OS
         // sandbox denies exec of the real PATH-resolved binary (e.g. a
@@ -208,6 +210,11 @@ impl DaemonConfig {
             std::env::var_os("HANGAR_COPILOT_PATH")
                 .map_or_else(|| PathBuf::from("copilot"), PathBuf::from),
             "copilot",
+        );
+        let antigravity_path = resolve_provider_path(
+            std::env::var_os("HANGAR_ANTIGRAVITY_PATH")
+                .map_or_else(|| PathBuf::from("agy"), PathBuf::from),
+            "antigravity",
         );
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
@@ -251,6 +258,7 @@ impl DaemonConfig {
             claude_path,
             codex_path,
             copilot_path,
+            antigravity_path,
             poll_interval,
             provider_max_runtime,
             sweeper,
@@ -516,6 +524,7 @@ pub async fn run(
         claude_path: cfg.claude_path.clone(),
         codex_path: cfg.codex_path.clone(),
         copilot_path: cfg.copilot_path.clone(),
+        antigravity_path: cfg.antigravity_path.clone(),
         max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
         // e38.23: confine every provider spawn in the OS-level FS sandbox per
@@ -1426,6 +1435,17 @@ async fn execute_claimed(
                     )
                     .await
                     .map_err(anyhow::Error::from),
+                Backend::Antigravity => runner
+                    .run_antigravity_in(
+                        &env,
+                        task_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
+                        &dispatch.invocation,
+                        &location,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from),
             }
         }
     };
@@ -1563,7 +1583,9 @@ async fn run_interactive(
     // `execute_claimed`).
     let extra_env = match dispatch.backend {
         // The ONE permitted plaintext escape: the child env.
-        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone().expose_for_child_env(),
+        Backend::Codex | Backend::Copilot | Backend::Antigravity => {
+            dispatch.agent_env.clone().expose_for_child_env()
+        }
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -3419,6 +3441,7 @@ mod tests {
             claude_path: "/nonexistent/hangar-test-claude".into(),
             codex_path: "/nonexistent/hangar-test-codex".into(),
             copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            antigravity_path: "/nonexistent/hangar-test-antigravity".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -3625,6 +3648,7 @@ mod tests {
             claude_path: "/nonexistent/hangar-test-claude".into(),
             codex_path: "/nonexistent/hangar-test-codex".into(),
             copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            antigravity_path: "/nonexistent/hangar-test-antigravity".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -4030,6 +4054,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -4442,6 +4467,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -4481,6 +4507,19 @@ mod tests {
             !argv.contains(&"exec".to_string()),
             "an interactive task must not spawn codex's non-interactive exec: {argv:?}"
         );
+        let (_p, argv) = interactive_command(&runner, &interactive_dispatch(Backend::Antigravity));
+        assert!(
+            !argv.contains(&"-p".to_string()),
+            "an interactive task must not spawn antigravity in print-and-exit mode: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"-i".to_string()),
+            "an interactive task must spawn antigravity with -i flag: {argv:?}"
+        );
+        assert!(
+            argv.ends_with(&["--".to_string(), "do the thing".to_string()]),
+            "an interactive antigravity task must still be seeded with its brief: {argv:?}"
+        );
 
         // …and the headless row still gets the headless shape (the fix must not
         // simply disable non-interactive execution).
@@ -4488,6 +4527,12 @@ mod tests {
         assert!(
             argv.contains(&"-p".to_string()),
             "a headless task MUST print-and-exit: {argv:?}"
+        );
+        let (_p, argv) =
+            runner.provider_command(Backend::Antigravity, &inv, dispatch_mode("headless"));
+        assert!(
+            argv.contains(&"-p".to_string()),
+            "a headless antigravity task MUST print-and-exit: {argv:?}"
         );
     }
 
@@ -4508,6 +4553,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -4584,6 +4630,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: false,
@@ -4632,6 +4679,17 @@ mod tests {
             disp.backend,
             Backend::Copilot,
             "a copilot agent must dispatch the copilot backend, not fall back to claude"
+        );
+
+        // An antigravity agent on that claude-advertised runtime → antigravity backend.
+        let agy = bootstrap::create_agent(pool, &ws, "gemini_worker", "antigravity", None)
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agy.id, None, Mode::Headless).await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Antigravity,
+            "an antigravity agent must dispatch the antigravity backend"
         );
 
         // A claude agent on the same runtime → claude backend.

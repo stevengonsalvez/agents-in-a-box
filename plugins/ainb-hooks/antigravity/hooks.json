@@ -1,0 +1,55 @@
+{
+  "//": "ainb-hooks managed drop-in, written to ~/.gemini/antigravity-cli/hooks/ainb.json by `ainb-notifyd install --antigravity`. Do not edit by hand; uninstall deletes this whole file.",
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 3
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ],
+    "Notification": [
+      {
+        "type": "command",
+        "command": "AINB_AGENT=antigravity __AINB_HOOK_SCRIPT__",
+        "timeout": 5
+      }
+    ]
+  }
+}

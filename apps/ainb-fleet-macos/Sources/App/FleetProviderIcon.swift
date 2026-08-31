@@ -26,6 +26,7 @@ struct FleetProviderIcon: View {
         switch provider {
         case .acp: "point.3.connected.trianglepath.dotted"
         case .unknown: "terminal"
+        case .antigravity: "sparkles"
         case .claude, .codex, .copilot: "questionmark.circle"
         }
     }
@@ -37,6 +38,7 @@ private enum FleetProviderIconAsset {
         case .claude: "claude"
         case .codex: "codex"
         case .copilot: "copilot"
+        case .antigravity: "antigravity"
         case .acp, .unknown: nil
         }
         guard let name else { return nil }

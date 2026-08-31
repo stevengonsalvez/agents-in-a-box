@@ -724,16 +724,13 @@ async fn dispatch_usage_via_plugin(argv: Vec<String>) -> ! {
 /// data. Subsequent runs hit session-reader's sqlite cache and finish
 /// in well under a second.
 ///
-/// Override via the `AINB_USAGE_TIMEOUT_SECS` env var when running
-/// against very large session archives.
-const PLUGIN_DATA_WAIT_DEFAULT_SECS: u64 = 120;
-
+/// Raise `usage_client.fetch_timeout_secs` (or `AINB_USAGE_TIMEOUT_SECS`)
+/// when running against very large session archives.
 fn plugin_data_wait() -> std::time::Duration {
-    std::env::var("AINB_USAGE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| std::time::Duration::from_secs(PLUGIN_DATA_WAIT_DEFAULT_SECS))
+    std::time::Duration::from_secs(crate::config::tunables::resolved(
+        "AINB_USAGE_TIMEOUT_SECS",
+        crate::config::tunables::snapshot().usage_client.fetch_timeout_secs,
+    ))
 }
 
 /// Pause between retry attempts when burndown still reports
@@ -1330,6 +1327,12 @@ impl CliCommand for NotifydCommand {
                     .help("Target GitHub Copilot CLI"),
             )
             .arg(
+                clap::Arg::new("antigravity")
+                    .long("antigravity")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Google Antigravity CLI"),
+            )
+            .arg(
                 clap::Arg::new("all")
                     .long("all")
                     .action(clap::ArgAction::SetTrue)
@@ -1378,7 +1381,7 @@ impl CliCommand for NotifydCommand {
                         .arg(
                             clap::Arg::new("agent")
                                 .long("agent")
-                                .help("Filter by agent (claude|codex|copilot)"),
+                                .help("Filter by agent (claude|codex|copilot|antigravity)"),
                         )
                         .arg(
                             clap::Arg::new("project")
@@ -1431,6 +1434,7 @@ impl CliCommand for NotifydCommand {
                 m.get_flag("claude"),
                 m.get_flag("codex"),
                 m.get_flag("copilot"),
+                m.get_flag("antigravity"),
                 m.get_flag("all"),
             )
         };
@@ -1645,8 +1649,10 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("listen")
                         .long("listen")
                         .value_name("ADDR")
-                        .default_value("127.0.0.1:8420")
-                        .help("Address to bind (default loopback; non-loopback needs --token)"),
+                        .help(
+                            "Address to bind (default: web.listen, or 127.0.0.1:8420; \
+                             non-loopback needs --token)",
+                        ),
                 )
                 .arg(
                     clap::Arg::new("token").long("token").value_name("SECRET").help(
@@ -1657,6 +1663,7 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("insecure-bind")
                         .long("insecure-bind")
                         .action(clap::ArgAction::SetTrue)
+                        .overrides_with("no-insecure-bind")
                         .help(
                             "Allow a non-loopback bind with no token. DANGEROUS: an \
                              unauthenticated bind exposes a control surface — the live WS \
@@ -1669,9 +1676,31 @@ impl CliCommand for WebCommand {
                     clap::Arg::new("read-only")
                         .long("read-only")
                         .action(clap::ArgAction::SetTrue)
+                        .overrides_with("no-read-only")
                         .help(
                             "Viewer-only: disable the live terminal write surface \
                              (the WS terminal is refused with 403)",
+                        ),
+                )
+                // Negations exist because `[web]` can now turn these on by
+                // default. A SetTrue flag can only ever say "on", so without
+                // these there is no way to run one invocation with the write
+                // surface enabled once `web.read_only = true` is in the file.
+                .arg(
+                    clap::Arg::new("no-read-only")
+                        .long("no-read-only")
+                        .action(clap::ArgAction::SetTrue)
+                        .overrides_with("read-only")
+                        .help("Serve the write surface for this run, overriding web.read_only"),
+                )
+                .arg(
+                    clap::Arg::new("no-insecure-bind")
+                        .long("no-insecure-bind")
+                        .action(clap::ArgAction::SetTrue)
+                        .overrides_with("insecure-bind")
+                        .help(
+                            "Refuse an unauthenticated non-loopback bind for this run, \
+                             overriding web.insecure_bind",
                         ),
                 )
                 .after_help(
@@ -1686,13 +1715,39 @@ impl CliCommand for WebCommand {
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         // Extract owned values synchronously so only owned data crosses into
         // the 'static future.
+        //
+        // `[web]` supplies the defaults; the flags still win, because a flag is
+        // a decision about THIS invocation and a file is a standing preference.
+        // `--listen` therefore carries no clap default any more: with one, an
+        // unset flag was indistinguishable from an explicit loopback and the
+        // config value could never be reached.
+        //
+        // Each boolean reads as three states, not two: an explicit `--no-x`
+        // turns it off, an explicit `--x` turns it on, and neither defers to
+        // the file. `flag || config` is what a SetTrue pair cannot express, and
+        // it made `insecure_bind` in particular a one-way door: once true in
+        // config there was no invocation that could refuse it again.
+        //
+        // The token is deliberately not configurable here: `--token` is the
+        // only way in, and it never touches config.toml.
+        let defaults = crate::config::tunables::snapshot();
+        let defaults = &defaults.web;
+        let flag_or = |on: &str, off: &str, from_config: bool| {
+            if matches.get_flag(off) {
+                false
+            } else if matches.get_flag(on) {
+                true
+            } else {
+                from_config
+            }
+        };
         let listen_raw = matches
             .get_one::<String>("listen")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1:8420".to_string());
+            .unwrap_or_else(|| defaults.listen.clone());
         let token = matches.get_one::<String>("token").cloned();
-        let insecure_bind = matches.get_flag("insecure-bind");
-        let read_only = matches.get_flag("read-only");
+        let insecure_bind = flag_or("insecure-bind", "no-insecure-bind", defaults.insecure_bind);
+        let read_only = flag_or("read-only", "no-read-only", defaults.read_only);
 
         Box::pin(async move {
             use std::net::ToSocketAddrs;
@@ -3176,15 +3231,14 @@ mod tests {
 
     #[test]
     fn built_ins_registers_all_commands() {
-        let r = CommandRegistry::built_ins();
-        let names = r.names();
-        // main's 30 (built-ins + doctor + reflect + claudecode + codex + tmux +
-        // otel + abtop + witr + learnings + plugin stub + fleet + mcp +
-        // notifyd + hangar) + headroom + rtk + the web dashboard + the daemon
-        // lifecycle surface + signed self-updates = 36. The TUI is NOT in the registry, main.rs
-        // handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 36, "expected 36 entries, got {names:?}");
-        for required in [
+        // The registry's exact surface. Adding or removing a command MUST update
+        // this list, and the list is the ONLY place that needs it, because the
+        // count comes from `expected.len()`. A separate hardcoded total is how
+        // this test kept reddening CI on both runners every time a command
+        // landed, for no signal the set comparison does not already give.
+        // The TUI is NOT in the registry; main.rs handles `tui` /
+        // no-subcommand inline.
+        let mut expected = vec![
             "daemon",
             "run",
             "list",
@@ -3221,12 +3275,13 @@ mod tests {
             "headroom",
             "rtk",
             "update",
-        ] {
-            assert!(
-                names.contains(&required),
-                "missing required command: {required}"
-            );
-        }
+        ];
+        expected.sort_unstable();
+
+        let mut names = CommandRegistry::built_ins().names();
+        names.sort_unstable();
+
+        assert_eq!(names, expected);
     }
 
     #[test]
