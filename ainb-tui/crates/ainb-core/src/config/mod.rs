@@ -227,6 +227,21 @@ fn default_claude_model() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Every layer EXCEPT the user file, merged.
+    ///
+    /// `save()` writes the user file, but this struct is the merge of every
+    /// layer — so without knowing what the other layers already provide, a
+    /// save bakes their values into the user's own file. Since a project
+    /// config now outranks the user's, that means a repo's `.ainb/config.toml`
+    /// would overwrite the user's global settings the first time they toggled
+    /// anything in that repo. `ainb mcp import` writes such a file by default,
+    /// so this is not a corner case.
+    ///
+    /// Skipped by serde: it is provenance, not configuration, and must never
+    /// reach a config file.
+    #[serde(skip)]
+    inherited: toml::Table,
+
     /// Application version
     #[serde(default = "default_version")]
     pub version: String,
@@ -1818,12 +1833,30 @@ impl AppConfig {
             loaded.push(path);
         }
 
+        // The same merge with the user layer left out. Comparing against this
+        // is how `save()` tells "the user set this" from "a project or system
+        // file provides this".
+        let mut inherited = toml::Table::new();
+        for (scope, path) in Self::get_config_paths() {
+            if scope == ConfigScope::User || !path.exists() {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Ok(layer) = parse_config_layer(&content) {
+                merge_config_tables(&mut inherited, layer);
+            }
+        }
+
         let mut config = Self::from_merged_layers(merged).with_context(|| {
             format!(
                 "Failed to load config merged from {}",
                 loaded.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
             )
         })?;
+
+        config.inherited = inherited;
 
         // Load built-in container templates if none exist
         if config.container_templates.is_empty() {
@@ -1964,7 +1997,29 @@ impl AppConfig {
             }
         }
 
+        // Write only what the USER layer owns. This struct is the merge of
+        // every layer, so a leaf whose value another layer already provides is
+        // not ours to persist — writing it would copy a project's or the
+        // system's setting into the user's global file, where it then applies
+        // everywhere. A leaf the user file already carries stays, even if it
+        // agrees with another layer: it was theirs before this save and
+        // dropping it would be a silent deletion.
+        let inherited = toml::Value::Table(self.inherited.clone());
+        let already_ours: std::collections::HashSet<String> = existing
+            .parse::<toml::Table>()
+            .map(|table| {
+                let mut leaves = Vec::new();
+                flatten_leaves(&table, String::new(), &mut leaves);
+                leaves.into_iter().map(|(key, _)| key).collect()
+            })
+            .unwrap_or_default();
+
         for (key, value) in &ours_leaves {
+            if !already_ours.contains(key)
+                && registry::navigate_toml(&inherited, key).is_ok_and(|from| from == value)
+            {
+                continue;
+            }
             set_document_key(&mut doc, key, value)?;
         }
         Ok(doc.to_string())
@@ -2133,6 +2188,7 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         let mut config = Self {
+            inherited: toml::Table::new(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             authentication: AuthenticationConfig::default(),
             default_container_template: default_container_template(),
@@ -2876,6 +2932,69 @@ timeout = 60
         );
         // The whole point: it must still load.
         toml::from_str::<AppConfig>(&saved).expect("saved config no longer deserializes");
+    }
+
+    /// A save must not copy another layer's values into the user's file.
+    ///
+    /// This struct is the merge of every layer, and `save()` writes the USER
+    /// file. Now that a project config outranks the user's, a repo's
+    /// `.ainb/config.toml` would otherwise be baked into
+    /// `~/.agents-in-a-box/config/config.toml` the first time anything was
+    /// toggled in that repo — and `ainb mcp import` creates such a file by
+    /// default, so it is a path people actually walk.
+    #[test]
+    fn save_does_not_persist_values_another_layer_provides() {
+        let project = "[docker]\ntimeout = 22\n[fleet]\nterminal = \"ghostty\"\n";
+        let user_file = "[ui_preferences]\ntheme = \"dark\"\n";
+
+        // What `load()` would produce: user then project, project winning.
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+        // The user changes one thing in the settings screen.
+        config.ui_preferences.theme = "light".to_string();
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["ui_preferences"]["theme"].as_str(),
+            Some("light"),
+            "the user's own edit was not saved"
+        );
+        // Asserted on VALUES, not section presence: a section whose fields all
+        // have serde defaults still serializes as an empty table, which is
+        // noise rather than a leaked setting.
+        assert!(
+            registry::navigate_toml(&toml::Value::Table(reparsed.clone()), "fleet.terminal")
+                .is_err(),
+            "the project's fleet.terminal was copied into the user's file:\n{saved}"
+        );
+        assert!(
+            registry::navigate_toml(&toml::Value::Table(reparsed.clone()), "docker.timeout")
+                .is_err(),
+            "the project's docker.timeout was copied into the user's file:\n{saved}"
+        );
+    }
+
+    /// The other half: a value the user file already carries stays, even when
+    /// another layer happens to agree. Dropping it would be a silent deletion
+    /// of something they set.
+    #[test]
+    fn save_keeps_a_user_value_another_layer_agrees_with() {
+        let project = "[docker]\ntimeout = 22\n";
+        let user_file = "[docker]\ntimeout = 22\n";
+
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["docker"]["timeout"].as_integer(),
+            Some(22),
+            "a value the user file already held was dropped:\n{saved}"
+        );
     }
 
     /// A settings save must not strip the file's comments.
