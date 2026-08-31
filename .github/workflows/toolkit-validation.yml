@@ -61,7 +61,7 @@ jobs:
     name: Validate template skill refs against ainb-toolkit
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 15
     runs-on: ubuntu-latest
@@ -109,7 +109,7 @@ jobs:
     name: Test ainb installations (replaces bootstrap.js parity tests)
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
     timeout-minutes: 30
     runs-on: ubuntu-latest
