@@ -147,8 +147,10 @@ jobs:
       - name: Run live-binary tripwires (Layer 4)
         run: |
           cd ainb-tui
-          # Release-build the binary so tripwires get a fast spawn time.
-          cargo build --release -p ainb
+          # Build with release-fast (no LTO, parallel codegen) so tripwires
+          # get a fast spawn time without paying full release-profile LTO.
+          # This step measured ~15 of the job's 16 minutes under `--release`.
+          cargo build --profile release-fast -p ainb
 
           # CLI tripwires run without tmux; TUI tripwires self-skip when
           # tmux is missing (sudo-installed step above ensures it's
@@ -165,7 +167,7 @@ jobs:
           # full CI cycle just to reveal the next failure. Surfacing every
           # failure in one run is what makes the next such gap cheap to
           # recover from.
-          cargo test -p ainb --release --no-fail-fast \
+          cargo test -p ainb --profile release-fast --no-fail-fast \
               --test 'tripwire_cli_*' \
               --test 'tripwire_core_skill_manager_*' \
               --test 'tripwire_core_home_tile_lists_skill_manager'
@@ -173,7 +175,7 @@ jobs:
       - name: "Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME"
         run: |
           cd ainb-tui
-          BIN="$PWD/target/release/ainb"
+          BIN="$PWD/target/release-fast/ainb"
 
           # Pretend HOME is a clean tempdir so the real-home tier
           # writes into it instead of the runner's actual home.
