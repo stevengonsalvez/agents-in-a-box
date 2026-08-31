@@ -281,9 +281,24 @@ fn atc_instance() -> Result<String> {
 fn atc(action: Action) -> Result<String> {
     let name = atc_instance()?;
     match action {
-        // `repair` re-asserts the OS timer and the daemon registration, which is
-        // exactly what starting a stopped ATC means.
-        Action::Start | Action::Restart => delegate(&["fleet", "atc", "repair", &name]),
+        // ATC has two halves and they fail independently. `repair` re-asserts
+        // the SCHEDULER (OS timer + daemon registration); it does nothing about
+        // the Claude session the scheduler beats into. Starting an ATC whose
+        // session has died must respawn the session, and `setup` is the verb
+        // that does it — idempotent, and it preserves state.json / task-log.md.
+        //
+        // Routing everything through `repair` is why "start" failed with
+        // "the daemon did NOT accept the unregister" on a host whose only
+        // actual fault was a dead tmux session: the wrong half was being fixed,
+        // and the scheduler guard then refused a change it did not need.
+        Action::Start | Action::Restart => {
+            let session = crate::tmux::sanitize_session_name(&name);
+            if crate::fleet::daemons::probe::tmux_session_alive(&session) {
+                delegate(&["fleet", "atc", "repair", &name])
+            } else {
+                delegate(&["fleet", "atc", "setup", &name])
+            }
+        }
         // No confirmation flag: `fleet atc teardown` takes only <name> and
         // --purge. Passing --yes made clap reject the whole invocation, so
         // `stop` failed every time.
