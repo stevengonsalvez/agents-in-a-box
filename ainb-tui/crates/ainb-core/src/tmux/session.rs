@@ -170,12 +170,26 @@ impl TmuxSession {
         }
 
         if self.remain_on_exit {
-            let target = format!("={}", self.sanitized_name);
-            Command::new("tmux")
+            // `=name:` not `=name`. The `=` keeps the session match EXACT, so a
+            // longer session sharing this prefix cannot be hit; the trailing
+            // `:` makes it a WINDOW target, which is what `set-option -w` and
+            // `respawn-pane` require. A bare `=name` is a session target and
+            // both reject it outright ("no such window", "can't find pane"),
+            // which fails the whole launch. Do not "simplify" to `=name`, and
+            // do not pin a pane index either: `pane-base-index 1` is a common
+            // setting and `=name:.0` then cannot be found.
+            let target = format!("={}:", self.sanitized_name);
+            let status = Command::new("tmux")
                 .args(["set-option", "-w", "-t", &target, "remain-on-exit", "on"])
                 .status()
                 .await
                 .context("Failed to set remain-on-exit")?;
+            // Checked, because a silent failure here is invisible: the launch
+            // would go on to succeed with a pane that vanishes on exit, which is
+            // precisely the bug this option exists to prevent.
+            if !status.success() {
+                anyhow::bail!("Failed to set remain-on-exit on '{}'", self.sanitized_name);
+            }
             // `-k` kills the holder shell. The pane keeps the cwd it was created
             // with, so `-c` is not needed here.
             let status = Command::new("tmux")
