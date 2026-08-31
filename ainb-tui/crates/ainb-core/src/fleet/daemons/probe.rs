@@ -779,6 +779,35 @@ pub(crate) fn tmux_session_alive(session: &str) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// The inputs [`hangar_status_for`] reads, mirroring the fields it used to take
+/// straight off `daemon_runtime_status()`.
+struct HangarRuntime {
+    pid: Option<u32>,
+    version: Option<String>,
+    old: bool,
+}
+
+/// Count of `hangar daemon run` processes visible on this host.
+///
+/// CONTEXT ONLY, never on its own an error. The single-instance guard is
+/// PER-HOME: a machine running N ainb homes (worktrees, temp homes in tests)
+/// legitimately has N daemons, and treating that as a fault was the exact
+/// false positive a earlier orphan hunt had to unpick. The authoritative
+/// signal for THIS home stays `running_daemon_pid()`.
+fn hangar_daemon_census() -> usize {
+    std::process::Command::new("ps")
+        .args(["-axo", "args="])
+        .output()
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| line.contains("hangar daemon run"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     probe_atc_with(home, now_ms, &tmux_session_alive)
 }
@@ -1042,6 +1071,29 @@ pub fn probe_hangar_daemon() -> DaemonStatus {
     let runtime = crate::cli::hangar::daemon_runtime_status();
     let serving = crate::fleet::bridge::daemon::socket_path()
         .is_some_and(|socket| socket_is_listening(&socket));
+    hangar_status_for(
+        runtime.pid,
+        runtime.version,
+        runtime.old,
+        serving,
+        hangar_daemon_census,
+    )
+}
+
+/// [`probe_hangar_daemon`]'s decision, with every input passed in.
+///
+/// Split out so the ownership cases are testable: the interesting one is a
+/// socket that answers while this home records no owner, which cannot be
+/// staged against a real daemon without racing the host's own.
+pub(crate) fn hangar_status_for(
+    pid: Option<u32>,
+    version: Option<String>,
+    old: bool,
+    serving: bool,
+    census: impl Fn() -> usize,
+) -> DaemonStatus {
+    let kind = DaemonKind::HangarDaemon;
+    let runtime = HangarRuntime { pid, version, old };
     match (runtime.pid, serving) {
         (None, false) => DaemonStatus::stopped(kind, "not running".to_string()),
         // A recorded owner with a dead socket is the half-alive case the
@@ -1052,6 +1104,22 @@ pub fn probe_hangar_daemon() -> DaemonStatus {
             version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
             version: runtime.version,
             reason: format!("pid {pid} owns this home but the socket is not accepting"),
+            ..DaemonStatus::running(kind)
+        },
+        // Socket answering while this home records NO owner: something else is
+        // serving our socket. That is the split-brain that makes
+        // `ainb fleet atc repair` bail with "the daemon did NOT accept the
+        // unregister" — the verb dials the socket, a daemon this home does not
+        // own answers, and the registration lives somewhere else entirely.
+        (None, true) => DaemonStatus {
+            state: DaemonState::Degraded,
+            connected: true,
+            channel: Some("unix socket".to_string()),
+            reason: format!(
+                "socket is served by a daemon this home does not own ({} running \
+host-wide) — `ainb hangar daemon restart` re-takes ownership",
+                census()
+            ),
             ..DaemonStatus::running(kind)
         },
         (pid, true) => DaemonStatus {
@@ -2202,6 +2270,53 @@ mod tests {
             "reason must name the fix: {}",
             s.reason
         );
+    }
+
+    /// The split-brain that makes `ainb fleet atc repair` bail with "the daemon
+    /// did NOT accept the unregister": a socket answers, but this home records
+    /// no owner, so the verb dials a daemon whose registration lives elsewhere.
+    #[test]
+    fn hangar_socket_served_without_a_recorded_owner_is_degraded() {
+        let s = super::hangar_status_for(None, None, false, true, || 3);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "unowned socket must not read as Running"
+        );
+        assert!(s.connected, "the socket IS answering; that half is fine");
+        assert!(
+            s.reason.contains("does not own") && s.reason.contains('3'),
+            "reason must say it is unowned and how many are host-wide: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("hangar daemon restart"),
+            "reason must name the fix: {}",
+            s.reason
+        );
+    }
+
+    /// The census is CONTEXT, never the fault: one ainb home per worktree is
+    /// normal, and counting host-wide daemons as strays was the false positive
+    /// this branch had to avoid.
+    #[test]
+    fn hangar_owned_socket_stays_running_however_many_homes_exist() {
+        let s = super::hangar_status_for(Some(42), None, false, true, || 9);
+        assert_eq!(s.state, DaemonState::Running);
+        assert_eq!(s.pid, Some(42));
+        assert!(
+            !s.reason.contains('9'),
+            "census must not leak into a healthy row: {}",
+            s.reason
+        );
+    }
+
+    /// A recorded owner with a dead socket is the other half-alive case.
+    #[test]
+    fn hangar_recorded_owner_with_dead_socket_is_degraded() {
+        let s = super::hangar_status_for(Some(7), None, false, false, || 1);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(s.reason.contains("not accepting"), "{}", s.reason);
     }
 
     /// A session check is only meaningful if it can actually fail; a name this
