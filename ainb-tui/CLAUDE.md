@@ -197,10 +197,16 @@ The config auto-detects and uses it if installed.
 
 ## Configuration
 
-Configuration files are loaded from (in order of precedence):
-1. `./.ainb/config.toml` (project-level; legacy `./.agents-box/config.toml` still read)
-2. `~/.agents-in-a-box/config/config.toml` (user-level)
-3. `/etc/agents-in-a-box/config.toml` (system-level)
+Configuration is read from four locations (`ainb config path` lists them):
+1. `./.ainb/config.toml` (project-level)
+2. `./.agents-box/config.toml` (project-level, legacy name)
+3. `~/.agents-in-a-box/config/config.toml` (user-level)
+4. `/etc/agents-in-a-box/config.toml` (system-level)
+
+**Known issue:** precedence currently runs the wrong way — the system file
+overrides the user's, which overrides a project's. Reordering alone is unsafe
+because `merge_loaded` assigns some fields unconditionally, so a project file
+that omits a section resets it to defaults; the two land together.
 
 See `config/example.config.toml` for all available options with documentation.
 

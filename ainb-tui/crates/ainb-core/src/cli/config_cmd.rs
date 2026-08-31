@@ -355,17 +355,19 @@ fn cmd_reset(force: bool) -> Result<()> {
 
 /// Show all config file locations with existence markers
 fn cmd_path(format: OutputFormat) -> Result<()> {
+    // Merge order, not a claimed precedence ranking. `load` applies these in
+    // order and each overrides the previous, so this IS the precedence — and
+    // today it runs the surprising way round, with the system file last and
+    // therefore strongest. Printing the real order beats printing a ranking
+    // the loader does not implement.
     let paths = AppConfig::get_config_paths();
-
-    let scopes = ["project", "user", "system"];
 
     match format {
         OutputFormat::Json => {
             let entries: Vec<ConfigPathEntry> = paths
                 .iter()
-                .zip(scopes.iter())
-                .map(|(path, scope)| ConfigPathEntry {
-                    scope: (*scope).to_string(),
+                .map(|(scope, path)| ConfigPathEntry {
+                    scope: scope.as_str().to_string(),
                     path: path.display().to_string(),
                     exists: path.exists(),
                 })
@@ -375,18 +377,25 @@ fn cmd_path(format: OutputFormat) -> Result<()> {
             println!("{json}");
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            let labels = ["Project config", "User config", "System config"];
-
-            println!("Configuration file locations (highest precedence first):");
+            println!("Configuration file locations, in load order:");
+            println!("(each file overrides the ones above it)");
             println!("{}", "\u{2501}".repeat(60));
 
-            for (i, path) in paths.iter().enumerate() {
-                let exists = path.exists();
-                let marker = if exists { "\u{2713}" } else { "\u{2717}" };
-                let label = labels.get(i).unwrap_or(&"Config");
-                println!("  {marker} {label}: {}", path.display());
+            for (scope, path) in &paths {
+                let marker = if path.exists() {
+                    "\u{2713}"
+                } else {
+                    "\u{2717}"
+                };
+                println!("  {marker} {}: {}", scope.label(), path.display());
             }
 
+            println!();
+            println!(
+                "Note: the system file currently overrides the user's, and the user's\n\
+                 overrides a project's. That is the reverse of what you would expect\n\
+                 and is being fixed; until then, keep settings in one of these files."
+            );
             println!();
             println!("Use 'ainb config edit' to open the user config in your editor.");
         }
