@@ -2,10 +2,19 @@
 # ==============================
 # Copy this file to: ~/.agents-in-a-box/config/config.toml
 #
-# Configuration is loaded from (in order of precedence):
-#   1. ./.agents-box/config.toml  (project-level)
-#   2. ~/.agents-in-a-box/config/config.toml  (user-level)
-#   3. /etc/agents-in-a-box/config.toml  (system-level)
+# Configuration is read from four locations. `ainb config path` prints them
+# with a mark against the ones that exist:
+#   ./.ainb/config.toml                    (project-level)
+#   ./.agents-box/config.toml              (project-level, legacy name)
+#   ~/.agents-in-a-box/config/config.toml  (user-level)
+#   /etc/agents-in-a-box/config.toml       (system-level)
+#
+# KNOWN ISSUE: which one wins is currently the reverse of what you would
+# expect — the system file overrides the user's, which overrides a project's.
+# Fixing the order alone is unsafe today, because merging a layer also resets
+# a few fields it does not mention, so a small project file would silently
+# clear settings from your user config. Both are being fixed together; until
+# then, prefer keeping settings in ONE of these files.
 
 version = "0.1.0"
 
