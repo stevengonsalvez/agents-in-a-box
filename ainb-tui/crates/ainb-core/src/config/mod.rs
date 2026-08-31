@@ -1604,6 +1604,45 @@ fn migrate_stray_user_config(canonical: &Path) {
         "merged stray config.toml into the user config"
     );
 }
+/// Which layer a config file belongs to.
+///
+/// Carried alongside the path so a caller cannot mislabel it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    /// `/etc/agents-in-a-box/config.toml` — lowest precedence.
+    System,
+    /// `~/.agents-in-a-box/config/config.toml`.
+    User,
+    /// `./.agents-box/config.toml`, the legacy project location.
+    ProjectLegacy,
+    /// `./.ainb/config.toml` — highest precedence.
+    Project,
+}
+
+impl ConfigScope {
+    /// Human label for `ainb config path`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "System config",
+            Self::User => "User config",
+            Self::ProjectLegacy => "Project config (legacy .agents-box)",
+            Self::Project => "Project config",
+        }
+    }
+
+    /// Stable machine name for `--format json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::ProjectLegacy => "project-legacy",
+            Self::Project => "project",
+        }
+    }
+}
+
 impl AppConfig {
     /// One-shot cleanup of config files left behind by older builds.
     ///
@@ -1625,7 +1664,7 @@ impl AppConfig {
         let mut config = Self::default();
 
         // Load each config file and merge
-        for path in config_paths {
+        for (_scope, path) in config_paths {
             if path.exists() {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read config from {}", path.display()))?;
@@ -1858,25 +1897,44 @@ impl AppConfig {
         )
     }
 
-    /// Get configuration file paths in order of precedence
-    pub fn get_config_paths() -> Vec<PathBuf> {
+    /// Every config file location, in the order [`Self::load`] merges them.
+    ///
+    /// Each file overrides the last, so the LAST entry wins — which today means
+    /// the system config outranks the user's and a project's. That is the
+    /// inverse of what the docs and `ainb config path` describe, and it is not
+    /// fixed here: `merge_loaded` assigns several fields unconditionally
+    /// (`authentication.cli_provider`, `ui_preferences.statusline_decision`,
+    /// `workspace_defaults.max_repositories`, …), so "last file wins" currently
+    /// means "the last file's serde DEFAULTS win" for those. Reordering without
+    /// first making the merge per-field lets a project file containing only
+    /// `[docker] timeout = 22` reset a user's provider, wizard decisions and
+    /// scan limit — and the next `save()` writes that reset into their file.
+    ///
+    /// See `agents-in-a-box-l0sq`: the reorder lands with that change,
+    /// not before it.
+    ///
+    /// Returns the scope with each path. They used to be parallel arrays zipped
+    /// at the call site, where four paths met three labels and the last one was
+    /// silently dropped.
+    pub fn get_config_paths() -> Vec<(ConfigScope, PathBuf)> {
         let mut paths = vec![];
 
-        // 1. Local project config — `.ainb/` is canonical; `.agents-box/`
-        //    is the legacy location, still read but listed first so an
-        //    `.ainb/` file wins when both exist (later files override).
         if let Ok(cwd) = std::env::current_dir() {
-            paths.push(cwd.join(".agents-box").join("config.toml"));
-            paths.push(cwd.join(".ainb").join("config.toml"));
+            paths.push((
+                ConfigScope::ProjectLegacy,
+                cwd.join(".agents-box").join("config.toml"),
+            ));
+            paths.push((ConfigScope::Project, cwd.join(".ainb").join("config.toml")));
         }
 
-        // 2. User config (~/.agents-in-a-box/config/config.toml)
         if let Ok(config_dir) = Self::get_user_config_dir() {
-            paths.push(config_dir.join("config.toml"));
+            paths.push((ConfigScope::User, config_dir.join("config.toml")));
         }
 
-        // 3. System config
-        paths.push(PathBuf::from("/etc/agents-in-a-box/config.toml"));
+        paths.push((
+            ConfigScope::System,
+            PathBuf::from("/etc/agents-in-a-box/config.toml"),
+        ));
 
         paths
     }
@@ -3239,8 +3297,8 @@ show_git_status = false
     #[test]
     fn project_config_paths_prefer_ainb_over_legacy() {
         let paths = AppConfig::get_config_paths();
-        let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
-        let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
+        let ainb = paths.iter().position(|(_, p)| p.ends_with(".ainb/config.toml"));
+        let legacy = paths.iter().position(|(_, p)| p.ends_with(".agents-box/config.toml"));
         let (ainb, legacy) = (
             ainb.expect(".ainb path missing"),
             legacy.expect("legacy path missing"),
