@@ -103,10 +103,18 @@ const CATCHUP_PERIOD: Duration = Duration::from_mins(1);
 
 /// How long the sweep stays out of the way of daemon boot.
 ///
-/// Seven minutes, not the five [`crate::fleet_retention`] uses, and the stagger
-/// is the point: both janitors rewrite payload through the SAME single writer,
-/// so starting two cold backlog drains on the same minute doubles the bytes in
-/// flight against the lock session spawn needs.
+/// Seven minutes, not the five [`crate::fleet_retention`] uses, so the two
+/// janitors' FIRST passes do not land on the same minute: both rewrite payload
+/// through the SAME single writer, and starting two cold drains together
+/// doubles the bytes in flight against the lock session spawn needs.
+///
+/// The stagger separates only that first pass. On a cold backlog both re-arm at
+/// [`CATCHUP_PERIOD`], so the drains overlap from roughly t+7min until the
+/// shorter finishes. That is tolerated, not prevented: each pass is bounded by
+/// [`MAX_ROWS_PER_PASS`], yields between batches and checkpoints, so overlapping
+/// passes share the writer rather than monopolising it. Serialising them would
+/// need a shared lock the two modules do not have, and the measured cost does
+/// not justify one.
 const FIRST_PASS_DELAY: Duration = Duration::from_mins(7);
 
 /// What one [`run_provider_retention_pass`] reclaimed.

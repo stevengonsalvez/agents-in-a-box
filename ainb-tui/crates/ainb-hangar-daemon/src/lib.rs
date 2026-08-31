@@ -922,9 +922,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // fleet_provider_event to 372k rows / 2,207 MB under none either — the last
         // of those saturating the single writer until session spawn failed with
         // `database is locked`. All three are pure cleanup with no deadline, so none
-        // belongs on a hot path, and the two payload sweeps start seven and five
-        // minutes in respectively so their cold backlog drains do not overlap on
-        // that one writer.
+        // belongs on a hot path. The two payload sweeps start five and seven
+        // minutes in (fleet_event first, then fleet_provider_event) so their
+        // FIRST passes do not land together. That stagger does not survive a
+        // cold backlog: both re-arm on the 1-minute catch-up period, so their
+        // drains do overlap from about t+7min until the shorter one settles.
+        // Overlap is tolerable rather than prevented -- each pass is bounded,
+        // yields the writer between batches, and checkpoints -- so the writer
+        // is shared politely, not serialised.
         let _fleet_archiver =
             crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
         let _fleet_retention =
