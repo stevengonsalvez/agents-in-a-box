@@ -41,7 +41,7 @@ version = "0.1.0"
 # =============================================================================
 [authentication]
 # Active CLI provider for agent sessions
-# Options: "claude" | "codex" | "gemini" | "copilot"
+# Options: "claude" | "codex" | "gemini" | "copilot" | "antigravity"
 cli_provider = "claude"
 
 # Claude-specific authentication provider
