@@ -31,7 +31,18 @@ fn atc_holding_the_fleet() -> Option<String> {
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
     let status =
         crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
-    if status.state != crate::fleet::daemons::probe::DaemonState::Running {
+    // Degraded counts as HOLDING. This guard was written when the ATC probe had
+    // two outcomes, so "not Running" meant "not supervising". A degraded ATC is
+    // one whose scheduler is still registered and still firing, so starting the
+    // fleet daemon alongside it is exactly the double-supervision this refuses:
+    // both watchers auto-continue into the same panes and ATC's per-session
+    // retry cap is defeated by an uncapped daemon. Only a stopped or unknown
+    // instance is safe to ignore.
+    if !matches!(
+        status.state,
+        crate::fleet::daemons::probe::DaemonState::Running
+            | crate::fleet::daemons::probe::DaemonState::Degraded
+    ) {
         return None;
     }
     // `probe_atc` puts the winning instance name in the channel label.
