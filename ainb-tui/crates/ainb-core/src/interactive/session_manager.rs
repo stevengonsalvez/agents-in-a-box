@@ -200,7 +200,10 @@ pub(crate) async fn claim_codex_remote_thread(
         // reporting a timeout that named nothing while the pane held the exact
         // cause (a dead app-server cwd, a trust modal, a bad model id).
         if let Some(detail) = codex_launch_exit(&exact_target).await {
-            anyhow::bail!("Codex exited during startup: {detail}{}", codex_exit_hint(&detail));
+            anyhow::bail!(
+                "Codex exited during startup: {detail}{}",
+                codex_exit_hint(&detail)
+            );
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(match capture_failed_launch_pane(&exact_target).await {
