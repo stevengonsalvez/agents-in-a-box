@@ -57,7 +57,9 @@
 //! * **A blocked permission is answerable.** `session/request_permission` parks
 //!   its responder here and raises an attention row; the answer arrives through
 //!   `fleet/action` and reaches the adapter's pending JSON-RPC id. A permission
-//!   whose adapter dies is resolved by convergence, never left as a ghost row.
+//!   whose adapter dies is retired the moment its turn ends, and by convergence
+//!   when no turn was open to end, never left as a ghost row for an operator to
+//!   click at a delivery they can already see resolved.
 //!   EVERY parked ask is answerable, not just the newest: an adapter running
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
@@ -1589,7 +1591,7 @@ impl SessionActor {
             }
         }
         self.pump().await;
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // Close the queue BEFORE the last drain: after this a `submit_prompt`
         // gets `Closed` (answered `session_gone`) rather than landing a job in a
         // buffer nobody will ever read.
@@ -1992,6 +1994,19 @@ impl SessionActor {
                 body,
                 created_at: now,
             });
+        // A permission still parked when the turn ENDS has no answerable
+        // responder left: the adapter either died holding it (the `Err` leg) or
+        // finished the turn without waiting for it. It is retired HERE, BEFORE
+        // the receipt lands, because the receipt is what every reader treats as
+        // "this turn is over": left to convergence, the attention list keeps
+        // advertising an approval to click for a delivery the operator can
+        // already see resolved (R8/I7's ghost row). Convergence still does this
+        // and must, for a session with no open turn and for a daemon that died
+        // mid-turn; this is that same `cancel_parked` pulled forward to the
+        // first moment the turn is known to be over, not a second copy of the
+        // repair. The process-exit route gets here an `EXIT_QUIESCE` later at
+        // best, and only once this actor finishes the write set below.
+        self.cancel_parked("hangar-turn-end").await;
         // ONE transaction (I4): the reply, its receipt and the released session
         // land together or not at all. Four separate commits left a daemon
         // death between them showing an answer with no receipt, or a receipt
@@ -2477,7 +2492,7 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        self.cancel_parked().await;
+        self.cancel_parked("hangar-converge").await;
         // BEFORE the shared routine, so each drained prompt carries its own
         // enumerated cause instead of being swept up as an anonymous stuck leg.
         self.drain_queue(cause.detail()).await;
@@ -2496,6 +2511,16 @@ impl SessionActor {
 
     /// Raise the attention row R8 exists for, and PARK the responder.
     async fn raise_permission(&mut self, permission: PermissionRequest) {
+        // No open turn means nothing is left to answer this. The request was
+        // already in the actor's channel when `finish_turn` retired the parked
+        // set, so raising it now would insert an attention row AFTER the
+        // receipt committed and the session went IDLE: the same ghost row
+        // `finish_turn` closes, through a narrower window. Refuse it at the
+        // door instead of parking a responder nobody will ever reach.
+        if self.turn.is_none() {
+            let _ = permission.answer_cancelled();
+            return;
+        }
         let fingerprint = permission_fingerprint(&self.session_key, &permission);
         let payload = serde_json::json!({
             "kind": "acp_permission",
@@ -2693,15 +2718,19 @@ impl SessionActor {
     }
 
     /// Answer every parked permission `Cancelled` and close its row.
-    /// Convergence's job: a permission whose adapter is gone must never survive
-    /// as a ghost row.
-    async fn cancel_parked(&mut self) {
+    /// A permission whose adapter is gone must never survive as a ghost row.
+    ///
+    /// `answered_by` is the caller's own name, not a constant: turn end and
+    /// convergence both retire parked permissions, and a row stamped
+    /// `hangar-converge` by the turn-end path would report a repair that never
+    /// ran, over-counting adapter crashes in any audit over that column.
+    async fn cancel_parked(&mut self, answered_by: &str) {
         let parked: Vec<ParkedPermission> = self.parked.drain().map(|(_, value)| value).collect();
         self.stats.pending_permissions.store(0, Ordering::Relaxed);
         for permission in parked {
             let attention_id = permission.attention_id;
             let _ = permission.request.answer_cancelled();
-            self.retire_attention(&attention_id, "hangar-converge", "cancelled").await;
+            self.retire_attention(&attention_id, answered_by, "cancelled").await;
         }
     }
 
