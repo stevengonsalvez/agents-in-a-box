@@ -305,14 +305,19 @@ async fn capture_failed_launch_pane(exact_target: &str) -> Option<String> {
     // it this returns `None` every single time and the pane text -- the entire
     // point of capturing it -- never reaches the caller.
     let pane_target = format!("{exact_target}:");
-    // `-S -` starts at the beginning of HISTORY, not the visible screen. On a
-    // dead pane tmux paints "Pane is dead (status N, ...)" over the viewport, so
-    // a program that printed one line and exited leaves a capture containing
-    // only that marker -- which is the same nameless failure this whole path
-    // exists to end. Verified against tmux 3.6a: without `-S -` the error line
+    // `-S -3000` reaches into HISTORY rather than the visible screen. On a dead
+    // pane tmux paints "Pane is dead (status N, ...)" over the viewport, so a
+    // program that printed one line and exited leaves a screen-only capture
+    // holding just that marker -- the same nameless failure this whole path
+    // exists to end. Verified against tmux 3.6a: without history the error line
     // is gone, with it the line and the marker both come back.
+    //
+    // Bounded, not `-S -`: the pane's history limit is the user's global (this
+    // repo's own recommended tmux.conf suggests 1,000,000 lines), and a full
+    // capture there measured 6.9 MB to keep the twelve lines below. 3000 lines
+    // yields an identical result for anything this reads.
     let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-S", "-", "-t", &pane_target])
+        .args(["capture-pane", "-p", "-S", "-3000", "-t", &pane_target])
         .output()
         .await
         .ok()?;
@@ -2729,6 +2734,73 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 
 #[cfg(test)]
 mod tests {
+
+    /// `capture_failed_launch_pane` itself must return the program's output.
+    ///
+    /// Deliberately calls the FUNCTION rather than re-issuing its tmux command:
+    /// a test that re-implements the call cannot see the call drift away from
+    /// it, and both halves of this helper's contract were broken at some point
+    /// while the suite stayed green. The window-target suffix and the history
+    /// range are each load-bearing, and reverting either one reds this.
+    ///
+    /// Prints `SKIP:` and returns when tmux is unavailable, matching the
+    /// convention the CI job greps for.
+    #[tokio::test]
+    async fn capture_failed_launch_pane_reads_a_dead_pane() {
+        use tokio::process::Command as TokioCommand;
+
+        if TokioCommand::new("tmux").arg("-V").output().await.is_err() {
+            println!("SKIP: tmux unavailable, cannot exercise pane capture");
+            return;
+        }
+        let session = format!("ainb_captest_{}", std::process::id());
+        let _ = TokioCommand::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .output()
+            .await;
+        let created = TokioCommand::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-c", "/tmp"])
+            .output()
+            .await
+            .expect("spawn tmux");
+        if !created.status.success() {
+            println!("SKIP: tmux could not create a session on this host");
+            return;
+        }
+        let target = format!("={session}");
+        let _ = TokioCommand::new("tmux")
+            .args([
+                "set-option",
+                "-w",
+                "-t",
+                &format!("{target}:"),
+                "remain-on-exit",
+                "on",
+            ])
+            .output()
+            .await;
+        let _ = TokioCommand::new("tmux")
+            .args([
+                "respawn-pane",
+                "-k",
+                "-t",
+                &format!("{target}:"),
+                "sh -c 'echo codex-startup-failed; exit 1'",
+            ])
+            .output()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let captured = super::capture_failed_launch_pane(&target).await;
+
+        let _ = TokioCommand::new("tmux").args(["kill-session", "-t", &target]).output().await;
+
+        let captured = captured.expect("a dead pane must still be readable");
+        assert!(
+            captured.contains("codex-startup-failed"),
+            "the program's own output must survive the dead-pane marker, got: {captured}"
+        );
+    }
 
     /// Both wordings Codex uses for a dead app-server cwd earn the remedy, and
     /// an unrelated failure is passed through untouched rather than given a
