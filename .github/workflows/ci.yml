@@ -49,6 +49,29 @@ jobs:
   #
   # `on.push` keeps its own `paths:` — push runs are not required checks, so
   # main-branch CI cost is unchanged.
+  #
+  # WHAT HAPPENS WHEN THIS JOB ITSELF FAILS. The four matrix jobs below
+  # (`test`, `ainb-hooks`, `fleet-send-tmux`, `hangar-e2e`) gate their STEPS
+  # on `needs.changes.outputs.relevant != 'false'`. If a failed `changes`
+  # made that comparison false, all four would conclude GREEN having
+  # executed nothing: the required checks would be satisfied by four jobs
+  # that ran no tests, and a PR could merge untested. That is NOT what
+  # happens, and it is measured rather than assumed:
+  #
+  # Run 33393560903 forced this job to fail before dorny/paths-filter could
+  # set `relevant` (the filter step reports `skipped`, so the output is
+  # genuinely absent, not stale). All sixteen jobs dispatched, the four
+  # matrix jobs reported under their EXPANDED names, and the step-level
+  # guards RAN: `ainb-hooks (ubuntu-latest)` (job 99492659192) concluded
+  # success with all seven of its real steps executed, and both
+  # `fleet send integrity` legs did the same. A missing output resolves to
+  # the empty string, and `'' != 'false'` is true.
+  #
+  # Worth re-measuring if GitHub ever changes that resolution, because the
+  # failure would be SILENT: a job green-with-every-step-skipped is
+  # indistinguishable from a real pass in `gh pr checks` or in any job-level
+  # summary. Only the `steps[]` conclusions from
+  # `/actions/runs/<id>/jobs` tell the two apart.
   # ────────────────────────────────────────────────────────────────────────────
   changes:
     name: Detect relevant changes
@@ -186,6 +209,9 @@ jobs:
     # EXPANDED names, so that one skip strands every open PR on "Expected".
     # The relevance clause stays on the steps, where a gated-out PR still
     # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
     if: '!cancelled()'
     # 40 against a 28.7min p95. A macOS leg once sat here for 97 minutes with
     # the nextest step never recording a completion, and with no budget set
@@ -392,6 +418,9 @@ jobs:
     # EXPANDED names, so that one skip strands every open PR on "Expected".
     # The relevance clause stays on the steps, where a gated-out PR still
     # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
     if: '!cancelled()'
     timeout-minutes: 20
     runs-on: ${{ matrix.os }}
@@ -500,6 +529,9 @@ jobs:
     # EXPANDED names, so that one skip strands every open PR on "Expected".
     # The relevance clause stays on the steps, where a gated-out PR still
     # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
     if: '!cancelled()'
     timeout-minutes: 15
     runs-on: ${{ matrix.os }}
@@ -569,6 +601,9 @@ jobs:
     # EXPANDED names, so that one skip strands every open PR on "Expected".
     # The relevance clause stays on the steps, where a gated-out PR still
     # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
     if: '!cancelled()'
     timeout-minutes: 45
     runs-on: ${{ matrix.os }}
