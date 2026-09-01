@@ -1155,6 +1155,186 @@ mod tests {
         }
     }
 
+    /// A seeded state whose ATC supervisor mode is known — the shape the mode
+    /// toggle and the inline help both read.
+    fn seeded_state_with_atc(rows: Vec<DaemonStatus>, mode: SupervisorMode) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(AtcModeView {
+                name: "tower".to_string(),
+                mode,
+                provider: "claude".to_string(),
+            }),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    fn atc_row() -> DaemonStatus {
+        status(DaemonKind::Atc, DaemonState::Running, true, Some("tower"))
+    }
+
+    // ── Supervisor mode toggle ──────────────────────────────────────────────
+
+    #[test]
+    fn the_atc_menu_offers_only_the_mode_the_fleet_is_not_in() {
+        // Offering both would put "switch to the mode you are already in" on
+        // screen, which reads as a state the fleet might not be in.
+        for (mode, expected, forbidden) in [
+            (SupervisorMode::Full, Action::ModeLite, Action::ModeFull),
+            (SupervisorMode::Lite, Action::ModeFull, Action::ModeLite),
+        ] {
+            let mut state = seeded_state_with_atc(vec![atc_row()], mode);
+            state.open_menu();
+            let menu = state.menu.as_ref().expect("menu opens on the ATC row");
+            let entries = menu.entries(false);
+            assert!(
+                entries.contains(&MenuEntry::Act(expected)),
+                "{} mode must offer {expected:?}: {entries:?}",
+                mode.id()
+            );
+            assert!(
+                !entries.contains(&MenuEntry::Act(forbidden)),
+                "{} mode must not offer {forbidden:?}",
+                mode.id()
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_atc_row_never_offers_a_mode_switch() {
+        // Mode is an ATC supervisor concept; a bridge has no modes to switch.
+        let mut state = seeded_state_with_atc(
+            vec![status(DaemonKind::Bridge, DaemonState::Running, true, None)],
+            SupervisorMode::Full,
+        );
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "bridge offered a mode switch: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_mode_switch_is_offered_when_the_mode_is_unknown() {
+        // Several instances, or an unreadable meta: nothing here could say WHICH
+        // fleet a switch would act on, and a guessed one is worse than none.
+        let mut state = seeded_state(vec![atc_row()]);
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "offered a switch with no known mode: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_open_menu_does_not_reshuffle_when_the_collector_republishes() {
+        // The entry list is captured at open. If it re-read the mode per frame,
+        // a collect landing mid-keystroke would move the cursor's meaning — you
+        // press "switch to lite" and get "stop".
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let before = state.menu.as_ref().unwrap().entries(false);
+
+        // The collector publishes a switched mode underneath the open menu.
+        {
+            let shared = state.shared();
+            let mut guard = shared.lock().unwrap();
+            guard.atc = Some(AtcModeView {
+                name: "tower".to_string(),
+                mode: SupervisorMode::Lite,
+                provider: "claude".to_string(),
+            });
+        }
+        let after = state.menu.as_ref().unwrap().entries(false);
+        assert_eq!(before, after, "the open menu must not reshuffle");
+    }
+
+    #[test]
+    fn the_menu_labels_say_which_mode_they_switch_to() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let text = render_to_string(&mut state, None, 100, 24);
+        assert!(
+            text.contains("switch to lite mode"),
+            "a bare verb id would not say what it does: {text}"
+        );
+    }
+
+    // ── Inline mode help ────────────────────────────────────────────────────
+
+    #[test]
+    fn selecting_the_atc_row_explains_both_modes_and_names_the_owner() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, None, 120, 30);
+        assert!(text.contains("full heartbeat"), "current owner: {text}");
+        assert!(text.contains("no LLM"), "lite behaviour: {text}");
+        assert!(text.contains("never answers an ASK"), "lite limits: {text}");
+        assert!(text.contains("spends tokens"), "full limits: {text}");
+    }
+
+    #[test]
+    fn the_help_comes_from_the_same_text_the_cli_prints() {
+        // One source for both surfaces: a screen and a CLI that describe the
+        // modes differently is how an operator switches the wrong way.
+        let snapshot = Snapshot {
+            atc: Some(AtcModeView {
+                name: "tower".to_string(),
+                mode: SupervisorMode::Lite,
+                provider: "codex".to_string(),
+            }),
+            rows: vec![atc_row()],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        };
+        assert_eq!(
+            atc_help_lines(&snapshot, 0),
+            crate::fleet::atc::mode_help(SupervisorMode::Lite, "codex")
+        );
+    }
+
+    #[test]
+    fn the_help_is_absent_on_every_other_row() {
+        let snapshot = Snapshot {
+            atc: Some(AtcModeView {
+                name: "tower".to_string(),
+                mode: SupervisorMode::Full,
+                provider: "claude".to_string(),
+            }),
+            rows: vec![
+                status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                atc_row(),
+            ],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        };
+        assert!(atc_help_lines(&snapshot, 0).is_empty(), "bridge row");
+        assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
+    }
+
+    #[test]
+    fn a_short_terminal_drops_the_help_rather_than_the_table() {
+        // The rows are the point of the screen; the help is context. On a
+        // terminal too short for both, the help goes.
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, None, 100, 10);
+        assert!(text.contains("ATC"), "the row must survive: {text}");
+        assert!(
+            !text.contains("never answers an ASK"),
+            "the help must not squeeze the table: {text}"
+        );
+    }
+
     fn hook_health() -> HookHealth {
         HookHealth {
             bundled_version: "0.4.5".to_string(),
