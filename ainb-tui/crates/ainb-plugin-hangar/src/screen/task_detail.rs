@@ -122,6 +122,27 @@ impl TaskLifecycle {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
+
+    /// Map a task wire `status` (the `tasks_list` snapshot vocabulary) onto the
+    /// lifecycle, so a detail screen opened AFTER the task finalized still gates
+    /// retry / cancel correctly. Live task events keep overriding this seed; an
+    /// unknown status maps to `None` and the caller keeps its current value.
+    ///
+    /// Without this seed the reducer's default [`TaskLifecycle::Queued`] sticks
+    /// for any task that reached a terminal state before the screen subscribed
+    /// (e.g. a dispatch that failed in milliseconds), leaving `R` permanently
+    /// dead on a task the screen itself reports as failed.
+    #[must_use]
+    pub fn from_wire_status(status: &str) -> Option<Self> {
+        match status {
+            "queued" | "dispatched" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 /// One line in the transcript: a typed transcript message or an interleaved
@@ -352,6 +373,12 @@ impl TaskDetailState {
     #[must_use]
     pub const fn lifecycle(&self) -> TaskLifecycle {
         self.lifecycle
+    }
+
+    /// Seed the lifecycle from the bound task's snapshot status at open time.
+    /// Live task events folded afterwards keep overriding this value.
+    pub const fn seed_lifecycle(&mut self, lifecycle: TaskLifecycle) {
+        self.lifecycle = lifecycle;
     }
 
     /// Iterate the raw transcript in arrival order.
@@ -2427,5 +2454,28 @@ mod card_tests {
         let capped = wrap_chars("one two three four five six seven eight", 5, 2);
         assert_eq!(capped.len(), 2);
         assert!(capped[1].ends_with('…'), "overflow ellipsised: {capped:?}");
+    }
+
+    /// Every wire status the store can persist maps onto a lifecycle, and the
+    /// terminal ones gate `R` on. An unknown status maps to `None` (caller keeps
+    /// its current value) — a NEW TaskStatus variant must be added here or the
+    /// seeded screen silently regresses to a dead `R` again.
+    #[test]
+    fn lifecycle_seeds_from_every_wire_status() {
+        let cases = [
+            ("queued", TaskLifecycle::Queued, false),
+            ("dispatched", TaskLifecycle::Queued, false),
+            ("running", TaskLifecycle::Running, false),
+            ("done", TaskLifecycle::Succeeded, true),
+            ("failed", TaskLifecycle::Failed, true),
+            ("cancelled", TaskLifecycle::Cancelled, true),
+        ];
+        for (wire, want, terminal) in cases {
+            let got = TaskLifecycle::from_wire_status(wire)
+                .unwrap_or_else(|| panic!("wire status `{wire}` unmapped"));
+            assert_eq!(got, want, "wire `{wire}`");
+            assert_eq!(got.is_terminal(), terminal, "terminal gate for `{wire}`");
+        }
+        assert_eq!(TaskLifecycle::from_wire_status("nonsense"), None);
     }
 }
