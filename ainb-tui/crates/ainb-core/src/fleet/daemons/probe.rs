@@ -934,9 +934,7 @@ pub(crate) fn probe_atc_with(
         // to true, matching this.
         let heartbeat_enabled = meta.as_ref().map_or(true, |m| m.heartbeat_enabled);
         let interval_min = meta.as_ref().map_or(15, |m| m.heartbeat_interval_min.max(1));
-        let provider = meta
-            .as_ref()
-            .map_or_else(|| "claude".to_string(), |m| m.provider.clone());
+        let provider = meta.as_ref().map_or_else(|| "claude".to_string(), |m| m.provider.clone());
         if !heartbeat_enabled {
             // Disabled instances are never a running-source. Skip before reading
             // the heartbeat state so a stale beat can't promote it.

@@ -339,7 +339,10 @@ mod tests {
             assert_eq!(SupervisorMode::from_id(mode.id()), Some(mode));
         }
         assert_eq!(SupervisorMode::from_id("FULL"), Some(SupervisorMode::Full));
-        assert_eq!(SupervisorMode::from_id(" lite "), Some(SupervisorMode::Lite));
+        assert_eq!(
+            SupervisorMode::from_id(" lite "),
+            Some(SupervisorMode::Lite)
+        );
         assert_eq!(SupervisorMode::from_id("hybrid"), None);
     }
 
@@ -374,7 +377,10 @@ mod tests {
     #[test]
     fn codex_policy_lands_in_the_file_codex_actually_reads() {
         // A CLAUDE.md would be provisioned, ignored, and look fine.
-        assert_eq!(resolve_full_provider("codex").unwrap().policy_file, "AGENTS.md");
+        assert_eq!(
+            resolve_full_provider("codex").unwrap().policy_file,
+            "AGENTS.md"
+        );
     }
 
     #[test]

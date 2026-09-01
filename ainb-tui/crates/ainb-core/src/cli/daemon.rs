@@ -202,7 +202,10 @@ pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
         return if matches!(kind, DaemonKind::Atc) {
             atc_set_mode(mode)
         } else {
-            bail!("mode switching is an ATC supervisor concept; `{}` has no modes", kind.display_name())
+            bail!(
+                "mode switching is an ATC supervisor concept; `{}` has no modes",
+                kind.display_name()
+            )
         };
     }
     if action == Action::Pair {
@@ -441,7 +444,9 @@ fn atc(action: Action) -> Result<String> {
                 let stopped = crate::cli::fleet::atc_supervisor::stop_lite(&name);
                 crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
                 Ok(match stopped {
-                    Some(pid) => format!("ATC '{name}' lite scanner restarted (replaced pid {pid})"),
+                    Some(pid) => {
+                        format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
+                    }
                     None => format!("ATC '{name}' lite scanner started"),
                 })
             }

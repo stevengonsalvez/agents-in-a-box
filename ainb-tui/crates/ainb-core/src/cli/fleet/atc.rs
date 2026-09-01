@@ -65,7 +65,9 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // `setup` is idempotent and is what `daemon atc start` re-runs to respawn a
     // dead session; rebuilding meta from `AtcMeta::new` would silently flip a
     // deliberately-lite fleet back to a token-spending full brain.
-    let existing = std::fs::read_to_string(&paths.meta).ok().and_then(|s| AtcMeta::from_json(&s).ok());
+    let existing = std::fs::read_to_string(&paths.meta)
+        .ok()
+        .and_then(|s| AtcMeta::from_json(&s).ok());
 
     let mut meta = AtcMeta::new(&name);
     if let Some(prior) = &existing {

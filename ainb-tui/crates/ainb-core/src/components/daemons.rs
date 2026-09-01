@@ -18,8 +18,8 @@ use ratatui::{
 use crate::app::state::DaemonsOverlayState;
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
-use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::atc::SupervisorMode;
+use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
@@ -1038,12 +1038,7 @@ fn render_atc_help(frame: &mut Frame, area: Rect, lines: &[String]) {
     );
 }
 
-fn render_footer(
-    frame: &mut Frame,
-    area: Rect,
-    state: &DaemonsState,
-    atc: Option<&AtcModeView>,
-) {
+fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Option<&AtcModeView>) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
     let spans = if state.error_open.is_some() {
@@ -1062,7 +1057,10 @@ fn render_footer(
         ]
     } else {
         let enter_hint = match atc {
-            Some(a) => format!(" start / restart / stop / switch to {} mode  ", a.mode.other().id()),
+            Some(a) => format!(
+                " start / restart / stop / switch to {} mode  ",
+                a.mode.other().id()
+            ),
             None => " start / restart / stop  ".to_string(),
         };
         vec![
