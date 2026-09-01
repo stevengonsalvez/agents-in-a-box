@@ -916,35 +916,34 @@ pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::S
         )
 }
 
-/// What one worktree has to lose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UncommittedProbe {
-    /// No worktree is registered for the session, so there is nothing to lose.
-    NoWorktree,
-    Clean,
-    Dirty(usize),
-    /// The worktree exists but its status could not be read. Never fold this
-    /// into Clean: a delete confirmation that says nothing is read as "nothing
-    /// to lose".
-    Unknown,
+/// What one selection has to lose, as the bulk dialog reports it.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct BulkWorktreeStatus {
+    /// `(session name, uncommitted file count)` per dirty tree.
+    pub dirty: Vec<(String, usize)>,
+    /// Trees that are there but could not be read. Never folded into "clean".
+    pub unchecked: usize,
+    /// Selected sessions that have a tree on disk, which is what a delete
+    /// actually removes.
+    pub with_worktree: usize,
 }
 
-/// Read one session's worktree status. Shared by the single-row and the bulk
-/// confirmation so both dialogs answer the same way for the same session.
-fn session_uncommitted_probe(
-    worktree_manager: &crate::git::WorktreeManager,
-    session_id: Uuid,
-) -> UncommittedProbe {
-    use crate::git::WorktreeError;
-    match worktree_manager.uncommitted_file_count(session_id) {
-        Ok(0) => UncommittedProbe::Clean,
-        Ok(count) => UncommittedProbe::Dirty(count),
-        // A session with no registered worktree is an ordinary case, not a
-        // failure: warning about it every time trains the user to skip past the
-        // warning that matters.
-        Err(WorktreeError::NotFound(_)) => UncommittedProbe::NoWorktree,
-        Err(_) => UncommittedProbe::Unknown,
+/// Count what `git status --porcelain` reports in `path`, or `Err` when it
+/// cannot be read. Ignored files are not counted, see
+/// `WorktreeManager::uncommitted_file_count`.
+fn uncommitted_count_at(path: &std::path::Path) -> Result<usize, ()> {
+    let output = std::process::Command::new("git")
+        .current_dir(path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
     }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count())
 }
 
 /// Shown when a bulk key is pressed with nothing checked.
@@ -7806,8 +7805,8 @@ impl AppState {
     /// two cannot apply different skip rules or different wording to the same
     /// session.
     fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
-        let (dirty, unchecked) = self.bulk_uncommitted_counts(&[session_id]);
-        Self::format_bulk_uncommitted_warning(&dirty, unchecked)
+        let status = self.bulk_uncommitted_counts(&[session_id]);
+        Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked)
     }
 
     /// Show the tri-option Stop all / Delete all / Cancel dialog for every
@@ -7834,19 +7833,12 @@ impl AppState {
         // many worktrees, what can be stopped) is answered from this, rather
         // than walking the workspace list once per question per id.
         let mut names: Vec<String> = Vec::with_capacity(count);
-        let mut worktree_count = 0;
         let mut stoppable: Vec<Uuid> = Vec::new();
         let mut already_stopped = 0;
         let mut no_stop_path = 0;
         for id in &session_ids {
             let session = self.find_session(*id);
             names.push(session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()));
-            // Shell sessions have no dedicated worktree, so counting them in
-            // "Delete removes N worktree(s)" would inflate the number on the one
-            // dialog whose job is to state the destructive scope accurately.
-            if session.is_none_or(|s| !matches!(s.agent_type, SessionAgentType::Shell)) {
-                worktree_count += 1;
-            }
             // Stop only means something for interactive agent sessions: it kills
             // tmux and the session resumes later. Boss (Docker) and Shell
             // sessions have no such path, and an already-Stopped session has
@@ -7861,8 +7853,10 @@ impl AppState {
             }
         }
 
-        let (dirty, unchecked) = self.bulk_uncommitted_counts(&session_ids);
-        let warning = Self::format_bulk_uncommitted_warning(&dirty, unchecked);
+        let status = self.bulk_uncommitted_counts(&session_ids);
+        // What Delete actually removes: trees on disk, not selected rows.
+        let worktree_count = status.with_worktree;
+        let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked);
         let summary = Self::format_bulk_session_summary(&names);
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
@@ -7941,14 +7935,15 @@ impl AppState {
         )
     }
 
-    /// `(dirty sessions, sessions whose status could not be read)`.
+    /// What the selection has to lose.
     ///
-    /// A session whose worktree status cannot be read is NOT reported as clean:
-    /// it is counted as unchecked so the dialog can say so, because "unknown"
-    /// and "nothing to lose" must never look the same on a delete confirmation.
-    /// A session with no registered worktree has nothing to lose and is not
-    /// counted either way. Shell sessions are skipped entirely.
-    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> (Vec<(String, usize)>, usize) {
+    /// Probes each distinct worktree once, not each session: two sessions can
+    /// resolve to the same tree, and reporting its four modified files twice
+    /// would say eight. A tree whose status cannot be read is NOT reported as
+    /// clean, because "unknown" and "nothing to lose" must never look the same
+    /// on a delete confirmation. Shell sessions have no dedicated tree and are
+    /// skipped entirely.
+    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> BulkWorktreeStatus {
         use crate::git::WorktreeManager;
         use crate::models::SessionAgentType;
 
@@ -7957,11 +7952,11 @@ impl AppState {
         /// child processes off a single keypress.
         const MAX_CONCURRENT_PROBES: usize = 8;
 
-        // Sessions with a worktree worth probing, paired with their names. An id
-        // that no longer resolves to a session row is probed anyway: the probe
-        // needs only the uuid, and a worktree whose session vanished from the
-        // list is the one most likely to be holding forgotten work.
-        let probes: Vec<(Uuid, String)> = session_ids
+        // Sessions with a tree worth probing, paired with their names. An id that
+        // no longer resolves to a session row is probed anyway: the probe needs
+        // only the uuid, and a tree whose session vanished from the list is the
+        // one most likely to be holding forgotten work.
+        let candidates: Vec<(Uuid, String)> = session_ids
             .iter()
             .filter_map(|id| match self.find_session(*id) {
                 None => Some((*id, unknown_session_label(*id))),
@@ -7969,46 +7964,72 @@ impl AppState {
                 Some(session) => Some((*id, session.name.clone())),
             })
             .collect();
-        let mut unchecked = 0;
 
         let Ok(worktree_manager) = WorktreeManager::new() else {
-            return (Vec::new(), probes.len());
+            return BulkWorktreeStatus {
+                dirty: Vec::new(),
+                unchecked: candidates.len(),
+                with_worktree: candidates.len(),
+            };
         };
 
-        // `uncommitted_file_count` shells out to `git status` per worktree and
-        // this runs inline on a keypress. Batching does not reduce the number of
-        // calls, one per probed session either way; it bounds how many run at
-        // once so a large selection cannot spawn a thread and a child process
-        // per row all at the same time.
-        let mut results: Vec<UncommittedProbe> = Vec::with_capacity(probes.len());
-        for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
-            let batch_results: Vec<UncommittedProbe> = std::thread::scope(|scope| {
-                // Spawn every probe in the batch before joining any of them,
-                // otherwise they run one at a time.
-                let mut handles = Vec::with_capacity(batch.len());
-                for (id, _) in batch {
-                    let worktree_manager = &worktree_manager;
-                    let id = *id;
-                    handles
-                        .push(scope.spawn(move || session_uncommitted_probe(worktree_manager, id)));
+        // Resolve paths first: it is a stat, not a subprocess, and it collapses
+        // sessions that share a tree into one probe.
+        let mut probes: Vec<(PathBuf, String)> = Vec::new();
+        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+        let mut status = BulkWorktreeStatus::default();
+        for (id, name) in candidates {
+            match worktree_manager.worktree_path(id) {
+                // Nothing on disk: deleting this session destroys no files.
+                Err(crate::git::WorktreeError::NotFound(_)) => {}
+                Err(_) => {
+                    // Something is there and could not be resolved.
+                    status.unchecked += 1;
+                    status.with_worktree += 1;
                 }
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or(UncommittedProbe::Unknown))
-                    .collect()
-            });
-            results.extend(batch_results);
-        }
-
-        let mut dirty = Vec::new();
-        for ((_, name), probe) in probes.into_iter().zip(results) {
-            match probe {
-                UncommittedProbe::Clean | UncommittedProbe::NoWorktree => {}
-                UncommittedProbe::Dirty(count) => dirty.push((name, count)),
-                UncommittedProbe::Unknown => unchecked += 1,
+                Ok(path) => {
+                    // Count distinct trees: two sessions sharing one tree means
+                    // delete removes one directory, not two.
+                    if seen_paths.insert(path.clone()) {
+                        status.with_worktree += 1;
+                        probes.push((path, name));
+                    }
+                }
             }
         }
-        (dirty, unchecked)
+
+        // `git status` is a subprocess per tree and this runs inline on a
+        // keypress. Batching does not reduce the number of calls, one per tree
+        // either way; it bounds how many run at once so a large selection cannot
+        // spawn a thread and a child process per tree all at the same time. A
+        // single probe skips the threads entirely.
+        let counts: Vec<Result<usize, ()>> = if probes.len() == 1 {
+            vec![uncommitted_count_at(&probes[0].0)]
+        } else {
+            let mut counts = Vec::with_capacity(probes.len());
+            for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
+                let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
+                    // Spawn every probe in the batch before joining any of them,
+                    // otherwise they run one at a time.
+                    let mut handles = Vec::with_capacity(batch.len());
+                    for (path, _) in batch {
+                        handles.push(scope.spawn(move || uncommitted_count_at(path)));
+                    }
+                    handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+                });
+                counts.extend(batch_counts);
+            }
+            counts
+        };
+
+        for ((_, name), count) in probes.into_iter().zip(counts) {
+            match count {
+                Ok(0) => {}
+                Ok(count) => status.dirty.push((name, count)),
+                Err(()) => status.unchecked += 1,
+            }
+        }
+        status
     }
 
     /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
@@ -8115,19 +8136,24 @@ impl AppState {
         });
     }
 
-    /// Show confirmation dialog for killing multiple "other" tmux sessions
+    /// Show confirmation dialog for killing multiple "other" tmux sessions.
+    ///
+    /// Names them, like the managed-session bulk dialog reached by the same key:
+    /// a count alone does not tell the user whether the selection is the one
+    /// they meant.
     pub fn show_kill_other_tmux_sessions_confirmation(&mut self, session_names: Vec<String>) {
         let count = session_names.len();
-        info!(
-            "Showing kill confirmation for {} other tmux sessions",
-            count
-        );
+        info!("Showing kill confirmation for {count} other tmux sessions");
+        let listed = truncate_list(session_names.iter().cloned());
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Sessions".to_string(),
-            message: format!("Are you sure you want to kill {} tmux session(s)?", count),
+            message: format!(
+                "Kill {count} tmux session(s): {listed}?\nThese are not managed by ainb, so \
+                 only the tmux session is killed."
+            ),
             confirm_action: ConfirmAction::KillOtherTmuxSessions(session_names),
-            selected_option: false,
-            warning: Some("This closes all selected external tmux sessions.".to_string()),
+            selected_option: false, // Default to "No"
+            warning: None,
             options: None,
             selected_index: 0,
         });
@@ -10396,6 +10422,9 @@ impl AppState {
                 .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
             {
                 already_stopped += 1;
+                // Unchecked optimistically on confirmation, but nothing was done
+                // to it, so put the check back like the failure path does.
+                self.selected_sessions.insert(id);
                 continue;
             }
             if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {

@@ -9601,7 +9601,7 @@ mod panel_back_tests {
         impl Drop for SessionGuard {
             fn drop(&mut self) {
                 let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &self.0])
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
                     .status();
             }
         }
