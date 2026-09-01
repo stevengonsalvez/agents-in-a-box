@@ -1831,9 +1831,13 @@ impl InteractiveSessionManager {
                     let tmux_name =
                         Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
                     let legacy_name = Self::generate_tmux_name_legacy(&worktree.branch_name);
-                    // Check if new format session exists, otherwise try legacy
+                    // Check if new format session exists, otherwise try legacy.
+                    // `=name` is exact: a bare `-t` prefix-matches, so a live
+                    // "feat-auth-2" would answer for "feat-auth" and we would
+                    // then kill the exact "feat-auth", which matches nothing,
+                    // leaving the real session running with its worktree gone.
                     let check_new = std::process::Command::new("tmux")
-                        .args(["has-session", "-t", &tmux_name])
+                        .args(["has-session", "-t", &format!("={tmux_name}")])
                         .output();
                     let final_name = if check_new.map(|o| o.status.success()).unwrap_or(false) {
                         info!("Found tmux session with new format: {}", tmux_name);
