@@ -6605,6 +6605,28 @@ impl AppState {
             .collect()
     }
 
+    /// Multi-selected managed session ids in list order (workspace, then
+    /// session), so a dialog that names them reads the same way the list does
+    /// instead of following `HashSet` iteration order. Ids no longer present in
+    /// any workspace are kept, at the end, so nothing silently drops out of a
+    /// bulk operation.
+    pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
+        let mut ordered: Vec<Uuid> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.sessions.iter())
+            .map(|s| s.id)
+            .filter(|id| self.selected_sessions.contains(id))
+            .collect();
+        ordered.extend(
+            self.selected_sessions
+                .iter()
+                .copied()
+                .filter(|id| self.find_session(*id).is_none()),
+        );
+        ordered
+    }
+
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
     pub fn toggle_select_other_tmux_session(&mut self) {
         if let Some(session) = self.selected_other_tmux_session() {
