@@ -4458,13 +4458,12 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else if managed_count > 0 {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    // Checked rows get the SAME tri-option dialog as a single
+                    // row: bulk delete used to fire immediately here, which
+                    // destroyed every selected worktree (and any uncommitted
+                    // work in it) with no way back.
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 // Check if we're in the SSH Sessions section
                 } else if state.is_ssh_session_selected() {
                     if let Some(ssh_session) = state.selected_ssh_session() {
@@ -4570,13 +4569,8 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 }
             }
             AppEvent::ResumeSession(trigger) => {
@@ -4731,6 +4725,24 @@ impl EventHandler {
                             crate::app::state::ConfirmAction::StopSession(session_id) => {
                                 state.pending_async_action =
                                     Some(AsyncAction::StopSession(session_id));
+                            }
+                            crate::app::state::ConfirmAction::BulkDeleteSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Deleting {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                state.selected_sessions.clear();
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkDeleteSessions(session_ids));
+                            }
+                            crate::app::state::ConfirmAction::BulkStopSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Stopping {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                state.selected_sessions.clear();
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkStopSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
                                 state.pending_async_action =
