@@ -2664,8 +2664,14 @@ mod tests {
         assert_eq!(state.selected_session_ids_in_order(), ids);
     }
 
-    /// Stop must leave every worktree on disk. This is the outcome the original
-    /// bug destroyed, so it is asserted against real directories.
+    /// End to end for the safe path: check the rows, press `d`, accept the
+    /// default, and every worktree is still on disk afterwards.
+    ///
+    /// The keypress and the confirmation are driven through the real event
+    /// handler, so re-introducing the original bug (queuing a bulk delete from
+    /// `d`) fails this test at the action assertion before any directory is
+    /// touched. Only the stop is executed; the delete action is never run,
+    /// because running it in a test would remove real directories.
     #[tokio::test]
     async fn bulk_stop_preserves_every_worktree() {
         with_ainb_home_async(|| async {
@@ -2698,8 +2704,26 @@ mod tests {
 
             let mut state = AppState::new();
             state.workspaces.push(ws);
+            for id in &ids {
+                state.selected_sessions.insert(*id);
+            }
 
-            state.bulk_stop_sessions(ids.clone()).await;
+            // `d` with rows checked, then Enter on the default option.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            assert!(
+                state.pending_async_action.is_none(),
+                "the keypress must not queue anything before the user confirms"
+            );
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            let queued = state.pending_async_action.take();
+            let stop_ids = match queued {
+                Some(AsyncAction::BulkStopSessions(stop_ids)) => stop_ids,
+                other => panic!("the default must be a stop, not {other:?}"),
+            };
+            assert_eq!(stop_ids, ids, "every checked session is stopped");
+
+            state.bulk_stop_sessions(stop_ids).await;
 
             for worktree in &worktrees {
                 assert!(worktree.is_dir(), "Stop must keep {}", worktree.display());
