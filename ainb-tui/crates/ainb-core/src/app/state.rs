@@ -7773,7 +7773,7 @@ impl AppState {
             session_id
         );
 
-        // Check for uncommitted changes in worktree (only for non-Shell sessions)
+        // Check for uncommitted changes in the session's worktree
         let warning = self.check_session_uncommitted_warning(session_id);
 
         self.confirmation_dialog = Some(ConfirmationDialog {
@@ -7816,7 +7816,10 @@ impl AppState {
     /// two cannot apply different skip rules or different wording to the same
     /// session.
     fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
-        let status = self.bulk_uncommitted_counts(&[session_id]);
+        let name = self
+            .find_session(session_id)
+            .map_or_else(|| unknown_session_label(session_id), |s| s.name.clone());
+        let status = Self::bulk_uncommitted_counts(&[(session_id, name)]);
         Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked)
     }
 
@@ -7843,13 +7846,16 @@ impl AppState {
         // One pass over the selection: every later question (what to name, how
         // many worktrees, what can be stopped) is answered from this, rather
         // than walking the workspace list once per question per id.
-        let mut names: Vec<String> = Vec::with_capacity(count);
+        let mut id_names: Vec<(Uuid, String)> = Vec::with_capacity(count);
         let mut stoppable: Vec<Uuid> = Vec::new();
         let mut already_stopped = 0;
         let mut no_stop_path = 0;
         for id in &session_ids {
             let session = self.find_session(*id);
-            names.push(session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()));
+            id_names.push((
+                *id,
+                session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()),
+            ));
             // Stop only means something for interactive agent sessions: it kills
             // tmux and the session resumes later. Boss (Docker) and Shell
             // sessions have no such path, and an already-Stopped session has
@@ -7864,7 +7870,7 @@ impl AppState {
             }
         }
 
-        let status = self.bulk_uncommitted_counts(&session_ids);
+        let status = Self::bulk_uncommitted_counts(&id_names);
         // What Delete actually removes: distinct trees on disk, not selected
         // rows. When nothing could be resolved the number is a guess, so the
         // message says "their worktrees" rather than printing a figure as fact.
@@ -7874,7 +7880,7 @@ impl AppState {
             "their worktrees".to_string()
         };
         let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked);
-        let summary = Self::format_bulk_session_summary(&names);
+        let summary = Self::format_bulk_session_summary(&id_names);
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
@@ -7940,7 +7946,7 @@ impl AppState {
 
     /// One-line "which sessions are affected" summary for the bulk dialog.
     /// Long selections are truncated so the message still fits the dialog.
-    fn format_bulk_session_summary(names: &[String]) -> String {
+    fn format_bulk_session_summary(names: &[(Uuid, String)]) -> String {
         debug_assert!(
             !names.is_empty(),
             "the caller returns early on an empty selection"
@@ -7948,7 +7954,7 @@ impl AppState {
         format!(
             "{} session(s): {}",
             names.len(),
-            truncate_list(names.iter().cloned())
+            truncate_list(names.iter().map(|(_, name)| name.clone()))
         )
     }
 
@@ -7958,25 +7964,16 @@ impl AppState {
     /// resolve to the same tree, and reporting its four modified files twice
     /// would say eight. A tree whose status cannot be read is NOT reported as
     /// clean, because "unknown" and "nothing to lose" must never look the same
-    /// on a delete confirmation. Shell sessions have no dedicated tree and are
-    /// skipped entirely.
-    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> BulkWorktreeStatus {
+    /// on a delete confirmation. Every selected id is resolved, Shell sessions
+    /// included: what delete removes is whatever `by-session/<uuid>` points at,
+    /// so anything with a directory is counted and probed.
+    fn bulk_uncommitted_counts(names: &[(Uuid, String)]) -> BulkWorktreeStatus {
         use crate::git::WorktreeManager;
 
         /// Probes in flight at once. Each one forks a `git status`, so the fan
         /// out is bounded: a 40-row selection must not spawn 40 threads and 40
         /// child processes off a single keypress.
         const MAX_CONCURRENT_PROBES: usize = 8;
-
-        let names: Vec<(Uuid, String)> = session_ids
-            .iter()
-            .map(|id| {
-                let name = self
-                    .find_session(*id)
-                    .map_or_else(|| unknown_session_label(*id), |s| s.name.clone());
-                (*id, name)
-            })
-            .collect();
 
         let Ok(worktree_manager) = WorktreeManager::new() else {
             warn!("Cannot resolve worktrees: uncommitted work is unknown for this selection");
@@ -7997,7 +7994,7 @@ impl AppState {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut status = BulkWorktreeStatus::default();
         for (id, name) in names {
-            let Some(dir) = worktree_manager.session_dir(id) else {
+            let Some(dir) = worktree_manager.session_dir(*id) else {
                 // Nothing on disk: deleting this session destroys no files.
                 continue;
             };
@@ -8006,7 +8003,7 @@ impl AppState {
             let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
             if seen.insert(key) {
                 status.with_worktree += 1;
-                probes.push((dir, name));
+                probes.push((dir, name.clone()));
             }
         }
 
@@ -8015,24 +8012,19 @@ impl AppState {
         // either way; it bounds how many run at once so a large selection cannot
         // spawn a thread and a child process per tree all at the same time. A
         // single probe skips the threads entirely.
-        let counts: Vec<Result<usize, ()>> = if probes.len() == 1 {
-            vec![probe_tree(&probes[0].0)]
-        } else {
-            let mut counts = Vec::with_capacity(probes.len());
-            for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
-                let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
-                    // Spawn every probe in the batch before joining any of them,
-                    // otherwise they run one at a time.
-                    let mut handles = Vec::with_capacity(batch.len());
-                    for (path, _) in batch {
-                        handles.push(scope.spawn(move || probe_tree(path)));
-                    }
-                    handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
-                });
-                counts.extend(batch_counts);
-            }
-            counts
-        };
+        let mut counts: Vec<Result<usize, ()>> = Vec::with_capacity(probes.len());
+        for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
+            let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
+                // Spawn every probe in the batch before joining any of them,
+                // otherwise they run one at a time.
+                let mut handles = Vec::with_capacity(batch.len());
+                for (path, _) in batch {
+                    handles.push(scope.spawn(move || probe_tree(path)));
+                }
+                handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+            });
+            counts.extend(batch_counts);
+        }
 
         for ((_, name), count) in probes.into_iter().zip(counts) {
             match count {
@@ -8063,6 +8055,12 @@ impl AppState {
         } else {
             String::new()
         };
+        if dirty.len() == 1 && unchecked == 0 {
+            // One row: naming it and saying "1 session(s)" repeats what the user
+            // is already looking at, and a long branch name would wrap the
+            // banner across three rows.
+            return Some(format!("⚠️ {total} uncommitted file(s) in worktree"));
+        }
         Some(format!(
             "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
             total,
