@@ -951,9 +951,6 @@ fn session_uncommitted_probe(
 pub(crate) const NOTHING_SELECTED_WARNING: &str =
     "No sessions selected. Use Space to select sessions first.";
 
-/// Shown on a single-session dialog whose worktree status could not be read.
-const UNCHECKED_SINGLE_WARNING: &str = "⚠️ could not check this worktree for uncommitted work";
-
 /// Render at most three items, then "and N more". Shared by the bulk dialog's
 /// message and its warning so the two cannot truncate at different lengths or
 /// word it differently.
@@ -7802,34 +7799,15 @@ impl AppState {
         ));
     }
 
-    /// Check if a session's worktree has uncommitted changes.
-    /// Returns None for Shell sessions (no dedicated worktree) or if there is
-    /// nothing to lose. Shares `session_uncommitted_probe` with the bulk path so
-    /// the two dialogs cannot report different answers for the same session.
+    /// Uncommitted-work warning for one session, or None when there is nothing
+    /// to say.
+    ///
+    /// Runs the same code as the bulk dialog on a one-element selection, so the
+    /// two cannot apply different skip rules or different wording to the same
+    /// session.
     fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
-        use crate::git::WorktreeManager;
-        use crate::models::SessionAgentType;
-
-        // Find the session to check its type
-        let session = self.find_session(session_id)?;
-
-        // Skip for Shell sessions - they don't have dedicated worktrees
-        if matches!(session.agent_type, SessionAgentType::Shell) {
-            return None;
-        }
-
-        // A manager we cannot even build means the status is unknown, not clean:
-        // the bulk path says so and this one has to agree.
-        let Ok(worktree_manager) = WorktreeManager::new() else {
-            return Some(UNCHECKED_SINGLE_WARNING.to_string());
-        };
-        match session_uncommitted_probe(&worktree_manager, session_id) {
-            UncommittedProbe::Dirty(count) => {
-                Some(format!("⚠️ {count} uncommitted file(s) in worktree"))
-            }
-            UncommittedProbe::Unknown => Some(UNCHECKED_SINGLE_WARNING.to_string()),
-            UncommittedProbe::NoWorktree | UncommittedProbe::Clean => None,
-        }
+        let (dirty, unchecked) = self.bulk_uncommitted_counts(&[session_id]);
+        Self::format_bulk_uncommitted_warning(&dirty, unchecked)
     }
 
     /// Show the tri-option Stop all / Delete all / Cancel dialog for every
@@ -7852,49 +7830,40 @@ impl AppState {
             count
         );
 
-        let names: Vec<String> = session_ids
-            .iter()
-            .map(|id| {
-                self.find_session(*id)
-                    .map_or_else(|| unknown_session_label(*id), |s| s.name.clone())
-            })
-            .collect();
-        // Shell sessions have no dedicated worktree, so counting them in "Delete
-        // removes N worktree(s)" would inflate the number on the one dialog
-        // whose job is to state the destructive scope accurately.
-        let worktree_count = session_ids
-            .iter()
-            .filter(|id| {
-                self.find_session(**id)
-                    .is_none_or(|s| !matches!(s.agent_type, crate::models::SessionAgentType::Shell))
-            })
-            .count();
-        let (dirty, unchecked) = self.bulk_uncommitted_counts(&session_ids);
-        let warning = Self::format_bulk_uncommitted_warning(&dirty, unchecked);
-        let summary = Self::format_bulk_session_summary(&names);
-
-        // Stop only means something for interactive agent sessions: it kills
-        // tmux and the session resumes later. Boss (Docker) and Shell sessions
-        // have no such path, so a mixed selection offers Stop for the sessions
-        // it actually applies to rather than dropping the safe option for
-        // everyone because one row cannot use it.
-        // Already-Stopped sessions are excluded too: offering "Stop all" for a
-        // selection that is entirely stopped makes the default a no-op, and the
-        // user pressing Enter on it would lose their selection for nothing. The
-        // two exclusions are counted apart because the dialog has to say which
-        // one applies: "cannot be stopped" and "already stopped" are opposite
-        // claims about whether the session can come back.
+        // One pass over the selection: every later question (what to name, how
+        // many worktrees, what can be stopped) is answered from this, rather
+        // than walking the workspace list once per question per id.
+        let mut names: Vec<String> = Vec::with_capacity(count);
+        let mut worktree_count = 0;
         let mut stoppable: Vec<Uuid> = Vec::new();
         let mut already_stopped = 0;
         let mut no_stop_path = 0;
         for id in &session_ids {
-            match self.find_session(*id) {
+            let session = self.find_session(*id);
+            names.push(session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()));
+            // Shell sessions have no dedicated worktree, so counting them in
+            // "Delete removes N worktree(s)" would inflate the number on the one
+            // dialog whose job is to state the destructive scope accurately.
+            if session.is_none_or(|s| !matches!(s.agent_type, SessionAgentType::Shell)) {
+                worktree_count += 1;
+            }
+            // Stop only means something for interactive agent sessions: it kills
+            // tmux and the session resumes later. Boss (Docker) and Shell
+            // sessions have no such path, and an already-Stopped session has
+            // nothing to stop. The two exclusions are counted apart because the
+            // dialog has to say which applies: "cannot be stopped" and "already
+            // stopped" are opposite claims about whether it can come back.
+            match session {
                 Some(s) if !is_stoppable_interactive(s) => no_stop_path += 1,
                 Some(s) if matches!(s.status, SessionStatus::Stopped) => already_stopped += 1,
                 Some(_) => stoppable.push(*id),
                 None => no_stop_path += 1,
             }
         }
+
+        let (dirty, unchecked) = self.bulk_uncommitted_counts(&session_ids);
+        let warning = Self::format_bulk_uncommitted_warning(&dirty, unchecked);
+        let summary = Self::format_bulk_session_summary(&names);
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
@@ -7930,12 +7899,17 @@ impl AppState {
         } else {
             let stoppable_count = stoppable.len();
             let rest = count - stoppable_count;
-            let excluded = if no_stop_path == 0 {
-                format!("the other {rest} are already stopped")
-            } else if already_stopped == 0 {
-                format!("the other {rest} cannot be stopped")
+            let (subject, verb) = if rest == 1 {
+                ("the other one".to_string(), "is")
             } else {
-                format!("the other {rest} are already stopped or cannot be stopped")
+                (format!("the other {rest}"), "are")
+            };
+            let excluded = if no_stop_path == 0 {
+                format!("{subject} {verb} already stopped")
+            } else if already_stopped == 0 {
+                format!("{subject} cannot be stopped")
+            } else {
+                format!("{subject} {verb} already stopped or cannot be stopped")
             };
             stop_or_delete_dialog(
                 format!("Stop or Delete {count} Session(s)"),
@@ -10427,6 +10401,10 @@ impl AppState {
             if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
                 error!("Failed to stop session {}: {}", id, e);
                 failed += 1;
+                // The row was unchecked optimistically when the user confirmed.
+                // It is still running, so put the check back rather than making
+                // the user hunt for it.
+                self.selected_sessions.insert(id);
             } else {
                 stopped += 1;
             }
@@ -10939,6 +10917,9 @@ impl AppState {
                         if let Err(e) = self.delete_session_core(id).await {
                             error!("Failed to delete session {}: {}", id, e);
                             failed += 1;
+                            // Still there, so keep it checked: the row was
+                            // unchecked optimistically on confirmation.
+                            self.selected_sessions.insert(id);
                         } else {
                             deleted += 1;
                         }
