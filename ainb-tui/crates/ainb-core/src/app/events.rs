@@ -4552,7 +4552,7 @@ impl EventHandler {
                 let other_count = other_names.len();
                 if managed_count == 0 && other_count == 0 {
                     state.add_warning_notification(
-                        "No sessions selected. Use Space to select sessions first.".to_string(),
+                        crate::app::state::NOTHING_SELECTED_WARNING.to_string(),
                     );
                 } else if managed_count > 0 && other_count > 0 {
                     state.add_warning_notification(
