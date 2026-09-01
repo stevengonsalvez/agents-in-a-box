@@ -2719,6 +2719,50 @@ mod tests {
         });
     }
 
+    /// A Shell session's row is deletable like any other, and delete removes
+    /// whatever its `by-session` symlink points at, so it must be counted and
+    /// probed rather than assumed to own nothing.
+    #[test]
+    fn bulk_worktree_status_counts_a_shell_session_with_a_tree() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shell-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+
+            let session = resumable_session(
+                "shell",
+                SessionMode::Interactive,
+                SessionAgentType::Shell,
+                SessionStatus::Running,
+            );
+            std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                .expect("symlink");
+            let id = session.id;
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree);
+            ws.add_session(session);
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let status = state.bulk_uncommitted_counts(&[id]);
+
+            assert_eq!(
+                status.with_worktree, 1,
+                "delete would remove this directory"
+            );
+            assert_eq!(
+                status.unchecked, 1,
+                "not a git tree, so its contents are unknown"
+            );
+        });
+    }
+
     /// Multi-select ids come out in list order, once each.
     #[test]
     fn selected_session_ids_in_order_dedups_and_follows_the_list() {
@@ -2738,6 +2782,13 @@ mod tests {
     async fn bulk_stop_preserves_every_worktree() {
         with_ainb_home_async(|| async {
             use crate::models::SessionStatus;
+
+            // The stop path shells out to tmux; without the binary every stop
+            // reports failure and the status assertions below are meaningless.
+            if std::process::Command::new("tmux").arg("-V").status().is_err() {
+                eprintln!("SKIP: tmux unavailable");
+                return;
+            }
 
             let tmp = tempfile::tempdir().expect("tempdir");
             let mut ws = crate::models::Workspace::new("ws".to_string(), tmp.path().to_path_buf());
