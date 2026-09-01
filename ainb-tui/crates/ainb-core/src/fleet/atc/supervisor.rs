@@ -224,6 +224,18 @@ fn missing_capability(control: AtcControl) -> &'static str {
     }
 }
 
+// ── Lite controller identity ────────────────────────────────────────────────
+
+/// The daemon-heartbeat filename the lite controller records its pid under.
+///
+/// Per-instance and path-sanitised, so stopping "the lite scanner" always means
+/// exactly the process this instance started — never a pattern match on a
+/// command line that would happily signal another checkout's scanner.
+#[must_use]
+pub fn lite_heartbeat_id(name: &str) -> String {
+    format!("atc-lite-{}", super::paths::sanitize_instance_name(name))
+}
+
 // ── Operator-facing help ────────────────────────────────────────────────────
 
 /// The concise inline help shown beside the mode toggle: what each mode does,
@@ -410,6 +422,14 @@ mod tests {
     }
 
     // ── Help text ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_lite_heartbeat_id_is_per_instance_and_path_safe() {
+        assert_eq!(lite_heartbeat_id("tower"), "atc-lite-tower");
+        let id = lite_heartbeat_id("../evil");
+        assert!(!id.contains('/'), "{id}");
+        assert!(!id.contains('.'), "{id}");
+    }
 
     #[test]
     fn help_names_the_current_owner_both_behaviours_and_both_limits() {

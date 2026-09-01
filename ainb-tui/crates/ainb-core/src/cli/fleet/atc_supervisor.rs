@@ -27,7 +27,8 @@ use serde_json::json;
 
 use crate::cli::OutputFormat;
 use crate::fleet::atc::supervisor::{
-    Controller, SupervisorMode, may_act, mode_help, resolve_full_provider, stand_down_reason,
+    Controller, SupervisorMode, lite_heartbeat_id, may_act, mode_help, resolve_full_provider,
+    stand_down_reason,
 };
 use crate::fleet::atc::{AtcMeta, AtcPaths, DEFAULT_ERR_RETRY_CAP, HeartbeatState, timer};
 use crate::fleet::plumbing;
@@ -266,13 +267,6 @@ async fn unregister_daemon_cron(name: &str) -> bool {
 }
 
 // ── The lite supervisor process ─────────────────────────────────────────────
-
-/// The heartbeat-file name the lite supervisor records its pid under, so a mode
-/// switch (or `ainb daemon atc stop`) can find and stop exactly this process
-/// rather than pattern-matching on a command line.
-fn lite_heartbeat_id(name: &str) -> String {
-    format!("atc-lite-{}", crate::fleet::atc::sanitize_instance_name(name))
-}
 
 /// Start the lite scanner for `name` if it is not already running. The public
 /// entry point `setup` and the daemon lifecycle verbs use.
@@ -714,12 +708,4 @@ mod tests {
         assert!(line.contains("2 left for a human"), "{line}");
     }
 
-    #[test]
-    fn the_lite_heartbeat_id_is_per_instance_and_path_safe() {
-        assert_eq!(lite_heartbeat_id("tower"), "atc-lite-tower");
-        // A traversal-ish name cannot escape the daemons dir.
-        let id = lite_heartbeat_id("../evil");
-        assert!(!id.contains('/'), "{id}");
-        assert!(!id.contains('.'), "{id}");
-    }
 }
