@@ -1,9 +1,11 @@
 ---
 name: ainb-fleet:atc
 description: |
-  ATC (Air Traffic Control) — the persistent orchestrating brain of the fleet.
-  A plain `ainb` Claude session running a generated CLAUDE.md policy, woken on
-  an OS-timer heartbeat (default 15 min) built from the LLM-free `fleet needs`
+  ATC (Air Traffic Control) — the single operator-visible fleet supervisor, in
+  exactly one mode: `lite` (no LLM: deterministic scan, known-transient retry
+  policy, safety caps, evidence) or `full` (the persistent orchestrating brain).
+  Full mode is a plain `ainb` session (Claude or Codex) running a generated
+  policy, woken on a heartbeat (default 15 min) built from the LLM-free `fleet needs`
   read — which is itself HOOKS-PRIMARY (event-sourced): ATC learns ASK/WAIT/IDLE
   from the materialized `current_state` table, not by scraping panes, with a
   tmux fallback for non-Claude agents. `atc setup` installs the global Claude
@@ -11,7 +13,7 @@ description: |
   sessions via the fleet verbs (confident ASK → broadcast; ERR → continue within
   a retry cap) and escalates the uncertain ones to the phone bridge. Supersedes
   the `daemon` skill for managed fleets. Use to provision / inspect / tear down
-  an ATC instance.
+  an ATC instance, or to switch which controller owns the fleet.
 version: "0.1.0"
 user-invocable: true
 triggers:
@@ -22,6 +24,9 @@ triggers:
   - conductor
   - watch the fleet
   - auto-clear and escalate
+  - lite mode
+  - full mode
+  - supervisor mode
 allowed-tools:
   - Bash
 ---
@@ -62,6 +67,63 @@ materialized state. So provisioning ATC is also what turns the whole fleet
 hooks-primary; without it (or without `atc setup`'s hook install), `fleet needs`
 falls back to the live pane scan everywhere and still works.
 
+## One supervisor, one mode
+
+ATC is the single operator-visible supervisor for a fleet, and it is in exactly
+one mode at a time. The mode is persisted in `meta.json`, and **both**
+controllers re-read it from disk before every send — so the losing one stands
+down by itself, rather than relying on having been stopped in time.
+
+```
+             ┌──────────────────────────────────────────────┐
+ meta.json ─▶│  mode  ──▶  owner  ──▶  the ONLY sender      │
+             └──────────────────────────────────────────────┘
+   lite ─▶ lite scanner    no LLM · known transient ERR only · caps · reports
+   full ─▶ full heartbeat  scheduled beat ─▶ LLM session ─▶ triage + coordinate
+```
+
+| | lite | full |
+|---|---|---|
+| LLM | none | one brain session, woken every N minutes |
+| ERR (known transient) | auto-`continue` inside the retry cap | same, decided by the brain |
+| ASK / WAIT / IDLE | **reported, never answered** | triaged, answered, escalated |
+| fleet coordination | none | yes |
+| token spend | zero | every beat |
+| provider | irrelevant (no brain) | must be one ainb can drive |
+
+Both modes spend the **same** `continue_counts` ledger in
+`heartbeat-state.json`, so switching never hands a permanently-broken session a
+fresh set of retries.
+
+```bash
+ainb fleet atc mode tower                      # report the mode, provider, owner
+ainb fleet atc mode tower --set lite           # switch (explicit, persistent)
+ainb fleet atc mode tower --set full --provider codex
+```
+
+The switch persists the mode BEFORE it stops anything, then dismantles the
+outgoing controller and starts the incoming one. On the Daemons screen (`d`),
+the ATC row offers the same switch and prints this help inline.
+
+### Full-mode providers
+
+`claude` (default) and `codex` today. The list is read off each provider's
+declared capability, not hard-coded: a provider ainb cannot both host a resident
+session for AND inject a heartbeat into is **refused**, never provisioned as a
+brain that would silently never wake. Codex gets its policy in `AGENTS.md`,
+which is the file it actually reads.
+
+Copilot and Antigravity are not offered yet — they implement no ATC control, so
+`--provider copilot` fails with the list of what does work rather than
+pretending.
+
+### This replaces `ainb fleet daemon`
+
+Lite mode IS the standalone daemon's loop, moved inside ATC's safety rules: the
+same scan, but capped, ledgered, and unable to run beside the heartbeat.
+`ainb fleet daemon` still exists and still refuses to start against a fleet ATC
+owns in either mode.
+
 ## Provision
 
 ```bash
@@ -74,7 +136,17 @@ ainb fleet atc setup tower --interval 10 --idle-pause 30
 
 # Provision files only (no OS timer, no session) — useful for inspection / CI.
 ainb fleet atc setup tower --no-spawn --no-heartbeat
+
+# Provision straight into lite mode (no LLM, no brain session, no timer).
+ainb fleet atc setup tower --mode lite
+
+# Full mode on Codex instead of Claude.
+ainb fleet atc setup tower --provider codex
 ```
+
+`setup` CARRIES an existing instance's mode and provider forward. It is what
+`ainb daemon atc start` re-runs to respawn a dead session, so rebuilding them
+from defaults would flip a deliberately-lite fleet back to a paying brain.
 
 `setup` is **idempotent**: re-running re-renders `CLAUDE.md` + `meta.json` and
 re-installs the timer, but never clobbers the accumulated `state.json` /
@@ -83,7 +155,8 @@ re-installs the timer, but never clobbers the accumulated `state.json` /
 | file | role |
 |---|---|
 | `CLAUDE.md` | the rendered policy ATC reads (verbs, playbooks, safety, memory) |
-| `meta.json` | `{name, heartbeat_enabled, heartbeat_interval_min, idle_pause_min}` |
+| `meta.json` | `{name, mode, provider, heartbeat_enabled, heartbeat_interval_min, idle_pause_min}` |
+| `AGENTS.md` | the same policy under the name a Codex brain reads (codex provider only) |
 | `state.json` | ATC's durable machine state (retry counts, escalations) — survives compaction |
 | `task-log.md` | ATC's human-readable running log |
 
