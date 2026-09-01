@@ -2191,21 +2191,14 @@ impl EventHandler {
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // Enter starts every selected resumable session, not just the
                 // highlighted one.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("Enter".to_string()))
                     } else {
@@ -2221,20 +2214,13 @@ impl EventHandler {
                 // moved to 'A' so the menu bar's `r resume` hint matches what
                 // the key actually does (one key, one meaning). Pressing 'r'
                 // on a non-resumable selection is a no-op.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // 'r' resumes every selected resumable session.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("r".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
