@@ -3641,11 +3641,13 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
 
 /// Fetch Boss-mode (Docker container) workspaces with a strict per-mode
 /// timeout. Returns an empty `Vec` on any failure path — caller proceeds
-/// with Interactive results. The `docker info` probe runs on a blocking
-/// thread so a wedged Docker socket can't pin a tokio runtime thread.
+/// with Interactive results. The Docker probe runs on a blocking thread so a
+/// wedged Docker socket can't pin a tokio runtime thread.
 async fn fetch_boss_mode_workspaces() -> Vec<Workspace> {
     const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    // DISPLAY CLASS: cached. A stale "no" costs this refresh its Boss-mode
+    // rows and nothing else; the next refresh inside 30s shows them.
     let docker_available = tokio::task::spawn_blocking(AppState::is_docker_available_sync)
         .await
         .unwrap_or(false);
@@ -4763,6 +4765,10 @@ impl AppState {
                 home.join(".agents-in-a-box").join("auth").join(".credentials.json");
 
             // Only attempt refresh if we have OAuth credentials AND Docker is available
+            // DISPLAY CLASS: cached. A stale "no" defers the refresh to the
+            // next check (this runs on every workspace load, and a periodic
+            // 5-minute check runs behind it). Nothing is left behind by
+            // skipping it.
             if credentials_path.exists() && Self::oauth_token_needs_refresh(&credentials_path) {
                 if self.is_docker_available().await {
                     info!("Docker available - attempting OAuth token refresh");
@@ -4780,6 +4786,9 @@ impl AppState {
         // Capped at 5s — a slow or wedged Docker daemon must not block
         // the workspaces panel from rendering. Interactive mode is
         // tmux-only and runs unconditionally after this returns.
+        //
+        // DISPLAY CLASS: cached. A stale "no" costs this load its Boss-mode
+        // rows; the next load inside 30s picks them up, and nothing leaks.
         const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
         if self.is_docker_available().await {
             info!("Docker available - loading Boss mode sessions");
@@ -8252,11 +8261,16 @@ impl AppState {
 
         // ONLY check authentication for Boss mode (Docker-based sessions)
         if snapshot.mode == SessionMode::Boss {
-            if !self.is_docker_available().await {
+            // Launching is the retry the message below asks for, so the gate
+            // must ask Docker rather than replay a "no" cached before the user
+            // started it. The gate owns that decision and the message it
+            // carries, which is what makes both of them testable.
+            if let DockerGate::Blocked(message) =
+                boss_mode_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+                    .await
+            {
                 error!("Boss mode requires Docker but Docker is not running");
-                self.add_error_notification(
-                    "Boss mode requires Docker.\n\nPlease start Docker and try again, or use Interactive mode instead.".to_string()
-                );
+                self.add_error_notification(message);
                 return;
             }
 
@@ -9829,8 +9843,13 @@ impl AppState {
                 debug!("Interactive cleanup failed (expected if Boss mode): {}", e);
             }
 
-            // Try Boss cleanup if Docker is available
-            if self.is_docker_available().await {
+            // Try Boss cleanup if Docker is available. CLEANUP CLASS: this
+            // probes Docker rather than reading the 30s cache, because a stale
+            // "no" here leaks the container instead of merely delaying a
+            // display. See `boss_cleanup_docker_gate`.
+            if boss_cleanup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+                .await
+            {
                 if let Err(e) = self.delete_boss_session(session_id).await {
                     debug!("Boss cleanup failed (expected if Interactive mode): {}", e);
                 }
@@ -10090,18 +10109,19 @@ impl AppState {
                 None
             };
 
+            // `None` covers both "not a Codex session" and "shared remote
+            // control is unavailable on this hangar home" (already warned
+            // about). Both resume the session with plain provider argv.
             let mut codex_remote = if metadata.agent_type == SessionAgentType::Codex {
-                Some(
-                    crate::interactive::session_manager::ensure_codex_remote_thread(
-                        metadata.session_id,
-                        &metadata.worktree_path,
-                        model.as_deref(),
-                        skip_permissions,
-                        metadata.headroom_enabled,
-                        metadata.codex_thread_id.clone(),
-                    )
-                    .await?,
+                crate::interactive::session_manager::ensure_codex_remote_thread(
+                    metadata.session_id,
+                    &metadata.worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    metadata.headroom_enabled,
+                    metadata.codex_thread_id.clone(),
                 )
+                .await?
             } else {
                 None
             };
@@ -10122,16 +10142,14 @@ impl AppState {
                 .await?;
 
             if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
-                codex_remote = Some(
-                    crate::interactive::session_manager::claim_codex_remote_thread(
-                        metadata.session_id,
-                        &metadata.worktree_path,
-                        model.as_deref(),
-                        skip_permissions,
-                        metadata.headroom_enabled,
-                    )
-                    .await?,
-                );
+                codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
+                    metadata.session_id,
+                    &metadata.worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    metadata.headroom_enabled,
+                )
+                .await?;
             }
             if let Some(thread_id) =
                 codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
@@ -10496,6 +10514,11 @@ impl AppState {
                 }
                 AsyncAction::RefreshWorkspaces => {
                     info!("Manual refresh triggered");
+                    // A manual refresh is the user saying "look again", which
+                    // includes at Docker: without this, starting Docker and
+                    // hitting refresh keeps showing no Boss-mode rows until the
+                    // 30s cache lapses, and the refresh looks broken.
+                    invalidate_docker_probe_cache(&DOCKER_PROBE);
                     // Reload workspace data and force UI refresh
                     self.load_real_workspaces().await;
                     self.ui_needs_refresh = true;
@@ -10770,15 +10793,15 @@ impl AppState {
             auth_state.error_message = Some("Preparing authentication setup...".to_string());
         }
 
-        // First check if Docker is available
-        if !self.is_docker_available().await {
+        // Re-running setup is the retry the message below asks for, so the
+        // gate must ask Docker rather than replay a "no" cached before the
+        // user started it.
+        if let DockerGate::Blocked(message) =
+            auth_setup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async).await
+        {
             warn!("Docker is not available or not running");
             if let Some(ref mut auth_state) = self.auth_setup_state {
-                auth_state.error_message = Some(
-                    "❌ Docker is not available\n\n\
-                     Please start Docker and try again."
-                        .to_string(),
-                );
+                auth_state.error_message = Some(message);
                 auth_state.is_processing = false;
             }
             return Err("Docker not available".into());
@@ -10905,13 +10928,32 @@ impl AppState {
     }
 
     /// Check if Docker is available and running (synchronous, static version)
+    ///
+    /// Answers from `DOCKER_PROBE` whenever a probe ran inside the TTL, so a
+    /// wedged Docker costs one 3s stall per window rather than one per call
+    /// site. Asks `docker version` rather than `docker info` so this and the
+    /// async twin put the same question to Docker, which is what makes a single
+    /// shared cache correct.
+    ///
+    /// DISPLAY CLASS ONLY. A cached answer can be up to `DOCKER_PROBE_TTL` old,
+    /// which is fine where a stale "no" costs a render or defers a retryable
+    /// piece of work, and wrong where it would skip a teardown. Cleanup and
+    /// teardown paths take `boss_cleanup_docker_gate`; a user pressing a key
+    /// after being told to start Docker takes `boss_mode_docker_gate` or
+    /// `auth_setup_docker_gate`. All three invalidate and probe.
     pub fn is_docker_available_sync() -> bool {
+        docker_answer_or_probe(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_sync)
+    }
+
+    /// Ask Docker itself, ignoring the cache. Reached only through
+    /// `is_docker_available_sync`, which owns the caching.
+    fn probe_docker_sync() -> bool {
         use std::process::{Command, Stdio};
 
         // Spawn the process and wait with a timeout to avoid hanging
         // when Docker Desktop is installed but not running
         match Command::new("docker")
-            .arg("info")
+            .args(["version", "--format", "{{.Server.Version}}"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -10921,7 +10963,7 @@ impl AppState {
                 // Timed out, or could not be polled: either way the child has
                 // been killed and reaped, and Docker has not answered.
                 None => {
-                    warn!("docker info did not answer within 3s - Docker not available");
+                    warn!("docker version did not answer within 3s - Docker not available");
                     false
                 }
             },
@@ -10930,7 +10972,21 @@ impl AppState {
     }
 
     /// Check if Docker is available and running
+    ///
+    /// Shares `DOCKER_PROBE` with the sync twin: both run the same
+    /// `docker version` command, so either one's answer serves the other.
+    ///
+    /// DISPLAY CLASS ONLY, with the same split as `is_docker_available_sync`:
+    /// anything that would leak a container on a stale "no" must go through
+    /// `boss_cleanup_docker_gate` instead.
     async fn is_docker_available(&self) -> bool {
+        docker_answer_or_probe_async(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+            .await
+    }
+
+    /// Ask Docker itself, ignoring the cache. Reached only through
+    /// `is_docker_available`, which owns the caching.
+    async fn probe_docker_async() -> bool {
         // `tokio::process` rather than `std::process`: on timeout the future is
         // dropped, and `kill_on_drop` then signals the child and lets tokio's
         // reaper collect it. A `std::process::Child` dropped here would be left
@@ -11820,18 +11876,19 @@ impl AppState {
             None
         };
         let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
+        // `None` covers both "not a Codex session" and "shared remote control
+        // is unavailable on this hangar home" (already warned about). Both
+        // restart the session with plain provider argv.
         let mut codex_remote = if agent_type == SessionAgentType::Codex {
-            Some(
-                crate::interactive::session_manager::ensure_codex_remote_thread(
-                    session_id,
-                    std::path::Path::new(&workspace_path),
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                    metadata.and_then(|m| m.codex_thread_id.clone()),
-                )
-                .await?,
+            crate::interactive::session_manager::ensure_codex_remote_thread(
+                session_id,
+                std::path::Path::new(&workspace_path),
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                metadata.and_then(|m| m.codex_thread_id.clone()),
             )
+            .await?
         } else {
             None
         };
@@ -11858,16 +11915,14 @@ impl AppState {
             .await?;
 
         if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
-            codex_remote = Some(
-                crate::interactive::session_manager::claim_codex_remote_thread(
-                    session_id,
-                    std::path::Path::new(&workspace_path),
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                )
-                .await?,
-            );
+            codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
+                session_id,
+                std::path::Path::new(&workspace_path),
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+            )
+            .await?;
         }
         if let Some(thread_id) =
             codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
@@ -12135,6 +12190,208 @@ impl AppState {
         );
         self.current_screen = target;
         self.ui_needs_refresh = true;
+    }
+}
+
+/// How long a Docker answer is reused. Long enough that a wedged Docker costs
+/// one 3s probe per window across every call site, short enough that starting
+/// Docker Desktop is noticed without restarting the TUI.
+const DOCKER_PROBE_TTL: Duration = Duration::from_secs(30);
+
+/// The last Docker answer and the instant it was taken, shared by
+/// `AppState::is_docker_available_sync` and `AppState::is_docker_available`.
+/// One entry serves both because both run the same `docker version` probe.
+///
+/// The probe runs outside the lock, so two callers that miss together each
+/// probe once and the later answer wins. That is the deliberate trade: holding
+/// this lock across a 3s wait would stall every other call site behind the one
+/// that is already paying for the wedged Docker.
+static DOCKER_PROBE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+
+/// The cached answer, when one was taken less than `ttl` before `now`.
+///
+/// `None` means "probe anyway": the cache is empty, the entry has aged out, or
+/// the lock is poisoned. A poisoned lock must never take the TUI down over a
+/// cached boolean, and re-probing is always correct, only slower.
+fn cached_docker_answer(
+    now: Instant,
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+) -> Option<bool> {
+    let (taken_at, answer) = (*cache.lock().ok()?)?;
+    (now.saturating_duration_since(taken_at) < ttl).then_some(answer)
+}
+
+/// Record `answer` as the Docker state observed at `now`.
+///
+/// A poisoned lock is dropped silently, for the same reason as above: losing a
+/// cache entry costs one extra probe, panicking costs the session.
+fn store_docker_answer(now: Instant, cache: &Mutex<Option<(Instant, bool)>>, answer: bool) {
+    if let Ok(mut entry) = cache.lock() {
+        *entry = Some((now, answer));
+    }
+}
+
+/// Drop any cached Docker answer, so the next caller asks Docker again.
+///
+/// A poisoned lock needs nothing dropped, since `cached_docker_answer` already
+/// reads it as "probe anyway".
+fn invalidate_docker_probe_cache(cache: &Mutex<Option<(Instant, bool)>>) {
+    if let Ok(mut entry) = cache.lock() {
+        *entry = None;
+    }
+}
+
+/// Whether Docker is available: the cached answer when one was taken inside
+/// `ttl`, otherwise `probe`'s answer, which is then cached.
+///
+/// The lookup lives here rather than at each call site so it is exercised in
+/// one place. A negative answer is cached too: a Docker that is down is
+/// exactly the case that costs 3s a call, and the TTL bounds how long a
+/// restarted Docker stays unnoticed (`invalidate_docker_probe_cache` shortens
+/// that to nothing where the user asked for a retry).
+fn docker_answer_or_probe(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if let Some(cached) = cached_docker_answer(Instant::now(), cache, ttl) {
+        return cached;
+    }
+    let answer = probe();
+    store_docker_answer(Instant::now(), cache, answer);
+    answer
+}
+
+/// `docker_answer_or_probe` for a probe that has to be awaited.
+///
+/// Takes a closure rather than a future because `tokio::process::Command`
+/// spawns the child while building its future, and a cache hit must not spawn
+/// a `docker version` it will then discard.
+async fn docker_answer_or_probe_async<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if let Some(cached) = cached_docker_answer(Instant::now(), cache, ttl) {
+        return cached;
+    }
+    let answer = probe().await;
+    store_docker_answer(Instant::now(), cache, answer);
+    answer
+}
+
+/// `docker_answer_or_probe_async` for a check the user just asked for by
+/// retrying, which must reach Docker rather than answer from the cache.
+///
+/// A "no" is cached like any other answer, so a user who read "start Docker
+/// and try again", started Docker, and pressed the key again would otherwise
+/// be told the same "no" for the rest of the TTL. Dropping the entry first is
+/// what makes the retry a retry; the fresh answer is then cached as usual, so
+/// the retry costs one probe rather than exempting the path from caching.
+async fn docker_answer_for_retry<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    invalidate_docker_probe_cache(cache);
+    docker_answer_or_probe_async(cache, ttl, probe).await
+}
+
+/// What a Docker-gated path does next, and what to tell the user when it can
+/// go no further.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DockerGate {
+    /// Docker answered "yes" just now, so the path continues.
+    Proceed,
+    /// Docker is not there now, not merely when it was last asked, and this is
+    /// the message that says so.
+    Blocked(String),
+}
+
+/// The Docker gate on launching a Boss-mode session.
+///
+/// Takes the cache and the probe rather than an already-computed `bool` so the
+/// retry semantics live inside what a test drives: prime the cache with the
+/// "no" the user was already shown, and the gate must still reach Docker. A
+/// call site that answered the question for itself and handed a `bool` in
+/// could quietly go back to replaying that "no", with nothing to notice it.
+async fn boss_mode_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> DockerGate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if docker_answer_for_retry(cache, ttl, probe).await {
+        DockerGate::Proceed
+    } else {
+        DockerGate::Blocked(
+            "Boss mode requires Docker.\n\nPlease start Docker and try again, or use Interactive mode instead."
+                .to_string(),
+        )
+    }
+}
+
+/// The Docker gate on tearing a Boss-mode session's container down.
+///
+/// CLEANUP CLASS, and the reason that class exists. It reaches Docker through
+/// `docker_answer_for_retry`, the same invalidate-then-probe seam the retry
+/// gates use, instead of through the 30s cache. A "no" cached moments earlier
+/// by a display path (a workspace refresh taken while Docker was still coming
+/// up) would otherwise skip `delete_boss_session` outright, and nothing revisits
+/// it: the session row is being deleted, so the container is leaked for good.
+/// One 3s worst case per deletion is the price of not leaking.
+///
+/// Returns a bare `bool` rather than a `DockerGate`: there is no user to show a
+/// message to and nothing to block. A genuine "Docker is down" here means the
+/// container is already gone with the engine, so the deletion proceeds.
+///
+/// Takes the cache and the probe rather than an already-computed `bool` for the
+/// same reason `boss_mode_docker_gate` does: prime the cache with the stale "no"
+/// and the gate must still reach Docker, which is only checkable at this seam.
+async fn boss_cleanup_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    docker_answer_for_retry(cache, ttl, probe).await
+}
+
+/// The Docker gate on running authentication setup, which needs a container to
+/// run the OAuth flow in. Same seam and same reason as `boss_mode_docker_gate`:
+/// re-running setup is the retry its message asks for.
+async fn auth_setup_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> DockerGate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if docker_answer_for_retry(cache, ttl, probe).await {
+        DockerGate::Proceed
+    } else {
+        DockerGate::Blocked(
+            "❌ Docker is not available\n\n\
+             Please start Docker and try again."
+                .to_string(),
+        )
     }
 }
 
@@ -12535,6 +12792,9 @@ impl App {
 
         // Only initialize the streaming manager if Docker is available
         // (log streaming requires Docker for Boss mode containers)
+        //
+        // DISPLAY CLASS: cached. Startup, and the cache is empty here anyway,
+        // so this is the probe every other startup call site then reuses.
         if AppState::is_docker_available_sync() {
             info!("Docker available - initializing log streaming manager");
             if let Err(e) = coordinator.init_manager(log_sender.clone()) {
@@ -12558,6 +12818,10 @@ impl App {
 
             // Only attempt refresh if we have OAuth credentials that need refreshing
             // AND Docker is available (token refresh requires Docker for Boss mode)
+            // DISPLAY CLASS: cached, and deliberately the same answer the log
+            // streaming check above just took - two 3s probes in the startup
+            // path is the stall the cache exists to remove. A stale "no" defers
+            // the refresh to the periodic check.
             if credentials_path.exists() && AppState::oauth_token_needs_refresh(&credentials_path) {
                 if AppState::is_docker_available_sync() {
                     info!("Docker available - attempting OAuth token refresh on startup");
@@ -12746,7 +13010,11 @@ impl App {
                 {
                     info!("OAuth token needs refresh (periodic check)");
 
-                    // Only attempt refresh if Docker is available
+                    // Only attempt refresh if Docker is available.
+                    //
+                    // DISPLAY CLASS: cached. This check itself repeats every 5
+                    // minutes, which is ten times the cache TTL, so a stale
+                    // "no" can only ever cost one cycle.
                     if self.state.is_docker_available().await {
                         // Refresh tokens inline (this is quick enough not to block UI)
                         match self.state.refresh_oauth_tokens().await {
@@ -13398,5 +13666,518 @@ mod docker_probe_reap_tests {
             wait_or_reap(&mut child, Duration::from_secs(5)),
             Some(false)
         );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_cache_tests {
+    //! The TTL cache both Docker probes consult, and the seam they consult it
+    //! through. Nothing here shells out to docker: the boundary cases run
+    //! against explicit `Instant`s so the TTL is exact and the tests cost no
+    //! wall-clock time, and the seam runs against a counting stand-in probe so
+    //! a lost cache lookup shows up as an extra call rather than as nothing.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        DOCKER_PROBE_TTL, DockerGate, auth_setup_docker_gate, boss_cleanup_docker_gate,
+        boss_mode_docker_gate, cached_docker_answer, docker_answer_for_retry,
+        docker_answer_or_probe, docker_answer_or_probe_async, invalidate_docker_probe_cache,
+        store_docker_answer,
+    };
+
+    const TTL: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn an_empty_cache_asks_the_caller_to_probe() {
+        let cache = Mutex::new(None);
+        assert_eq!(cached_docker_answer(Instant::now(), &cache, TTL), None);
+    }
+
+    #[test]
+    fn an_entry_inside_the_ttl_is_reused() {
+        for answer in [true, false] {
+            let taken_at = Instant::now();
+            let cache = Mutex::new(Some((taken_at, answer)));
+            assert_eq!(
+                cached_docker_answer(taken_at, &cache, TTL),
+                Some(answer),
+                "an entry taken this instant must be reused"
+            );
+            assert_eq!(
+                cached_docker_answer(taken_at + TTL - Duration::from_millis(1), &cache, TTL),
+                Some(answer),
+                "an entry one millisecond short of the TTL must be reused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_at_or_past_the_ttl_is_not_reused() {
+        let taken_at = Instant::now();
+        let cache = Mutex::new(Some((taken_at, true)));
+        assert_eq!(
+            cached_docker_answer(taken_at + TTL, &cache, TTL),
+            None,
+            "the TTL is exclusive: an entry exactly that old has expired"
+        );
+        assert_eq!(
+            cached_docker_answer(taken_at + TTL + Duration::from_secs(1), &cache, TTL),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stored_answer_is_what_the_next_reader_sees() {
+        let cache = Mutex::new(None);
+        let taken_at = Instant::now();
+
+        store_docker_answer(taken_at, &cache, true);
+        assert_eq!(cached_docker_answer(taken_at, &cache, TTL), Some(true));
+
+        // A later probe replaces the entry rather than ageing alongside it.
+        let later = taken_at + TTL + Duration::from_secs(1);
+        store_docker_answer(later, &cache, false);
+        assert_eq!(cached_docker_answer(later, &cache, TTL), Some(false));
+    }
+
+    #[test]
+    fn a_poisoned_lock_degrades_to_probing_instead_of_panicking() {
+        let cache = Arc::new(Mutex::new(Some((Instant::now(), true))));
+
+        let poisoner = Arc::clone(&cache);
+        let panicked = std::thread::spawn(move || {
+            let _held = poisoner.lock().expect("lock is healthy until we panic");
+            panic!("poison the docker probe cache");
+        })
+        .join();
+        assert!(panicked.is_err(), "the poisoning thread must have panicked");
+        assert!(cache.is_poisoned(), "the lock must now be poisoned");
+
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            None,
+            "a poisoned lock must read as 'probe anyway', not panic"
+        );
+        // And the write side must survive it too.
+        store_docker_answer(Instant::now(), &cache, false);
+    }
+
+    #[test]
+    fn the_shipped_ttl_is_the_window_an_answer_is_reused_for() {
+        // Driven with the shipped constant rather than the local one, so this
+        // pins what `DOCKER_PROBE_TTL` does rather than what it equals.
+        let taken_at = Instant::now();
+        let cache = Mutex::new(Some((taken_at, true)));
+
+        assert_eq!(
+            cached_docker_answer(
+                taken_at + DOCKER_PROBE_TTL - Duration::from_millis(1),
+                &cache,
+                DOCKER_PROBE_TTL,
+            ),
+            Some(true),
+            "an answer taken inside the shipped window must be reused"
+        );
+        assert_eq!(
+            cached_docker_answer(taken_at + DOCKER_PROBE_TTL, &cache, DOCKER_PROBE_TTL),
+            None,
+            "an answer as old as the shipped window must be re-probed"
+        );
+
+        // And the window is short enough that a user who starts Docker Desktop
+        // is not stuck with a stale "no" for the rest of the session.
+        assert!(
+            DOCKER_PROBE_TTL <= Duration::from_secs(60),
+            "a longer window would strand a user who just started Docker"
+        );
+    }
+
+    /// A probe stand-in that records how many times it was asked and answers
+    /// differently each time, so a reused answer is distinguishable from a
+    /// fresh one.
+    fn counted_probe(calls: &AtomicUsize) -> bool {
+        calls.fetch_add(1, Ordering::SeqCst) == 0
+    }
+
+    #[test]
+    fn a_second_call_inside_the_ttl_never_reaches_docker() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a cold cache must probe");
+
+        assert!(
+            docker_answer_or_probe(&cache, TTL, || counted_probe(&calls)),
+            "the second call must return the first probe's answer"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a call inside the TTL must not probe again"
+        );
+    }
+
+    #[test]
+    fn a_call_past_the_ttl_probes_again() {
+        // A zero TTL ages an entry out the instant it is stored, which is the
+        // expired branch without a test that waits out the shipped 30s.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, Duration::ZERO, || {
+            counted_probe(&calls)
+        }));
+        assert!(
+            !docker_answer_or_probe(&cache, Duration::ZERO, || counted_probe(&calls)),
+            "an expired entry must be replaced by the fresh answer, not reused"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_async_probe_follows_the_same_policy() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await
+        );
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await,
+            "the async twin must answer from the cache the sync twin filled"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a cache hit must not spawn a probe"
+        );
+
+        assert!(
+            !docker_answer_or_probe_async(&cache, Duration::ZERO, || async {
+                counted_probe(&calls)
+            })
+            .await
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_the_sync_path_serves_the_async_path() {
+        // The claim that makes one static correct for both probes: they ask
+        // Docker the same question, so either one's answer is the other's.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await,
+            "the async path must reuse the answer the sync path stored"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the async path must not re-probe what the sync path just answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_the_async_path_serves_the_sync_path() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await
+        );
+        assert!(
+            docker_answer_or_probe(&cache, TTL, || counted_probe(&calls)),
+            "the sync path must reuse the answer the async path stored"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the sync path must not re-probe what the async path just answered"
+        );
+    }
+
+    #[test]
+    fn invalidation_drops_a_stored_answer() {
+        let cache = Mutex::new(None);
+        store_docker_answer(Instant::now(), &cache, false);
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(false),
+            "the answer must be cached before invalidation can drop it"
+        );
+
+        invalidate_docker_probe_cache(&cache);
+
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            None,
+            "after invalidation the next caller must probe Docker again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_asks_docker_instead_of_replaying_a_cached_no() {
+        // The user-visible bug this guards: told to start Docker, the user
+        // starts it and retries, and the fresh "yes" must win over the "no"
+        // cached moments earlier.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+
+        let probed = AtomicUsize::new(0);
+        let answer = docker_answer_for_retry(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert!(answer, "a retry must report what Docker says now");
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "a retry must reach Docker even with an answer cached inside the TTL"
+        );
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(true),
+            "the retry's answer must replace the stale one for later callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_asks_docker_instead_of_replaying_a_cached_no() {
+        // The container-leak this guards: a display path caches "no" while
+        // Docker is still coming up, the user deletes the session seconds
+        // later, and the Boss-mode teardown reads that cached "no" and skips
+        // container removal. Unlike a display path there is no next time - the
+        // session row is gone, so the container is orphaned for good.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+
+        let probed = AtomicUsize::new(0);
+        let available = boss_cleanup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert!(
+            available,
+            "cleanup must act on the Docker that is there now, not the one cached moments ago"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "cleanup must reach Docker even with an answer cached inside the TTL"
+        );
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(true),
+            "the cleanup's answer must replace the stale one for later callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_that_finds_no_docker_still_reports_it() {
+        // The gate is not a veto: a genuine "Docker is down" means the
+        // container went down with the engine, and the deletion proceeds
+        // without a Boss-mode teardown. What must never happen is reporting
+        // that from the cache instead of from Docker.
+        let cache = Mutex::new(Some((Instant::now(), true)));
+
+        let probed = AtomicUsize::new(0);
+        let available = boss_cleanup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            false
+        })
+        .await;
+
+        assert!(!available, "a cleanup must report what Docker says now");
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "a cached yes must not stand in for the probe either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_after_a_retry_answers_from_the_retry() {
+        // The retry drops the cache once, it does not exempt the path from
+        // caching: the next ordinary check inside the TTL still costs nothing.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_for_retry(&cache, TTL, || async { counted_probe(&calls) }).await);
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the retry itself may probe"
+        );
+    }
+
+    /// A probe that must not be reached, so a gate answering from the cache
+    /// fails loudly instead of quietly.
+    async fn never_probed() -> bool {
+        panic!("the gate answered from the cache instead of asking Docker");
+    }
+
+    #[tokio::test]
+    async fn the_boss_mode_gate_asks_docker_rather_than_replaying_the_no_the_user_saw() {
+        // The user read "start Docker and try again", started Docker, and
+        // pressed launch. The cached "no" is exactly the answer the gate must
+        // not give back.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+        let probed = AtomicUsize::new(0);
+
+        let gate = boss_mode_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert_eq!(
+            gate,
+            DockerGate::Proceed,
+            "an explicit retry must report what Docker says now"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "the gate must reach Docker even with an answer cached inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_boss_mode_gate_blocks_with_the_message_that_asks_for_the_retry() {
+        let cache = Mutex::new(None);
+
+        let DockerGate::Blocked(message) =
+            boss_mode_docker_gate(&cache, TTL, || async { false }).await
+        else {
+            panic!("a gate with no Docker behind it must block");
+        };
+
+        assert!(
+            message.contains("Boss mode requires Docker"),
+            "the message must name what needs Docker: {message}"
+        );
+        assert!(
+            message.contains("start Docker and try again"),
+            "the message must ask for the retry the gate then honours: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_auth_setup_gate_asks_docker_rather_than_replaying_the_no_the_user_saw() {
+        let cache = Mutex::new(Some((Instant::now(), false)));
+        let probed = AtomicUsize::new(0);
+
+        let gate = auth_setup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert_eq!(
+            gate,
+            DockerGate::Proceed,
+            "re-running setup is a retry, so it must report what Docker says now"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "the gate must reach Docker even with an answer cached inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_auth_setup_gate_blocks_with_the_message_that_asks_for_the_retry() {
+        let cache = Mutex::new(None);
+
+        let DockerGate::Blocked(message) =
+            auth_setup_docker_gate(&cache, TTL, || async { false }).await
+        else {
+            panic!("a gate with no Docker behind it must block");
+        };
+
+        assert!(
+            message.contains("Docker is not available"),
+            "the message must say what is missing: {message}"
+        );
+        assert!(
+            message.contains("start Docker and try again"),
+            "the message must ask for the retry the gate then honours: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_passes_leaves_its_answer_for_the_next_ordinary_check() {
+        // The gate drops the cache once, it does not exempt the path from
+        // caching: the ordinary check that follows costs nothing.
+        let cache = Mutex::new(None);
+
+        assert_eq!(
+            boss_mode_docker_gate(&cache, TTL, || async { true }).await,
+            DockerGate::Proceed
+        );
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, never_probed).await,
+            "the check after the gate must answer from the gate's probe"
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_shared_static_test {
+    //! One test, deliberately alone in this module, run against the shipped
+    //! `DOCKER_PROBE` static rather than a locally built cache.
+    //!
+    //! Every other cache test drives a local `Mutex` precisely so it cannot
+    //! collide with the rest of this multi-threaded binary, which leaves one
+    //! claim unpinned: that `is_docker_available_sync` really consults the
+    //! static the async twin consults, and not a cache of its own. That can
+    //! only be checked against the static itself, so it is checked once, here,
+    //! by the only test that touches it, and the static is emptied on both
+    //! sides of the check so nothing else in the binary inherits an answer.
+    //!
+    //! The check primes the static instead of letting a real probe fill it.
+    //! Running `docker version` for real against a wedged Docker is the 3s
+    //! stall and the orphaned `com.docker.cli` that issue #785 is about: the
+    //! CLI re-spawns itself, so killing the direct child still leaves copies
+    //! reparented to launchd. A unit test must not add those to a developer's
+    //! machine. What the sync probe writes on a miss is `docker_answer_or_probe`'s
+    //! half, pinned on a local cache in `docker_probe_cache_tests`.
+
+    use std::time::Instant;
+
+    use super::{AppState, DOCKER_PROBE, invalidate_docker_probe_cache, store_docker_answer};
+
+    #[test]
+    fn the_sync_probe_answers_from_the_shared_static() {
+        invalidate_docker_probe_cache(&DOCKER_PROBE);
+
+        // Both answers, so a probe wired to a cache of its own cannot pass by
+        // coincidentally agreeing with whatever this machine's Docker says.
+        for primed in [true, false] {
+            store_docker_answer(Instant::now(), &DOCKER_PROBE, primed);
+            assert_eq!(
+                AppState::is_docker_available_sync(),
+                primed,
+                "the sync probe must answer from DOCKER_PROBE, the static the async twin reads"
+            );
+        }
+
+        invalidate_docker_probe_cache(&DOCKER_PROBE);
     }
 }
