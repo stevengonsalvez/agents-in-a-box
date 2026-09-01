@@ -6,6 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
+// TUI palette (see .claude/skills/tui-screen/SKILL.md).
+const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
+const DARK_BG: Color = Color::Rgb(25, 25, 35);
+
 /// Borders (2) + one message row + two button rows: the smallest box that can
 /// show a confirmation and the keys that answer it.
 const MIN_DIALOG_HEIGHT: u16 = 5;
@@ -61,8 +65,10 @@ impl ConfirmationDialogComponent {
             let constraints = if warning_rows > 0 {
                 vec![
                     Constraint::Length(warning_rows), // Warning
-                    Constraint::Min(1),               // Message
-                    Constraint::Length(2),            // Buttons
+                    // Min(0): on a box too short for both, the message yields
+                    // and the warning keeps its rows.
+                    Constraint::Min(0),    // Message
+                    Constraint::Length(2), // Buttons
                 ]
             } else {
                 vec![
@@ -176,10 +182,27 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
         .constraints([Constraint::Min(0), Constraint::Length(button_row)])
         .split(area);
     if chunks[0].height > 0 {
-        let title = Paragraph::new(dialog.title.clone())
-            .style(Style::default().fg(Color::White).bg(Color::Black))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(title, chunks[0]);
+        // The warning outranks the title here: on a destructive dialog the one
+        // line worth the space is the one saying what would be lost.
+        let (text, style) = dialog.warning.as_ref().map_or_else(
+            || {
+                (
+                    dialog.title.clone(),
+                    Style::default().fg(SOFT_WHITE).bg(DARK_BG),
+                )
+            },
+            |warning| {
+                (
+                    warning.clone(),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            },
+        );
+        let line = Paragraph::new(text).style(style).wrap(Wrap { trim: true });
+        frame.render_widget(line, chunks[0]);
     }
     render_buttons(frame, chunks[1], dialog);
 }
@@ -216,7 +239,12 @@ fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16
     // message.
     let needed = wanted_warning.saturating_add(message_rows).saturating_add(4);
     let height = base.max(needed).min(max_height);
-    let warning_rows = wanted_warning.min(height.saturating_sub(MIN_DIALOG_HEIGHT));
+    // Rows left once the borders and buttons are paid for. The warning gets what
+    // it needs up to that; when the box is too short for both, the warning keeps
+    // its row and the message is the one that goes, because the warning is the
+    // text a delete confirmation exists to show.
+    let spare = height.saturating_sub(4);
+    let warning_rows = wanted_warning.min(spare);
     (height, warning_rows)
 }
 
@@ -224,9 +252,9 @@ fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16
 /// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
 /// Deliberately counts chars rather than display columns, so a run of
-/// double-width (CJK) glyphs is under-counted; the extra row added per paragraph
-/// absorbs that and the odd wide emoji. Measure display width here if that stops
-/// being enough.
+/// double-width (CJK) glyphs is under-counted; the single extra row absorbs that
+/// and the odd wide emoji. Measure display width here if that stops being
+/// enough.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows: usize = 0;
@@ -249,9 +277,10 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
                 used -= width;
             }
         }
-        rows += paragraph_rows + 1; // one row of slack, see above
+        rows += paragraph_rows;
     }
-    u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
+    // One row of slack for the whole text, not per line: see above.
+    u16::try_from(rows.max(1).saturating_add(1)).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -333,11 +362,11 @@ mod tests {
         }
     }
 
-    /// A short terminal must not squeeze the button row to nothing: the warning
-    /// banner yields first, because a destructive dialog whose Stop / Delete /
-    /// Cancel row is invisible is worse than one with no banner.
+    /// A short terminal must not squeeze the button row to nothing, and the
+    /// warning outranks the message for the rows that are left: a destructive
+    /// dialog exists to show what would be lost, and the buttons that answer it.
     #[test]
-    fn a_short_dialog_drops_the_warning_before_the_buttons() {
+    fn a_short_dialog_keeps_the_warning_and_the_buttons() {
         let d = dialog(
             "12 session(s): alpha, beta, gamma, and 9 more",
             Some("⚠️ 40 uncommitted file(s) in 12 session(s): alpha (12), beta (9), gamma (7)"),
@@ -346,9 +375,13 @@ mod tests {
             let (box_height, warning_rows) = dialog_layout(&d, 60, height);
             let inner = box_height - 2;
             assert!(
-                warning_rows + 2 < inner,
+                warning_rows + 2 <= inner,
                 "at height {height} the warning ({warning_rows}) leaves no room for the \
-                 message and buttons in {inner} inner rows"
+                 buttons in {inner} inner rows"
+            );
+            assert!(
+                warning_rows > 0,
+                "at height {height} the warning vanished entirely"
             );
         }
     }
