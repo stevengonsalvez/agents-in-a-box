@@ -859,6 +859,71 @@ pub enum ConfirmAction {
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
+/// Assemble the shared Stop / Delete / Cancel dialog.
+///
+/// One builder for the single-row and the bulk path, so a future safety change
+/// (a new warning, a different default) lands on both at once. Stop is always
+/// `selected_index: 0`: the safe option is the one an accidental Enter picks.
+fn stop_or_delete_dialog(
+    title: String,
+    message: String,
+    warning: Option<String>,
+    stop: (&str, ConfirmAction),
+    delete: (&str, ConfirmAction),
+) -> ConfirmationDialog {
+    let (stop_label, stop_action) = stop;
+    let (delete_label, delete_action) = delete;
+    ConfirmationDialog {
+        title,
+        message,
+        // confirm_action mirrors the default (Stop) so the legacy binary
+        // ConfirmationConfirm handler still does the safe thing if it ever runs
+        // without options.
+        confirm_action: stop_action.clone(),
+        selected_option: true,
+        warning,
+        options: Some(vec![
+            DialogOption {
+                label: stop_label.to_string(),
+                action: stop_action,
+            },
+            DialogOption {
+                label: delete_label.to_string(),
+                action: delete_action,
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ]),
+        selected_index: 0, // Default = Stop (safe option)
+    }
+}
+
+/// `true` for the sessions Stop actually applies to: interactive agent sessions,
+/// where killing tmux leaves a worktree that resumes later. Boss (Docker) and
+/// Shell sessions have no soft-stop, so they only ever get a delete
+/// confirmation.
+pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::Session) -> bool {
+    use crate::models::{SessionAgentType, SessionMode};
+    matches!(session.mode, SessionMode::Interactive)
+        && matches!(
+            session.agent_type,
+            SessionAgentType::Claude
+                | SessionAgentType::Codex
+                | SessionAgentType::Gemini
+                | SessionAgentType::Copilot
+        )
+}
+
+/// Label for a selected id that no longer resolves to a session. The id is kept
+/// in the bulk action (so nothing silently drops out of a delete) but a full
+/// 36-character uuid would eat three rows of the dialog on its own.
+fn unknown_session_label(id: Uuid) -> String {
+    let id = id.to_string();
+    format!("unknown ({})", &id[..8])
+}
+
 // ============================================================================
 // MCP Pool observability overlay
 // ============================================================================
@@ -6611,19 +6676,15 @@ impl AppState {
     /// any workspace are kept, at the end, so nothing silently drops out of a
     /// bulk operation.
     pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
+        let mut seen: HashSet<Uuid> = HashSet::new();
         let mut ordered: Vec<Uuid> = self
             .workspaces
             .iter()
             .flat_map(|w| w.sessions.iter())
             .map(|s| s.id)
-            .filter(|id| self.selected_sessions.contains(id))
+            .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
             .collect();
-        ordered.extend(
-            self.selected_sessions
-                .iter()
-                .copied()
-                .filter(|id| self.find_session(*id).is_none()),
-        );
+        ordered.extend(self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)));
         ordered
     }
 
@@ -7681,33 +7742,13 @@ impl AppState {
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        let options = vec![
-            DialogOption {
-                label: "Stop".to_string(),
-                action: ConfirmAction::StopSession(session_id),
-            },
-            DialogOption {
-                label: "Delete".to_string(),
-                action: ConfirmAction::DeleteSession(session_id),
-            },
-            DialogOption {
-                label: "Cancel".to_string(),
-                action: ConfirmAction::Cancel,
-            },
-        ];
-
-        self.confirmation_dialog = Some(ConfirmationDialog {
-            title: "Stop or Delete Session".to_string(),
-            message: "Stop keeps the worktree and resumes later. Delete removes the worktree."
-                .to_string(),
-            // confirm_action mirrors the default (Stop) so the legacy ConfirmationConfirm
-            // handler still has something sensible if it ever runs without options.
-            confirm_action: ConfirmAction::StopSession(session_id),
-            selected_option: true,
+        self.confirmation_dialog = Some(stop_or_delete_dialog(
+            "Stop or Delete Session".to_string(),
+            "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
             warning,
-            options: Some(options),
-            selected_index: 0, // Default = Stop (safe option)
-        });
+            ("Stop", ConfirmAction::StopSession(session_id)),
+            ("Delete", ConfirmAction::DeleteSession(session_id)),
+        ));
     }
 
     /// Check if a session's worktree has uncommitted changes.
@@ -7751,40 +7792,51 @@ impl AppState {
 
         let names: Vec<String> = session_ids
             .iter()
-            .map(|id| self.find_session(*id).map_or_else(|| id.to_string(), |s| s.name.clone()))
+            .map(|id| {
+                self.find_session(*id)
+                    .map_or_else(|| unknown_session_label(*id), |s| s.name.clone())
+            })
             .collect();
-        let warning =
-            Self::format_bulk_uncommitted_warning(&self.bulk_uncommitted_counts(&session_ids));
+        let (dirty, unchecked) = self.bulk_uncommitted_counts(&session_ids);
+        let warning = Self::format_bulk_uncommitted_warning(&dirty, unchecked);
+        let summary = Self::format_bulk_session_summary(&names);
 
-        let options = vec![
-            DialogOption {
-                label: "Stop all".to_string(),
-                action: ConfirmAction::BulkStopSessions(session_ids.clone()),
-            },
-            DialogOption {
-                label: "Delete all".to_string(),
-                action: ConfirmAction::BulkDeleteSessions(session_ids.clone()),
-            },
-            DialogOption {
-                label: "Cancel".to_string(),
-                action: ConfirmAction::Cancel,
-            },
-        ];
+        // Stop only means something for interactive agent sessions: it kills
+        // tmux and the session resumes later. Boss (Docker) and Shell sessions
+        // have no such path, so a selection containing one gets the binary
+        // delete confirmation rather than a Stop button that would lie.
+        let all_stoppable = session_ids
+            .iter()
+            .all(|id| self.find_session(*id).is_some_and(is_stoppable_interactive));
 
-        self.confirmation_dialog = Some(ConfirmationDialog {
-            title: format!("Stop or Delete {count} Session(s)"),
-            message: format!(
-                "{}\nStop keeps every worktree and resumes later. Delete removes {} worktree(s).",
-                Self::format_bulk_session_summary(&names),
-                count
-            ),
-            // confirm_action mirrors the default (Stop all) for the legacy
-            // binary ConfirmationConfirm path.
-            confirm_action: ConfirmAction::BulkStopSessions(session_ids),
-            selected_option: true,
-            warning,
-            options: Some(options),
-            selected_index: 0, // Default = Stop all (safe option)
+        self.confirmation_dialog = Some(if all_stoppable {
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop keeps every worktree and resumes later. \
+                     Delete removes {count} worktree(s)."
+                ),
+                warning,
+                (
+                    "Stop all",
+                    ConfirmAction::BulkStopSessions(session_ids.clone()),
+                ),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
+        } else {
+            ConfirmationDialog {
+                title: format!("Delete {count} Session(s)"),
+                message: format!(
+                    "{summary}\nThis removes {count} worktree(s). The selection includes \
+                     sessions that cannot be stopped and resumed, so Delete is the only \
+                     option offered."
+                ),
+                confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
+                selected_option: false, // Default = No
+                warning,
+                options: None,
+                selected_index: 0,
+            }
         });
     }
 
@@ -7809,37 +7861,70 @@ impl AppState {
         )
     }
 
-    /// `(session name, uncommitted file count)` for every selected session whose
-    /// worktree is dirty. Sessions with clean or unreadable worktrees, and Shell
-    /// sessions (no dedicated worktree), are omitted.
-    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> Vec<(String, usize)> {
+    /// `(dirty sessions, sessions whose status could not be read)`.
+    ///
+    /// A session whose worktree status cannot be read is NOT reported as clean:
+    /// it is counted as unchecked so the dialog can say so, because "unknown"
+    /// and "nothing to lose" must never look the same on a delete confirmation.
+    /// Shell sessions have no dedicated worktree, so they are skipped entirely.
+    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> (Vec<(String, usize)>, usize) {
         use crate::git::WorktreeManager;
         use crate::models::SessionAgentType;
 
+        // Sessions with a worktree worth probing, paired with their names.
+        let mut probes: Vec<(Uuid, String)> = Vec::new();
+        let mut unchecked = 0;
+        for id in session_ids {
+            match self.find_session(*id) {
+                // An id we cannot resolve to a session is unknown, not clean.
+                None => unchecked += 1,
+                Some(session) if matches!(session.agent_type, SessionAgentType::Shell) => {}
+                Some(session) => probes.push((*id, session.name.clone())),
+            }
+        }
+
         let Ok(worktree_manager) = WorktreeManager::new() else {
-            return Vec::new();
+            return (Vec::new(), unchecked + probes.len());
         };
 
-        session_ids
-            .iter()
-            .filter_map(|id| {
-                let session = self.find_session(*id)?;
-                if matches!(session.agent_type, SessionAgentType::Shell) {
-                    return None;
-                }
-                let count = worktree_manager.uncommitted_file_count(*id).ok()?;
-                (count > 0).then(|| (session.name.clone(), count))
-            })
-            .collect()
+        // `uncommitted_file_count` shells out to `git status` per worktree and
+        // this runs inline on a keypress, so the probes go out together: a
+        // 12-session selection costs about one status call, not twelve.
+        let counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = probes
+                .iter()
+                .map(|(id, _)| {
+                    let worktree_manager = &worktree_manager;
+                    let id = *id;
+                    scope.spawn(move || worktree_manager.uncommitted_file_count(id).map_err(|_| ()))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+        });
+
+        let mut dirty = Vec::new();
+        for ((_, name), count) in probes.into_iter().zip(counts) {
+            match count {
+                Ok(0) => {}
+                Ok(count) => dirty.push((name, count)),
+                Err(()) => unchecked += 1,
+            }
+        }
+        (dirty, unchecked)
     }
 
     /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
     /// the work "Delete all" would destroy, so it names the dirty sessions
     /// rather than reporting a bare total.
-    fn format_bulk_uncommitted_warning(dirty: &[(String, usize)]) -> Option<String> {
+    fn format_bulk_uncommitted_warning(
+        dirty: &[(String, usize)],
+        unchecked: usize,
+    ) -> Option<String> {
         const MAX_NAMED: usize = 3;
         if dirty.is_empty() {
-            return None;
+            return (unchecked > 0).then(|| {
+                format!("⚠️ could not check {unchecked} session(s) for uncommitted work")
+            });
         }
         let total: usize = dirty.iter().map(|(_, count)| *count).sum();
         let shown = dirty.len().min(MAX_NAMED);
@@ -7849,16 +7934,22 @@ impl AppState {
             .collect::<Vec<_>>()
             .join(", ");
         let more = if dirty.len() > shown {
-            format!(", +{} more", dirty.len() - shown)
+            format!(", and {} more", dirty.len() - shown)
+        } else {
+            String::new()
+        };
+        let unknown = if unchecked > 0 {
+            format!("; {unchecked} more could not be checked")
         } else {
             String::new()
         };
         Some(format!(
-            "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
+            "⚠️ {} uncommitted file(s) in {} session(s): {}{}{}",
             total,
             dirty.len(),
             listed,
-            more
+            more,
+            unknown
         ))
     }
 
@@ -10090,7 +10181,11 @@ impl AppState {
     ///
     /// The session is rediscovered as `Stopped` on the next workspace reload (and
     /// across TUI restarts) and can be resumed via `resume_interactive_session`.
-    async fn stop_interactive_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+    async fn stop_interactive_session(
+        &mut self,
+        session_id: Uuid,
+        trigger_key: &str,
+    ) -> anyhow::Result<()> {
         use crate::interactive::SessionStore;
         use crate::models::SessionStatus;
 
@@ -10162,7 +10257,7 @@ impl AppState {
             session_id,
             tmux_name,
             worktree_path,
-            AuditTrigger::UserKeypress("D→Stop".to_string()),
+            AuditTrigger::UserKeypress(trigger_key.to_string()),
             audit_result,
         );
 
@@ -10182,7 +10277,7 @@ impl AppState {
         let mut stopped = 0;
         let mut failed = 0;
         for id in session_ids {
-            if let Err(e) = self.stop_interactive_session(id).await {
+            if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
                 error!("Failed to stop session {}: {}", id, e);
                 failed += 1;
             } else {
@@ -10629,7 +10724,7 @@ impl AppState {
                     }
                 }
                 AsyncAction::StopSession(session_id) => {
-                    if let Err(e) = self.stop_interactive_session(session_id).await {
+                    if let Err(e) = self.stop_interactive_session(session_id, "D→Stop").await {
                         error!("Failed to stop session {}: {}", session_id, e);
                         self.add_error_notification(format!("Stop failed: {}", e));
                     }
