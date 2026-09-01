@@ -182,12 +182,14 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
         .constraints([Constraint::Min(0), Constraint::Length(button_row)])
         .split(area);
     if chunks[0].height > 0 {
-        // The warning outranks the title here: on a destructive dialog the one
-        // line worth the space is the one saying what would be lost.
+        // The warning outranks everything here: on a destructive dialog the one
+        // line worth the space is the one saying what would be lost. Without a
+        // warning the message wins, since it names the sessions and says what
+        // the buttons do; the title only repeats the count.
         let (text, style) = dialog.warning.as_ref().map_or_else(
             || {
                 (
-                    dialog.title.clone(),
+                    dialog.message.clone(),
                     Style::default().fg(SOFT_WHITE).bg(DARK_BG),
                 )
             },
@@ -209,27 +211,25 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
 
 /// Rows the warning block occupies, 0 when the dialog has no warning.
 ///
-/// At least 3 so short warnings keep the banner they have always had, and at
-/// most 6 so one long warning cannot push the buttons off screen. The height
-/// calculation uses this same number, so the box always reserves exactly what
-/// the layout hands out.
+/// At least 3, so short warnings keep the banner they have always had. No upper
+/// cap here: `dialog_layout` already limits the banner to the rows the box can
+/// spare, and capping twice truncated long warnings mid-sentence on terminals
+/// with room to show them, losing the tail that says the warning is incomplete.
 fn warning_row_count(dialog: &ConfirmationDialog, dialog_width: u16) -> u16 {
     dialog.warning.as_ref().map_or(0, |w| {
-        wrapped_line_count(w, dialog_width.saturating_sub(2)).clamp(3, 6)
+        wrapped_line_count(w, dialog_width.saturating_sub(2)).max(3)
     })
 }
 
-/// Dialog height: the historic fixed size (8, or 11 with a warning) unless the
-/// wrapped body needs more rows, in which case the box grows rather than
-/// clipping. The bulk Stop/Delete dialog names the sessions it affects, so it
-/// is routinely taller than the fixed size allowed.
 /// `(box height, rows the warning banner gets)`, computed together so the two
-/// cannot disagree. The box is the historic fixed size (8, or 11 with a
-/// warning) unless the wrapped body needs more rows, in which case it grows
-/// rather than clipping; the bulk Stop/Delete dialog names the sessions it
-/// affects, so it is routinely taller than the fixed size allowed. When the box
-/// cannot grow far enough, the banner yields first: the message keeps a row and
-/// the buttons keep both of theirs, so the answer is never invisible.
+/// cannot disagree.
+///
+/// The box is the historic fixed size (8, or 11 with a warning) unless the
+/// wrapped body needs more rows, in which case it grows rather than clipping:
+/// the bulk Stop/Delete dialog names the sessions it affects, so it is routinely
+/// taller than the fixed size allowed. When the box cannot grow far enough the
+/// message yields, not the banner, so a delete confirmation never hides what
+/// would be lost or the buttons that answer it.
 fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16) -> (u16, u16) {
     let message_rows = wrapped_line_count(&dialog.message, dialog_width.saturating_sub(2));
     let wanted_warning = warning_row_count(dialog, dialog_width);
