@@ -176,9 +176,10 @@ pub fn provider_control(provider_id: &str) -> Option<AtcControl> {
     ProviderRegistry::built_ins().get(provider_id).map(|p| p.atc_control())
 }
 
-/// Every provider id that can currently host a full-mode brain, in registry
-/// order. This is read off the capability, never hard-coded, so a provider that
-/// implements `atc_control` becomes selectable everywhere at once.
+/// Every provider id that can currently host a full-mode brain, in registry order.
+///
+/// Read off the capability, never hard-coded, so a provider that implements
+/// `atc_control` becomes selectable everywhere at once.
 #[must_use]
 pub fn supported_full_providers() -> Vec<&'static str> {
     let registry = ProviderRegistry::built_ins();
@@ -215,7 +216,7 @@ prompts to a brain at all.",
 }
 
 /// Name the half that is missing, so the refusal says what would have to exist.
-fn missing_capability(control: AtcControl) -> &'static str {
+const fn missing_capability(control: AtcControl) -> &'static str {
     match (control.resident_session, control.heartbeat_injection) {
         (false, false) => "host a resident supervisor session for it, or inject a heartbeat turn",
         (true, false) => "inject a heartbeat turn into its session",

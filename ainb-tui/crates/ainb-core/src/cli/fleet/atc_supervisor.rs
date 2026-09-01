@@ -55,9 +55,11 @@ pub fn read_meta(name: &str) -> Result<(AtcMeta, AtcPaths)> {
     Ok((meta, paths))
 }
 
-/// Persist a mutated meta atomically. Every mode transition goes through here,
-/// so a crash mid-switch can never leave a torn meta.json that neither
-/// controller can parse (which would strand the fleet with no owner at all).
+/// Persist a mutated meta atomically.
+///
+/// Every mode transition goes through here, so a crash mid-switch can never
+/// leave a torn meta.json that neither controller can parse — which would
+/// strand the fleet with no owner at all.
 pub fn write_meta(paths: &AtcPaths, meta: &AtcMeta) -> Result<()> {
     plumbing::atomic::write_atomic(&paths.meta, meta.to_json()?.as_bytes())
         .with_context(|| format!("writing {}", paths.meta.display()))
@@ -263,8 +265,7 @@ async fn unregister_daemon_cron(name: &str) -> bool {
             expected_generation: None,
         })
         .await
-        .map(|r| r.disabled)
-        .unwrap_or(false)
+        .is_ok_and(|r| r.disabled)
 }
 
 // ── The lite supervisor process ─────────────────────────────────────────────

@@ -232,12 +232,15 @@ fn probe_atc_lite(
     now_ms: i64,
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
-    use crate::fleet::atc::supervisor::lite_heartbeat_id;
+    use crate::fleet::atc::supervisor::{SupervisorMode, lite_heartbeat_id};
     use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, is_pid_alive};
 
     let kind = DaemonKind::Atc;
     let name = meta.name.clone();
-    let channel = Some(format!("{name} · LITE · no LLM"));
+    let channel = Some(format!(
+        "{name} · {} · no LLM",
+        SupervisorMode::Lite.label()
+    ));
     let last_active = std::fs::read_to_string(&paths.heartbeat_state)
         .ok()
         .map(|s| HeartbeatState::from_json_or_default(&s))
@@ -1025,7 +1028,10 @@ pub(crate) fn probe_atc_with(
             kind,
             state: DaemonState::Degraded,
             connected: false,
-            channel: Some(format!("{name} · FULL({provider}) · every {interval_min}m")),
+            channel: Some(format!(
+                "{name} · {}({provider}) · every {interval_min}m",
+                SupervisorMode::Full.label()
+            )),
             last_activity_at: hbs.last_active_ms,
             reason: format!(
                 "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; `ainb daemon atc start` respawns it"
@@ -1042,7 +1048,10 @@ pub(crate) fn probe_atc_with(
         version: None,
         version_current: None,
         connected: true,
-        channel: Some(format!("{name} · FULL({provider}) · every {interval_min}m")),
+        channel: Some(format!(
+            "{name} · {}({provider}) · every {interval_min}m",
+            SupervisorMode::Full.label()
+        )),
         last_activity_at: hbs.last_active_ms,
         error_count: 0,
         last_error: None,
