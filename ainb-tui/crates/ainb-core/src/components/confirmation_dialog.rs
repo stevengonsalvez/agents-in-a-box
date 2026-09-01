@@ -6,6 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
+/// Borders (2) + one message row + two button rows: the smallest box that can
+/// show a confirmation and the keys that answer it.
+const MIN_DIALOG_HEIGHT: u16 = 5;
+
 pub struct ConfirmationDialogComponent;
 
 impl ConfirmationDialogComponent {
@@ -15,15 +19,20 @@ impl ConfirmationDialogComponent {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         if let Some(dialog) = &state.confirmation_dialog {
-            // Below this there is no room for borders, a message and buttons,
-            // and the arithmetic below would underflow.
-            if area.width < 10 || area.height < 6 {
+            // Borders (2) + one message row + two button rows is the smallest
+            // drawable dialog; below that the arithmetic underflows and there is
+            // nothing meaningful to show anyway.
+            if area.width < 10 || area.height < MIN_DIALOG_HEIGHT {
                 return;
             }
             // Calculate dialog size (center it)
             let dialog_width = 60.min(area.width - 4);
-            let warning_rows = warning_row_count(dialog, dialog_width);
             let dialog_height = dialog_height(dialog, dialog_width, area.height);
+            // What the box can actually spare for the warning: the message keeps
+            // at least one row and the buttons keep both of theirs, so a tall
+            // warning never squeezes the Stop/Delete/Cancel row to nothing.
+            let warning_rows = warning_row_count(dialog, dialog_width)
+                .min(dialog_height.saturating_sub(MIN_DIALOG_HEIGHT));
 
             let dialog_area = Rect {
                 x: (area.width - dialog_width) / 2,
@@ -53,7 +62,7 @@ impl ConfirmationDialogComponent {
             };
 
             // Build constraints based on whether warning is present
-            let constraints = if dialog.warning.is_some() {
+            let constraints = if warning_rows > 0 {
                 vec![
                     Constraint::Length(warning_rows), // Warning
                     Constraint::Min(1),               // Message
@@ -72,7 +81,8 @@ impl ConfirmationDialogComponent {
                 .split(inner_area);
 
             // Determine which chunk indices to use based on warning presence
-            let (message_chunk, button_chunk) = if let Some(warning_text) = &dialog.warning {
+            let warning_text = dialog.warning.as_ref().filter(|_| warning_rows > 0);
+            let (message_chunk, button_chunk) = if let Some(warning_text) = warning_text {
                 // Render warning with yellow/orange highlight
                 let warning = Paragraph::new(warning_text.as_str())
                     .style(
@@ -175,17 +185,22 @@ fn warning_row_count(dialog: &ConfirmationDialog, dialog_width: u16) -> u16 {
 fn dialog_height(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16) -> u16 {
     let message_rows = wrapped_line_count(&dialog.message, dialog_width.saturating_sub(2));
     let base = if dialog.warning.is_some() { 11 } else { 8 };
-    // 2 borders + warning block + message + 2 button rows.
-    let needed = 4 + warning_row_count(dialog, dialog_width) + message_rows;
+    // 2 borders + warning block + message + 2 button rows, saturating because
+    // `wrapped_line_count` is allowed to return u16::MAX for a pathological
+    // message.
+    let needed = warning_row_count(dialog, dialog_width)
+        .saturating_add(message_rows)
+        .saturating_add(4);
     base.max(needed).min(max_height)
 }
 
 /// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
 /// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
-/// ponytail: counts chars, not display columns, so a run of double-width (CJK)
-/// glyphs is under-counted; the extra row added per paragraph absorbs that and
-/// the odd wide emoji. Measure display width here if that stops being enough.
+/// Deliberately counts chars rather than display columns, so a run of
+/// double-width (CJK) glyphs is under-counted; the extra row added per paragraph
+/// absorbs that and the odd wide emoji. Measure display width here if that stops
+/// being enough.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows: usize = 0;
@@ -282,7 +297,7 @@ mod tests {
     #[test]
     fn tiny_terminals_are_clamped_not_underflowed() {
         let d = dialog("Are you sure?", None);
-        for height in 6..=12u16 {
+        for height in MIN_DIALOG_HEIGHT..=12u16 {
             let computed = dialog_height(&d, 60, height);
             assert!(
                 computed >= 2,
@@ -290,5 +305,39 @@ mod tests {
             );
             assert!(computed <= height, "dialog must fit the area");
         }
+    }
+
+    /// A short terminal must not squeeze the button row to nothing: the warning
+    /// banner yields first, because a destructive dialog whose Stop / Delete /
+    /// Cancel row is invisible is worse than one with no banner.
+    #[test]
+    fn a_short_dialog_drops_the_warning_before_the_buttons() {
+        let d = dialog(
+            "12 session(s): alpha, beta, gamma, and 9 more",
+            Some("⚠️ 40 uncommitted file(s) in 12 session(s): alpha (12), beta (9), gamma (7)"),
+        );
+        for height in MIN_DIALOG_HEIGHT..=14u16 {
+            let box_height = dialog_height(&d, 60, height);
+            let warning_rows =
+                warning_row_count(&d, 60).min(box_height.saturating_sub(MIN_DIALOG_HEIGHT));
+            let inner = box_height - 2;
+            assert!(
+                warning_rows + 2 < inner,
+                "at height {height} the warning ({warning_rows}) leaves no room for the \
+                 message and buttons in {inner} inner rows"
+            );
+        }
+    }
+
+    /// A pathological message must not overflow the height arithmetic.
+    #[test]
+    fn a_huge_message_saturates_instead_of_overflowing() {
+        let huge = "line\n".repeat(70_000);
+        let d = dialog(&huge, Some("⚠️ warning"));
+        assert_eq!(
+            dialog_height(&d, 60, 40),
+            40,
+            "clamped to the area, no panic"
+        );
     }
 }
