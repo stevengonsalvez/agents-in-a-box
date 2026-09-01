@@ -2883,6 +2883,12 @@ fn build_atc_command() -> Command {
                         .long("once")
                         .action(clap::ArgAction::SetTrue)
                         .help("Run a single scan and exit (diagnostics)"),
+                )
+                .arg(
+                    clap::Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Report what the scan would do; send nothing and spend no retry budget"),
                 ),
         )
         .subcommand(Command::new("list").about("List all provisioned ATC instances"))

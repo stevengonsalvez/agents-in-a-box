@@ -74,9 +74,10 @@ pub async fn mode(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
 
     let requested = match matches.get_one::<String>("set") {
         None => None,
-        Some(raw) => Some(SupervisorMode::from_id(raw).with_context(|| {
-            format!("unknown mode '{raw}' — expected `lite` or `full`")
-        })?),
+        Some(raw) => Some(
+            SupervisorMode::from_id(raw)
+                .with_context(|| format!("unknown mode '{raw}' — expected `lite` or `full`"))?,
+        ),
     };
     let requested_provider = matches.get_one::<String>("provider").cloned();
 
@@ -315,6 +316,11 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
         .cloned()
         .context("expected an instance name")?;
     let once = matches.get_flag("once");
+    // A dry run PLANS but never sends and never spends ledger budget. It exists
+    // so the mode gate can be exercised — by a test, or by an operator checking
+    // what lite would do — without an inspection turning into a fleet-wide
+    // `continue`.
+    let dry_run = matches.get_flag("dry-run");
     let (meta, paths) = read_meta(&name)?;
 
     // Refuse to even start in the wrong mode, so a stale unit or a hand-typed
@@ -351,9 +357,9 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
             return Ok(());
         }
 
-        match tick(&paths, DEFAULT_ERR_RETRY_CAP).await {
+        match tick(&paths, DEFAULT_ERR_RETRY_CAP, dry_run).await {
             Ok(report) => {
-                if report.continued > 0 {
+                if report.continued > 0 && !dry_run {
                     heartbeat.record_activity();
                 } else {
                     heartbeat.touch();
@@ -413,10 +419,16 @@ impl LiteReport {
 
 /// One lite scan: read the fleet, auto-continue the ERR rows still inside their
 /// budget, and stamp the shared ledger.
-async fn tick(paths: &AtcPaths, cap: u32) -> Result<LiteReport> {
+async fn tick(paths: &AtcPaths, cap: u32, dry_run: bool) -> Result<LiteReport> {
     let rows = super::atc::fetch_needs().await?;
     let mut state = read_heartbeat_state(paths);
     let (report, to_continue) = plan(&rows, cap, &mut state);
+
+    if dry_run {
+        // Neither send nor persist: a dry run must be observably free of side
+        // effects, or it is not a dry run.
+        return Ok(report);
+    }
 
     for row in to_continue {
         if let Err(e) = crate::fleet::send::send(&row.session, "continue").await {
@@ -707,5 +719,4 @@ mod tests {
         assert!(line.contains("1 at cap"), "{line}");
         assert!(line.contains("2 left for a human"), "{line}");
     }
-
 }
