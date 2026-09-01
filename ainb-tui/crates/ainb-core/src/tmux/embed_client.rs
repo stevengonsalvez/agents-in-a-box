@@ -468,7 +468,7 @@ mod tests {
 
         // The session must still exist — tmux owns it, not our client.
         let alive = Command::new("tmux")
-            .args(["has-session", "-t", &session])
+            .args(["has-session", "-t", &format!("={session}")])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);

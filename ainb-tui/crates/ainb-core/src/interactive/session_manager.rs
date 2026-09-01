@@ -1984,7 +1984,11 @@ impl InteractiveSessionManager {
             .ok_or(InteractiveSessionError::SessionNotFound(session_id))?;
 
         let output = Command::new("tmux")
-            .args(["has-session", "-t", &session.tmux_session_name])
+            .args([
+                "has-session",
+                "-t",
+                &format!("={}", session.tmux_session_name),
+            ])
             .output()
             .await?;
 

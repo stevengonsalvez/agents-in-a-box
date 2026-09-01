@@ -36,7 +36,10 @@ pub async fn execute(args: LogsArgs) -> Result<()> {
 
 /// Check if a tmux session exists
 async fn tmux_session_exists(session_name: &str) -> bool {
-    let output = Command::new("tmux").args(["has-session", "-t", session_name]).output().await;
+    let output = Command::new("tmux")
+        .args(["has-session", "-t", &format!("={session_name}")])
+        .output()
+        .await;
 
     matches!(output, Ok(o) if o.status.success())
 }

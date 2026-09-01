@@ -1622,7 +1622,7 @@ async fn run_tui_loop(
 
                         // Check if session already exists
                         let has_session = Command::new("tmux")
-                            .args(["has-session", "-t", &tmux_name])
+                            .args(["has-session", "-t", &format!("={tmux_name}")])
                             .output()
                             .await
                             .map(|o| o.status.success())

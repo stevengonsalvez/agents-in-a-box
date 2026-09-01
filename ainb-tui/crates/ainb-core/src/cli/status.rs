@@ -28,7 +28,7 @@ pub struct StatusOutput {
 /// Check if a tmux session exists
 fn tmux_session_exists(tmux_session_name: &str) -> bool {
     Command::new("tmux")
-        .args(["has-session", "-t", tmux_session_name])
+        .args(["has-session", "-t", &format!("={tmux_session_name}")])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

@@ -84,7 +84,7 @@ pub struct OrphanedSession {
 /// Check if a tmux session exists by name
 fn tmux_session_exists(name: &str) -> bool {
     Command::new("tmux")
-        .args(["has-session", "-t", name])
+        .args(["has-session", "-t", &format!("={name}")])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

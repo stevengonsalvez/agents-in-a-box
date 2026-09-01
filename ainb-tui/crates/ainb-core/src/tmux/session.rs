@@ -242,7 +242,7 @@ impl TmuxSession {
     /// * `bool` - True if the session exists, false otherwise
     pub async fn does_session_exist(&self) -> bool {
         let output = Command::new("tmux")
-            .args(["has-session", "-t", &self.sanitized_name])
+            .args(["has-session", "-t", &format!("={}", self.sanitized_name)])
             .output()
             .await;
 
