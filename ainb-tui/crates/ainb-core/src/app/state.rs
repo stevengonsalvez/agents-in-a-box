@@ -947,6 +947,21 @@ fn session_uncommitted_probe(
     }
 }
 
+/// Render at most three items, then "and N more". Shared by the bulk dialog's
+/// message and its warning so the two cannot truncate at different lengths or
+/// word it differently.
+fn truncate_list(items: impl Iterator<Item = String>) -> String {
+    const MAX_NAMED: usize = 3;
+    let items: Vec<String> = items.collect();
+    let shown = items.len().min(MAX_NAMED);
+    let listed = items[..shown].join(", ");
+    if items.len() > shown {
+        format!("{listed}, and {} more", items.len() - shown)
+    } else {
+        listed
+    }
+}
+
 /// Label for a selected id that no longer resolves to a session. The id is kept
 /// in the bulk action (so nothing silently drops out of a delete) but a full
 /// 36-character uuid would eat three rows of the dialog on its own.
@@ -7814,6 +7829,14 @@ impl AppState {
     /// delete immediately, taking uncommitted work with it; it now gets the same
     /// dialog, the same Stop default, and an aggregate uncommitted-work warning.
     pub fn show_bulk_delete_or_stop_confirmation(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
+        if session_ids.is_empty() {
+            self.add_warning_notification(
+                "No sessions selected. Use Space to select sessions first.".to_string(),
+            );
+            return;
+        }
         let count = session_ids.len();
         info!(
             "Showing bulk Stop/Delete/Cancel dialog for {} session(s)",
@@ -7836,10 +7859,17 @@ impl AppState {
         // have no such path, so a mixed selection offers Stop for the sessions
         // it actually applies to rather than dropping the safe option for
         // everyone because one row cannot use it.
+        // Already-Stopped sessions are excluded too: offering "Stop all" for a
+        // selection that is entirely stopped makes the default a no-op, and the
+        // user pressing Enter on it would lose their selection for nothing.
         let stoppable: Vec<Uuid> = session_ids
             .iter()
             .copied()
-            .filter(|id| self.find_session(*id).is_some_and(is_stoppable_interactive))
+            .filter(|id| {
+                self.find_session(*id).is_some_and(|s| {
+                    is_stoppable_interactive(s) && !matches!(s.status, SessionStatus::Stopped)
+                })
+            })
             .collect();
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
@@ -7887,21 +7917,13 @@ impl AppState {
     /// One-line "which sessions are affected" summary for the bulk dialog.
     /// Long selections are truncated so the message still fits the dialog.
     fn format_bulk_session_summary(names: &[String]) -> String {
-        const MAX_NAMED: usize = 3;
         if names.is_empty() {
             return "No sessions selected".to_string();
         }
-        let shown = names.len().min(MAX_NAMED);
-        let more = names.len() - shown;
-        let tail = if more > 0 {
-            format!(", and {more} more")
-        } else {
-            String::new()
-        };
         format!(
-            "{} session(s): {}{tail}",
+            "{} session(s): {}",
             names.len(),
-            names[..shown].join(", ")
+            truncate_list(names.iter().cloned())
         )
     }
 
@@ -7921,36 +7943,41 @@ impl AppState {
         /// child processes off a single keypress.
         const MAX_CONCURRENT_PROBES: usize = 8;
 
-        // Sessions with a worktree worth probing, paired with their names.
-        let mut probes: Vec<(Uuid, String)> = Vec::new();
+        // Sessions with a worktree worth probing, paired with their names. An id
+        // that no longer resolves to a session row is probed anyway: the probe
+        // needs only the uuid, and a worktree whose session vanished from the
+        // list is the one most likely to be holding forgotten work.
+        let probes: Vec<(Uuid, String)> = session_ids
+            .iter()
+            .filter_map(|id| match self.find_session(*id) {
+                None => Some((*id, unknown_session_label(*id))),
+                Some(session) if matches!(session.agent_type, SessionAgentType::Shell) => None,
+                Some(session) => Some((*id, session.name.clone())),
+            })
+            .collect();
         let mut unchecked = 0;
-        for id in session_ids {
-            match self.find_session(*id) {
-                // An id we cannot resolve to a session is unknown, not clean.
-                None => unchecked += 1,
-                Some(session) if matches!(session.agent_type, SessionAgentType::Shell) => {}
-                Some(session) => probes.push((*id, session.name.clone())),
-            }
-        }
 
         let Ok(worktree_manager) = WorktreeManager::new() else {
-            return (Vec::new(), unchecked + probes.len());
+            return (Vec::new(), probes.len());
         };
 
         // `uncommitted_file_count` shells out to `git status` per worktree and
-        // this runs inline on a keypress, so probes go out in bounded batches:
-        // a 12-session selection costs about two status calls, not twelve.
+        // this runs inline on a keypress. Batching does not reduce the number of
+        // calls, one per probed session either way; it bounds how many run at
+        // once so a large selection cannot spawn a thread and a child process
+        // per row all at the same time.
         let mut results: Vec<UncommittedProbe> = Vec::with_capacity(probes.len());
         for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
             let batch_results: Vec<UncommittedProbe> = std::thread::scope(|scope| {
-                let handles: Vec<_> = batch
-                    .iter()
-                    .map(|(id, _)| {
-                        let worktree_manager = &worktree_manager;
-                        let id = *id;
-                        scope.spawn(move || session_uncommitted_probe(worktree_manager, id))
-                    })
-                    .collect::<Vec<_>>();
+                // Spawn every probe in the batch before joining any of them,
+                // otherwise they run one at a time.
+                let mut handles = Vec::with_capacity(batch.len());
+                for (id, _) in batch {
+                    let worktree_manager = &worktree_manager;
+                    let id = *id;
+                    handles
+                        .push(scope.spawn(move || session_uncommitted_probe(worktree_manager, id)));
+                }
                 handles
                     .into_iter()
                     .map(|h| h.join().unwrap_or(UncommittedProbe::Unknown))
@@ -7977,35 +8004,23 @@ impl AppState {
         dirty: &[(String, usize)],
         unchecked: usize,
     ) -> Option<String> {
-        const MAX_NAMED: usize = 3;
         if dirty.is_empty() {
             return (unchecked > 0).then(|| {
                 format!("⚠️ could not check {unchecked} session(s) for uncommitted work")
             });
         }
         let total: usize = dirty.iter().map(|(_, count)| *count).sum();
-        let shown = dirty.len().min(MAX_NAMED);
-        let listed = dirty[..shown]
-            .iter()
-            .map(|(name, count)| format!("{name} ({count})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = if dirty.len() > shown {
-            format!(", and {} more", dirty.len() - shown)
-        } else {
-            String::new()
-        };
+        let listed = truncate_list(dirty.iter().map(|(name, count)| format!("{name} ({count})")));
         let unknown = if unchecked > 0 {
             format!("; {unchecked} more could not be checked")
         } else {
             String::new()
         };
         Some(format!(
-            "⚠️ {} uncommitted file(s) in {} session(s): {}{}{}",
+            "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
             total,
             dirty.len(),
             listed,
-            more,
             unknown
         ))
     }
@@ -10081,7 +10096,13 @@ impl AppState {
 
         for session_name in &orphaned_shells {
             info!("Killing orphaned tmux shell session: {}", session_name);
-            match Command::new("tmux").args(["kill-session", "-t", session_name]).output().await {
+            // `=name` so an orphan named "shell-x" cannot take out a live
+            // "shell-x-2" via tmux's prefix matching.
+            match Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={session_name}")])
+                .output()
+                .await
+            {
                 Ok(output) if output.status.success() => {
                     killed_count += 1;
                     info!("Successfully killed tmux session: {}", session_name);
@@ -10307,12 +10328,18 @@ impl AppState {
             Ok(())
         };
 
-        // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-        self.tmux_sessions.remove(&session_id);
+        // Only a successful kill flips the row to Stopped. Marking a session
+        // Stopped while its agent is still running is worse than reporting the
+        // failure: the row invites a resume, which would tear down and replace
+        // the live agent.
+        if result.is_ok() {
+            // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
+            self.tmux_sessions.remove(&session_id);
 
-        if let Some(session) = self.find_session_mut(session_id) {
-            session.set_status(SessionStatus::Stopped);
-            session.is_attached = false;
+            if let Some(session) = self.find_session_mut(session_id) {
+                session.set_status(SessionStatus::Stopped);
+                session.is_attached = false;
+            }
         }
 
         let audit_result = match &result {
@@ -10363,8 +10390,14 @@ impl AppState {
             }
         }
         if failed > 0 {
+            let attempted = total - already_stopped;
+            let skipped = if already_stopped > 0 {
+                format!(", {already_stopped} already stopped")
+            } else {
+                String::new()
+            };
             self.add_warning_notification(format!(
-                "Stopped {stopped}/{total} sessions ({failed} failed)"
+                "Stopped {stopped}/{attempted} sessions ({failed} failed{skipped})"
             ));
         } else if already_stopped > 0 {
             self.add_success_notification(format!(
@@ -10423,9 +10456,15 @@ impl AppState {
 
             // Recreate the tmux session at the worktree. If something is already
             // listening on this name (shouldn't be, since we set Stopped), kill it
-            // first so we get a clean shell — narrow target, never wildcard.
+            // first so we get a clean shell. `=name` forces an exact target:
+            // bare `-t name` falls through to prefix matching, so resuming
+            // "feat-auth" would kill a live "feat-auth-2".
             let _ = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", &metadata.tmux_session_name])
+                .args([
+                    "kill-session",
+                    "-t",
+                    &format!("={}", metadata.tmux_session_name),
+                ])
                 .output()
                 .await;
 
