@@ -4722,8 +4722,14 @@ impl HangarPlugin {
             dependencies: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
-        // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
-        self.screens.open_task_detail(tid.clone(), issue, card.branch.clone());
+        // card so the detail view surfaces `ainb/<slug>` exactly as the card does,
+        // and the card's status so retry / cancel gate on the real lifecycle.
+        self.screens.open_task_detail(
+            tid.clone(),
+            issue,
+            card.branch.clone(),
+            Some(card.status.as_str()),
+        );
         // Seed the card's already-fetched PR CI/merge status so the badge renders
         // the real state (not a muted unknown) with no extra round-trip.
         if let Some(status) = card.pr_status {
@@ -5068,16 +5074,30 @@ impl HangarPlugin {
                 let issue =
                     self.screens.issue_list.visible_rows().find(|r| r.id == issue_id).cloned();
                 if let Some(issue) = issue {
-                    // A synthetic task id keyed off the issue — the daemon binds
-                    // the real running task to the issue, and the task-detail
-                    // transcript folds events addressed to it.
-                    let task_id = ainb_hangar_core::ids::TaskId::from_str(format!(
-                        "task-{}",
-                        issue_id.as_str()
-                    ))
-                    .unwrap_or_else(|_| {
-                        ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
-                    });
+                    // Bind the issue's LATEST real task (newest Kanban card) when
+                    // one exists, so retry / cancel address a task row the daemon
+                    // actually has. Only an issue with no runs yet falls back to
+                    // the synthetic `task-<issue>` id — that screen still folds
+                    // transcript events, it just has nothing to retry.
+                    let latest = self
+                        .screens
+                        .kanban
+                        .latest_card_for_issue(issue_id.as_str())
+                        .cloned();
+                    let task_id = latest
+                        .as_ref()
+                        .and_then(|card| {
+                            ainb_hangar_core::ids::TaskId::from_str(card.task_id.clone()).ok()
+                        })
+                        .unwrap_or_else(|| {
+                            ainb_hangar_core::ids::TaskId::from_str(format!(
+                                "task-{}",
+                                issue_id.as_str()
+                            ))
+                            .unwrap_or_else(|_| {
+                                ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
+                            })
+                        });
                     // e38.34: a task-detail screen on an issue with a captured PR
                     // arms a `hangar/pr_status_refresh` so the badge surfaces the
                     // CI + merge status (and a merged PR auto-moves to Done). The
@@ -5086,13 +5106,22 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
-                    // ch3: the issue-list open is a synthetic task with no per-run
-                    // branch of its own, so seed the detail from the issue row's
-                    // `branch` — the daemon derives it from the issue's latest
-                    // completed task (mirroring `pr_url`), so the branch line reads
-                    // on the issue-list-opened detail exactly as on the Kanban path.
-                    let branch = issue.branch.clone();
-                    self.screens.open_task_detail(task_id.clone(), issue, branch);
+                    // ch3: prefer the bound card's own run branch; an issue with
+                    // no runs seeds from the issue row's `branch` — the daemon
+                    // derives it from the issue's latest completed task (mirroring
+                    // `pr_url`), so the branch line reads on the issue-list-opened
+                    // detail exactly as on the Kanban path.
+                    let branch = latest
+                        .as_ref()
+                        .and_then(|card| card.branch.clone())
+                        .or_else(|| issue.branch.clone());
+                    let status = latest.as_ref().map(|card| card.status.clone());
+                    self.screens.open_task_detail(
+                        task_id.clone(),
+                        issue,
+                        branch,
+                        status.as_deref(),
+                    );
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
                     next.selected_task = Some(task_id);
@@ -7829,7 +7858,7 @@ mod tests {
             dependencies: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
-        p.screens.open_task_detail(tid.clone(), issue, None);
+        p.screens.open_task_detail(tid.clone(), issue, None, None);
         let mut app = p.app_state().clone();
         app.screen = Screen::TaskDetail(tid);
         p.app = Some(app);
