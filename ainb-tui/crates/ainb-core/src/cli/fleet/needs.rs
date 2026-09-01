@@ -46,7 +46,9 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     // so a Claude session ainb never launched (hand-started, or `kind: "bg"`)
     // can enter the fleet at all: it has no ainb record, no broker row and
     // possibly no tmux pane, so its probe file is its only trace.
-    let probes = ProbeIndex::load();
+    let probes = tokio::task::spawn_blocking(ProbeIndex::load)
+        .await
+        .unwrap_or_default();
     let known = merge_sessions(vec![ainb, peers, jobs]);
     // Probe discovery ADDS sessions, it must never duplicate one.
     //
@@ -142,6 +144,10 @@ fn is_probe_only(session: &Session) -> bool {
     session.sources.as_slice() == [SessionSource::Probe]
 }
 
+fn should_scan(session: &Session, probe_status: Option<&str>) -> bool {
+    !(is_probe_only(session) && probe_status == Some("idle"))
+}
+
 /// What each evidence tier actually SAW this run, including the tiers that saw
 /// nothing.
 ///
@@ -232,23 +238,14 @@ async fn classify_all(
         // an idle probe has no `last_assistant_text` and no error visibility,
         // so the transcript path is strictly better placed to classify it.
         let probe_status = probes.peek_status(&session);
-        if probe_status == Some("busy") || probe_status == Some("shell") {
+        let probe_asserts_work = probe_status == Some("busy") || probe_status == Some("shell");
+        if probe_asserts_work {
             census.running += 1;
         }
         if probe_status == Some("waiting") {
             if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
                 census.probe += 1;
                 match resolution {
-                    // A session ONLY the probe tier knows about — ainb never
-                    // launched it, so it has no tmux pane and no broker peer — is
-                    // listed only when it actually needs something. Idle is not
-                    // actionable: the ATC playbook leaves idle sessions alone, and
-                    // there is no channel to nudge this one down anyway, so
-                    // listing it would add a row per stray Claude window to every
-                    // heartbeat body while changing nobody's behaviour.
-                    Resolution::Hook(row)
-                        if is_probe_only(&session)
-                            && matches!(row.context, NeedsContext::Idle(_)) => {}
                     Resolution::Hook(row) => hook_rows.push(*row),
                     Resolution::Healthy => {}
                     // Tier A never returns Fallback; it abstains with None instead.
@@ -268,13 +265,19 @@ async fn classify_all(
             // classifier drops both; RUNNING is genuinely working, so count it.
             Resolution::Healthy => {
                 census.hook += 1;
-                census.running += 1;
+                if !probe_asserts_work {
+                    census.running += 1;
+                }
             }
             Resolution::Fallback => fallback_sessions.push(session),
         }
     }
 
     // Run the live classifier only for the fallback sessions, in parallel.
+    // A probe-only idle session has no reply path and does not need action.
+    // Suppress it before the pane scan, where an idle heuristic could otherwise
+    // turn infrastructure observation into a Fleet work row.
+    fallback_sessions.retain(|session| should_scan(session, probes.peek_status(session)));
     census.scan = fallback_sessions.len();
     let mut handles = Vec::with_capacity(fallback_sessions.len());
     for session in fallback_sessions {
@@ -396,7 +399,34 @@ fn truncate_line(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod census_tests {
-    use super::TierCensus;
+    use super::{TierCensus, should_scan};
+    use crate::fleet::types::{Session, SessionSource};
+
+    fn probe_only_session() -> Session {
+        Session {
+            id: "probe-session".to_string(),
+            cwd: "/tmp/probe".to_string(),
+            pid: None,
+            git_root: None,
+            tmux_session: None,
+            workspace_name: None,
+            worktree_path: None,
+            peer_id: None,
+            bg_job_id: None,
+            transcript_path: None,
+            sources: vec![SessionSource::Probe],
+            summary: None,
+            last_seen_ms: None,
+        }
+    }
+
+    #[test]
+    fn probe_only_idle_does_not_become_a_fleet_work_row() {
+        let session = probe_only_session();
+        assert!(!should_scan(&session, Some("idle")));
+        assert!(should_scan(&session, Some("busy")));
+        assert!(should_scan(&session, None));
+    }
 
     #[test]
     fn summary_line_names_every_tier_including_the_silent_ones() {

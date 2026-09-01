@@ -198,11 +198,7 @@ pub fn resolve_probe(
     idle_threshold_min: i64,
     now_ms: i64,
 ) -> Option<Resolution> {
-    let route_hint = if session.tmux_session.is_some() {
-        RouteHint::Tmux
-    } else {
-        RouteHint::Broker
-    };
+    let route_hint = RouteHint::from_session(&session);
     let stamped = |session: Session, ctx: NeedsContext| {
         let mut row = make_row(session, ctx, route_hint);
         row.source = Some(SOURCE_PROBE.to_string());
@@ -893,7 +889,7 @@ mod tests {
         };
         // Carries the probe's own reason, plus how long it has held it.
         assert_eq!(w.text, "input needed (blocked 0m)");
-        assert!(matches!(row.route_hint, RouteHint::Broker));
+        assert!(matches!(row.route_hint, RouteHint::None));
     }
 
     #[test]
