@@ -123,10 +123,7 @@ fn the_mode_survives_the_process_that_set_it() {
 
     // On disk, and readable by a NEW process — the mode is not in-memory state.
     assert_eq!(meta(&home, &name)["mode"], "lite");
-    let read_back = run(
-        &home,
-        &["--format", "json", "fleet", "atc", "mode", &name],
-    );
+    let read_back = run(&home, &["--format", "json", "fleet", "atc", "mode", &name]);
     assert!(read_back.status.success(), "{}", stderr(&read_back));
     assert_eq!(json(&read_back)["mode"], "lite");
     assert_eq!(json(&read_back)["owner"], "lite scanner");
@@ -170,10 +167,7 @@ fn an_instance_written_before_modes_existed_reads_as_full_claude() {
     )
     .unwrap();
 
-    let out = run(
-        &home,
-        &["--format", "json", "fleet", "atc", "mode", &name],
-    );
+    let out = run(&home, &["--format", "json", "fleet", "atc", "mode", &name]);
     assert!(out.status.success(), "{}", stderr(&out));
     let v = json(&out);
     assert_eq!(v["mode"], "full");
@@ -334,10 +328,7 @@ fn reading_the_mode_never_changes_it() {
     assert!(setup(&home, &name, &["--mode", "lite"]).status.success());
     let before = meta(&home, &name);
 
-    let out = run(
-        &home,
-        &["--format", "json", "fleet", "atc", "mode", &name],
-    );
+    let out = run(&home, &["--format", "json", "fleet", "atc", "mode", &name]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(meta(&home, &name), before, "a read must not mutate");
     let _ = std::fs::remove_dir_all(&home);
