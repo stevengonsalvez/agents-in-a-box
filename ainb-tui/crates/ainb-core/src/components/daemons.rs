@@ -19,6 +19,7 @@ use crate::app::state::DaemonsOverlayState;
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
+use crate::fleet::atc::SupervisorMode;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
@@ -59,6 +60,22 @@ pub struct Snapshot {
     /// Most-recent hook wiring health. Collected beside daemon state, never in
     /// the render path.
     pub hook_health: Option<HookHealth>,
+    /// The ATC supervisor's mode + full-mode provider, when a single instance
+    /// makes it unambiguous. Read off disk by the collector, never in render.
+    ///
+    /// `None` when there is no instance, several (nothing here could say WHICH
+    /// one a switch would act on), or the meta will not parse. The mode toggle
+    /// and the inline help are both hidden in that case rather than guessing.
+    pub atc: Option<AtcModeView>,
+}
+
+/// What the Daemons screen needs to know about the ATC supervisor beyond its
+/// runtime row: which mode owns the fleet, and which brain full mode would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtcModeView {
+    pub name: String,
+    pub mode: SupervisorMode,
+    pub provider: String,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -104,6 +121,11 @@ struct ActionMenu {
     kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
     cursor: usize,
+    /// The ATC supervisor mode as of the moment the menu opened. Captured, not
+    /// re-read per frame: the entry list must not reshuffle under the cursor
+    /// while someone is on it, which is how you press "switch to lite" and get
+    /// "stop".
+    atc_mode: Option<SupervisorMode>,
 }
 
 /// One entry in the action menu.
@@ -121,8 +143,10 @@ impl ActionMenu {
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
         // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
         // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> =
-            Action::for_kind(self.kind).into_iter().map(MenuEntry::Act).collect();
+        let mut entries: Vec<MenuEntry> = Action::for_kind_in_mode(self.kind, self.atc_mode)
+            .into_iter()
+            .map(MenuEntry::Act)
+            .collect();
         if has_error {
             entries.push(MenuEntry::ViewError);
         }
@@ -208,9 +232,21 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
+        let atc_mode = self.atc_mode();
         if let Some(kind) = self.selected_kind() {
-            self.menu = Some(ActionMenu { kind, cursor: 0 });
+            self.menu = Some(ActionMenu {
+                kind,
+                cursor: 0,
+                atc_mode,
+            });
         }
+    }
+
+    /// The ATC supervisor mode from the latest snapshot, when unambiguous.
+    fn atc_mode(&mut self) -> Option<SupervisorMode> {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.atc.as_ref().map(|a| a.mode)
     }
 
     /// Close every overlay at once — for a key that leaves the screen outright.
@@ -332,6 +368,7 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+            atc: guard.atc.clone(),
         }
     }
 }
@@ -420,17 +457,39 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
+    let atc = collect_atc_mode();
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
             guard.collected_at_ms = now_ms();
             guard.hook_health = hook_health;
+            guard.atc = atc;
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
         Err(e) => tracing::warn!(error = %e, "daemons screen: collect failed"),
     }
+}
+
+/// Read the ATC supervisor mode, but only when ONE instance makes it
+/// unambiguous — the same rule `ainb daemon atc` uses to refuse acting on a
+/// guessed instance. Disk I/O, so it runs on the collector thread (H-D2).
+fn collect_atc_mode() -> Option<AtcModeView> {
+    use crate::fleet::atc::meta::AtcMeta;
+    use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
+    let names = list_instance_names_in(&root);
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    let paths = AtcPaths::under_root(&root, name);
+    let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta).ok()?).ok()?;
+    Some(AtcModeView {
+        name: meta.name,
+        mode: meta.mode,
+        provider: meta.provider,
+    })
 }
 
 /// Spawn the detached background collector: one immediate collect, then a collect
@@ -486,10 +545,27 @@ pub fn render(
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    // Carve a one-line help footer off the bottom.
+    // Carve a one-line help footer off the bottom, plus — when the cursor is on
+    // the ATC row — the supervisor-mode help above it. The help is inline rather
+    // than an overlay on purpose: an operator about to switch the thing that
+    // drives their whole fleet should be reading what each mode does WHILE the
+    // row's real state is still on screen, not instead of it.
+    let atc_help = atc_help_lines(&snapshot, state.selected);
+    let help_height = u16::try_from(atc_help.len()).unwrap_or(0);
+    // Never let the help squeeze the table below a usable size; on a short
+    // terminal the footer hint still points at the CLI verb.
+    let help_height = if inner.height >= help_height + 10 {
+        help_height
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(help_height),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     // One table, plus the Hooks box. The old System services panel is gone: it
@@ -513,7 +589,10 @@ pub fn render(
     } else {
         render_table(frame, chunks[0], &snapshot, state);
     }
-    render_footer(frame, chunks[1], state);
+    if help_height > 0 {
+        render_atc_help(frame, chunks[1], &atc_help);
+    }
+    render_footer(frame, chunks[2], state, snapshot.atc.as_ref());
     // Overlays paint last so they float above the table.
     if state.error_open.is_some() {
         render_error_view(frame, inner, state);
@@ -528,7 +607,9 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
         return;
     };
     let entries = menu.entries(state.has_error_for(menu.kind));
-    let width = 30_u16.min(area.width.saturating_sub(2));
+    // Wide enough for the longest label ("switch to full mode"), which the old
+    // 30-column popup clipped.
+    let width = 34_u16.min(area.width.saturating_sub(2));
     let height = u16::try_from(entries.len()).unwrap_or(3) + 3;
     let popup = centered(area, width, height.min(area.height));
     frame.render_widget(ratatui::widgets::Clear, popup);
@@ -552,7 +633,7 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     let mut lines: Vec<Line> = Vec::with_capacity(entries.len() + 1);
     for (i, entry) in entries.iter().enumerate() {
         let label = match entry {
-            MenuEntry::Act(a) => a.id(),
+            MenuEntry::Act(a) => a.label(),
             MenuEntry::ViewError => "view last error",
         };
         let selected = i == menu.cursor;
@@ -920,7 +1001,49 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+/// The supervisor-mode help for the ATC row, or empty when the cursor is
+/// elsewhere / the mode is unknown.
+///
+/// The lines come from [`crate::fleet::atc::mode_help`] — the same text
+/// `ainb fleet atc mode` prints — so the screen and the CLI can never describe
+/// the modes differently.
+fn atc_help_lines(snapshot: &Snapshot, selected: usize) -> Vec<String> {
+    if snapshot.rows.get(selected).map(|r| r.kind) != Some(DaemonKind::Atc) {
+        return Vec::new();
+    }
+    let Some(atc) = snapshot.atc.as_ref() else {
+        return Vec::new();
+    };
+    crate::fleet::atc::mode_help(atc.mode, &atc.provider)
+}
+
+/// Paint the mode help. The first line (the current owner) is emphasised: it is
+/// the fact the rest of the block is context for.
+fn render_atc_help(frame: &mut Frame, area: Rect, lines: &[String]) {
+    let painted: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let style = if i == 0 {
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_GRAY)
+            };
+            Line::from(Span::styled(text.clone(), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(painted).style(Style::default().bg(PANEL_BG)),
+        area,
+    );
+}
+
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    state: &DaemonsState,
+    atc: Option<&AtcModeView>,
+) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
     let spans = if state.error_open.is_some() {
@@ -938,11 +1061,15 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
     } else {
+        let enter_hint = match atc {
+            Some(a) => format!(" start / restart / stop / switch to {} mode  ", a.mode.other().id()),
+            None => " start / restart / stop  ".to_string(),
+        };
         vec![
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(" start / restart / stop  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(enter_hint, Style::default().fg(MUTED_GRAY)),
             Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
             Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
@@ -1019,6 +1146,7 @@ mod tests {
     /// This is the H-D2 test seam — render is decoupled from any live collect.
     fn seeded_state(rows: Vec<DaemonStatus>) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
@@ -1072,6 +1200,7 @@ mod tests {
 
     fn seeded_state_with_hook(rows: Vec<DaemonStatus>, hook_health: HookHealth) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),
