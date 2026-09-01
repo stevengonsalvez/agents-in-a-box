@@ -172,7 +172,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::AgentDefaults,
         label: "Agent CLI",
         help: "Which agent CLI new sessions launch",
-        kind: RowKind::Choice(&["claude", "codex", "gemini", "copilot"]),
+        kind: RowKind::Choice(&["claude", "codex", "gemini", "copilot", "antigravity"]),
     }),
     Entry::Row(ConfigRow {
         key: "authentication.claude_provider",
@@ -715,7 +715,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::Usage,
         label: "Plan Provider",
         help: "Which provider's spend counts against this plan",
-        kind: RowKind::Choice(&["all", "claude", "codex", "cursor"]),
+        kind: RowKind::Choice(&["all", "claude", "codex", "cursor", "antigravity"]),
     }),
     Entry::Row(ConfigRow {
         key: "usage.plan.reset_day",
@@ -1252,7 +1252,9 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         category: C::HangarDaemon,
         label: "Default Agent",
         help: "Host-wide default provider backend for new cards",
-        kind: RowKind::Choice(&["claude", "codex", "copilot"]),
+        // Mirrors the daemon's own variant order, which
+        // `hangar_daemon_rows_match_the_daemon_registry` asserts exactly.
+        kind: RowKind::Choice(&["claude", "codex", "antigravity", "copilot"]),
     }),
     Entry::Row(ConfigRow {
         key: "hangar_daemon.workspace.creation_disabled",
@@ -2314,13 +2316,15 @@ mod tests {
             CliProvider::Codex,
             CliProvider::Gemini,
             CliProvider::Copilot,
+            CliProvider::Antigravity,
         ];
         for variant in &cli {
             match variant {
                 CliProvider::Claude
                 | CliProvider::Codex
                 | CliProvider::Gemini
-                | CliProvider::Copilot => {}
+                | CliProvider::Copilot
+                | CliProvider::Antigravity => {}
             }
         }
         assert_covered("authentication.cli_provider", &cli);
@@ -2372,13 +2376,15 @@ mod tests {
             UsagePlanProvider::Claude,
             UsagePlanProvider::Codex,
             UsagePlanProvider::Cursor,
+            UsagePlanProvider::Antigravity,
         ];
         for variant in &providers {
             match variant {
                 UsagePlanProvider::All
                 | UsagePlanProvider::Claude
                 | UsagePlanProvider::Codex
-                | UsagePlanProvider::Cursor => {}
+                | UsagePlanProvider::Cursor
+                | UsagePlanProvider::Antigravity => {}
             }
         }
         assert_covered("usage.plan.provider", &providers);
