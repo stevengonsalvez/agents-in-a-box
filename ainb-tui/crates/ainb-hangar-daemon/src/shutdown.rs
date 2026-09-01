@@ -35,6 +35,23 @@ pub enum Cause {
     /// response: two daemons on one home race the same database and unlink each
     /// other's socket.
     LockLost(i32),
+    /// The hangar home was deleted underneath this daemon, and it could not put
+    /// its own ownership lock back.
+    ///
+    /// The shape an ephemeral `$HOME` leaves behind: the harness exits, its
+    /// scratch directory goes with it, and the daemon serves a store and a
+    /// socket that no longer exist on disk. Also noticed rather than signalled;
+    /// see [`crate::single_instance::Outcome::HomeGone`].
+    HomeGone,
+}
+
+impl From<crate::single_instance::Outcome> for Cause {
+    fn from(outcome: crate::single_instance::Outcome) -> Self {
+        match outcome {
+            crate::single_instance::Outcome::Lost(pid) => Self::LockLost(pid),
+            crate::single_instance::Outcome::HomeGone => Self::HomeGone,
+        }
+    }
 }
 
 impl Cause {
@@ -54,6 +71,7 @@ impl Cause {
             Self::Interrupt => "SIGINT",
             Self::Terminate => "SIGTERM",
             Self::LockLost(_) => "lock-lost",
+            Self::HomeGone => "home-gone",
         }
     }
 }
@@ -72,10 +90,10 @@ pub struct Watch {
     interrupt: Option<tokio::signal::unix::Signal>,
     /// `None` only when the SIGTERM handler could not be installed.
     terminate: Option<tokio::signal::unix::Signal>,
-    /// Resolves with the new owner's pid if this daemon ever stops owning its
-    /// home. `None` for a daemon that holds no lock (a test harness driving the
+    /// Resolves with the reason this daemon stopped owning its home, if it ever
+    /// does. `None` for a daemon that holds no lock (a test harness driving the
     /// run loop directly).
-    lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>,
+    lock_lost: Option<tokio::sync::oneshot::Receiver<crate::single_instance::Outcome>>,
 }
 
 /// Install one signal handler, logging and degrading rather than failing.
@@ -127,7 +145,10 @@ impl Watch {
     /// Also stand down when `lock_lost` resolves — see
     /// [`crate::single_instance::watch_ownership`].
     #[must_use]
-    pub fn on_lock_lost(mut self, lock_lost: tokio::sync::oneshot::Receiver<i32>) -> Self {
+    pub fn on_lock_lost(
+        mut self,
+        lock_lost: tokio::sync::oneshot::Receiver<crate::single_instance::Outcome>,
+    ) -> Self {
         self.lock_lost = Some(lock_lost);
         self
     }
@@ -162,7 +183,7 @@ impl Watch {
                         // time an arm body runs, so awaiting `pending()` here —
                         // the previous shape — stranded the signal streams and
                         // the daemon stopped answering SIGINT and SIGTERM.
-                        owner = lock_lost => owner.ok().map(Cause::LockLost),
+                        owner = lock_lost => owner.ok().map(Cause::from),
                     }
                 }
                 None => {
@@ -223,7 +244,9 @@ impl Handle {
 /// before the caller does any further work; the waiting happens on a spawned
 /// task feeding every [`Handle`].
 #[must_use]
-pub fn install(lock_lost: Option<tokio::sync::oneshot::Receiver<i32>>) -> Handle {
+pub fn install(
+    lock_lost: Option<tokio::sync::oneshot::Receiver<crate::single_instance::Outcome>>,
+) -> Handle {
     let mut watch = Watch::new();
     if let Some(lock_lost) = lock_lost {
         watch = watch.on_lock_lost(lock_lost);
@@ -286,6 +309,7 @@ mod tests {
         assert_eq!(Cause::Interrupt.as_str(), "SIGINT");
         assert_eq!(Cause::Terminate.as_str(), "SIGTERM");
         assert_eq!(Cause::LockLost(7).as_str(), "lock-lost");
+        assert_eq!(Cause::HomeGone.as_str(), "home-gone");
     }
 
     /// Losing the home is not a reason to kill the operator's attached panes:
@@ -295,13 +319,47 @@ mod tests {
         assert!(!Cause::LockLost(7).reaps_interactive_sessions());
     }
 
+    /// Neither is a vanished home. The daemon is standing down because its own
+    /// state directory disappeared, which says nothing about the tmux panes a
+    /// developer may still be attached to. Killing those would destroy work the
+    /// daemon merely supervises.
+    #[test]
+    fn a_vanished_home_leaves_attached_sessions_alone() {
+        assert!(!Cause::HomeGone.reaps_interactive_sessions());
+    }
+
+    /// The watchdog's two outcomes map onto the two causes, so a stand-down
+    /// cannot arrive as the wrong one.
+    #[test]
+    fn each_watchdog_outcome_names_its_cause() {
+        assert_eq!(
+            Cause::from(crate::single_instance::Outcome::Lost(9001)),
+            Cause::LockLost(9001)
+        );
+        assert_eq!(
+            Cause::from(crate::single_instance::Outcome::HomeGone),
+            Cause::HomeGone
+        );
+    }
+
     #[tokio::test]
     async fn a_resolved_watchdog_stands_the_daemon_down() {
         let _serialised = SIGNAL_LOCK.lock().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut watch = Watch::new().on_lock_lost(rx);
-        tx.send(9001).expect("send new owner");
+        tx.send(crate::single_instance::Outcome::Lost(9001)).expect("send new owner");
         assert_eq!(watch.recv().await, Cause::LockLost(9001));
+    }
+
+    /// The other stand-down the watchdog can report: no successor, just no home.
+    #[tokio::test]
+    async fn a_vanished_home_stands_the_daemon_down() {
+        let _serialised = SIGNAL_LOCK.lock().await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut watch = Watch::new().on_lock_lost(rx);
+        tx.send(crate::single_instance::Outcome::HomeGone)
+            .expect("send the vanished home");
+        assert_eq!(watch.recv().await, Cause::HomeGone);
     }
 
     /// A watchdog that died must not be read as a lost lock — that would shut
@@ -312,7 +370,7 @@ mod tests {
         // overlap a sibling test that raises one — it would observe that
         // delivery and read as "the seam resolved".
         let _serialised = SIGNAL_LOCK.lock().await;
-        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::single_instance::Outcome>();
         let mut watch = Watch::new().on_lock_lost(rx);
         drop(tx);
         assert!(
@@ -342,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn signals_still_arrive_after_the_watchdog_is_dropped() {
         let _serialised = SIGNAL_LOCK.lock().await;
-        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::single_instance::Outcome>();
         let mut watch = Watch::new().on_lock_lost(rx);
         drop(tx);
 
@@ -362,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn sigterm_resolves_the_seam() {
         let _serialised = SIGNAL_LOCK.lock().await;
-        let (_tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<crate::single_instance::Outcome>();
         let mut watch = Watch::new().on_lock_lost(rx);
 
         tokio::task::spawn_blocking(|| {
