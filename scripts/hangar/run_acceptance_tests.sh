@@ -78,7 +78,6 @@ run_group() {
         if [ "$a" = "--test" ]; then n=$((n + 1)); fi
     done
     [ "$n" -gt 0 ] || return 0
-    ran=$((ran + n))
 
     local log rc
     log="$(mktemp)"
@@ -128,6 +127,15 @@ run_group() {
         printf 'FAIL %s: nextest exited %s with no per-test failure (build error?)\n' \
             "$label" "$rc" >&2
         group_fails=1
+        # `ran` deliberately gets NOTHING here. nextest builds the whole group
+        # before running any of it, so a compile error in ONE target means ZERO
+        # of this group's targets executed. Counting `n` up front made that case
+        # print `ran=68 failed=1 skipped=0`, i.e. 67 phantom green tripwires, in
+        # the summary line of the script whose entire job is catching vacuous
+        # green. A counter that lies in exactly the scenario it exists to detect
+        # is worse than no counter, because people trust it.
+    else
+        ran=$((ran + n))
     fi
     rm -f "$log"
     skips=$((skips + group_skips))

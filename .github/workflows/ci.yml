@@ -637,7 +637,7 @@ jobs:
       # `no such command: nextest`.
       - uses: taiki-e/install-action@nextest
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       # macOS runner images do NOT ship tmux (actions/runner-images macos-15
       # README) — without installing it here the macOS leg is vacuously green:
