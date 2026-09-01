@@ -168,9 +168,10 @@ fn render_buttons(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
     }
 }
 
-/// Last-resort rendering for an area too small to hold a bordered dialog: the
-/// title on one row (if there is one to spare) and the buttons underneath, so
-/// the modal that is holding the keyboard is at least visible and answerable.
+/// Last-resort rendering for an area too small to hold a bordered dialog: one
+/// row of text (the warning if there is one, else the message) and the buttons
+/// underneath, so the modal that is holding the keyboard is at least visible and
+/// answerable.
 fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -251,10 +252,30 @@ fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16
 /// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
 /// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
-/// Deliberately counts chars rather than display columns, so a run of
-/// double-width (CJK) glyphs is under-counted; the single extra row absorbs that
-/// and the odd wide emoji. Measure display width here if that stops being
-/// enough.
+/// Terminal columns a string occupies.
+///
+/// A coarse East Asian Wide / Fullwidth table rather than a `unicode-width`
+/// dependency: this only sizes a dialog box, and the caller adds a slack row.
+fn display_columns(text: &str) -> usize {
+    text.chars()
+        .map(|c| {
+            let c = c as u32;
+            let wide = (0x1100..=0x115F).contains(&c)      // Hangul Jamo
+                || (0x2E80..=0xA4CF).contains(&c)          // CJK radicals through Yi
+                || (0xAC00..=0xD7A3).contains(&c)          // Hangul syllables
+                || (0xF900..=0xFAFF).contains(&c)          // CJK compatibility
+                || (0xFE30..=0xFE6F).contains(&c)          // CJK compatibility forms
+                || (0xFF00..=0xFF60).contains(&c)          // Fullwidth forms
+                || (0xFFE0..=0xFFE6).contains(&c)          // Fullwidth signs
+                || (0x1F300..=0x1FAFF).contains(&c); // Emoji
+            usize::from(wide) + 1
+        })
+        .sum()
+}
+
+/// Measures display columns, not chars, so a warning naming CJK sessions is not
+/// under-counted and clipped. The remaining slack row covers the odd glyph the
+/// coarse width table below gets wrong.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows: usize = 0;
@@ -262,7 +283,7 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
         let mut paragraph_rows = 1usize;
         let mut used = 0usize;
         for word in paragraph.split_whitespace() {
-            let len = word.chars().count();
+            let len = display_columns(word);
             if used == 0 {
                 used = len;
             } else if used + 1 + len <= width {
@@ -345,6 +366,20 @@ mod tests {
         assert!(wrapped_line_count(&"x".repeat(45), 20) >= 3);
         // Explicit newlines each start a new row.
         assert!(wrapped_line_count("a\nb\nc", 60) >= 3);
+    }
+
+    /// Double-width glyphs must not be counted as one column, or the box is
+    /// sized too small and the warning is clipped exactly where it names the
+    /// sessions.
+    #[test]
+    fn wrapped_line_count_measures_display_columns() {
+        let cjk = "日本語ブランチ".repeat(6); // 42 chars, 84 columns
+        assert_eq!(display_columns("日本語"), 6);
+        assert_eq!(display_columns("abc"), 3);
+        assert!(
+            wrapped_line_count(&cjk, 40) >= 3,
+            "84 columns at width 40 needs 3 rows, not 2"
+        );
     }
 
     /// A terminal too small for borders, a message and buttons must not
