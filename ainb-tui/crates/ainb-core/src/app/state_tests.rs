@@ -2261,7 +2261,7 @@ mod tests {
     /// Long selections stay readable: three names, then a count.
     #[test]
     fn bulk_session_summary_truncates_long_selections() {
-        let names: Vec<String> = (1..=12).map(|i| format!("s{}", i)).collect();
+        let names: Vec<String> = (1..=12).map(|i| format!("s{i}")).collect();
         assert_eq!(
             AppState::format_bulk_session_summary(&names),
             "12 session(s): s1, s2, s3, and 9 more"
@@ -2286,7 +2286,7 @@ mod tests {
         assert!(warning.contains("alpha (3)"), "{}", warning);
         assert!(warning.contains("beta (1)"), "{}", warning);
 
-        let many: Vec<(String, usize)> = (1..=5).map(|i| (format!("s{}", i), i as usize)).collect();
+        let many: Vec<(String, usize)> = (1usize..=5).map(|i| (format!("s{i}"), i)).collect();
         let warning =
             AppState::format_bulk_uncommitted_warning(&many).expect("dirty sessions warn");
         assert!(warning.contains("+2 more"), "{}", warning);
