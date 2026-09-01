@@ -256,13 +256,18 @@ fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16
     // its row and the message is the one that goes, because the warning is the
     // text a delete confirmation exists to show.
     let spare = height.saturating_sub(4);
-    let warning_rows = wanted_warning.min(spare);
+    // The message keeps a row whenever there are two to share: it is the only
+    // line naming what is about to be destroyed. Only when a single row is left
+    // does the warning take it, since "40 uncommitted files" outranks the names
+    // when there is room for exactly one of them.
+    let warning_rows = if spare >= 2 {
+        wanted_warning.min(spare - 1)
+    } else {
+        wanted_warning.min(spare)
+    };
     (height, warning_rows)
 }
 
-/// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
-/// with `Wrap { trim: true }` (which never splits a word that fits on a line).
-///
 /// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
 /// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
@@ -411,6 +416,15 @@ mod tests {
                 warning_rows > 0,
                 "at height {height} the warning vanished entirely"
             );
+            // Two rows to share means the message keeps one: it is the only line
+            // that names what is about to be destroyed.
+            let spare = box_height - 4;
+            if spare >= 2 {
+                assert!(
+                    spare - warning_rows >= 1,
+                    "at height {height} the message got no row"
+                );
+            }
         }
     }
 
