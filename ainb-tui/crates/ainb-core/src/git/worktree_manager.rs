@@ -312,8 +312,15 @@ impl WorktreeManager {
     /// resolution fails for trees that are perfectly readable, such as a plain
     /// clone whose `.git` is a directory rather than a worktree pointer file.
     ///
-    /// Every failure is `NotFound`: either there is no tree here or it is not a
-    /// git checkout.
+    /// Errors carry meaning that callers depend on:
+    ///
+    /// - `NotFound`: there is nothing on disk here. Deleting the session
+    ///   destroys no files.
+    /// - `CommandFailed`: a directory is there but it is not a git checkout, so
+    ///   its contents cannot be inspected. Deleting the session still removes
+    ///   the directory, so this is "unknown", never "nothing to lose".
+    /// - `Io`: the path could not be read (permissions, a racing removal). Also
+    ///   unknown.
     pub fn worktree_path(&self, session_id: Uuid) -> Result<PathBuf, WorktreeError> {
         let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
         tracing::debug!("Looking for session path: {:?}", session_path);
@@ -340,9 +347,11 @@ impl WorktreeManager {
             )));
         }
 
-        // Check if it's a valid git worktree (has .git file or directory)
+        // A directory with no `.git` still holds files, and deleting the session
+        // removes it, so this is NOT NotFound: reporting "nothing to lose" here
+        // is how a confirmation dialog stays silent while files are destroyed.
         if !worktree_path.join(".git").exists() {
-            return Err(WorktreeError::NotFound(format!(
+            return Err(WorktreeError::CommandFailed(format!(
                 "Not a git worktree (no .git): {}",
                 worktree_path.display()
             )));
@@ -812,15 +821,18 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// Get count of uncommitted files (staged, unstaged, or untracked) in a worktree
-    ///
-    /// Used to warn users before deleting a session with uncommitted changes.
-    /// How many files `git status --porcelain` reports in the session's tree.
+    /// How many files `git status --porcelain` reports in the session's tree:
+    /// staged, unstaged and untracked. Used to warn before deleting a session
+    /// that still has work in it.
     ///
     /// Resolves only the path, so a tree this can read reports a real number
     /// even when its branch, commit or parent repository cannot be resolved: a
     /// caller warning about uncommitted work must not be told "unknown" for a
     /// plain clone.
+    ///
+    /// Ignored files are not counted, so a tree holding only ignored files reads
+    /// as clean. Counting them would mean counting `target/` and `node_modules/`
+    /// on every session, which buries the signal this exists to give.
     pub fn uncommitted_file_count(&self, session_id: Uuid) -> Result<usize, WorktreeError> {
         let worktree_path = self.worktree_path(session_id)?;
 
