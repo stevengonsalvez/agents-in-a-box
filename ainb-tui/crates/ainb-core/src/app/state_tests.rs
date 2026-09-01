@@ -470,7 +470,9 @@ mod tests {
         struct ExactTmuxSession(String);
         impl Drop for ExactTmuxSession {
             fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
+                    .output();
             }
         }
 
@@ -2537,6 +2539,8 @@ mod tests {
         with_ainb_home_async(|| async {
             use crate::models::SessionStatus;
 
+            // No tmux name on these, so the stop never shells out and the test
+            // does not need a tmux binary.
             let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
             let mut ids = Vec::new();
             for (name, status) in [
@@ -2654,6 +2658,64 @@ mod tests {
             state.show_bulk_delete_or_stop_confirmation(Vec::new());
             assert!(state.confirmation_dialog.is_none());
             assert!(state.pending_async_action.is_none());
+        });
+    }
+
+    /// Two sessions pointing at the same tree must be probed once: reporting
+    /// its four modified files twice would tell the user eight are at risk, and
+    /// "Delete removes N worktree(s)" would count the tree twice too.
+    #[test]
+    fn bulk_worktree_status_counts_a_shared_tree_once() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            if std::process::Command::new("git").arg("--version").status().is_err() {
+                eprintln!("SKIP: git unavailable");
+                return;
+            }
+
+            // One real repo with an uncommitted file, two sessions symlinked to it.
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shared-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(&tree)
+                    .status()
+                    .expect("git init")
+                    .success()
+            );
+            std::fs::write(tree.join("dirty.txt"), b"work").expect("write");
+
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree.clone());
+            let mut ids = Vec::new();
+            for name in ["alpha", "beta"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                    .expect("symlink");
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let status = state.bulk_uncommitted_counts(&ids);
+
+            assert_eq!(status.with_worktree, 1, "one tree, not two");
+            assert_eq!(status.dirty.len(), 1, "probed once");
+            assert_eq!(status.dirty[0].1, 1, "one dirty file, not two");
+            assert_eq!(status.unchecked, 0);
         });
     }
 
