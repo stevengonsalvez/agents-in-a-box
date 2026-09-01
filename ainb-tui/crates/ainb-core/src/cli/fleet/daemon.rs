@@ -28,6 +28,14 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// The instance name is reported because a bare refusal is unactionable on a
 /// host running many sessions.
 fn atc_holding_the_fleet() -> Option<String> {
+    // A fleet in LITE mode is already running this exact loop, inside the ATC
+    // retry cap. The probe below reads liveness, which is the right question for
+    // full mode but the wrong one here: a lite scanner that has not started yet
+    // still OWNS the fleet, and letting an uncapped daemon take the gap is how
+    // you get two controllers a minute apart.
+    if crate::cli::daemon::atc_mode() == Some(crate::fleet::atc::SupervisorMode::Lite) {
+        return Some("lite supervisor".to_string());
+    }
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
     let status =
         crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
@@ -57,6 +65,8 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
             anyhow::bail!(
                 "ATC '{owner}' is supervising this fleet; running the daemon alongside it \
                  sends every auto-continue twice and defeats ATC's per-session retry cap.\n\
+                 This watcher is superseded by the ATC supervisor: `ainb fleet atc mode <name>` \
+                 shows which mode owns the fleet, and lite mode IS this loop, capped.\n\
                  Use ATC, or pass --force-race to run both deliberately."
             );
         }
