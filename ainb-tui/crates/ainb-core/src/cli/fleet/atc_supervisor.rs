@@ -365,10 +365,20 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
                 } else {
                     heartbeat.touch();
                 }
+                let hooks = hook_evidence();
+                // A broken hook pipeline is recorded as an ERROR on the row, not
+                // just printed: an unattended lite fleet is exactly the case
+                // where nobody is reading stdout.
+                if !hooks.issues.is_empty() {
+                    heartbeat.record_error(format!("hook wiring: {}", hooks.issues.join("; ")));
+                }
                 if matches!(format, OutputFormat::Text) {
-                    println!("[atc/{name}] {}", report.line());
+                    println!("[atc/{name}] {} · hooks {}", report.line(), hooks.summary);
+                    for issue in &hooks.issues {
+                        println!("[atc/{name}]   {issue}");
+                    }
                 } else {
-                    println!("{}", serde_json::to_string(&report.json(&name))?);
+                    println!("{}", serde_json::to_string(&report.json(&name, &hooks))?);
                 }
             }
             Err(e) => {
@@ -394,17 +404,29 @@ pub struct LiteReport {
     pub capped: usize,
     /// Rows lite mode deliberately will not decide: ASK / WAIT / IDLE.
     pub reported: usize,
+    /// Rows the event-sourced `current_state` table produced (`source: "hook"`).
+    pub from_hooks: usize,
+    /// Rows folded from a live pane / transcript scan (`source: "tmux"`), plus
+    /// the legacy classifier path that reports no source at all.
+    pub from_scan: usize,
 }
 
 impl LiteReport {
     fn line(&self) -> String {
         format!(
-            "lite scan — {} row(s): {} ERR ({} continued, {} at cap), {} left for a human",
-            self.scanned, self.err, self.continued, self.capped, self.reported
+            "lite scan — {} row(s) ({} hook, {} scan): {} ERR ({} continued, {} at cap), \
+{} left for a human",
+            self.scanned,
+            self.from_hooks,
+            self.from_scan,
+            self.err,
+            self.continued,
+            self.capped,
+            self.reported
         )
     }
 
-    fn json(&self, name: &str) -> serde_json::Value {
+    fn json(&self, name: &str, hooks: &HookEvidence) -> serde_json::Value {
         json!({
             "action": "supervise",
             "name": name,
@@ -414,7 +436,53 @@ impl LiteReport {
             "continued": self.continued,
             "capped": self.capped,
             "reported": self.reported,
+            "evidence": {
+                "from_hooks": self.from_hooks,
+                "from_scan": self.from_scan,
+                "hook_health": hooks.summary,
+                "hook_issues": hooks.issues,
+            },
         })
+    }
+}
+
+/// The hook pipeline's health, as lite mode needs to report it.
+///
+/// This matters more in lite than in full: with the hooks broken, `fleet needs`
+/// silently degrades from the event-sourced `current_state` read to a pane scan,
+/// which sees less. A full ATC has a brain that can notice and say so; the lite
+/// scanner has no brain, so the health has to ride along with the evidence or
+/// nobody learns the pipeline is down.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HookEvidence {
+    /// `"ok"`, or a short count of what is wrong.
+    pub summary: String,
+    /// One line per issue: the component and its repair command.
+    pub issues: Vec<String>,
+}
+
+/// Read hook wiring health. Never fails: an unreadable home reports "unknown"
+/// rather than taking the scan loop down.
+fn hook_evidence() -> HookEvidence {
+    let Ok(paths) = ainb_plugin_notifyd::paths::Paths::from_home() else {
+        return HookEvidence {
+            summary: "unknown".to_string(),
+            issues: Vec::new(),
+        };
+    };
+    let health = ainb_plugin_notifyd::hook_health(&paths);
+    let issues: Vec<String> = health
+        .issues
+        .iter()
+        .map(|i| format!("{}: {} — fix: {}", i.component, i.message, i.repair))
+        .collect();
+    HookEvidence {
+        summary: if issues.is_empty() {
+            "ok".to_string()
+        } else {
+            format!("{} issue(s)", issues.len())
+        },
+        issues,
     }
 }
 
@@ -477,6 +545,13 @@ fn plan<'a>(
     };
     let mut send_to = Vec::new();
     for row in rows {
+        // Provenance, so the operator can see WHY the roster looks the way it
+        // does. A roster that quietly went all-scan is a broken hook pipeline,
+        // and it is indistinguishable from a healthy one by row count alone.
+        match row.source.as_deref() {
+            Some("hook") => report.from_hooks += 1,
+            _ => report.from_scan += 1,
+        }
         match row.context {
             NeedsContext::Err(_) => {
                 report.err += 1;
@@ -713,11 +788,33 @@ mod tests {
             continued: 1,
             capped: 1,
             reported: 2,
+            from_hooks: 3,
+            from_scan: 1,
         };
         let line = report.line();
         assert!(line.contains("2 ERR"), "{line}");
         assert!(line.contains("1 continued"), "{line}");
         assert!(line.contains("1 at cap"), "{line}");
         assert!(line.contains("2 left for a human"), "{line}");
+        assert!(line.contains("3 hook, 1 scan"), "provenance: {line}");
+    }
+
+    #[test]
+    fn the_scan_reports_where_its_evidence_came_from() {
+        // A roster that has quietly gone all-scan is a broken hook pipeline, and
+        // it is indistinguishable from a healthy one by row count alone. Lite
+        // has no brain to notice, so the counts have to be in the report.
+        let mut hooked = err_row("s1");
+        hooked.source = Some("hook".to_string());
+        let mut scanned = err_row("s2");
+        scanned.source = Some("tmux".to_string());
+        let legacy = err_row("s3"); // no source at all
+        let rows = vec![hooked, scanned, legacy];
+
+        let mut state = HeartbeatState::default();
+        let (report, _) = plan(&rows, 3, &mut state);
+        assert_eq!(report.from_hooks, 1);
+        assert_eq!(report.from_scan, 2, "unsourced rows are not hook evidence");
+        assert_eq!(report.from_hooks + report.from_scan, report.scanned);
     }
 }
