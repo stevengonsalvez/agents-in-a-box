@@ -2113,20 +2113,38 @@ mod tests {
     /// it. Without this these tests would touch the developer's real
     /// `~/.agents-in-a-box`. The lock is the crate-wide env lock, not a private
     /// one, so this serialises against EVERY `AINB_HOME`-mutating test in the
-    /// binary rather than just other callers here.
+    /// binary rather than just other callers here. The restore runs from `Drop`,
+    /// so a failing assertion inside `body` cannot leave a deleted tempdir path
+    /// in the env for every later test in the binary.
     fn with_ainb_home<R>(body: impl FnOnce() -> R) -> R {
-        let _g = crate::headroom::HEADROOM_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("AINB_HOME").ok();
-        std::env::set_var("AINB_HOME", dir.path());
-        let out = body();
-        match prev {
-            Some(v) => std::env::set_var("AINB_HOME", v),
-            None => std::env::remove_var("AINB_HOME"),
+        struct RestoreAinbHome {
+            previous: Option<String>,
+            _guard: std::sync::MutexGuard<'static, ()>,
+            _dir: tempfile::TempDir,
         }
-        out
+
+        impl Drop for RestoreAinbHome {
+            fn drop(&mut self) {
+                match self.previous.take() {
+                    Some(v) => std::env::set_var("AINB_HOME", v),
+                    None => std::env::remove_var("AINB_HOME"),
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _restore = RestoreAinbHome {
+            _guard: crate::headroom::HEADROOM_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            previous: {
+                let previous = std::env::var("AINB_HOME").ok();
+                std::env::set_var("AINB_HOME", dir.path());
+                previous
+            },
+            _dir: dir,
+        };
+        body()
     }
 
     /// Two checked, running interactive sessions, plus their ids in list order.
@@ -2487,6 +2505,81 @@ mod tests {
             .join(" | ");
         assert!(message.contains("Stopped 1 session(s)"), "{message}");
         assert!(message.contains("1 already stopped"), "{message}");
+    }
+
+    /// A selection that is already entirely stopped has nothing to stop, so
+    /// offering "Stop all" as the default would make Enter a no-op that also
+    /// throws the selection away.
+    #[test]
+    fn bulk_dialog_offers_no_stop_when_everything_is_already_stopped() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["a", "b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Stopped,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "nothing left to stop");
+            assert!(!dialog.selected_option, "Default = No");
+        });
+    }
+
+    /// Stopping the stoppable subset must leave the rows it did not touch
+    /// checked, or the user has to find and re-select them.
+    #[test]
+    fn bulk_stop_of_a_subset_keeps_the_untouched_rows_selected() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert_eq!(
+                state.selected_sessions.iter().copied().collect::<Vec<_>>(),
+                vec![boss_id],
+                "the row Stop did not touch stays checked"
+            );
+        });
+    }
+
+    /// An empty selection has nothing to confirm, so it must not open a
+    /// "Stop or Delete 0 Session(s)" dialog whose Delete deletes nothing.
+    #[test]
+    fn bulk_dialog_refuses_an_empty_selection() {
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            state.show_bulk_delete_or_stop_confirmation(Vec::new());
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+        });
     }
 
     /// Multi-select ids come out in list order, once each.
