@@ -466,6 +466,7 @@ mod tests {
             heartbeat_enabled: true,
             heartbeat_interval_min: 5,
             idle_pause_min: 60,
+            ..AtcMeta::new("alpha")
         };
         let xml = build_plist(&meta);
         assert!(xml.contains("<integer>300</integer>"));

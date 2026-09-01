@@ -258,6 +258,7 @@ mod tests {
             heartbeat_enabled: true,
             heartbeat_interval_min: 7,
             idle_pause_min: 25,
+            ..AtcMeta::new("alpha")
         };
         let md = render_claude_md(&meta);
         assert!(md.contains("every 7 minutes"));
