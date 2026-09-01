@@ -2106,6 +2106,29 @@ mod tests {
     // tests pin the confirmation step in place.
     // ========================================================================
 
+    /// Point `AINB_HOME` at a tempdir for the duration of `body`.
+    ///
+    /// Opening the bulk dialog probes worktrees, which builds a
+    /// `WorktreeManager` and so reads `AINB_HOME` and creates directories under
+    /// it. Without this these tests would touch the developer's real
+    /// `~/.agents-in-a-box`. The lock is the crate-wide env lock, not a private
+    /// one, so this serialises against EVERY `AINB_HOME`-mutating test in the
+    /// binary rather than just other callers here.
+    fn with_ainb_home<R>(body: impl FnOnce() -> R) -> R {
+        let _g = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("AINB_HOME").ok();
+        std::env::set_var("AINB_HOME", dir.path());
+        let out = body();
+        match prev {
+            Some(v) => std::env::set_var("AINB_HOME", v),
+            None => std::env::remove_var("AINB_HOME"),
+        }
+        out
+    }
+
     /// Two checked, running interactive sessions, plus their ids in list order.
     fn state_with_checked_sessions(names: &[&str]) -> (AppState, Vec<uuid::Uuid>) {
         use crate::models::SessionStatus;
@@ -2135,127 +2158,139 @@ mod tests {
     /// confirmation is removed this goes red on `pending_async_action`.
     #[test]
     fn bulk_delete_asks_before_destroying_anything() {
-        let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
 
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        assert!(
-            state.pending_async_action.is_none(),
-            "bulk delete must not queue any action before the user confirms"
-        );
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
-        let opts = dialog.options.as_ref().expect("tri-option dialog");
-        assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
-        assert_eq!(opts[0].label, "Stop all");
-        assert_eq!(opts[1].label, "Delete all");
-        assert_eq!(opts[2].label, "Cancel");
-        assert_eq!(dialog.selected_index, 0, "Default = Stop all (safe option)");
-        assert!(matches!(
-            &opts[0].action,
-            ConfirmAction::BulkStopSessions(got) if got == &ids
-        ));
-        assert!(matches!(
-            &opts[1].action,
-            ConfirmAction::BulkDeleteSessions(got) if got == &ids
-        ));
-        assert!(matches!(opts[2].action, ConfirmAction::Cancel));
-        assert_eq!(
-            state.selected_sessions.len(),
-            2,
-            "selection survives until the user picks an outcome"
-        );
+            assert!(
+                state.pending_async_action.is_none(),
+                "bulk delete must not queue any action before the user confirms"
+            );
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
+            assert_eq!(opts[0].label, "Stop all");
+            assert_eq!(opts[1].label, "Delete all");
+            assert_eq!(opts[2].label, "Cancel");
+            assert_eq!(dialog.selected_index, 0, "Default = Stop all (safe option)");
+            assert!(matches!(
+                &opts[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+            assert!(matches!(
+                &opts[1].action,
+                ConfirmAction::BulkDeleteSessions(got) if got == &ids
+            ));
+            assert!(matches!(opts[2].action, ConfirmAction::Cancel));
+            assert_eq!(
+                state.selected_sessions.len(),
+                2,
+                "selection survives until the user picks an outcome"
+            );
+        });
     }
 
     /// Shift+D (the explicit bulk key) takes the same confirmed path as `d`.
     #[test]
     fn bulk_delete_selected_sessions_asks_before_destroying_anything() {
-        let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
 
-        EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
+            EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-        assert!(state.pending_async_action.is_none());
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
-        assert!(matches!(
-            &dialog.options.as_ref().expect("tri-option dialog")[0].action,
-            ConfirmAction::BulkStopSessions(got) if got == &ids
-        ));
+            assert!(state.pending_async_action.is_none());
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert!(matches!(
+                &dialog.options.as_ref().expect("tri-option dialog")[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+        });
     }
 
     /// The dialog names the sessions and says how many are affected.
     #[test]
     fn bulk_delete_dialog_names_the_affected_sessions() {
-        let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
 
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
-        assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
-        assert!(
-            dialog.message.contains("2 session(s): alpha, beta"),
-            "{}",
-            dialog.message
-        );
-        assert!(
-            dialog.message.contains("Stop keeps every worktree"),
-            "{}",
-            dialog.message
-        );
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
+            assert!(
+                dialog.message.contains("2 session(s): alpha, beta"),
+                "{}",
+                dialog.message
+            );
+            assert!(
+                dialog.message.contains("Stop keeps every worktree"),
+                "{}",
+                dialog.message
+            );
+        });
     }
 
     /// Accepting the default (Stop all) must queue a stop, never a delete.
     #[test]
     fn bulk_dialog_default_option_queues_stop_not_delete() {
-        let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(matches!(
-            state.pending_async_action,
-            Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
-        ));
-        assert!(state.selected_sessions.is_empty(), "selection consumed");
-        assert!(state.confirmation_dialog.is_none());
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert!(state.selected_sessions.is_empty(), "selection consumed");
+            assert!(state.confirmation_dialog.is_none());
+        });
     }
 
     /// Explicitly choosing Delete all still deletes, so the fix does not remove
     /// the capability, only the surprise.
     #[test]
     fn bulk_dialog_delete_option_queues_bulk_delete() {
-        let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
-        EventHandler::process_event(AppEvent::ConfirmationToggle, &mut state);
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationToggle, &mut state);
 
-        EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(matches!(
-            state.pending_async_action,
-            Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
-        ));
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
+            ));
+        });
     }
 
     /// Cancel (either the option or Esc) leaves the selection and every session
     /// exactly as it was.
     #[test]
     fn bulk_dialog_cancel_does_nothing() {
-        let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
-        EventHandler::process_event(AppEvent::ConfirmationPrev, &mut state); // wrap to Cancel
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationPrev, &mut state); // wrap to Cancel
 
-        EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(
-            state.pending_async_action.is_none(),
-            "Cancel queues nothing"
-        );
-        assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
+            assert!(
+                state.pending_async_action.is_none(),
+                "Cancel queues nothing"
+            );
+            assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
 
-        // Esc on a freshly-opened dialog is equally inert.
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
-        EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
-        assert!(state.confirmation_dialog.is_none());
-        assert!(state.pending_async_action.is_none());
-        assert_eq!(state.selected_sessions.len(), 2);
+            // Esc on a freshly-opened dialog is equally inert.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+            assert_eq!(state.selected_sessions.len(), 2);
+        });
     }
 
     /// Long selections stay readable: three names, then a count.
@@ -2317,65 +2352,141 @@ mod tests {
     }
 
     /// Stop is meaningless for a Boss (Docker) session: killing tmux leaves the
-    /// container running. A selection containing one must fall back to the
-    /// binary delete confirmation, defaulting to No, rather than offering a
+    /// container running. A selection of only such sessions must fall back to
+    /// the binary delete confirmation, defaulting to No, rather than offering a
     /// Stop button that would lie about what happened.
     #[test]
-    fn bulk_dialog_without_a_stop_path_falls_back_to_delete_confirmation() {
+    fn bulk_dialog_without_any_stop_path_falls_back_to_delete_confirmation() {
         use crate::models::SessionStatus;
 
-        let (mut state, _ids) = state_with_checked_sessions(&["alpha"]);
-        let boss = resumable_session(
-            "boss",
-            SessionMode::Boss,
-            SessionAgentType::Claude,
-            SessionStatus::Running,
-        );
-        let boss_id = boss.id;
-        state.workspaces[0].add_session(boss);
-        state.selected_sessions.insert(boss_id);
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["boss-a", "boss-b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Boss,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
 
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        assert!(state.pending_async_action.is_none(), "still asks first");
-        let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
-        assert!(
-            dialog.options.is_none(),
-            "no Stop option for a Boss session"
-        );
-        assert!(!dialog.selected_option, "Default = No");
-        assert!(matches!(
-            dialog.confirm_action,
-            ConfirmAction::BulkDeleteSessions(_)
-        ));
+            assert!(state.pending_async_action.is_none(), "still asks first");
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "no Stop option for Boss sessions");
+            assert!(!dialog.selected_option, "Default = No");
+            assert!(matches!(
+                dialog.confirm_action,
+                ConfirmAction::BulkDeleteSessions(_)
+            ));
+        });
+    }
+
+    /// One Boss row in the selection must not strip the safe option from the
+    /// rows that can use it: Stop covers the stoppable subset, Delete still
+    /// covers everything, and Stop stays the default.
+    #[test]
+    fn bulk_dialog_offers_stop_for_the_stoppable_subset_of_a_mixed_selection() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(dialog.selected_index, 0, "Stop is still the default");
+            assert_eq!(opts[0].label, "Stop 2", "names how many Stop covers");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the two interactive sessions"
+            );
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert_eq!(delete_ids.len(), 3, "Delete still covers everything");
+            assert!(delete_ids.contains(&boss_id));
+        });
     }
 
     /// A checked id that no longer resolves to a session still takes part in the
-    /// bulk action (nothing silently drops out of a delete), but the dialog
-    /// shows a short label rather than a full 36-character uuid.
+    /// bulk delete (nothing silently drops out), but the dialog shows a short
+    /// label rather than a full 36-character uuid.
     #[test]
     fn bulk_dialog_labels_unresolvable_ids_without_dumping_a_uuid() {
-        let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
-        let stale = uuid::Uuid::new_v4();
-        state.selected_sessions.insert(stale);
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
+            let stale = uuid::Uuid::new_v4();
+            state.selected_sessions.insert(stale);
 
-        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
-        assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
-        assert!(
-            !dialog.message.contains(&stale.to_string()),
-            "the full uuid would eat three rows of the dialog: {}",
-            dialog.message
-        );
-        let queued = match &dialog.confirm_action {
-            ConfirmAction::BulkDeleteSessions(queued) | ConfirmAction::BulkStopSessions(queued) => {
-                queued.clone()
-            }
-            other => panic!("unexpected action: {other:?}"),
-        };
-        assert!(queued.contains(&stale), "stale ids stay in the action");
-        assert!(queued.contains(&ids[0]));
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
+            assert!(
+                !dialog.message.contains(&stale.to_string()),
+                "the full uuid would eat three rows of the dialog: {}",
+                dialog.message
+            );
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert!(delete_ids.contains(&stale), "stale ids stay in the delete");
+            assert!(delete_ids.contains(&ids[0]));
+        });
+    }
+
+    /// A bulk stop must not claim to have stopped sessions that were already
+    /// stopped: the count is what the user reads to know the operation worked.
+    #[tokio::test]
+    async fn bulk_stop_reports_already_stopped_sessions_separately() {
+        use crate::models::SessionStatus;
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        let mut ids = Vec::new();
+        for (name, status) in [
+            ("running", SessionStatus::Running),
+            ("already", SessionStatus::Stopped),
+        ] {
+            let mut session = resumable_session(
+                name,
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                status,
+            );
+            session.tmux_session_name = None;
+            ids.push(session.id);
+            ws.add_session(session);
+        }
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+
+        state.bulk_stop_sessions(ids).await;
+
+        let message = state
+            .notifications
+            .iter()
+            .map(|n| n.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(message.contains("Stopped 1 session(s)"), "{message}");
+        assert!(message.contains("1 already stopped"), "{message}");
     }
 
     /// Multi-select ids come out in list order, once each.
