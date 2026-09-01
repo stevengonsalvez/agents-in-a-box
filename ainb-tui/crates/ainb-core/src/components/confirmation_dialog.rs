@@ -1,6 +1,8 @@
 // ABOUTME: Confirmation dialog component for displaying yes/no prompts with keyboard navigation
 
 use crate::app::state::{AppState, ConfirmationDialog};
+use unicode_width::UnicodeWidthStr;
+
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -182,30 +184,39 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(button_row)])
         .split(area);
-    if chunks[0].height > 0 {
-        // The warning outranks everything here: on a destructive dialog the one
-        // line worth the space is the one saying what would be lost. Without a
-        // warning the message wins, since it names the sessions and says what
-        // the buttons do; the title only repeats the count.
-        let (text, style) = dialog.warning.as_ref().map_or_else(
-            || {
-                (
-                    dialog.message.clone(),
-                    Style::default().fg(SOFT_WHITE).bg(DARK_BG),
-                )
-            },
-            |warning| {
-                (
-                    warning.clone(),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            },
-        );
-        let line = Paragraph::new(text).style(style).wrap(Wrap { trim: true });
-        frame.render_widget(line, chunks[0]);
+    // Warning first: on a destructive dialog the line worth the space is the one
+    // saying what would be lost. The message comes next, since it names the
+    // sessions and says what the buttons do; the title only repeats the count.
+    let mut lines: Vec<(String, Style)> = Vec::new();
+    if let Some(warning) = dialog.warning.as_ref() {
+        lines.push((
+            warning.clone(),
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push((
+        dialog.message.clone(),
+        Style::default().fg(SOFT_WHITE).bg(DARK_BG),
+    ));
+
+    let text_area = chunks[0];
+    if text_area.height > 0 {
+        let rows = usize::from(text_area.height).min(lines.len());
+        let per_line = text_area.height / u16::try_from(rows).unwrap_or(1);
+        let mut y = text_area.y;
+        for (text, style) in lines.into_iter().take(rows) {
+            let row = Rect {
+                x: text_area.x,
+                y,
+                width: text_area.width,
+                height: per_line.max(1),
+            };
+            frame.render_widget(
+                Paragraph::new(text).style(style).wrap(Wrap { trim: true }),
+                row,
+            );
+            y += per_line.max(1);
+        }
     }
     render_buttons(frame, chunks[1], dialog);
 }
@@ -252,30 +263,12 @@ fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16
 /// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
 /// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
-/// Terminal columns a string occupies.
+/// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
+/// with `Wrap { trim: true }` (which never splits a word that fits on a line).
 ///
-/// A coarse East Asian Wide / Fullwidth table rather than a `unicode-width`
-/// dependency: this only sizes a dialog box, and the caller adds a slack row.
-fn display_columns(text: &str) -> usize {
-    text.chars()
-        .map(|c| {
-            let c = c as u32;
-            let wide = (0x1100..=0x115F).contains(&c)      // Hangul Jamo
-                || (0x2E80..=0xA4CF).contains(&c)          // CJK radicals through Yi
-                || (0xAC00..=0xD7A3).contains(&c)          // Hangul syllables
-                || (0xF900..=0xFAFF).contains(&c)          // CJK compatibility
-                || (0xFE30..=0xFE6F).contains(&c)          // CJK compatibility forms
-                || (0xFF00..=0xFF60).contains(&c)          // Fullwidth forms
-                || (0xFFE0..=0xFFE6).contains(&c)          // Fullwidth signs
-                || (0x1F300..=0x1FAFF).contains(&c); // Emoji
-            usize::from(wide) + 1
-        })
-        .sum()
-}
-
-/// Measures display columns, not chars, so a warning naming CJK sessions is not
-/// under-counted and clipped. The remaining slack row covers the odd glyph the
-/// coarse width table below gets wrong.
+/// Measures display columns via `unicode-width`, so a warning naming CJK
+/// sessions is not under-counted and clipped. One slack row is added for the
+/// whole text.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let mut rows: usize = 0;
@@ -283,7 +276,7 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
         let mut paragraph_rows = 1usize;
         let mut used = 0usize;
         for word in paragraph.split_whitespace() {
-            let len = display_columns(word);
+            let len = UnicodeWidthStr::width(word);
             if used == 0 {
                 used = len;
             } else if used + 1 + len <= width {
@@ -374,8 +367,8 @@ mod tests {
     #[test]
     fn wrapped_line_count_measures_display_columns() {
         let cjk = "日本語ブランチ".repeat(6); // 42 chars, 84 columns
-        assert_eq!(display_columns("日本語"), 6);
-        assert_eq!(display_columns("abc"), 3);
+        assert_eq!(UnicodeWidthStr::width("日本語"), 6);
+        assert_eq!(UnicodeWidthStr::width("abc"), 3);
         assert!(
             wrapped_line_count(&cjk, 40) >= 3,
             "84 columns at width 40 needs 3 rows, not 2"
