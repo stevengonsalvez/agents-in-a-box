@@ -21,7 +21,7 @@ against sqlite + git ground truth. Recordings are of green runs only.
 | leg | state | evidence | recording |
 |-----|-------|----------|-----------|
 | Phase 0 harness | PASS | daemon on iso socket (pid file, token, db under iso home); TUI `g` chrome; boxtrack repo seeded on main | - |
-| P1 single-issue happy path | PASS (proof run HGR-2) | TUI wizard create with repo `@boxtrack` + agent impl-1; daemon claim; worktree `ainb/01M1FKF4BD...` on the real repo; agent committed 3 conventional commits, pushed, opened boxtrack-proving PR #1; task `done` exit 0, `task.branch` recorded, run_history success (84 in / 8946 out), issue auto-promoted `done`; Kanban done card, Usage totals $1.66 | pending (clean re-drive) |
+| P1 single-issue happy path | PASS (proof run HGR-2, recorded run HGR-3) | HGR-2: TUI wizard create with repo `@boxtrack` + agent impl-1; daemon claim; worktree `ainb/01M1FKF4BD...` on the real repo; agent committed 3 conventional commits, pushed, opened boxtrack-proving PR #1 (merged); task `done` exit 0, `task.branch` recorded, run_history success, issue auto-promoted `done`. HGR-3 (recorded): same journey driven entirely by the tape, agent added `GET /api/version` + test in 2m09s, pushed, opened PR #6; Kanban done card renders `impl-1 · done · ainb/01M1FKWT...` | `p1-happy-path.gif` / `.mp4`, stills `p1-1..6` (`p1-2` shows the render lag of defect 10: Repo/Agent still read as placeholders while the DB already held boxtrack + impl-1) |
 | P2 pipeline + squad | pending | - | - |
 | P3 live human loop | pending | - | - |
 | P4 levers + observability | partial | `R` retry override proven (child attempt chained, ran); Kanban, Usage, Daemon health rendered live | - |
