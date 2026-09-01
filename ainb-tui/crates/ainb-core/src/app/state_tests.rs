@@ -2190,8 +2190,16 @@ mod tests {
 
         let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
         assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
-        assert!(dialog.message.contains("2 session(s): alpha, beta"), "{}", dialog.message);
-        assert!(dialog.message.contains("Stop keeps every worktree"), "{}", dialog.message);
+        assert!(
+            dialog.message.contains("2 session(s): alpha, beta"),
+            "{}",
+            dialog.message
+        );
+        assert!(
+            dialog.message.contains("Stop keeps every worktree"),
+            "{}",
+            dialog.message
+        );
     }
 
     /// Accepting the default (Stop all) must queue a stop, never a delete.
@@ -2236,7 +2244,10 @@ mod tests {
 
         EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(state.pending_async_action.is_none(), "Cancel queues nothing");
+        assert!(
+            state.pending_async_action.is_none(),
+            "Cancel queues nothing"
+        );
         assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
 
         // Esc on a freshly-opened dialog is equally inert.
@@ -2275,8 +2286,7 @@ mod tests {
         assert!(warning.contains("alpha (3)"), "{}", warning);
         assert!(warning.contains("beta (1)"), "{}", warning);
 
-        let many: Vec<(String, usize)> =
-            (1..=5).map(|i| (format!("s{}", i), i as usize)).collect();
+        let many: Vec<(String, usize)> = (1..=5).map(|i| (format!("s{}", i), i as usize)).collect();
         let warning =
             AppState::format_bulk_uncommitted_warning(&many).expect("dirty sessions warn");
         assert!(warning.contains("+2 more"), "{}", warning);
