@@ -182,8 +182,8 @@ impl RepoSource {
             RepoSource::GithubShorthand { owner, repo } => Ok(ParsedRepo {
                 source: self.clone(),
                 host: "github.com".to_string(),
-                owner: owner.clone(),
-                repo_name: repo.clone(),
+                owner: safe_segment("owner", owner)?,
+                repo_name: safe_segment("repo", repo)?,
             }),
             RepoSource::LocalPath(path) => {
                 let repo_name =
@@ -397,6 +397,22 @@ fn ensure_git_suffix(url: &str) -> String {
     }
 }
 
+/// Reject a host/owner/repo segment that would escape the clone-cache root.
+///
+/// `RemoteRepoManager::get_cache_path` joins these three segments straight onto
+/// `~/.agents-in-a-box/repos`, so `https://github.com/../..` would otherwise
+/// resolve to the AINB state dir itself. The CLI used to carry its own
+/// `.replace("..", "")` sanitiser; the guard belongs here, where every caller
+/// that builds a cache path goes through it.
+fn safe_segment(kind: &str, value: &str) -> Result<String, RepoSourceError> {
+    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\\']) {
+        return Err(RepoSourceError::ParseError(format!(
+            "Unsafe {kind} segment: {value:?}"
+        )));
+    }
+    Ok(value.to_string())
+}
+
 /// Parse HTTPS URL into components
 fn parse_https_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSourceError> {
     // https://github.com/owner/repo.git or https://github.com/owner/repo
@@ -411,9 +427,9 @@ fn parse_https_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSour
     let parts: Vec<&str> = without_protocol.split('/').collect();
 
     if parts.len() >= 3 {
-        let host = parts[0].to_string();
-        let owner = parts[1].to_string();
-        let repo_name = parts[2].to_string();
+        let host = safe_segment("host", parts[0])?;
+        let owner = safe_segment("owner", parts[1])?;
+        let repo_name = safe_segment("repo", parts[2])?;
 
         Ok(ParsedRepo {
             source,
@@ -467,9 +483,9 @@ fn parse_ssh_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSource
         if path_parts.len() >= 2 {
             return Ok(ParsedRepo {
                 source,
-                host,
-                owner: path_parts[0].to_string(),
-                repo_name: path_parts[1].to_string(),
+                host: safe_segment("host", &host)?,
+                owner: safe_segment("owner", path_parts[0])?,
+                repo_name: safe_segment("repo", path_parts[1])?,
             });
         }
     }
