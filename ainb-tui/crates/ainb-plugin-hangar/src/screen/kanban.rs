@@ -273,6 +273,26 @@ impl KanbanState {
         }
     }
 
+    /// The NEWEST card (by `created_at`, id as the stable tiebreak) whose parent
+    /// issue is `issue_id`, across every column — i.e. the issue's latest run.
+    ///
+    /// The issue-list open path binds task detail through this lookup so the
+    /// screen carries the REAL task id + status: a synthetic `task-<issue>` id
+    /// can render a transcript but can never retry or cancel anything, because
+    /// the daemon has no such task row.
+    #[must_use]
+    pub fn latest_card_for_issue(&self, issue_id: &str) -> Option<&CardSummary> {
+        self.columns
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .filter(|card| card.issue_id.as_deref() == Some(issue_id))
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.task_id.cmp(&b.task_id))
+            })
+    }
+
     /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
     /// `issue_id -> title` map the `hangar/issues_list` snapshot carries, so N
     /// dispatch runs of ONE issue read as N runs of that issue rather than N
