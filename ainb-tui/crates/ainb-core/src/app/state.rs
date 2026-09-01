@@ -947,6 +947,13 @@ fn session_uncommitted_probe(
     }
 }
 
+/// Shown when a bulk key is pressed with nothing checked.
+pub(crate) const NOTHING_SELECTED_WARNING: &str =
+    "No sessions selected. Use Space to select sessions first.";
+
+/// Shown on a single-session dialog whose worktree status could not be read.
+const UNCHECKED_SINGLE_WARNING: &str = "⚠️ could not check this worktree for uncommitted work";
+
 /// Render at most three items, then "and N more". Shared by the bulk dialog's
 /// message and its warning so the two cannot truncate at different lengths or
 /// word it differently.
@@ -6692,12 +6699,14 @@ impl AppState {
     /// Of the multi-selected managed sessions, return the IDs that can actually
     /// be resumed: interactive agent sessions that are currently Stopped.
     /// Running sessions are excluded so a bulk resume never kills+recreates a
-    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    /// live tmux session. Returned in list order, like the delete path.
     pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
         use crate::models::SessionStatus;
-        self.selected_sessions
-            .iter()
-            .copied()
+        // List order, like the delete path: the order sessions are resumed in,
+        // and the order they appear in the log and the audit trail, should not
+        // be the per-process randomisation of HashSet iteration.
+        self.selected_session_ids_in_order()
+            .into_iter()
             .filter(|id| {
                 self.find_session(*id).is_some_and(|s| {
                     is_stoppable_interactive(s) && matches!(s.status, SessionStatus::Stopped)
@@ -7809,14 +7818,16 @@ impl AppState {
             return None;
         }
 
-        let worktree_manager = WorktreeManager::new().ok()?;
+        // A manager we cannot even build means the status is unknown, not clean:
+        // the bulk path says so and this one has to agree.
+        let Ok(worktree_manager) = WorktreeManager::new() else {
+            return Some(UNCHECKED_SINGLE_WARNING.to_string());
+        };
         match session_uncommitted_probe(&worktree_manager, session_id) {
             UncommittedProbe::Dirty(count) => {
                 Some(format!("⚠️ {count} uncommitted file(s) in worktree"))
             }
-            UncommittedProbe::Unknown => {
-                Some("⚠️ could not check this worktree for uncommitted work".to_string())
-            }
+            UncommittedProbe::Unknown => Some(UNCHECKED_SINGLE_WARNING.to_string()),
             UncommittedProbe::NoWorktree | UncommittedProbe::Clean => None,
         }
     }
@@ -7832,9 +7843,7 @@ impl AppState {
         use crate::models::SessionStatus;
 
         if session_ids.is_empty() {
-            self.add_warning_notification(
-                "No sessions selected. Use Space to select sessions first.".to_string(),
-            );
+            self.add_warning_notification(NOTHING_SELECTED_WARNING.to_string());
             return;
         }
         let count = session_ids.len();
@@ -7850,6 +7859,16 @@ impl AppState {
                     .map_or_else(|| unknown_session_label(*id), |s| s.name.clone())
             })
             .collect();
+        // Shell sessions have no dedicated worktree, so counting them in "Delete
+        // removes N worktree(s)" would inflate the number on the one dialog
+        // whose job is to state the destructive scope accurately.
+        let worktree_count = session_ids
+            .iter()
+            .filter(|id| {
+                self.find_session(**id)
+                    .is_none_or(|s| !matches!(s.agent_type, crate::models::SessionAgentType::Shell))
+            })
+            .count();
         let (dirty, unchecked) = self.bulk_uncommitted_counts(&session_ids);
         let warning = Self::format_bulk_uncommitted_warning(&dirty, unchecked);
         let summary = Self::format_bulk_session_summary(&names);
@@ -7882,7 +7901,7 @@ impl AppState {
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
                     "{summary}\nStop keeps every worktree and resumes later. \
-                     Delete removes {count} worktree(s)."
+                     Delete removes {worktree_count} worktree(s)."
                 ),
                 warning,
                 ("Stop all", ConfirmAction::BulkStopSessions(stoppable)),
@@ -7900,7 +7919,7 @@ impl AppState {
                 title: format!("Delete {count} Session(s)"),
                 message: format!(
                     "{summary}\n{reason}, so Delete is the only option offered. \
-                     It removes {count} worktree(s)."
+                     It removes {worktree_count} worktree(s)."
                 ),
                 confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
                 selected_option: false, // Default = No
@@ -7922,7 +7941,7 @@ impl AppState {
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
                     "{summary}\nStop covers {stoppable_count} and keeps their worktrees, \
-                     {excluded}. Delete removes all {count} worktree(s)."
+                     {excluded}. Delete removes {worktree_count} worktree(s)."
                 ),
                 warning,
                 (
@@ -10394,8 +10413,10 @@ impl AppState {
         let mut already_stopped = 0;
         let mut failed = 0;
         for id in session_ids {
-            // Already Stopped means there is nothing to kill; counting it as a
-            // stop would report "Stopped 10" for work that stopped 5.
+            // The dialog already filters these out, so this is normally zero.
+            // It still has to be here: a session can reach Stopped between the
+            // dialog opening and this running, and counting it as a stop would
+            // report "Stopped 10" for what stopped 5.
             if self
                 .find_session(id)
                 .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
