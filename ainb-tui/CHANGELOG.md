@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-09-01
+### Added
+- feat!: retire gpt-5.4 from the Codex model picker
+- **core**: add antigravity provider, session agents, and tui configuration
+- **fleet-macos**: add antigravity wire support, icon mapping, and filter labels
+- **hangar**: add antigravity runner spec, agent kind, and skill materialization
+- **hangar**: never autostart into an ephemeral home, and add a prune verb
+- **hangar**: stand a daemon down when its home is deleted underneath it
+- **notifyd**: add antigravity tool adapter, lifecycle hooks, and installer
+- **raycast**: support local clipboard paths
+- **usage**: add antigravity transcript parser, model rates, and burndown filtering
+- add a config registry that a test proves exhaustive
+- drive the settings screen from the registry, with a tree and search
+- give env-only tunables a config key, env still wins
+- keep credentials out of config.toml
+- make the ACP adapter command and permission mode configurable
+- make the hardcoded timeouts and limits configurable
+- wire the notifyd and fleet knobs to the new keys
+
+### Fixed
+- **config**: cover the antigravity provider in the config registry
+- **cts-v2**: mirror the harness profile in the nested plugin build
+- **daemon**: respawn ATC without resetting its configuration
+- **daemon**: start ATC by respawning its dead session
+- **daemons**: flag a hangar socket this home does not own
+- **daemons**: probe the ATC session, not just its timer
+- **fleet**: keep the anti-race guard holding for a degraded ATC
+- **hangar**: close parked ACP permissions when the turn ends
+- **hangar**: let each caller declare whether it outlives the daemon
+- **hangar**: only bind a daemon to a launcher that outlives it
+- **hangar**: parse nextest output under CARGO_TERM_COLOR=always
+- **hangar**: refuse a permission raised after its turn ended
+- **hangar**: replace GEMINI_API_KEY with ANTIGRAVITY_HOME in ENV_ALLOWLIST
+- **hangar**: stop a daemon under an ephemeral home outliving its launcher
+- **tmux**: match a session name exactly, and admit when unknown
+- **tui**: clean up the docker probe when polling it fails too
+- **tui**: reap the docker probe instead of orphaning it
+- ainb config path showed three of four files, all mislabelled
+- bare ainb must still load its config
+- bound keychain reads and stop showing an editor nobody set
+- close the remaining ways a config write could lose data
+- correct example.config.toml and stop it drifting again
+- finish routing bridge edits, and keep comments through migration
+- floor the app tick, fix stale doc links, mark restart-only rows
+- handle dotted map keys, clearing a key, and slow secret rows
+- keep --help cheap and drop a dead constant
+- keep config reads read-only and honour a cleared cache path
+- keep inline tables, symlinks, and blank optional numbers
+- keep retired Codex ids out of daemon dispatch
+- keep the config's mode and clean up temps in burndown
+- let a bridge edit actually reach the file, and keep the file's mode
+- let a child's own env override survive the bridge marker
+- let the new stale key win, and unfreeze bridged values
+- make a no-op save a no-op, and let the auth row update
+- make promoted settings take effect without a restart
+- make the config migration and save fail safe, not silently
+- match replace-paths by segment, and protect usage.currency
+- merge config layers per key instead of field by field
+- only write plugin rows the user actually edited
+- preserve unmodelled sections when saving config.toml
+- quote map keys in row paths, and stop two more stalls
+- read the user config from one path, not two
+- repair settings-screen state that survived a session
+- replace, do not merge, the tables where union is wrong
+- restore the legacy fleet-stale override and show the ACP rows
+- retry failed daemon writes and stop probe tests reading real config
+- retry order, adapter merge, and an unvalidated permission mode
+- stop a bad external value wedging the settings screen
+- stop burndown reverting core's edits and stripping comments
+- stop config writes deleting the file's comments
+- stop losing hangar daemon edits and make web flags reversible
+- stop reads migrating the Hangar database
+- stop settings tests writing the developer's real config
+- stop the env bridge racing threads and leaking into children
+- substitute retired Codex ids before the launch that fails
+- validate ainb config set against the schema
+
+### Documentation
+- ci: stop a changes failure from stranding every open PR
+- **ci**: record what a failed changes job resolves to
+- **cli**: regenerate the CLI reference for the prune verb
+- **hangar**: show the TUI on the architecture page
+- correct the ainb-fleet and ainb-hooks diagrams
+- describe the diagrams accurately, and correct the CLI count
+- describe the real config precedence, including that it is wrong
+- document all 34 workspace crates, not 10
+- document every new config key
+- link the screenshot-gap issue from the README
+- regenerate the ecosystem and plugin architecture diagrams
+- rewrite the value proposition around outcomes
+- turn the architecture reference stub into a real index
+- test: cover the skill-install root and refresh the CLI reference
+
+### Other
+- ignore local Codex session state
+- stop using retired gpt-5.4 ids in fixtures and docs
+- **hangar**: one nextest run per package, not one cargo call per test file
+- **tui**: cache the docker probe, and keep the paths that need truth fresh
+- **hangar**: promote the parent-death watchdog out of test-only
+- give ConfigCategory the categories the schema needs
+- share the retired Codex model table across crates
+
+
 ## [1.22.13] - 2026-08-27
 ### Fixed
 - **tui**: show build version on home
