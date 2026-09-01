@@ -2461,7 +2461,7 @@ mod tests {
             assert_eq!(delete_ids.len(), 3, "Delete still covers everything");
             assert!(delete_ids.contains(&boss_id));
             assert!(
-                dialog.message.contains("the other 1 cannot be stopped"),
+                dialog.message.contains("the other one cannot be stopped"),
                 "a Boss row is excluded because it has no stop path, not because it \
                  is already stopped: {}",
                 dialog.message
@@ -2495,7 +2495,7 @@ mod tests {
                 "Stop covers only the running session"
             );
             assert!(
-                dialog.message.contains("the other 1 are already stopped"),
+                dialog.message.contains("the other one is already stopped"),
                 "{}",
                 dialog.message
             );
@@ -2694,9 +2694,11 @@ mod tests {
                     SessionStatus::Running,
                 );
                 session.workspace_path = worktree.to_string_lossy().to_string();
-                // No tmux session name: nothing to kill, so the test never shells
-                // out to tmux and never touches another session's server.
-                session.tmux_session_name = None;
+                // A name that exists nowhere, so the real kill path runs and
+                // reports "can't find session". Safe only because the kill
+                // targets `=name`: a bare `-t` would prefix-match and could
+                // reach a developer's live session.
+                session.tmux_session_name = Some(format!("ainb-test-{}", session.id));
                 ids.push(session.id);
                 worktrees.push(worktree);
                 ws.add_session(session);
