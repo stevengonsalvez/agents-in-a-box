@@ -341,13 +341,31 @@ impl WorktreeManager {
 
     /// How many files `git status --porcelain` reports in `path`.
     ///
+    /// `path` must be the root of a checkout; a directory that is not one is an
+    /// error here, which callers report as "could not check", never as clean.
+    ///
     /// Ignored files are not counted, so a tree holding only ignored files reads
     /// as clean. Counting them would mean counting `target/` and
     /// `node_modules/` on every session, which buries the signal this exists to
     /// give.
     pub fn uncommitted_file_count_at(path: &Path) -> Result<usize, WorktreeError> {
-        let output =
-            Command::new("git").current_dir(path).args(["status", "--porcelain"]).output()?;
+        // Without this, `git` walks up to the nearest ancestor repository and
+        // answers for THAT tree, so a plain directory nested under any repo
+        // reports hundreds of files the session does not own.
+        if !path.join(".git").exists() {
+            return Err(WorktreeError::CommandFailed(format!(
+                "Not a git worktree (no .git): {}",
+                path.display()
+            )));
+        }
+
+        // `--no-optional-locks` keeps the probe read-only. A plain `git status`
+        // refreshes and rewrites the index, taking `.git/index.lock`, and this
+        // runs against trees with live agents committing in them.
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(["--no-optional-locks", "status", "--porcelain"])
+            .output()?;
 
         if !output.status.success() {
             return Err(WorktreeError::CommandFailed(format!(
@@ -363,46 +381,22 @@ impl WorktreeManager {
             .count())
     }
 
-    /// Resolve a session's working tree on disk.
-    ///
-    /// Only the path: no branch, no commit, no main-repository lookup. Callers
-    /// that just need to run a git command in the tree (the uncommitted-changes
-    /// probe, say) use this rather than `get_worktree_info`, whose extra
-    /// resolution fails for trees that are perfectly readable, such as a plain
-    /// clone whose `.git` is a directory rather than a worktree pointer file.
-    ///
-    /// Errors carry meaning that callers depend on:
-    ///
-    /// - `NotFound`: there is nothing on disk here. Deleting the session
-    ///   destroys no files.
-    /// - `CommandFailed`: a directory is there but it is not a git checkout, so
-    ///   its contents cannot be inspected. Deleting the session still removes
-    ///   the directory, so this is "unknown", never "nothing to lose".
-    /// - `Io`: the path could not be read (permissions, a racing removal). Also
-    ///   unknown.
-    pub fn worktree_path(&self, session_id: Uuid) -> Result<PathBuf, WorktreeError> {
+    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
+        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
         let worktree_path = self.session_dir(session_id).ok_or_else(|| {
             WorktreeError::NotFound(format!("Session {session_id} worktree not found"))
         })?;
 
-        // A directory with no `.git` still holds files, and deleting the session
-        // removes it, so this is NOT NotFound: reporting "nothing to lose" here
-        // is how a confirmation dialog stays silent while files are destroyed.
+        tracing::debug!("Final worktree path: {:?}", worktree_path);
+
+        // Check if it's a valid git worktree (has .git file or directory).
+        // NotFound here, as it always has been: callers match on it.
         if !worktree_path.join(".git").exists() {
-            return Err(WorktreeError::CommandFailed(format!(
+            return Err(WorktreeError::NotFound(format!(
                 "Not a git worktree (no .git): {}",
                 worktree_path.display()
             )));
         }
-
-        Ok(worktree_path)
-    }
-
-    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
-        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
-        let worktree_path = self.worktree_path(session_id)?;
-
-        tracing::debug!("Final worktree path: {:?}", worktree_path);
 
         let repo = match Repository::open(&worktree_path) {
             Ok(r) => r,
@@ -857,16 +851,6 @@ impl WorktreeManager {
         }
 
         Ok(())
-    }
-
-    /// `uncommitted_file_count_at` for the session's tree.
-    ///
-    /// Resolves only the path, so a tree this can read reports a real number
-    /// even when its branch, commit or parent repository cannot be resolved: a
-    /// caller warning about uncommitted work must not be told "unknown" for a
-    /// plain clone.
-    pub fn uncommitted_file_count(&self, session_id: Uuid) -> Result<usize, WorktreeError> {
-        Self::uncommitted_file_count_at(&self.worktree_path(session_id)?)
     }
 }
 
