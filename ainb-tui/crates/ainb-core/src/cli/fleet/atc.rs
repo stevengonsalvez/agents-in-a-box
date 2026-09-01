@@ -7,6 +7,10 @@
 //   teardown <name>  remove the timer + instance dir. Safe when absent.
 //   status <name>    report one instance (meta + timer + session liveness).
 //   list             list all provisioned instances.
+//   mode <name>      report the supervisor mode (lite | full), or switch it with
+//                    --set. Exactly one controller owns the fleet at a time.
+//   supervise <name> (internal) run the LITE controller: the LLM-free scan loop
+//                    that owns the fleet while mode is `lite`.
 //   repair <name>    re-assert an existing instance's heartbeat scheduler from
 //                    its meta.json, rebuilt against the CURRENT $PATH/$AINB_BIN.
 //                    Reads meta, never writes it, so a stale timer costs one
@@ -19,6 +23,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use crate::cli::OutputFormat;
+use crate::fleet::atc::supervisor::{
+    Controller, SupervisorMode, may_act, mode_help, resolve_full_provider, stand_down_reason,
+};
 use crate::fleet::atc::{
     AtcMeta, AtcPaths, DEFAULT_ERR_RETRY_CAP, HeartbeatState, build_heartbeat_enforcing_cap,
     render_claude_md, should_pause_for_idle, timer,
@@ -33,6 +40,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("teardown", sub)) => teardown(sub, format).await,
         Some(("status", sub)) => status(sub, format).await,
         Some(("repair", sub)) => repair(sub, format).await,
+        Some(("mode", sub)) => super::atc_supervisor::mode(sub, format).await,
+        Some(("supervise", sub)) => super::atc_supervisor::supervise(sub, format).await,
         Some(("list", _)) => list(format).await,
         Some(("heartbeat", sub)) => heartbeat(sub, format).await,
         Some(("hook", sub)) => hook(sub).await,
@@ -50,7 +59,33 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let no_heartbeat = matches.get_flag("no-heartbeat");
     let no_spawn = matches.get_flag("no-spawn");
 
+    let paths = AtcPaths::resolve(&name)?;
+
+    // Carry the supervisor mode + provider of an EXISTING instance forward.
+    // `setup` is idempotent and is what `daemon atc start` re-runs to respawn a
+    // dead session; rebuilding meta from `AtcMeta::new` would silently flip a
+    // deliberately-lite fleet back to a token-spending full brain.
+    let existing = std::fs::read_to_string(&paths.meta).ok().and_then(|s| AtcMeta::from_json(&s).ok());
+
     let mut meta = AtcMeta::new(&name);
+    if let Some(prior) = &existing {
+        meta.mode = prior.mode;
+        meta.provider.clone_from(&prior.provider);
+    }
+    if let Some(raw) = matches.get_one::<String>("mode") {
+        meta.mode = SupervisorMode::from_id(raw)
+            .with_context(|| format!("unknown mode '{raw}' — expected `lite` or `full`"))?;
+    }
+    if let Some(p) = matches.get_one::<String>("provider") {
+        meta.provider.clone_from(p);
+    }
+    // Refuse BEFORE writing anything: a full-mode instance on a provider ainb
+    // cannot nudge provisions cleanly and is then never woken, which looks
+    // healthy on every surface. Lite mode runs no brain, so it is unconstrained.
+    if meta.mode == SupervisorMode::Full {
+        resolve_full_provider(&meta.provider)?;
+    }
+
     if let Some(i) = interval {
         meta.heartbeat_interval_min = i;
     }
@@ -59,7 +94,6 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     }
     meta.heartbeat_enabled = !no_heartbeat;
 
-    let paths = AtcPaths::resolve(&name)?;
     std::fs::create_dir_all(&paths.dir)
         .with_context(|| format!("creating ATC dir {}", paths.dir.display()))?;
 
@@ -67,8 +101,19 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // idempotent and picks up policy/template changes on re-run. All four durable
     // artefacts are written through `write_atomic` (M-A3): a crash mid-write
     // would otherwise leave a torn file that status/list/heartbeat then error on.
-    plumbing::atomic::write_atomic(&paths.claude_md, render_claude_md(&meta).as_bytes())
+    let policy = render_claude_md(&meta);
+    plumbing::atomic::write_atomic(&paths.claude_md, policy.as_bytes())
         .context("writing CLAUDE.md")?;
+    // A provider that reads a DIFFERENT file (Codex reads AGENTS.md) gets the
+    // same policy under the name it actually opens. Writing only CLAUDE.md
+    // would give a brain that boots and then ignores its playbook. CLAUDE.md is
+    // still written unconditionally so switching providers never leaves the
+    // instance without the file the previous one read.
+    let policy_file = provider_policy_file(&meta);
+    if policy_file != "CLAUDE.md" {
+        plumbing::atomic::write_atomic(&paths.dir.join(policy_file), policy.as_bytes())
+            .with_context(|| format!("writing {policy_file}"))?;
+    }
     plumbing::atomic::write_atomic(&paths.meta, meta.to_json()?.as_bytes())
         .context("writing meta.json")?;
 
@@ -91,7 +136,10 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // daemon cron's `atc_retry` cap) — the exact one-send-path / daemon-owns-state
     // violation. Best-effort: a down daemon warns and returns false (external-dep
     // rule — never hard-fail on a missing daemon). The UX is unchanged.
-    let daemon_registered = if meta.heartbeat_enabled {
+    // A LITE fleet has no LLM heartbeat to schedule, and registering one would
+    // put a second controller on the fleet the moment the daemon came up.
+    let schedules_heartbeat = meta.heartbeat_enabled && meta.mode == SupervisorMode::Full;
+    let daemon_registered = if schedules_heartbeat {
         register_heartbeat_with_daemon(&meta, &paths).await
     } else {
         false
@@ -103,7 +151,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // mechanism fires. When the daemon is unreachable the local timer keeps the
     // heartbeat alive. `timer::install` is idempotent.
     let mut timer_paths = Vec::new();
-    if meta.heartbeat_enabled {
+    if schedules_heartbeat {
         if daemon_registered {
             // A prior daemon-down run may have installed a local timer; remove it
             // now that the daemon cron is the single active scheduler.
@@ -142,10 +190,19 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         }
     }
 
-    // Spawn the ATC session unless suppressed (tests / dry provisioning).
+    // Start the controller the mode names — never both. In full mode that is the
+    // brain session; in lite mode it is the LLM-free scanner, and no brain is
+    // spawned at all (spawning one that is never nudged would burn a session
+    // slot and mislead every liveness surface).
     let mut spawned = false;
+    let mut lite_started = false;
     if !no_spawn {
-        spawned = spawn_session(&meta, &paths).await?;
+        match meta.mode {
+            SupervisorMode::Full => spawned = spawn_session(&meta, &paths).await?,
+            SupervisorMode::Lite => {
+                lite_started = super::atc_supervisor::ensure_lite_running(&meta.name).is_ok();
+            }
+        }
     }
 
     let summary = json!({
@@ -160,15 +217,32 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         "session_spawned": spawned,
         "lifecycle_hooks_installed": hooks_installed,
         "daemon_registered": daemon_registered,
+        "mode": meta.mode.id(),
+        "provider": meta.provider,
+        "owner": meta.mode.owner().label(),
+        "lite_supervisor_started": lite_started,
     });
 
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{name}' provisioned.");
         println!("  dir:       {}", paths.dir.display());
-        println!("  policy:    {}", paths.claude_md.display());
-        println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
+        println!("  policy:    {}", paths.dir.join(policy_file).display());
+        println!(
+            "  mode:      {} — owned by the {}",
+            meta.mode.id(),
+            meta.mode.owner().label()
+        );
+        match meta.mode {
+            SupervisorMode::Full => {
+                println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
+                println!("  brain:     {}", meta.provider);
+            }
+            SupervisorMode::Lite => {
+                println!("  scanner:   lite (started: {lite_started}) — no LLM, no token spend");
+            }
+        }
         println!("  hooks:     lifecycle hooks installed: {hooks_installed}");
-        if meta.heartbeat_enabled {
+        if schedules_heartbeat {
             let via = if daemon_registered {
                 "daemon cron".to_string()
             } else {
@@ -178,6 +252,8 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
                 "  heartbeat: every {}m via {via}",
                 meta.heartbeat_interval_min
             );
+        } else if meta.mode == SupervisorMode::Lite {
+            println!("  heartbeat: n/a in lite mode (the scanner is the controller)");
         } else {
             println!("  heartbeat: disabled");
         }
@@ -203,15 +279,21 @@ async fn spawn_session(meta: &AtcMeta, paths: &AtcPaths) -> Result<bool> {
     if tmux_session_exists(&meta.tmux_session()).await {
         return Ok(false);
     }
+    // Refuse rather than spawn a brain we cannot wake. Reached only in full
+    // mode; `setup` and `mode --set` both validate earlier, so this is the last
+    // guard for a hand-edited meta.json.
+    resolve_full_provider(&meta.provider)?;
     let bin = atc_bin();
     let bootstrap = format!(
         "You are ATC. Read {} as your operating policy, then read state.json and \
 task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
-        paths.claude_md.display()
+        paths.dir.join(provider_policy_file(meta)).display()
     );
     let status = tokio::process::Command::new(&bin)
         .args([
             "run",
+            "--tool",
+            &meta.provider,
             "--repo",
             &paths.dir.display().to_string(),
             "--name",
@@ -227,6 +309,15 @@ task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
         bail!("`ainb run` exited {status} — ATC session not spawned");
     }
     Ok(true)
+}
+
+/// The policy filename the instance's provider actually reads, falling back to
+/// `CLAUDE.md` for a provider that declares no ATC control (a lite instance can
+/// legitimately name any provider, since it runs no brain).
+fn provider_policy_file(meta: &AtcMeta) -> &'static str {
+    crate::fleet::atc::supervisor::provider_control(&meta.provider)
+        .filter(|c| c.is_supported())
+        .map_or("CLAUDE.md", |c| c.policy_file)
 }
 
 /// Register the ATC instance's heartbeat as a daemon cron (D12), returning
@@ -459,11 +550,17 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
         "last_heartbeat_ms": last_heartbeat_ms,
         "heartbeat_age_ms": heartbeat_age_ms,
         "heartbeat_stale": heartbeat_stale,
+        "mode": meta.mode.id(),
+        "provider": meta.provider,
+        "owner": meta.mode.owner().label(),
     });
 
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{}' status", meta.name);
         println!("  dir:       {}", paths.dir.display());
+        for line in mode_help(meta.mode, &meta.provider) {
+            println!("  {line}");
+        }
         println!(
             "  session:   {} (running: {session_running})",
             meta.tmux_session()
@@ -989,6 +1086,45 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
         bail!("no ATC instance named '{name}' — cannot fire heartbeat");
     }
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta)?)?;
+
+    // THE EXCLUSIVITY GATE. Both schedulers — the local launchd/systemd timer
+    // and the daemon cron — reach the full controller through this one verb, so
+    // gating here gates every full-mode action path. A timer left behind by a
+    // switch to lite therefore fires into a refusal instead of sending a second
+    // stream of nudges alongside the lite scanner.
+    //
+    // Reports `roster_valid: false` and `delivered: false`, which are the
+    // daemon's own fail-closed gates: it leaves the retry ledger untouched
+    // rather than reading a stood-down beat as "the whole fleet recovered".
+    if !may_act(meta.mode, Controller::FullHeartbeat) {
+        let reason = stand_down_reason(meta.mode, Controller::FullHeartbeat);
+        if matches!(format, OutputFormat::Text) {
+            println!("[atc/{name}] {reason}");
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "heartbeat",
+                    "name": name,
+                    "stood_down": true,
+                    "mode": meta.mode.id(),
+                    "owner": meta.mode.owner().label(),
+                    "reason": reason,
+                    "needs_count": 0,
+                    "err_sessions": [],
+                    "roster_valid": false,
+                    "ledger_owner": "none",
+                    "completions": 0,
+                    "session_live": false,
+                    "idle_paused": false,
+                    "delivered": false,
+                    "skipped_pending": false,
+                }))?
+            );
+        }
+        return Ok(());
+    }
+
     let tmux = meta.tmux_session();
 
     // Pull the LLM-free needs read. Shelling the verb keeps ATC poll-mode and
@@ -1265,7 +1401,7 @@ fn write_heartbeat_state(paths: &AtcPaths, state: &HeartbeatState) {
 /// Shell `ainb fleet needs --no-enrich --format json` and parse the rows. The
 /// `--no-enrich` keeps the read 0-token; any failure degrades to an empty
 /// fleet (the heartbeat then reports "quiet").
-async fn fetch_needs() -> Result<Vec<NeedsRow>> {
+pub(super) async fn fetch_needs() -> Result<Vec<NeedsRow>> {
     let bin = atc_bin();
     let out = tokio::process::Command::new(&bin)
         .args(["--format", "json", "fleet", "needs", "--no-enrich"])
