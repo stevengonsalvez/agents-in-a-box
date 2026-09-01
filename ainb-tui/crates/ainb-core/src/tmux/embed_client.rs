@@ -311,7 +311,8 @@ mod tests {
     /// wildcard/kill-server, per the tmux safety rule).
     fn new_session(tag: &str) -> String {
         let name = format!("ainb-embed-test-{}-{}", tag, std::process::id());
-        let _ = Command::new("tmux").args(["kill-session", "-t", &name]).output();
+        // Exact target, never a prefix match.
+        let _ = Command::new("tmux").args(["kill-session", "-t", &format!("={name}")]).output();
         let ok = Command::new("tmux")
             .args([
                 "new-session",
@@ -332,7 +333,8 @@ mod tests {
     }
 
     fn kill_session(name: &str) {
-        let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
+        // Exact target, never a prefix match.
+        let _ = Command::new("tmux").args(["kill-session", "-t", &format!("={name}")]).output();
     }
 
     fn screen_contains(client: &EmbedClient, needle: &str, deadline: Instant) -> bool {

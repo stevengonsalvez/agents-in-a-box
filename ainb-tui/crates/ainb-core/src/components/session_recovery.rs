@@ -781,7 +781,10 @@ impl SessionRecoveryState {
         let check_result = Command::new("tmux").args(["has-session", "-t", &new_session]).output();
         if check_result.map(|o| o.status.success()).unwrap_or(false) {
             // Kill existing session to avoid conflicts
-            let _ = Command::new("tmux").args(["kill-session", "-t", &new_session]).output();
+            // Exact target, never a prefix match.
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={new_session}")])
+                .output();
         }
 
         // Create new tmux session in the worktree directory

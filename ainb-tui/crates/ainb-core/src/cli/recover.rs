@@ -487,7 +487,10 @@ fn cleanup_single_orphan(orphan: &OrphanedSession) -> Result<()> {
     // 1. Kill tmux session if alive
     if orphan.is_tmux_alive {
         if let Some(ref tmux_name) = orphan.tmux_session_name {
-            let _ = Command::new("tmux").args(["kill-session", "-t", tmux_name]).output();
+            // Exact target, never a prefix match.
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={tmux_name}")])
+                .output();
         }
     }
 
