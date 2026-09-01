@@ -7861,16 +7861,21 @@ impl AppState {
         // everyone because one row cannot use it.
         // Already-Stopped sessions are excluded too: offering "Stop all" for a
         // selection that is entirely stopped makes the default a no-op, and the
-        // user pressing Enter on it would lose their selection for nothing.
-        let stoppable: Vec<Uuid> = session_ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.find_session(*id).is_some_and(|s| {
-                    is_stoppable_interactive(s) && !matches!(s.status, SessionStatus::Stopped)
-                })
-            })
-            .collect();
+        // user pressing Enter on it would lose their selection for nothing. The
+        // two exclusions are counted apart because the dialog has to say which
+        // one applies: "cannot be stopped" and "already stopped" are opposite
+        // claims about whether the session can come back.
+        let mut stoppable: Vec<Uuid> = Vec::new();
+        let mut already_stopped = 0;
+        let mut no_stop_path = 0;
+        for id in &session_ids {
+            match self.find_session(*id) {
+                Some(s) if !is_stoppable_interactive(s) => no_stop_path += 1,
+                Some(s) if matches!(s.status, SessionStatus::Stopped) => already_stopped += 1,
+                Some(_) => stoppable.push(*id),
+                None => no_stop_path += 1,
+            }
+        }
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
@@ -7884,11 +7889,18 @@ impl AppState {
                 ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
             )
         } else if stoppable.is_empty() {
+            let reason = if no_stop_path == 0 {
+                "Every one of these is already stopped, so there is nothing to stop"
+            } else if already_stopped == 0 {
+                "None of these sessions can be stopped and resumed"
+            } else {
+                "These sessions are either already stopped or have no stop path"
+            };
             ConfirmationDialog {
                 title: format!("Delete {count} Session(s)"),
                 message: format!(
-                    "{summary}\nThis removes {count} worktree(s). None of these sessions \
-                     can be stopped and resumed, so Delete is the only option offered."
+                    "{summary}\n{reason}, so Delete is the only option offered. \
+                     It removes {count} worktree(s)."
                 ),
                 confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
                 selected_option: false, // Default = No
@@ -7898,11 +7910,19 @@ impl AppState {
             }
         } else {
             let stoppable_count = stoppable.len();
+            let rest = count - stoppable_count;
+            let excluded = if no_stop_path == 0 {
+                format!("the other {rest} are already stopped")
+            } else if already_stopped == 0 {
+                format!("the other {rest} cannot be stopped")
+            } else {
+                format!("the other {rest} are already stopped or cannot be stopped")
+            };
             stop_or_delete_dialog(
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
-                    "{summary}\nStop applies to the {stoppable_count} that can be resumed \
-                     and keeps their worktrees. Delete removes all {count} worktree(s)."
+                    "{summary}\nStop covers {stoppable_count} and keeps their worktrees, \
+                     {excluded}. Delete removes all {count} worktree(s)."
                 ),
                 warning,
                 (
@@ -7917,9 +7937,10 @@ impl AppState {
     /// One-line "which sessions are affected" summary for the bulk dialog.
     /// Long selections are truncated so the message still fits the dialog.
     fn format_bulk_session_summary(names: &[String]) -> String {
-        if names.is_empty() {
-            return "No sessions selected".to_string();
-        }
+        debug_assert!(
+            !names.is_empty(),
+            "the caller returns early on an empty selection"
+        );
         format!(
             "{} session(s): {}",
             names.len(),
