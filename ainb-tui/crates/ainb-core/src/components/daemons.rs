@@ -20,6 +20,7 @@ use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
+use crate::fleet::read::{CurrentStateIndex, EvidenceCensus, EvidenceHealth, ProbeIndex};
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -59,6 +60,8 @@ pub struct Snapshot {
     /// Most-recent hook wiring health. Collected beside daemon state, never in
     /// the render path.
     pub hook_health: Option<HookHealth>,
+    /// Hook evidence freshness, collected beside the wiring health.
+    pub evidence_census: Option<EvidenceCensus>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -332,6 +335,7 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+            evidence_census: guard.evidence_census,
         }
     }
 }
@@ -420,12 +424,23 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
+    let probes = ProbeIndex::load();
+    let hooks_ready = hook_health.as_ref().is_some_and(|health| {
+        health.script_ready
+            && health.hook_binary_ready
+            && health
+                .agents
+                .iter()
+                .any(|agent| agent.agent == "claude" && agent.wiring_ready)
+    });
+    let evidence_census = CurrentStateIndex::load().evidence_census(&probes, hooks_ready, now_ms());
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
             guard.collected_at_ms = now_ms();
             guard.hook_health = hook_health;
+            guard.evidence_census = Some(evidence_census);
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
@@ -507,6 +522,7 @@ pub fn render(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
+            snapshot.evidence_census,
             runtime,
             snapshot.collected_at_ms > 0,
         );
@@ -649,6 +665,7 @@ fn render_hook_section(
     frame: &mut Frame,
     area: Rect,
     health: Option<&HookHealth>,
+    evidence: Option<EvidenceCensus>,
     runtime: Option<&DaemonsOverlayState>,
     collected: bool,
 ) {
@@ -765,6 +782,7 @@ fn render_hook_section(
                     ),
                     Style::default().fg(MUTED_GRAY),
                 )),
+                evidence_line(evidence),
                 Line::from(Span::styled(
                     issue,
                     Style::default().fg(if health.issues.is_empty() {
@@ -780,6 +798,24 @@ fn render_hook_section(
         Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
         inner,
     );
+}
+
+fn evidence_line(evidence: Option<EvidenceCensus>) -> Line<'static> {
+    let Some(evidence) = evidence else {
+        return Line::from(Span::styled("Claude hook evidence unavailable", Style::default().fg(STOPPED_RED)));
+    };
+    let style = match evidence.health {
+        EvidenceHealth::Healthy => Style::default().fg(HEALTHY_GREEN),
+        EvidenceHealth::Silent => Style::default().fg(GOLD),
+        EvidenceHealth::Unavailable => Style::default().fg(STOPPED_RED),
+    };
+    Line::from(Span::styled(
+        format!(
+            "Claude hook {}  ·  {} active probe(s), {} fresh state",
+            evidence.health.label(), evidence.active_probes, evidence.fresh_hook_states
+        ),
+        style,
+    ))
 }
 
 fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &DaemonsState) {
@@ -1022,6 +1058,7 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1075,6 +1112,7 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),
+            evidence_census: Some(EvidenceCensus::from_counts(true, 1, 1)),
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1307,6 +1345,26 @@ mod tests {
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+        assert!(
+            out.contains("Claude hook Healthy"),
+            "hook evidence health missing: {out}"
+        );
+    }
+
+    #[test]
+    fn renders_silent_and_unavailable_hook_evidence_as_warnings() {
+        let mut state = seeded_state_with_hook(Vec::new(), hook_health());
+        let shared = state.shared.as_ref().expect("seeded state");
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(true, 2, 0));
+        let silent = render_to_string(&mut state, None, 120, 24);
+        assert!(silent.contains("Claude hook Silent"), "silent warning missing: {silent}");
+
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(false, 2, 2));
+        let unavailable = render_to_string(&mut state, None, 120, 24);
+        assert!(
+            unavailable.contains("Claude hook Unavailable"),
+            "unavailable warning missing: {unavailable}"
+        );
     }
 
     /// Bug 3: a stopped daemon had no way back up. Every row is now selectable

@@ -399,6 +399,28 @@ impl ProbeIndex {
         self.all.len()
     }
 
+    /// Number of working directories with a live, recently-updated probe.
+    /// Several Claude sessions sharing one directory still need only one hook
+    /// state row, so this mirrors the hook reader's cwd key.
+    #[must_use]
+    pub fn fresh_cwd_count(&self, now_ms: i64) -> usize {
+        self.fresh_cwds(now_ms).len()
+    }
+
+    /// Working directories with a live, recently-updated probe.
+    #[must_use]
+    pub fn fresh_cwds(&self, now_ms: i64) -> std::collections::HashSet<&str> {
+        self.all
+            .iter()
+            .filter(|probe| {
+                probe.status_updated_at > 0
+                    && probe.status_updated_at <= now_ms
+                    && now_ms - probe.status_updated_at <= HEALTHY_MAX_AGE_MIN * 60_000
+            })
+            .map(|probe| probe.cwd.as_str())
+            .collect::<std::collections::HashSet<_>>()
+    }
+
     /// Every live probe, including several sharing one cwd.
     pub fn all_live(&self) -> impl Iterator<Item = &ClaudeProbe> {
         self.all.iter()
@@ -702,6 +724,23 @@ mod tests {
     fn a_missing_sessions_dir_yields_an_empty_index() {
         let dir = tempfile::tempdir().unwrap();
         assert!(ProbeIndex::load_from(&dir.path().join("nope")).is_empty());
+    }
+
+    #[test]
+    fn fresh_cwd_count_requires_a_recent_stamp_and_deduplicates_directories() {
+        let now = 60 * 60_000;
+        let mut fresh = probe("busy", now - 1_000);
+        let mut same_cwd = fresh.clone();
+        same_cwd.session_id = "cs2".into();
+        let mut stale = fresh.clone();
+        stale.cwd = "/w/stale".into();
+        stale.status_updated_at = now - (HEALTHY_MAX_AGE_MIN + 1) * 60_000;
+        fresh.status_updated_at = now - 2_000;
+        let index = ProbeIndex {
+            all: vec![fresh, same_cwd, stale],
+            ..ProbeIndex::default()
+        };
+        assert_eq!(index.fresh_cwd_count(now), 1);
     }
 
     #[test]
