@@ -844,6 +844,8 @@ pub struct DialogOption {
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
+    BulkDeleteSessions(Vec<Uuid>), // Delete every multi-selected session (removes worktrees)
+    BulkStopSessions(Vec<Uuid>), // Soft-stop every multi-selected session (preserves worktrees)
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
@@ -3824,6 +3826,7 @@ pub enum AsyncAction {
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    BulkStopSessions(Vec<Uuid>), // Soft-stop multiple interactive sessions (tmux only; preserves worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
     AttachToContainer(Uuid),               // Attach to a container session
@@ -7710,6 +7713,131 @@ impl AppState {
         }
     }
 
+    /// Show the tri-option Stop all / Delete all / Cancel dialog for every
+    /// multi-selected session.
+    ///
+    /// The single-row flow has always defaulted to Stop so a stray `d` cannot
+    /// destroy a worktree. The bulk flow used to skip confirmation entirely and
+    /// delete immediately, taking uncommitted work with it; it now gets the same
+    /// dialog, the same Stop default, and an aggregate uncommitted-work warning.
+    pub fn show_bulk_delete_or_stop_confirmation(&mut self, session_ids: Vec<Uuid>) {
+        let count = session_ids.len();
+        info!(
+            "Showing bulk Stop/Delete/Cancel dialog for {} session(s)",
+            count
+        );
+
+        let names: Vec<String> = session_ids
+            .iter()
+            .map(|id| {
+                self.find_session(*id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| id.to_string())
+            })
+            .collect();
+        let warning =
+            Self::format_bulk_uncommitted_warning(&self.bulk_uncommitted_counts(&session_ids));
+
+        let options = vec![
+            DialogOption {
+                label: "Stop all".to_string(),
+                action: ConfirmAction::BulkStopSessions(session_ids.clone()),
+            },
+            DialogOption {
+                label: "Delete all".to_string(),
+                action: ConfirmAction::BulkDeleteSessions(session_ids.clone()),
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ];
+
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: format!("Stop or Delete {} Session(s)", count),
+            message: format!(
+                "{}\nStop keeps every worktree and resumes later. Delete removes {} worktree(s).",
+                Self::format_bulk_session_summary(&names),
+                count
+            ),
+            // confirm_action mirrors the default (Stop all) for the legacy
+            // binary ConfirmationConfirm path.
+            confirm_action: ConfirmAction::BulkStopSessions(session_ids),
+            selected_option: true,
+            warning,
+            options: Some(options),
+            selected_index: 0, // Default = Stop all (safe option)
+        });
+    }
+
+    /// One-line "which sessions are affected" summary for the bulk dialog.
+    /// Long selections are truncated so the message still fits the dialog.
+    fn format_bulk_session_summary(names: &[String]) -> String {
+        const MAX_NAMED: usize = 3;
+        if names.is_empty() {
+            return "No sessions selected".to_string();
+        }
+        let shown = names.len().min(MAX_NAMED);
+        let mut summary = format!("{} session(s): {}", names.len(), names[..shown].join(", "));
+        if names.len() > shown {
+            summary.push_str(&format!(", and {} more", names.len() - shown));
+        }
+        summary
+    }
+
+    /// `(session name, uncommitted file count)` for every selected session whose
+    /// worktree is dirty. Sessions with clean or unreadable worktrees, and Shell
+    /// sessions (no dedicated worktree), are omitted.
+    fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> Vec<(String, usize)> {
+        use crate::git::WorktreeManager;
+        use crate::models::SessionAgentType;
+
+        let Ok(worktree_manager) = WorktreeManager::new() else {
+            return Vec::new();
+        };
+
+        session_ids
+            .iter()
+            .filter_map(|id| {
+                let session = self.find_session(*id)?;
+                if matches!(session.agent_type, SessionAgentType::Shell) {
+                    return None;
+                }
+                let count = worktree_manager.uncommitted_file_count(*id).ok()?;
+                (count > 0).then(|| (session.name.clone(), count))
+            })
+            .collect()
+    }
+
+    /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
+    /// the work "Delete all" would destroy, so it names the dirty sessions
+    /// rather than reporting a bare total.
+    fn format_bulk_uncommitted_warning(dirty: &[(String, usize)]) -> Option<String> {
+        const MAX_NAMED: usize = 3;
+        if dirty.is_empty() {
+            return None;
+        }
+        let total: usize = dirty.iter().map(|(_, count)| *count).sum();
+        let shown = dirty.len().min(MAX_NAMED);
+        let listed = dirty[..shown]
+            .iter()
+            .map(|(name, count)| format!("{} ({})", name, count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if dirty.len() > shown {
+            format!(", +{} more", dirty.len() - shown)
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
+            total,
+            dirty.len(),
+            listed,
+            more
+        ))
+    }
+
     /// `true` if ainb should offer to run `abtop --setup` (the Claude
     /// rate-limit StatusLine hook) before opening abtop for the first time.
     /// Offered until the hook has run (its `~/.claude/abtop-rate-limits.json`
@@ -10014,11 +10142,37 @@ impl AppState {
             audit_result,
         );
 
-        // Mirror delete_session: refresh workspace view so the Stopped indicator is rendered.
-        self.load_real_workspaces().await;
-        self.ui_needs_refresh = true;
-
+        // The caller owns the workspace refresh so a bulk stop repaints once
+        // instead of rescanning every workspace per session.
         result
+    }
+
+    /// Soft-stop every session in `session_ids`.
+    ///
+    /// Each one goes through `stop_interactive_session`, so tmux is killed and
+    /// nothing else is: worktrees, the `sessions.json` entries, and the
+    /// `by-session/<uuid>` symlinks all survive and every session stays
+    /// resumable. The caller refreshes the workspace view once afterwards.
+    async fn bulk_stop_sessions(&mut self, session_ids: Vec<Uuid>) {
+        let total = session_ids.len();
+        let mut stopped = 0;
+        let mut failed = 0;
+        for id in session_ids {
+            if let Err(e) = self.stop_interactive_session(id).await {
+                error!("Failed to stop session {}: {}", id, e);
+                failed += 1;
+            } else {
+                stopped += 1;
+            }
+        }
+        if failed > 0 {
+            self.add_warning_notification(format!(
+                "Stopped {}/{} sessions ({} failed)",
+                stopped, total, failed
+            ));
+        } else {
+            self.add_success_notification(format!("Stopped {} session(s)", stopped));
+        }
     }
 
     /// Resume a previously-stopped interactive session.
@@ -10456,6 +10610,9 @@ impl AppState {
                         error!("Failed to stop session {}: {}", session_id, e);
                         self.add_error_notification(format!("Stop failed: {}", e));
                     }
+                    // Refresh so the Stopped indicator is rendered.
+                    self.load_real_workspaces().await;
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::ResumeSession(session_id, trigger) => {
                     if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
@@ -10486,6 +10643,11 @@ impl AppState {
                     } else {
                         self.add_success_notification(format!("Resumed {} session(s)", resumed));
                     }
+                    self.ui_needs_refresh = true;
+                }
+                AsyncAction::BulkStopSessions(session_ids) => {
+                    self.bulk_stop_sessions(session_ids).await;
+                    self.load_real_workspaces().await;
                     self.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
