@@ -304,6 +304,65 @@ impl WorktreeManager {
         Ok(worktrees)
     }
 
+    /// The directory a session's tree lives in, if anything is there.
+    ///
+    /// Resolution only: no `.git` check, no branch, no commit. Callers that need
+    /// to know what a delete would remove use this, because a directory with no
+    /// `.git` is still a directory full of files.
+    pub fn session_dir(&self, session_id: Uuid) -> Option<PathBuf> {
+        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
+        tracing::debug!(
+            "Looking for session path: {:?} (exists: {}, is_symlink: {})",
+            session_path,
+            session_path.exists(),
+            session_path.is_symlink()
+        );
+
+        let worktree_path = if session_path.exists() && session_path.is_symlink() {
+            match std::fs::read_link(&session_path) {
+                Ok(resolved) => {
+                    tracing::debug!("Resolved symlink to: {:?}", resolved);
+                    resolved
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to read symlink {:?}: {}", session_path, e);
+                    return None;
+                }
+            }
+        } else {
+            // Fallback to old location for backward compatibility
+            let old_path = self.base_worktree_dir.join(session_id.to_string());
+            tracing::debug!("Using fallback path: {:?}", old_path);
+            old_path
+        };
+
+        worktree_path.exists().then_some(worktree_path)
+    }
+
+    /// How many files `git status --porcelain` reports in `path`.
+    ///
+    /// Ignored files are not counted, so a tree holding only ignored files reads
+    /// as clean. Counting them would mean counting `target/` and
+    /// `node_modules/` on every session, which buries the signal this exists to
+    /// give.
+    pub fn uncommitted_file_count_at(path: &Path) -> Result<usize, WorktreeError> {
+        let output =
+            Command::new("git").current_dir(path).args(["status", "--porcelain"]).output()?;
+
+        if !output.status.success() {
+            return Err(WorktreeError::CommandFailed(format!(
+                "git status failed in {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count())
+    }
+
     /// Resolve a session's working tree on disk.
     ///
     /// Only the path: no branch, no commit, no main-repository lookup. Callers
@@ -322,30 +381,9 @@ impl WorktreeManager {
     /// - `Io`: the path could not be read (permissions, a racing removal). Also
     ///   unknown.
     pub fn worktree_path(&self, session_id: Uuid) -> Result<PathBuf, WorktreeError> {
-        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
-        tracing::debug!("Looking for session path: {:?}", session_path);
-
-        let worktree_path = if session_path.exists() && session_path.is_symlink() {
-            std::fs::read_link(&session_path)?
-        } else {
-            // Fallback to old location for backward compatibility
-            let old_path = self.base_worktree_dir.join(session_id.to_string());
-            if old_path.exists() {
-                old_path
-            } else {
-                return Err(WorktreeError::NotFound(format!(
-                    "Session {session_id} worktree not found"
-                )));
-            }
-        };
-
-        // Check if the symlink target exists
-        if !worktree_path.exists() {
-            return Err(WorktreeError::NotFound(format!(
-                "Symlink target does not exist: {}",
-                worktree_path.display()
-            )));
-        }
+        let worktree_path = self.session_dir(session_id).ok_or_else(|| {
+            WorktreeError::NotFound(format!("Session {session_id} worktree not found"))
+        })?;
 
         // A directory with no `.git` still holds files, and deleting the session
         // removes it, so this is NOT NotFound: reporting "nothing to lose" here
@@ -821,39 +859,14 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// How many files `git status --porcelain` reports in the session's tree:
-    /// staged, unstaged and untracked. Used to warn before deleting a session
-    /// that still has work in it.
+    /// `uncommitted_file_count_at` for the session's tree.
     ///
     /// Resolves only the path, so a tree this can read reports a real number
     /// even when its branch, commit or parent repository cannot be resolved: a
     /// caller warning about uncommitted work must not be told "unknown" for a
     /// plain clone.
-    ///
-    /// Ignored files are not counted, so a tree holding only ignored files reads
-    /// as clean. Counting them would mean counting `target/` and `node_modules/`
-    /// on every session, which buries the signal this exists to give.
     pub fn uncommitted_file_count(&self, session_id: Uuid) -> Result<usize, WorktreeError> {
-        let worktree_path = self.worktree_path(session_id)?;
-
-        let output = Command::new("git")
-            .current_dir(&worktree_path)
-            .args(["status", "--porcelain"])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(WorktreeError::CommandFailed(format!(
-                "Failed to get git status: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        let count = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
-
-        Ok(count)
+        Self::uncommitted_file_count_at(&self.worktree_path(session_id)?)
     }
 }
 
