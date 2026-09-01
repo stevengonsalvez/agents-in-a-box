@@ -563,7 +563,10 @@ pub enum AppEvent {
     SetupMenuUp,     // Navigate up
     SetupMenuDown,   // Navigate down
     StartOnboarding, // Start onboarding wizard (from setup menu)
-    FactoryReset,    // Factory reset AINB
+    // NOTE: no `FactoryReset` variant. Factory reset is destructive and is
+    // reachable ONLY through `SetupMenuSelect`'s confirmation gate (see
+    // `SetupMenuItem::is_dangerous`). A bare event variant was an unconfirmed
+    // second door to the same wipe, with no dispatcher — removed 2026-09.
     // Changelog viewer events
     ShowChangelog,       // Navigate to changelog view (v key)
     ChangelogBack,       // Return to home screen (Esc)
@@ -8348,16 +8351,6 @@ impl EventHandler {
             AppEvent::StartOnboarding => {
                 tracing::debug!("Starting onboarding from setup menu");
                 state.start_onboarding(true, None);
-            }
-            AppEvent::FactoryReset => {
-                tracing::debug!("Factory reset requested");
-                use crate::config::OnboardingConfig;
-                if let Err(e) = OnboardingConfig::factory_reset() {
-                    tracing::error!("Factory reset failed: {}", e);
-                } else {
-                    tracing::info!("Factory reset completed");
-                    state.start_onboarding(true, None);
-                }
             }
             // Mouse events are handled directly in the main event loop
             AppEvent::MouseClick { .. }
