@@ -1815,13 +1815,22 @@ impl AppConfig {
     /// the structs cannot work: the file's silence about a key is gone by
     /// then.
     pub fn load() -> Result<Self> {
-        // Lowest precedence first; later files override earlier ones.
+        // Read each file ONCE and fold it into both accumulators. Walking the
+        // paths twice meant a file created or rewritten between the passes
+        // landed in one and not the other — and since only the first pass
+        // propagated errors, the result was a `save()` that skipped a leaf
+        // whose value was not actually in the effective config, silently
+        // dropping the user's own setting. It is also half the syscalls and
+        // parsing in a function that runs in daemons, plugin startup and the
+        // TUI event loop.
         let mut merged = toml::Table::new();
+        let mut inherited = toml::Table::new();
         let mut loaded: Vec<PathBuf> = Vec::new();
 
         // `(scope, path)`: the scope travels with the path so `ainb config path`
-        // cannot mislabel it. The loader only needs the path.
-        for (_scope, path) in Self::get_config_paths() {
+        // cannot mislabel it, and `save()` needs it to know which layer is the
+        // user's own.
+        for (scope, path) in Self::get_config_paths() {
             if !path.exists() {
                 continue;
             }
@@ -1829,24 +1838,11 @@ impl AppConfig {
                 .with_context(|| format!("Failed to read config from {}", path.display()))?;
             let layer = parse_config_layer(&content)
                 .with_context(|| format!("Failed to parse config from {}", path.display()))?;
+            if scope != ConfigScope::User {
+                merge_config_tables(&mut inherited, layer.clone());
+            }
             merge_config_tables(&mut merged, layer);
             loaded.push(path);
-        }
-
-        // The same merge with the user layer left out. Comparing against this
-        // is how `save()` tells "the user set this" from "a project or system
-        // file provides this".
-        let mut inherited = toml::Table::new();
-        for (scope, path) in Self::get_config_paths() {
-            if scope == ConfigScope::User || !path.exists() {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            if let Ok(layer) = parse_config_layer(&content) {
-                merge_config_tables(&mut inherited, layer);
-            }
         }
 
         let mut config = Self::from_merged_layers(merged).with_context(|| {
@@ -1997,27 +1993,31 @@ impl AppConfig {
             }
         }
 
-        // Write only what the USER layer owns. This struct is the merge of
-        // every layer, so a leaf whose value another layer already provides is
-        // not ours to persist — writing it would copy a project's or the
-        // system's setting into the user's global file, where it then applies
-        // everywhere. A leaf the user file already carries stays, even if it
-        // agrees with another layer: it was theirs before this save and
-        // dropping it would be a silent deletion.
+        // Write only what the USER layer owns.
+        //
+        // `ours_leaves` comes from the MERGED table, so for any key another
+        // layer sets, the value here is THAT layer's. Writing it would copy a
+        // project's or the system's setting into the user's global file, where
+        // it then applies everywhere.
+        //
+        // A leaf is not ours when the merged value is exactly what the other
+        // layers provide AND it is not what the user file holds. That second
+        // clause is what distinguishes "the user edited this to the same thing"
+        // from "this value is simply not theirs" — and, crucially, preserves a
+        // user value the project layer disagrees with, which is the common
+        // case and the one a naive check gets backwards.
         let inherited = toml::Value::Table(self.inherited.clone());
-        let already_ours: std::collections::HashSet<String> = existing
+        let on_disk = existing
             .parse::<toml::Table>()
-            .map(|table| {
-                let mut leaves = Vec::new();
-                flatten_leaves(&table, String::new(), &mut leaves);
-                leaves.into_iter().map(|(key, _)| key).collect()
-            })
-            .unwrap_or_default();
+            .map(toml::Value::Table)
+            .unwrap_or_else(|_| toml::Value::Table(toml::Table::new()));
 
         for (key, value) in &ours_leaves {
-            if !already_ours.contains(key)
-                && registry::navigate_toml(&inherited, key).is_ok_and(|from| from == value)
-            {
+            let from_inherited = registry::navigate_toml(&inherited, key).ok();
+            let from_user = registry::navigate_toml(&on_disk, key).ok();
+            if from_inherited == Some(value) && from_user != Some(value) {
+                // Another layer provides exactly this, and the user file says
+                // something else (or nothing). Leave their file alone.
                 continue;
             }
             set_document_key(&mut doc, key, value)?;
@@ -2973,6 +2973,35 @@ timeout = 60
             registry::navigate_toml(&toml::Value::Table(reparsed.clone()), "docker.timeout")
                 .is_err(),
             "the project's docker.timeout was copied into the user's file:\n{saved}"
+        );
+    }
+
+    /// The case both other tests miss: the user file has the key AND the
+    /// project sets it to something ELSE.
+    ///
+    /// `ours_leaves` is flattened from the MERGED table, where the project has
+    /// already won, so writing it back put the project's value into the user's
+    /// global file — the exact clobber this whole change exists to stop, just
+    /// reachable only when the two layers disagree.
+    #[test]
+    fn save_does_not_overwrite_a_user_value_with_a_project_one() {
+        let project = "[docker]\ntimeout = 22\n";
+        let user_file = "[docker]\ntimeout = 11\n";
+
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+        assert_eq!(
+            config.docker.timeout, 22,
+            "the merge should favour the project"
+        );
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["docker"]["timeout"].as_integer(),
+            Some(11),
+            "the project's value was written into the user's own file:\n{saved}"
         );
     }
 
