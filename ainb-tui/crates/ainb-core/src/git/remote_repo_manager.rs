@@ -1,8 +1,30 @@
 // ABOUTME: Manages cloning and caching of remote git repositories
+//
+// CONCURRENCY / DATA SAFETY: the shared clone cache
+// (`~/.agents-in-a-box/repos/<host>/<owner>/<repo>`) is written by every
+// concurrently running ainb process on the machine, and live worktrees gitlink
+// back into it — deleting one orphans every worktree cut from it. A 2026-09
+// incident wiped the whole cache this way: `clone_repo` did an UNLOCKED
+// check-then-act, so two processes both saw a cold cache, both cloned into the
+// same path, and the loser's "clean up my partial clone" `remove_dir_all` ate
+// the winner's finished repo — which uncached it again and re-armed the race.
+//
+// Four rules keep that from recurring; keep all four when editing this file:
+//   1. A clone lands in a private staging dir and is published with an atomic
+//      `rename` — the only directory a failing clone may delete is its own.
+//   2. Check-then-clone runs under a per-repo advisory file lock, and re-checks
+//      the cache after acquiring it (double-checked locking).
+//   3. Every destructive path goes through `remove_repo_dir_guarded`, which
+//      refuses to delete a repo that still has live worktrees.
+//   4. Every destructive attempt leaves a receipt outside `~/.agents-in-a-box`,
+//      so the evidence survives even a full wipe of that tree.
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -209,6 +231,14 @@ impl RemoteRepoManager {
     ///
     /// Standard clone has .git subdirectory and working copy, making it
     /// compatible with the same worktree handling as local repositories.
+    ///
+    /// Concurrency-safe: the check-then-clone sequence runs under a per-repo
+    /// advisory file lock and re-checks the cache once the lock is held, so N
+    /// processes launching sessions against the same cold repo produce ONE
+    /// clone and N-1 reuses. The clone itself is staged and published by
+    /// `rename` (see [`Self::clone_into_cache`]), so even a lock that fails to
+    /// apply — a lock file on an exotic filesystem, a process bypassing this
+    /// path — cannot end with one process deleting another's finished repo.
     pub fn clone_repo(
         &self,
         source: &RepoSource,
@@ -227,17 +257,57 @@ impl RemoteRepoManager {
             return Ok(cache_path);
         }
 
-        info!("Cloning {} to {}", url, cache_path.display());
-
-        // Create parent directories
+        // Create parent directories (also the lock file's home)
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        let _lock = CloneLock::acquire(&cache_path)?;
+
+        // Double-checked: another process may have published the clone while we
+        // waited on the lock. Reuse it — re-cloning over a live repo is exactly
+        // the mistake this lock exists to prevent.
+        if Self::cache_path_is_populated(&cache_path) {
+            info!(
+                "Repository cloned by a concurrent process at: {}",
+                cache_path.display()
+            );
+            if let Err(e) = self.fetch_updates(&cache_path) {
+                warn!("Failed to fetch updates: {}", e);
+            }
+            return Ok(cache_path);
+        }
+
+        Self::clone_into_cache(&url, &cache_path)
+    }
+
+    /// Clone `url` into a private staging directory, then publish it into
+    /// `cache_path` with an atomic `rename`.
+    ///
+    /// The staging directory is a sibling of `cache_path` so the rename stays
+    /// on one filesystem (and therefore atomic). The only directory this
+    /// function ever removes is that staging directory, which it created — so a
+    /// failed clone cannot delete a populated shared repo no matter who else is
+    /// running. Losing the publish race to another process is a success, not a
+    /// failure: their clone is adopted and ours discarded.
+    fn clone_into_cache(url: &str, cache_path: &Path) -> Result<PathBuf, RemoteRepoError> {
+        let staging = staging_path(cache_path)?;
+        // A same-named leftover can only come from a crashed earlier run whose
+        // pid we now reuse; it is ours by construction, but route it through
+        // the guard anyway so nothing in this file deletes unchecked.
+        remove_repo_dir_guarded(&staging, "clone_into_cache: stale staging dir")?;
+
+        info!(
+            "Cloning {} to {} (staging at {})",
+            url,
+            cache_path.display(),
+            staging.display()
+        );
+
         // Standard clone (not --bare) for compatibility with worktree discovery
         let output = Command::new("git")
-            .args(["clone", &url])
-            .arg(&cache_path)
+            .args(["clone", url])
+            .arg(&staging)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -245,25 +315,26 @@ impl RemoteRepoManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // `git clone` can leave a partially-initialised directory behind on
-            // failure (e.g. auth rejected mid-transfer). `is_cached()` only
-            // checks for a `.git` entry, so a broken partial would be treated as
-            // a warm cache on the next attempt and never re-cloned after the
-            // user fixes credentials. Remove it so the retry starts clean.
-            if cache_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&cache_path) {
-                    warn!(
-                        "Failed to remove partial clone at {}: {}",
-                        cache_path.display(),
-                        e
-                    );
-                }
+            // A failed `git clone` (auth rejected mid-transfer, network drop)
+            // leaves a partial checkout. It is in OUR staging dir, so clearing
+            // it can never touch the shared cache — and the cache was never
+            // written at all, so a retry starts clean either way. A cleanup
+            // that fails is logged, never raised: the clone error is the one
+            // the user needs.
+            if let Err(e) = remove_repo_dir_guarded(&staging, "clone_into_cache: failed clone") {
+                warn!(
+                    "Failed to remove staged partial clone at {}: {}",
+                    staging.display(),
+                    e
+                );
             }
-            return Err(classify_git_error(&stderr, &url));
+            return Err(classify_git_error(&stderr, url));
         }
 
+        publish_staged_clone(&staging, cache_path)?;
+
         info!("Successfully cloned to: {}", cache_path.display());
-        Ok(cache_path)
+        Ok(cache_path.to_path_buf())
     }
 
     /// Fetch updates for a cached repo
@@ -1031,22 +1102,20 @@ impl RemoteRepoManager {
         // would silently upload the dead repo's entire history — the remote
         // is verifiably empty, so wipe and re-clone fresh instead.
         if local_head_exists(&cache_path) {
-            std::fs::remove_dir_all(&cache_path)?;
+            remove_repo_dir_guarded(&cache_path, "initialize_empty_remote: stale history")?;
             cache_path = self.clone_repo(source, parsed)?;
         }
         push_initial_commit(&cache_path, &parsed.repo_name)
     }
 
-    /// Remove a cached repository
+    /// Remove a cached repository.
+    ///
+    /// Errors instead of deleting when live worktrees still link into the
+    /// clone. Currently has no callers, but it is public API on a public type —
+    /// kept, and routed through the guard, so wiring it up later cannot
+    /// reintroduce an unguarded wipe.
     pub fn remove_cached_repo(&self, parsed: &ParsedRepo) -> Result<(), RemoteRepoError> {
-        let cache_path = self.get_cache_path(parsed);
-
-        if cache_path.exists() {
-            std::fs::remove_dir_all(&cache_path)?;
-            info!("Removed cached repo: {}", cache_path.display());
-        }
-
-        Ok(())
+        remove_repo_dir_guarded(&self.get_cache_path(parsed), "remove_cached_repo")
     }
 }
 
@@ -1218,6 +1287,231 @@ fn push_initial_commit(cache_path: &Path, repo_name: &str) -> Result<String, Rem
 
     info!("Pushed initial commit to origin/{branch}");
     Ok(branch)
+}
+
+/// Distinguishes staging dirs made by two clones inside one process; the pid
+/// separates processes.
+static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// The private staging directory a clone of `cache_path` is built in.
+///
+/// A SIBLING of `cache_path` (same parent, hence same filesystem) so publishing
+/// it is a single atomic `rename`, and dot-prefixed + pid/nonce-namespaced so
+/// `list_cached_repos` ignores it and no two clones ever share one.
+fn staging_path(cache_path: &Path) -> Result<PathBuf, RemoteRepoError> {
+    let parent = cache_path.parent().ok_or_else(|| {
+        RemoteRepoError::IoError(format!(
+            "cache path has no parent directory: {}",
+            cache_path.display()
+        ))
+    })?;
+    let name = cache_path
+        .file_name()
+        .ok_or_else(|| {
+            RemoteRepoError::IoError(format!(
+                "cache path has no file name: {}",
+                cache_path.display()
+            ))
+        })?
+        .to_string_lossy();
+    let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{name}.clone-tmp-{}-{nonce}", std::process::id())))
+}
+
+/// Move a finished staging clone into place at `cache_path`.
+///
+/// `rename` over an existing non-empty directory fails rather than clobbering
+/// it, which is precisely the guarantee wanted here: whoever renames first
+/// wins, and the loser adopts the winner's clone instead of replacing a repo
+/// that live worktrees may already point at.
+fn publish_staged_clone(staging: &Path, cache_path: &Path) -> Result<(), RemoteRepoError> {
+    if std::fs::rename(staging, cache_path).is_ok() {
+        return Ok(());
+    }
+
+    if RemoteRepoManager::cache_path_is_populated(cache_path) {
+        info!(
+            "Concurrent clone already published {} — reusing it and discarding {}",
+            cache_path.display(),
+            staging.display()
+        );
+        if let Err(e) = remove_repo_dir_guarded(staging, "publish_staged_clone: discard loser") {
+            warn!(
+                "Failed to discard redundant staged clone at {}: {}",
+                staging.display(),
+                e
+            );
+        }
+        return Ok(());
+    }
+
+    // The destination holds no usable clone — a partial left by an aborted run
+    // from before this staging scheme, or a stray directory. Clear it (guarded:
+    // a repo with live worktrees is refused, never deleted) and publish again.
+    remove_repo_dir_guarded(
+        cache_path,
+        "publish_staged_clone: clear unusable destination",
+    )?;
+
+    std::fs::rename(staging, cache_path).map_err(|e| {
+        let _ = remove_repo_dir_guarded(staging, "publish_staged_clone: unpublishable clone");
+        RemoteRepoError::IoError(format!(
+            "failed to publish clone {} -> {}: {e}",
+            staging.display(),
+            cache_path.display()
+        ))
+    })
+}
+
+/// The advisory lock file serialising clones of the repo at `cache_path`.
+///
+/// Lives BESIDE the repo directory, never inside it: the clone is published by
+/// renaming a new directory over `cache_path`, so a lock file held under that
+/// path would be swapped out from under its holder mid-critical-section. Built
+/// by string append rather than `Path::with_extension` so repos named `foo.rs`
+/// and `foo.py` don't collide on a shared `foo.lock`.
+fn clone_lock_path(cache_path: &Path) -> Result<PathBuf, RemoteRepoError> {
+    let parent = cache_path.parent().ok_or_else(|| {
+        RemoteRepoError::IoError(format!(
+            "cache path has no parent directory: {}",
+            cache_path.display()
+        ))
+    })?;
+    let name = cache_path
+        .file_name()
+        .ok_or_else(|| {
+            RemoteRepoError::IoError(format!(
+                "cache path has no file name: {}",
+                cache_path.display()
+            ))
+        })?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.clone-lock")))
+}
+
+/// Holds the exclusive advisory clone lock for one repo, releasing it on drop
+/// (including on the `?` early-returns through the clone path).
+struct CloneLock {
+    file: std::fs::File,
+}
+
+impl CloneLock {
+    /// Block until this process holds the clone lock for `cache_path`.
+    ///
+    /// The lock is per open file description, so two threads of one ainb
+    /// process exclude each other exactly as two separate processes do.
+    fn acquire(cache_path: &Path) -> Result<Self, RemoteRepoError> {
+        let path = clone_lock_path(cache_path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        FileExt::lock_exclusive(&file)?;
+        debug!("Holding clone lock {}", path.display());
+        Ok(Self { file })
+    }
+}
+
+impl Drop for CloneLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// How many live worktrees are linked to the clone at `cache_path`.
+///
+/// `git worktree add` registers each checkout under `<repo>/.git/worktrees/`,
+/// and the worktree's own `.git` file gitlinks back into it. Deleting the repo
+/// therefore orphans every one of them — the exact damage of the 2026-09 wipe.
+fn live_worktree_count(cache_path: &Path) -> usize {
+    std::fs::read_dir(cache_path.join(".git").join("worktrees"))
+        .map_or(0, |entries| entries.flatten().count())
+}
+
+/// Delete a repo cache directory, refusing if live worktrees still link into it
+/// and recording a receipt either way.
+///
+/// EVERY destructive path in this file goes through here. A caller that
+/// genuinely means to remove a repo with worktrees must remove the worktrees
+/// first; there is deliberately no override flag.
+fn remove_repo_dir_guarded(path: &Path, operation: &str) -> Result<(), RemoteRepoError> {
+    // Nothing to delete, nothing to record — keeps the receipt log meaning
+    // "a real directory was removed or refused".
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let worktrees = live_worktree_count(path);
+    if worktrees > 0 {
+        record_destructive_op(
+            path,
+            operation,
+            &format!("REFUSED ({worktrees} live worktree(s))"),
+        );
+        return Err(RemoteRepoError::IoError(format!(
+            "refusing to delete {} during {operation}: {worktrees} live worktree(s) still link to it — remove those worktrees first",
+            path.display()
+        )));
+    }
+
+    record_destructive_op(path, operation, "remove_dir_all");
+    std::fs::remove_dir_all(path)?;
+    info!(
+        "Removed repo cache directory {} ({operation})",
+        path.display()
+    );
+    Ok(())
+}
+
+/// The append-only receipt log for destructive operations on the repo cache.
+///
+/// Deliberately OUTSIDE `~/.agents-in-a-box`: when that whole tree is what got
+/// wiped, a log stored inside it is gone with it. Uses the same OS cache-dir
+/// resolver as `cli::statusline` (`~/Library/Caches/ainb` on macOS,
+/// `~/.cache/ainb` on Linux).
+/// `AINB_DESTRUCTIVE_OPS_LOG` redirects it (a rotated ops location, a test).
+fn destructive_ops_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AINB_DESTRUCTIVE_OPS_LOG") {
+        return Some(PathBuf::from(path));
+    }
+    let dir = dirs::cache_dir().or_else(|| dirs::home_dir().map(|h| h.join(".cache")))?;
+    Some(dir.join("ainb").join("destructive-ops.log"))
+}
+
+/// Record one attempted destructive operation on a repo cache path.
+///
+/// Best effort by design — a receipt that cannot be written must never block or
+/// fail the operation it describes — but it is also emitted through `tracing`,
+/// so the evidence exists in two places.
+fn record_destructive_op(path: &Path, operation: &str, outcome: &str) {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let pid = std::process::id();
+    warn!(
+        target: "destructive_op",
+        path = %resolved.display(),
+        operation,
+        outcome,
+        pid,
+        "repo cache directory removal"
+    );
+
+    let Some(log_path) = destructive_ops_log_path() else {
+        return;
+    };
+    if let Some(parent) = log_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = writeln!(
+            file,
+            "{}\tpid={pid}\t{operation}\t{outcome}\t{}",
+            chrono::Utc::now().to_rfc3339(),
+            resolved.display()
+        );
+    }
 }
 
 /// Classify git errors into appropriate RemoteRepoError variants
