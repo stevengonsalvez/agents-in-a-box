@@ -2337,13 +2337,14 @@ mod tests {
     /// Long selections stay readable: three names, then a count.
     #[test]
     fn bulk_session_summary_truncates_long_selections() {
-        let names: Vec<String> = (1..=12).map(|i| format!("s{i}")).collect();
+        let names: Vec<(uuid::Uuid, String)> =
+            (1..=12).map(|i| (uuid::Uuid::new_v4(), format!("s{i}"))).collect();
         assert_eq!(
             AppState::format_bulk_session_summary(&names),
             "12 session(s): s1, s2, s3, and 9 more"
         );
         assert_eq!(
-            AppState::format_bulk_session_summary(&["only".to_string()]),
+            AppState::format_bulk_session_summary(&[(uuid::Uuid::new_v4(), "only".to_string())]),
             "1 session(s): only"
         );
     }
@@ -2710,7 +2711,9 @@ mod tests {
             let mut state = AppState::new();
             state.workspaces.push(ws);
 
-            let status = state.bulk_uncommitted_counts(&ids);
+            let id_names: Vec<(uuid::Uuid, String)> =
+                ids.iter().map(|id| (*id, "n".to_string())).collect();
+            let status = AppState::bulk_uncommitted_counts(&id_names);
 
             assert_eq!(status.with_worktree, 1, "one tree, not two");
             assert_eq!(status.dirty.len(), 1, "probed once");
@@ -2750,7 +2753,7 @@ mod tests {
             let mut state = AppState::new();
             state.workspaces.push(ws);
 
-            let status = state.bulk_uncommitted_counts(&[id]);
+            let status = AppState::bulk_uncommitted_counts(&[(id, "shell".to_string())]);
 
             assert_eq!(
                 status.with_worktree, 1,
@@ -2758,9 +2761,39 @@ mod tests {
             );
             assert_eq!(
                 status.unchecked, 1,
-                "not a git tree, so its contents are unknown"
+                "not a git tree, so its contents are unknown, whether or not the \
+                 temp directory happens to sit inside some other repository"
             );
+            assert!(status.dirty.is_empty(), "no ancestor repository's files");
         });
+    }
+
+    /// A session directory that is not a checkout must never be answered for by
+    /// an ancestor repository: `git status` walks up, so probing a plain folder
+    /// nested inside a repo would report hundreds of files the session does not
+    /// own, on the dialog whose entire job is to state what is at risk.
+    #[test]
+    fn a_plain_directory_inside_a_repo_is_unknown_not_dirty() {
+        if std::process::Command::new("git").arg("--version").status().is_err() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let outer = tempfile::tempdir().expect("tempdir");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(outer.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(outer.path().join("dirty.txt"), b"work").expect("write");
+        let nested = outer.path().join("not-a-checkout");
+        std::fs::create_dir_all(&nested).expect("nested");
+
+        let err = crate::git::WorktreeManager::uncommitted_file_count_at(&nested)
+            .expect_err("a plain directory is not a checkout");
+        assert!(format!("{err}").contains("no .git"), "{err}");
     }
 
     /// Multi-select ids come out in list order, once each.
