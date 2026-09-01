@@ -1874,7 +1874,13 @@ impl InteractiveSessionManager {
 
         if let Some(ref name) = tmux_session_name {
             info!("Attempting to kill tmux session: {}", name);
-            let output = Command::new("tmux").args(["kill-session", "-t", name]).output().await?;
+            // `=name` forces an exact target: bare `-t name` resolves exact, then
+            // prefix, then fnmatch, so deleting "feat-auth" would kill a live
+            // "feat-auth-2".
+            let output = Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={name}")])
+                .output()
+                .await?;
 
             if output.status.success() {
                 info!("Successfully killed tmux session: {}", name);
@@ -2033,14 +2039,22 @@ impl InteractiveSessionManager {
         work_dir: &Path,
     ) -> Result<(), InteractiveSessionError> {
         // Check if session already exists
-        let check = Command::new("tmux").args(["has-session", "-t", session_name]).output().await?;
+        // Both targets are exact. `has-session -t name` prefix-matches, so a live
+        // "feat-auth-2" would answer for "feat-auth" and the kill below would
+        // then destroy it.
+        let exact_target = format!("={session_name}");
+        let check =
+            Command::new("tmux").args(["has-session", "-t", &exact_target]).output().await?;
 
         if check.status.success() {
             warn!(
                 "Tmux session '{}' already exists, killing it first",
                 session_name
             );
-            Command::new("tmux").args(["kill-session", "-t", session_name]).output().await?;
+            Command::new("tmux")
+                .args(["kill-session", "-t", &exact_target])
+                .output()
+                .await?;
         }
 
         // Create new detached tmux session
