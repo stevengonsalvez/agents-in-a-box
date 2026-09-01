@@ -1280,14 +1280,25 @@ impl ScreenStates {
     /// run's `branch` (tcp T2, agents-in-a-box-ch3) when the opening card carries
     /// one — the detail view renders it as a branch line under the PR badge. Pass
     /// `None` when there is no per-run branch (e.g. opened from the issue list).
+    ///
+    /// `status` is the bound task's wire status from the opening snapshot; it
+    /// seeds the lifecycle so retry / cancel gate correctly on a task that
+    /// finalized BEFORE this screen subscribed (live task events still override).
+    /// `None` (no known task yet) keeps the reducer's `Queued` default.
     pub fn open_task_detail(
         &mut self,
         task_id: ainb_hangar_core::ids::TaskId,
         issue: IssueRow,
         branch: Option<String>,
+        status: Option<&str>,
     ) {
         let mut td = TaskDetailState::new(task_id, issue);
         td.set_branch(branch);
+        if let Some(lifecycle) =
+            status.and_then(super::task_detail::TaskLifecycle::from_wire_status)
+        {
+            td.seed_lifecycle(lifecycle);
+        }
         self.task_detail = Some(td);
     }
 
