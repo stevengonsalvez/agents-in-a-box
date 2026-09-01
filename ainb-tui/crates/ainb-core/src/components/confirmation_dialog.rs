@@ -18,7 +18,20 @@ impl ConfirmationDialogComponent {
             // Calculate dialog size (center it)
             // Increase height if warning is present
             let dialog_width = 60.min(area.width - 4);
-            let dialog_height = if dialog.warning.is_some() { 11 } else { 8 };
+            // Base heights keep every existing dialog pixel-identical; a longer
+            // body (the bulk Stop/Delete dialog names the sessions it affects)
+            // grows the box instead of being clipped.
+            let text_width = dialog_width.saturating_sub(2);
+            let warning_lines = dialog
+                .warning
+                .as_ref()
+                .map(|w| wrapped_line_count(w, text_width).clamp(1, 4))
+                .unwrap_or(0);
+            let message_lines = wrapped_line_count(&dialog.message, text_width);
+            let base_height = if dialog.warning.is_some() { 11 } else { 8 };
+            // 2 borders + warning block + message + 2 button rows.
+            let needed_height = 4 + warning_lines + message_lines;
+            let dialog_height = base_height.max(needed_height).min(area.height);
 
             let dialog_area = Rect {
                 x: (area.width - dialog_width) / 2,
@@ -50,7 +63,7 @@ impl ConfirmationDialogComponent {
             // Build constraints based on whether warning is present
             let constraints = if dialog.warning.is_some() {
                 vec![
-                    Constraint::Length(3), // Warning
+                    Constraint::Length(warning_lines.max(3)), // Warning
                     Constraint::Min(1),    // Message
                     Constraint::Length(2), // Buttons
                 ]
@@ -147,4 +160,15 @@ impl ConfirmationDialogComponent {
             }
         }
     }
+}
+
+/// Lines `text` occupies once wrapped to `width`, counting explicit newlines.
+/// Character-count based, which is close enough for sizing a dialog box.
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let lines: usize = text
+        .lines()
+        .map(|line| line.chars().count().max(1).div_ceil(width))
+        .sum();
+    lines.max(1).min(u16::MAX as usize) as u16
 }
