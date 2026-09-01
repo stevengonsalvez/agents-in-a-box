@@ -4723,7 +4723,13 @@ impl EventHandler {
                                     "Deleting {} selected session(s)...",
                                     session_ids.len()
                                 ));
-                                state.selected_sessions.clear();
+                                // Only the rows being acted on lose their check.
+                                // A mixed selection's Stop covers a subset, and
+                                // silently dropping the rest would make the user
+                                // re-select them.
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
                                 state.pending_async_action =
                                     Some(AsyncAction::BulkDeleteSessions(session_ids));
                             }
@@ -4732,7 +4738,9 @@ impl EventHandler {
                                     "Stopping {} selected session(s)...",
                                     session_ids.len()
                                 ));
-                                state.selected_sessions.clear();
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
                                 state.pending_async_action =
                                     Some(AsyncAction::BulkStopSessions(session_ids));
                             }
