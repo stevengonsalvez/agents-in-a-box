@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
-use tokio::process::Command;
 use tokio::time::{Duration, Instant, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -30,7 +29,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     validate_provider_installed(&provider)?;
 
     // Step 1: Resolve repository path
-    let repo_path = resolve_repo_path(&args).await?;
+    let repo_path = resolve_repo_path(&args)?;
     info!("Using repository: {}", repo_path.display());
 
     // Step 2: Determine workspace name and working directory
@@ -395,7 +394,7 @@ fn setup_mcp_pool(work_dir: &std::path::Path, session_name: &str) {
 }
 
 /// Resolve the repository path from args or current directory
-async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
+fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
     // Priority: --repo > --remote-repo > current directory
     if let Some(ref repo) = args.repo {
         let path = if repo.is_absolute() {
@@ -413,7 +412,7 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 
     if let Some(ref remote) = args.remote_repo {
         // Clone or fetch remote repository
-        return clone_remote_repo(remote).await;
+        return clone_remote_repo(remote);
     }
 
     // Use current directory
@@ -429,68 +428,42 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
     Ok(current_dir)
 }
 
-/// Clone a remote repository to a local cache directory
-async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
-    // Normalize remote URL
-    let url = if remote.starts_with("http") || remote.starts_with("git@") {
-        remote.to_string()
-    } else {
-        // Assume GitHub shorthand: owner/repo
-        format!("https://github.com/{remote}.git")
-    };
+/// Parse a `--remote-repo` value into the source and the host/owner/repo
+/// components `RemoteRepoManager` keys its cache path on.
+///
+/// Uses `from_input` rather than smart-parse `parse_with`: `--remote-repo` is
+/// remote by contract, and `parse_with` would resolve `owner/repo` to a local
+/// directory of that name under the cwd.
+fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
+    #[allow(deprecated)]
+    let source = crate::git::RepoSource::from_input(remote)
+        .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?;
+    let parsed = source
+        .parse_components()
+        .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
+    Ok((source, parsed))
+}
 
-    // Extract repo name for cache directory (sanitized to prevent path traversal)
-    let repo_name = url
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or("repo")
-        .replace("..", "")
-        .replace(['/', '\\'], "-");
+/// Clone (or fetch) a remote repository into AINB's shared clone cache.
+///
+/// Routes through [`RemoteRepoManager`] so the CLI lands clones in the SAME
+/// place the TUI does: `~/.agents-in-a-box/repos/<host>/<owner>/<repo>`. This
+/// used to clone into a private flat `~/.agents-in-a-box/repo-cache/<repo>`,
+/// which gave one GitHub repo two on-disk roots. The workspace list keys its
+/// groups on a session's source repository path, so the same repo rendered as
+/// two identically-named rows depending on whether the session was spawned
+/// from the CLI or the TUI.
+fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
+    let (source, parsed) = parse_remote_repo(remote)?;
 
-    // Validate repo name is safe
-    let repo_name = if repo_name.is_empty() || repo_name == "." {
-        "repo".to_string()
-    } else {
-        repo_name
-    };
-
-    let cache_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-        .join(".agents-in-a-box")
-        .join("repo-cache");
-
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let repo_path = cache_dir.join(repo_name);
-
-    if repo_path.exists() {
+    let manager = crate::git::RemoteRepoManager::new()?;
+    if manager.is_cached(&parsed) {
         info!("Repository already cached, fetching updates...");
-        let output = Command::new("git")
-            .current_dir(&repo_path)
-            .args(["fetch", "--all"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            warn!(
-                "Failed to fetch updates: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
     } else {
-        println!("Cloning {url}...");
-        let output = Command::new("git").arg("clone").arg(&url).arg(&repo_path).output().await?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to clone repository: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        println!("Cloning {}...", source.to_clone_url());
     }
 
-    Ok(repo_path)
+    manager.clone_repo(&source, &parsed).map_err(|e| anyhow::anyhow!(e))
 }
 
 // The current-branch lookup lives in `crate::git::current_branch_at`. It used
@@ -730,6 +703,50 @@ mod tests {
     use crate::cli::Tool;
 
     use crate::test_support::git_bin;
+
+    /// `--remote-repo` must land in the SAME cache root the TUI clones into:
+    /// `<cache>/<host>/<owner>/<repo>`. The CLI used to clone into a private
+    /// flat `~/.agents-in-a-box/repo-cache/<repo>`, which gave one GitHub repo
+    /// two on-disk roots and split its sessions into two identically-named
+    /// workspace groups (the list keys groups on the source repository path).
+    ///
+    /// Asserts the path the CLI derives, not a clone: no network.
+    #[test]
+    fn remote_repo_resolves_into_the_shared_clone_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = crate::git::RemoteRepoManager::with_cache_dir(tmp.path().to_path_buf())
+            .expect("manager");
+
+        for remote in [
+            "stevengonsalvez/agents-in-a-box",
+            "https://github.com/stevengonsalvez/agents-in-a-box.git",
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote).expect("parse");
+            assert_eq!(
+                manager.get_cache_path(&parsed),
+                tmp.path().join("github.com").join("stevengonsalvez").join("agents-in-a-box"),
+                "{remote} must resolve to the host/owner/repo cache path the TUI uses"
+            );
+        }
+    }
+
+    /// A `--remote-repo` value whose path segments climb out of the cache root
+    /// must be rejected, not joined. `get_cache_path` concatenates
+    /// host/owner/repo onto the cache dir, so `../..` would otherwise land the
+    /// clone on the AINB state directory itself.
+    #[test]
+    fn remote_repo_rejects_path_traversal() {
+        for remote in [
+            "https://github.com/../../evil",
+            "https://github.com/owner/..",
+            "git@github.com:../evil.git",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must not resolve to a cache path"
+            );
+        }
+    }
 
     /// Run a git command in `dir`, failing the test with git's own stderr.
     fn git(dir: &std::path::Path, args: &[&str]) {
