@@ -178,15 +178,16 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    frame.render_widget(Clear, area);
     let button_row = area.height.min(2);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(button_row)])
         .split(area);
+
     // Warning first: on a destructive dialog the line worth the space is the one
-    // saying what would be lost. The message comes next, since it names the
-    // sessions and says what the buttons do; the title only repeats the count.
+    // saying what would be lost. Then the message, which names the sessions and
+    // says what the buttons do. The title last, since it only repeats the count,
+    // but it is the only text that identifies WHICH dialog this is.
     let mut lines: Vec<(String, Style)> = Vec::new();
     if let Some(warning) = dialog.warning.as_ref() {
         lines.push((
@@ -198,26 +199,34 @@ fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
         dialog.message.clone(),
         Style::default().fg(SOFT_WHITE).bg(DARK_BG),
     ));
+    lines.push((
+        dialog.title.clone(),
+        Style::default().fg(SOFT_WHITE).bg(DARK_BG).add_modifier(Modifier::BOLD),
+    ));
 
     let text_area = chunks[0];
-    if text_area.height > 0 {
-        let rows = usize::from(text_area.height).min(lines.len());
-        let per_line = text_area.height / u16::try_from(rows).unwrap_or(1);
-        let mut y = text_area.y;
+    let rows = usize::from(text_area.height).min(lines.len());
+    // Clear only the rows actually drawn: wiping the whole frame would take the
+    // list the user is looking at with it.
+    if rows > 0 {
+        let used = Rect {
+            height: u16::try_from(rows).unwrap_or(text_area.height),
+            ..text_area
+        };
+        frame.render_widget(Clear, used);
+        let mut y = used.y;
         for (text, style) in lines.into_iter().take(rows) {
             let row = Rect {
-                x: text_area.x,
+                x: used.x,
                 y,
-                width: text_area.width,
-                height: per_line.max(1),
+                width: used.width,
+                height: 1,
             };
-            frame.render_widget(
-                Paragraph::new(text).style(style).wrap(Wrap { trim: true }),
-                row,
-            );
-            y += per_line.max(1);
+            frame.render_widget(Paragraph::new(text).style(style), row);
+            y += 1;
         }
     }
+    frame.render_widget(Clear, chunks[1]);
     render_buttons(frame, chunks[1], dialog);
 }
 
@@ -374,6 +383,9 @@ mod tests {
         let cjk = "日本語ブランチ".repeat(6); // 42 chars, 84 columns
         assert_eq!(UnicodeWidthStr::width("日本語"), 6);
         assert_eq!(UnicodeWidthStr::width("abc"), 3);
+        // The warning sign every dialog warning starts with is an emoji
+        // presentation sequence, and unicode-width already scores it wide.
+        assert_eq!(UnicodeWidthStr::width("⚠️"), 2);
         assert!(
             wrapped_line_count(&cjk, 40) >= 3,
             "84 columns at width 40 needs 3 rows, not 2"
