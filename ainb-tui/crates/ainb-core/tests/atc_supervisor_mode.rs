@@ -33,6 +33,18 @@ fn home_for(tag: &str) -> PathBuf {
     dir
 }
 
+/// A per-test instance NAME, unique to this process.
+///
+/// `AINB_HOME` isolates the instance dir but NOT the OS scheduler: launchd
+/// plists live in `~/Library/LaunchAgents/<label>.plist`, and the daemon's
+/// `atc_instance` rows are keyed by name in the real store. A test that used a
+/// plausible name like `tower` and then ran a verb which reconciles schedulers
+/// would unload a developer's actual ATC timer. A pid-derived name collides
+/// with nothing.
+fn instance(tag: &str) -> String {
+    format!("t{}-{}", std::process::id(), tag)
+}
+
 fn run(home: &std::path::Path, args: &[&str]) -> Output {
     Command::new(ainb_bin())
         .env("AINB_HOME", home)
@@ -86,9 +98,10 @@ fn a_fresh_instance_is_a_full_claude_atc() {
     // The compatibility contract: nothing about the default changed, so an
     // upgrade cannot quietly downgrade a fleet to the no-LLM scanner.
     let home = home_for("default");
-    let out = setup(&home, "tower", &[]);
+    let name = instance("default");
+    let out = setup(&home, &name, &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let m = meta(&home, "tower");
+    let m = meta(&home, &name);
     assert_eq!(m["mode"], "full");
     assert_eq!(m["provider"], "claude");
     let _ = std::fs::remove_dir_all(&home);
@@ -97,21 +110,22 @@ fn a_fresh_instance_is_a_full_claude_atc() {
 #[test]
 fn the_mode_survives_the_process_that_set_it() {
     let home = home_for("persist");
-    assert!(setup(&home, "tower", &[]).status.success());
+    let name = instance("persist");
+    assert!(setup(&home, &name, &[]).status.success());
 
     let out = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", "tower", "--set", "lite",
+            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
     // On disk, and readable by a NEW process — the mode is not in-memory state.
-    assert_eq!(meta(&home, "tower")["mode"], "lite");
+    assert_eq!(meta(&home, &name)["mode"], "lite");
     let read_back = run(
         &home,
-        &["--format", "json", "fleet", "atc", "mode", "tower"],
+        &["--format", "json", "fleet", "atc", "mode", &name],
     );
     assert!(read_back.status.success(), "{}", stderr(&read_back));
     assert_eq!(json(&read_back)["mode"], "lite");
@@ -125,12 +139,13 @@ fn re_running_setup_does_not_reset_the_mode() {
     // rebuilt meta from defaults it would flip a deliberately-lite fleet back to
     // a token-spending brain, which is the bug this test exists to hold shut.
     let home = home_for("resetup");
-    assert!(setup(&home, "tower", &["--mode", "lite"]).status.success());
-    assert_eq!(meta(&home, "tower")["mode"], "lite");
+    let name = instance("resetup");
+    assert!(setup(&home, &name, &["--mode", "lite"]).status.success());
+    assert_eq!(meta(&home, &name)["mode"], "lite");
 
-    let again = setup(&home, "tower", &["--interval", "9"]);
+    let again = setup(&home, &name, &["--interval", "9"]);
     assert!(again.status.success(), "{}", stderr(&again));
-    let m = meta(&home, "tower");
+    let m = meta(&home, &name);
     assert_eq!(
         m["mode"], "lite",
         "a bare re-setup must not change the mode"
@@ -144,17 +159,20 @@ fn an_instance_written_before_modes_existed_reads_as_full_claude() {
     // Simulates an on-disk instance from an older ainb: no `mode`, no
     // `provider`. It must keep behaving as the full LLM ATC it was.
     let home = home_for("legacy");
-    let dir = home.join("atc").join("tower");
+    let name = instance("legacy");
+    let dir = home.join("atc").join(&name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("meta.json"),
-        r#"{"name":"tower","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60}"#,
+        format!(
+            r#"{{"name":"{name}","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60}}"#
+        ),
     )
     .unwrap();
 
     let out = run(
         &home,
-        &["--format", "json", "fleet", "atc", "mode", "tower"],
+        &["--format", "json", "fleet", "atc", "mode", &name],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let v = json(&out);
@@ -172,11 +190,12 @@ fn the_full_heartbeat_stands_down_on_a_lite_fleet() {
     // cron reach the full controller through this verb, so a refusal here is a
     // refusal on every full-mode action path.
     let home = home_for("standdown");
-    assert!(setup(&home, "tower", &["--mode", "lite"]).status.success());
+    let name = instance("standdown");
+    assert!(setup(&home, &name, &["--mode", "lite"]).status.success());
 
     let beat = run(
         &home,
-        &["--format", "json", "fleet", "atc", "heartbeat", "tower"],
+        &["--format", "json", "fleet", "atc", "heartbeat", &name],
     );
     assert!(
         beat.status.success(),
@@ -198,11 +217,12 @@ fn the_full_heartbeat_stands_down_on_a_lite_fleet() {
 fn the_lite_scanner_refuses_to_start_on_a_full_fleet() {
     // The mirror image: the other controller, refused from its own entry point.
     let home = home_for("literefuse");
-    assert!(setup(&home, "tower", &[]).status.success());
+    let name = instance("literefuse");
+    assert!(setup(&home, &name, &[]).status.success());
 
     let out = run(
         &home,
-        &["fleet", "atc", "supervise", "tower", "--once", "--dry-run"],
+        &["fleet", "atc", "supervise", &name, "--once", "--dry-run"],
     );
     assert!(
         !out.status.success(),
@@ -220,14 +240,15 @@ fn exactly_one_controller_is_permitted_in_either_mode() {
     // must be one, always — never two (concurrent sends) and never zero (an
     // unowned fleet nothing is watching).
     let home = home_for("exclusive");
-    assert!(setup(&home, "tower", &[]).status.success());
+    let name = instance("exclusive");
+    assert!(setup(&home, &name, &[]).status.success());
 
     for mode in ["full", "lite"] {
         assert!(
             run(
                 &home,
                 &[
-                    "--format", "json", "fleet", "atc", "mode", "tower", "--set", mode
+                    "--format", "json", "fleet", "atc", "mode", &name, "--set", mode
                 ],
             )
             .status
@@ -236,13 +257,13 @@ fn exactly_one_controller_is_permitted_in_either_mode() {
 
         let beat = run(
             &home,
-            &["--format", "json", "fleet", "atc", "heartbeat", "tower"],
+            &["--format", "json", "fleet", "atc", "heartbeat", &name],
         );
         let full_permitted = !json(&beat)["stood_down"].as_bool().unwrap_or(false);
 
         let scan = run(
             &home,
-            &["fleet", "atc", "supervise", "tower", "--once", "--dry-run"],
+            &["fleet", "atc", "supervise", &name, "--once", "--dry-run"],
         );
         let lite_permitted = scan.status.success();
 
@@ -265,12 +286,13 @@ exactly one controller must be allowed"
 #[test]
 fn switching_reports_the_transition_and_is_idempotent() {
     let home = home_for("toggle");
-    assert!(setup(&home, "tower", &[]).status.success());
+    let name = instance("toggle");
+    assert!(setup(&home, &name, &[]).status.success());
 
     let first = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", "tower", "--set", "lite",
+            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
         ],
     );
     assert!(first.status.success(), "{}", stderr(&first));
@@ -284,7 +306,7 @@ fn switching_reports_the_transition_and_is_idempotent() {
     let again = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", "tower", "--set", "lite",
+            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
         ],
     );
     assert!(again.status.success(), "{}", stderr(&again));
@@ -294,12 +316,12 @@ fn switching_reports_the_transition_and_is_idempotent() {
     let back = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", "tower", "--set", "full",
+            "--format", "json", "fleet", "atc", "mode", &name, "--set", "full",
         ],
     );
     assert!(back.status.success(), "{}", stderr(&back));
     assert_eq!(json(&back)["mode"], "full");
-    assert_eq!(meta(&home, "tower")["mode"], "full");
+    assert_eq!(meta(&home, &name)["mode"], "full");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -308,23 +330,25 @@ fn reading_the_mode_never_changes_it() {
     // Switching the thing that drives a whole fleet must take an explicit
     // --set; looking at it must not be enough.
     let home = home_for("readonly");
-    assert!(setup(&home, "tower", &["--mode", "lite"]).status.success());
-    let before = meta(&home, "tower");
+    let name = instance("readonly");
+    assert!(setup(&home, &name, &["--mode", "lite"]).status.success());
+    let before = meta(&home, &name);
 
     let out = run(
         &home,
-        &["--format", "json", "fleet", "atc", "mode", "tower"],
+        &["--format", "json", "fleet", "atc", "mode", &name],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(meta(&home, "tower"), before, "a read must not mutate");
+    assert_eq!(meta(&home, &name), before, "a read must not mutate");
     let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
 fn the_mode_report_explains_both_modes_and_names_the_owner() {
     let home = home_for("help");
-    assert!(setup(&home, "tower", &[]).status.success());
-    let out = run(&home, &["fleet", "atc", "mode", "tower"]);
+    let name = instance("help");
+    assert!(setup(&home, &name, &[]).status.success());
+    let out = run(&home, &["fleet", "atc", "mode", &name]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("full heartbeat"), "current owner: {text}");
@@ -340,16 +364,17 @@ fn the_mode_report_explains_both_modes_and_names_the_owner() {
 #[test]
 fn codex_is_a_real_full_mode_brain_and_gets_the_file_it_reads() {
     let home = home_for("codex");
-    let out = setup(&home, "tower", &["--provider", "codex"]);
+    let name = instance("codex");
+    let out = setup(&home, &name, &["--provider", "codex"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(meta(&home, "tower")["provider"], "codex");
+    assert_eq!(meta(&home, &name)["provider"], "codex");
 
-    let dir = home.join("atc").join("tower");
+    let dir = home.join("atc").join(&name);
     // Codex reads AGENTS.md. A CLAUDE.md-only instance would boot and then
     // ignore its entire playbook, while looking perfectly provisioned.
     assert!(dir.join("AGENTS.md").is_file(), "codex policy not written");
     let policy = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
-    assert!(policy.contains("# ATC — Air Traffic Control (tower)"));
+    assert!(policy.contains(&format!("# ATC — Air Traffic Control ({name})")));
     // CLAUDE.md stays too, so switching providers never leaves the instance
     // without the file the previous brain read.
     assert!(dir.join("CLAUDE.md").is_file());
@@ -359,8 +384,9 @@ fn codex_is_a_real_full_mode_brain_and_gets_the_file_it_reads() {
 #[test]
 fn a_provider_ainb_cannot_drive_is_refused_not_faked() {
     let home = home_for("unsupported");
+    let name = instance("unsupported");
     for provider in ["copilot", "antigravity", "gemini"] {
-        let out = setup(&home, "tower", &["--provider", provider]);
+        let out = setup(&home, &name, &["--provider", provider]);
         assert!(
             !out.status.success(),
             "{provider} must be refused for full mode, not provisioned"
@@ -374,7 +400,7 @@ fn a_provider_ainb_cannot_drive_is_refused_not_faked() {
         // A refusal must leave nothing behind — a half-provisioned instance
         // whose brain can never be woken is worse than none.
         assert!(
-            !home.join("atc").join("tower").join("meta.json").exists(),
+            !home.join("atc").join(&name).join("meta.json").exists(),
             "{provider} refusal left a meta.json behind"
         );
     }
@@ -385,7 +411,8 @@ fn a_provider_ainb_cannot_drive_is_refused_not_faked() {
 fn an_unsupported_provider_cannot_be_switched_into_full_mode() {
     // The other door into the same state: provision fine, then try to switch.
     let home = home_for("switchgate");
-    assert!(setup(&home, "tower", &[]).status.success());
+    let name = instance("switchgate");
+    assert!(setup(&home, &name, &[]).status.success());
 
     let out = run(
         &home,
@@ -393,7 +420,7 @@ fn an_unsupported_provider_cannot_be_switched_into_full_mode() {
             "fleet",
             "atc",
             "mode",
-            "tower",
+            &name,
             "--set",
             "full",
             "--provider",
@@ -403,7 +430,7 @@ fn an_unsupported_provider_cannot_be_switched_into_full_mode() {
     assert!(!out.status.success(), "must be refused");
     assert!(stderr(&out).contains("copilot"), "{}", stderr(&out));
     // Refused BEFORE the write: the instance keeps the provider it had.
-    assert_eq!(meta(&home, "tower")["provider"], "claude");
+    assert_eq!(meta(&home, &name)["provider"], "claude");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -413,8 +440,9 @@ fn lite_mode_is_available_regardless_of_provider_support() {
     // What lite must NOT do is accept a provider that could never serve a later
     // switch back to full — that would defer the refusal to the worst moment.
     let home = home_for("literovider");
-    assert!(setup(&home, "tower", &["--mode", "lite"]).status.success());
-    assert_eq!(meta(&home, "tower")["mode"], "lite");
+    let name = instance("literovider");
+    assert!(setup(&home, &name, &["--mode", "lite"]).status.success());
+    assert_eq!(meta(&home, &name)["mode"], "lite");
 
     let ok = run(
         &home,
@@ -424,7 +452,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
             "fleet",
             "atc",
             "mode",
-            "tower",
+            &name,
             "--set",
             "lite",
             "--provider",
@@ -432,7 +460,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
         ],
     );
     assert!(ok.status.success(), "{}", stderr(&ok));
-    assert_eq!(meta(&home, "tower")["provider"], "codex");
+    assert_eq!(meta(&home, &name)["provider"], "codex");
 
     let bad = run(
         &home,
@@ -440,7 +468,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
             "fleet",
             "atc",
             "mode",
-            "tower",
+            &name,
             "--set",
             "lite",
             "--provider",
@@ -448,7 +476,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
         ],
     );
     assert!(!bad.status.success(), "must not bank an unusable provider");
-    assert_eq!(meta(&home, "tower")["provider"], "codex");
+    assert_eq!(meta(&home, &name)["provider"], "codex");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -457,7 +485,8 @@ fn lite_mode_is_available_regardless_of_provider_support() {
 #[test]
 fn a_lite_instance_provisions_a_policy_but_schedules_no_heartbeat() {
     let home = home_for("liteprov");
-    let out = setup(&home, "tower", &["--mode", "lite"]);
+    let name = instance("liteprov");
+    let out = setup(&home, &name, &["--mode", "lite"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let v = json(&out);
     assert_eq!(v["mode"], "lite");
