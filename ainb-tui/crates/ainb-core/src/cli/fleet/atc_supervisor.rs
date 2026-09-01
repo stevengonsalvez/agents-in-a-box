@@ -245,12 +245,34 @@ async fn reconcile_controllers(meta: &AtcMeta) -> Reconcile {
                 Ok(report) => {
                     out.scheduler_asserted = true;
                     out.notes.push(report);
+                    out.notes.extend(brain_session_note(meta));
                 }
                 Err(e) => out.notes.push(format!("heartbeat scheduler not re-asserted: {e}")),
             }
         }
     }
     out
+}
+
+/// Say so when full mode's scheduler now has nothing to beat into.
+///
+/// The switch deliberately does NOT spawn the brain itself: an operator asked to
+/// change which controller owns the fleet, not to launch a session, and a toggle
+/// that quietly starts a provider CLI is a bigger side effect than the toggle
+/// implies. But a scheduler firing into a dead session is silent — the beat
+/// fires, finds nothing, exits 0 — so the switch has to name it.
+///
+/// Only a PROVEN dead session earns the note. `None` means the check itself
+/// could not run (tmux off PATH), and reporting an environment problem as a
+/// missing brain would send the operator to the wrong fix.
+fn brain_session_note(meta: &AtcMeta) -> Option<String> {
+    let session = meta.tmux_session();
+    (crate::tmux::session_alive(&session) == Some(false)).then(|| {
+        format!(
+            "no brain session: {session} is not running, so beats would land nowhere. \
+`ainb daemon atc start` spawns it without reconfiguring the instance"
+        )
+    })
 }
 
 async fn unregister_daemon_cron(name: &str) -> bool {
