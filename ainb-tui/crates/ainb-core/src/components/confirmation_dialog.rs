@@ -19,20 +19,16 @@ impl ConfirmationDialogComponent {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         if let Some(dialog) = &state.confirmation_dialog {
-            // Borders (2) + one message row + two button rows is the smallest
-            // drawable dialog; below that the arithmetic underflows and there is
-            // nothing meaningful to show anyway.
+            // Too small for a bordered box. The dialog still owns the keyboard,
+            // so draw the buttons alone rather than leaving an invisible modal
+            // that swallows every keypress.
             if area.width < 10 || area.height < MIN_DIALOG_HEIGHT {
+                render_compact(frame, area, dialog);
                 return;
             }
             // Calculate dialog size (center it)
             let dialog_width = 60.min(area.width - 4);
-            let dialog_height = dialog_height(dialog, dialog_width, area.height);
-            // What the box can actually spare for the warning: the message keeps
-            // at least one row and the buttons keep both of theirs, so a tall
-            // warning never squeezes the Stop/Delete/Cancel row to nothing.
-            let warning_rows = warning_row_count(dialog, dialog_width)
-                .min(dialog_height.saturating_sub(MIN_DIALOG_HEIGHT));
+            let (dialog_height, warning_rows) = dialog_layout(dialog, dialog_width, area.height);
 
             let dialog_area = Rect {
                 x: (area.width - dialog_width) / 2,
@@ -166,6 +162,28 @@ fn render_buttons(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
     }
 }
 
+/// Last-resort rendering for an area too small to hold a bordered dialog: the
+/// title on one row (if there is one to spare) and the buttons underneath, so
+/// the modal that is holding the keyboard is at least visible and answerable.
+fn render_compact(frame: &mut Frame, area: Rect, dialog: &ConfirmationDialog) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let button_row = area.height.min(2);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(button_row)])
+        .split(area);
+    if chunks[0].height > 0 {
+        let title = Paragraph::new(dialog.title.clone())
+            .style(Style::default().fg(Color::White).bg(Color::Black))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(title, chunks[0]);
+    }
+    render_buttons(frame, chunks[1], dialog);
+}
+
 /// Rows the warning block occupies, 0 when the dialog has no warning.
 ///
 /// At least 3 so short warnings keep the banner they have always had, and at
@@ -182,16 +200,24 @@ fn warning_row_count(dialog: &ConfirmationDialog, dialog_width: u16) -> u16 {
 /// wrapped body needs more rows, in which case the box grows rather than
 /// clipping. The bulk Stop/Delete dialog names the sessions it affects, so it
 /// is routinely taller than the fixed size allowed.
-fn dialog_height(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16) -> u16 {
+/// `(box height, rows the warning banner gets)`, computed together so the two
+/// cannot disagree. The box is the historic fixed size (8, or 11 with a
+/// warning) unless the wrapped body needs more rows, in which case it grows
+/// rather than clipping; the bulk Stop/Delete dialog names the sessions it
+/// affects, so it is routinely taller than the fixed size allowed. When the box
+/// cannot grow far enough, the banner yields first: the message keeps a row and
+/// the buttons keep both of theirs, so the answer is never invisible.
+fn dialog_layout(dialog: &ConfirmationDialog, dialog_width: u16, max_height: u16) -> (u16, u16) {
     let message_rows = wrapped_line_count(&dialog.message, dialog_width.saturating_sub(2));
+    let wanted_warning = warning_row_count(dialog, dialog_width);
     let base = if dialog.warning.is_some() { 11 } else { 8 };
     // 2 borders + warning block + message + 2 button rows, saturating because
     // `wrapped_line_count` is allowed to return u16::MAX for a pathological
     // message.
-    let needed = warning_row_count(dialog, dialog_width)
-        .saturating_add(message_rows)
-        .saturating_add(4);
-    base.max(needed).min(max_height)
+    let needed = wanted_warning.saturating_add(message_rows).saturating_add(4);
+    let height = base.max(needed).min(max_height);
+    let warning_rows = wanted_warning.min(height.saturating_sub(MIN_DIALOG_HEIGHT));
+    (height, warning_rows)
 }
 
 /// Rows `text` needs at `width`, emulating the greedy word wrap ratatui applies
@@ -248,13 +274,14 @@ mod tests {
     /// Short dialogs keep the size they have always had.
     #[test]
     fn short_dialogs_keep_their_historic_size() {
-        assert_eq!(dialog_height(&dialog("Are you sure?", None), 60, 40), 8);
+        assert_eq!(dialog_layout(&dialog("Are you sure?", None), 60, 40).0, 8);
         assert_eq!(
-            dialog_height(
+            dialog_layout(
                 &dialog("Are you sure?", Some("⚠️ 1 uncommitted file(s)")),
                 60,
                 40
-            ),
+            )
+            .0,
             11
         );
     }
@@ -269,8 +296,7 @@ mod tests {
             long_message,
             Some("⚠️ 4 uncommitted file(s) in 2 session(s): alpha (3)"),
         );
-        let height = dialog_height(&d, 60, 40);
-        let warning_rows = warning_row_count(&d, 60);
+        let (height, warning_rows) = dialog_layout(&d, 60, 40);
         let message_rows = wrapped_line_count(&d.message, 58);
         // 2 borders + warning + message + 2 button rows must all fit.
         assert!(
@@ -298,7 +324,7 @@ mod tests {
     fn tiny_terminals_are_clamped_not_underflowed() {
         let d = dialog("Are you sure?", None);
         for height in MIN_DIALOG_HEIGHT..=12u16 {
-            let computed = dialog_height(&d, 60, height);
+            let (computed, _) = dialog_layout(&d, 60, height);
             assert!(
                 computed >= 2,
                 "height {computed} would underflow inner_area"
@@ -317,9 +343,7 @@ mod tests {
             Some("⚠️ 40 uncommitted file(s) in 12 session(s): alpha (12), beta (9), gamma (7)"),
         );
         for height in MIN_DIALOG_HEIGHT..=14u16 {
-            let box_height = dialog_height(&d, 60, height);
-            let warning_rows =
-                warning_row_count(&d, 60).min(box_height.saturating_sub(MIN_DIALOG_HEIGHT));
+            let (box_height, warning_rows) = dialog_layout(&d, 60, height);
             let inner = box_height - 2;
             assert!(
                 warning_rows + 2 < inner,
@@ -335,7 +359,7 @@ mod tests {
         let huge = "line\n".repeat(70_000);
         let d = dialog(&huge, Some("⚠️ warning"));
         assert_eq!(
-            dialog_height(&d, 60, 40),
+            dialog_layout(&d, 60, 40).0,
             40,
             "clamped to the area, no panic"
         );
