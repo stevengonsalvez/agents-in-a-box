@@ -64,8 +64,8 @@ impl ConfirmationDialogComponent {
             let constraints = if dialog.warning.is_some() {
                 vec![
                     Constraint::Length(warning_lines.max(3)), // Warning
-                    Constraint::Min(1),    // Message
-                    Constraint::Length(2), // Buttons
+                    Constraint::Min(1),                       // Message
+                    Constraint::Length(2),                    // Buttons
                 ]
             } else {
                 vec![
@@ -166,9 +166,6 @@ impl ConfirmationDialogComponent {
 /// Character-count based, which is close enough for sizing a dialog box.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
-    let lines: usize = text
-        .lines()
-        .map(|line| line.chars().count().max(1).div_ceil(width))
-        .sum();
+    let lines: usize = text.lines().map(|line| line.chars().count().max(1).div_ceil(width)).sum();
     lines.max(1).min(u16::MAX as usize) as u16
 }
