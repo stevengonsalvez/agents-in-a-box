@@ -245,20 +245,22 @@ impl RemoteRepoManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // `git clone` can leave a partially-initialised directory behind on
-            // failure (e.g. auth rejected mid-transfer). `is_cached()` only
-            // checks for a `.git` entry, so a broken partial would be treated as
-            // a warm cache on the next attempt and never re-cloned after the
-            // user fixes credentials. Remove it so the retry starts clean.
-            if cache_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&cache_path) {
-                    warn!(
-                        "Failed to remove partial clone at {}: {}",
-                        cache_path.display(),
-                        e
-                    );
-                }
-            }
+            // Deliberately leave whatever `git clone` wrote at `cache_path`.
+            //
+            // This used to remove the directory so a partial clone (auth
+            // rejected mid-transfer, say) could not masquerade as a warm cache
+            // on the next attempt. That cleanup could not tell a partial of its
+            // own making from a complete clone another process had just
+            // published into the same path, because the two are indistinguishable
+            // from the final path alone. Concurrent launches against one
+            // uncached repo therefore ended with the loser deleting the
+            // winner's finished repository, taking every worktree gitlinked
+            // into it with it, and leaving the path uncached so the next launch
+            // raced again.
+            //
+            // Nothing here may delete a shared path it did not create. A
+            // partial left behind is a recoverable annoyance; a deleted
+            // repository is not.
             return Err(classify_git_error(&stderr, &url));
         }
 
