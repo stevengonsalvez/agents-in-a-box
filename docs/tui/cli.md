@@ -2800,6 +2800,7 @@ Commands:
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
   repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+  mode      Report or switch the supervisor mode (lite | full) — exactly one owner per fleet
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
@@ -2829,6 +2830,8 @@ Options:
       --no-heartbeat             Provision without installing the OS heartbeat timer
       --no-spawn                 Provision files + timer but do not spawn the ainb session
       --no-hooks                 Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)
+      --mode <mode>              Supervisor mode (default: keep an existing instance's mode, else full). lite runs no LLM; full schedules a heartbeat into a brain session [possible values: lite, full]
+      --provider <provider>      Full-mode brain (claude | codex; default claude)
   -h, --help                     Print help
 ```
 
@@ -2904,6 +2907,45 @@ Options:
           
           [default: text]
           [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb fleet atc mode`
+
+One ATC supervisor owns a fleet, in exactly one mode.
+
+```console
+$ ainb fleet atc mode --help
+One ATC supervisor owns a fleet, in exactly one mode.
+
+lite — no LLM. A deterministic scan of the same LLM-free `fleet needs` read, auto-continuing only known transient errors, inside the same per-session retry cap. It never answers an ASK and never resolves an ambiguous session: those are reported, not decided.
+
+full — the scheduled heartbeat wakes an LLM session that triages the ambiguous work and coordinates the fleet. It spends tokens every beat and needs a provider ainb can actually drive.
+
+Both modes share ONE safety ledger, so switching never hands a permanently-broken session a fresh set of retries. Without --set this verb only reports; switching a fleet's controller is not something to do by accident while looking.
+
+Usage: ainb fleet atc mode [OPTIONS] <name>
+
+Arguments:
+  <name>
+          Instance name
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --set <set>
+          Switch the mode. Stops the outgoing controller before starting the incoming one
+          
+          [possible values: lite, full]
+
+      --provider <provider>
+          Full-mode brain (claude | codex). Remembered across a switch to lite, which runs no brain. A provider ainb cannot drive is refused, not faked
 
   -h, --help
           Print help (see a summary with '-h')
@@ -3392,10 +3434,12 @@ ATC
 Usage: ainb daemon atc [OPTIONS] <COMMAND>
 
 Commands:
-  start    Bring it up
-  restart  Take it down and bring it back up
-  stop     Take it down
-  help     Print this message or the help of the given subcommand(s)
+  start      Bring it up
+  restart    Take it down and bring it back up
+  stop       Take it down
+  mode-lite  Switch the supervisor to lite mode (no LLM, deterministic scan)
+  mode-full  Switch the supervisor to full mode (scheduled LLM heartbeat)
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3441,6 +3485,36 @@ $ ainb daemon atc stop --help
 Take it down
 
 Usage: ainb daemon atc stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc mode-lite`
+
+Switch the supervisor to lite mode (no LLM, deterministic scan)
+
+```console
+$ ainb daemon atc mode-lite --help
+Switch the supervisor to lite mode (no LLM, deterministic scan)
+
+Usage: ainb daemon atc mode-lite [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc mode-full`
+
+Switch the supervisor to full mode (scheduled LLM heartbeat)
+
+```console
+$ ainb daemon atc mode-full --help
+Switch the supervisor to full mode (scheduled LLM heartbeat)
+
+Usage: ainb daemon atc mode-full [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
