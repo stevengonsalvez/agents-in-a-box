@@ -304,35 +304,33 @@ impl WorktreeManager {
         Ok(worktrees)
     }
 
-    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
-        // Find the actual worktree path (might be in by-name directory)
+    /// Resolve a session's working tree on disk.
+    ///
+    /// Only the path: no branch, no commit, no main-repository lookup. Callers
+    /// that just need to run a git command in the tree (the uncommitted-changes
+    /// probe, say) use this rather than `get_worktree_info`, whose extra
+    /// resolution fails for trees that are perfectly readable, such as a plain
+    /// clone whose `.git` is a directory rather than a worktree pointer file.
+    ///
+    /// Every failure is `NotFound`: either there is no tree here or it is not a
+    /// git checkout.
+    pub fn worktree_path(&self, session_id: Uuid) -> Result<PathBuf, WorktreeError> {
         let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
         tracing::debug!("Looking for session path: {:?}", session_path);
-        tracing::debug!(
-            "Session path exists: {}, is_symlink: {}",
-            session_path.exists(),
-            session_path.is_symlink()
-        );
 
         let worktree_path = if session_path.exists() && session_path.is_symlink() {
-            let resolved_path = std::fs::read_link(&session_path)?;
-            tracing::debug!("Resolved symlink to: {:?}", resolved_path);
-            resolved_path
+            std::fs::read_link(&session_path)?
         } else {
             // Fallback to old location for backward compatibility
             let old_path = self.base_worktree_dir.join(session_id.to_string());
-            tracing::debug!("Using fallback path: {:?}", old_path);
             if old_path.exists() {
                 old_path
             } else {
                 return Err(WorktreeError::NotFound(format!(
-                    "Session {} worktree not found",
-                    session_id
+                    "Session {session_id} worktree not found"
                 )));
             }
         };
-
-        tracing::debug!("Final worktree path: {:?}", worktree_path);
 
         // Check if the symlink target exists
         if !worktree_path.exists() {
@@ -343,13 +341,21 @@ impl WorktreeManager {
         }
 
         // Check if it's a valid git worktree (has .git file or directory)
-        let git_path = worktree_path.join(".git");
-        if !git_path.exists() {
+        if !worktree_path.join(".git").exists() {
             return Err(WorktreeError::NotFound(format!(
                 "Not a git worktree (no .git): {}",
                 worktree_path.display()
             )));
         }
+
+        Ok(worktree_path)
+    }
+
+    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
+        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
+        let worktree_path = self.worktree_path(session_id)?;
+
+        tracing::debug!("Final worktree path: {:?}", worktree_path);
 
         let repo = match Repository::open(&worktree_path) {
             Ok(r) => r,
@@ -809,11 +815,17 @@ impl WorktreeManager {
     /// Get count of uncommitted files (staged, unstaged, or untracked) in a worktree
     ///
     /// Used to warn users before deleting a session with uncommitted changes.
+    /// How many files `git status --porcelain` reports in the session's tree.
+    ///
+    /// Resolves only the path, so a tree this can read reports a real number
+    /// even when its branch, commit or parent repository cannot be resolved: a
+    /// caller warning about uncommitted work must not be told "unknown" for a
+    /// plain clone.
     pub fn uncommitted_file_count(&self, session_id: Uuid) -> Result<usize, WorktreeError> {
-        let worktree_info = self.get_worktree_info(session_id)?;
+        let worktree_path = self.worktree_path(session_id)?;
 
         let output = Command::new("git")
-            .current_dir(&worktree_info.path)
+            .current_dir(&worktree_path)
             .args(["status", "--porcelain"])
             .output()?;
 
