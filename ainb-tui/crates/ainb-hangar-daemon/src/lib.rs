@@ -768,15 +768,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     // The ownership watchdog: the one layer that survives every exit path not
     // running. If this daemon ever stops owning its home — an operator deleting
-    // the lock, a home restored from a backup — it stands down instead of racing
-    // the daemon that owns it now. Home-scoped by construction: it reads one file
-    // and signals nobody, so unlike an argv-matching reaper it can never touch a
-    // daemon serving a different home.
+    // the lock, a home restored from a backup, or the home itself being deleted
+    // underneath a running daemon — it stands down instead of racing the daemon
+    // that owns it now, or serving a store and socket that no longer exist.
+    // Home-scoped by construction: it reads and writes one file and signals
+    // nobody, so unlike an argv-matching reaper it can never touch a daemon
+    // serving a different home.
     let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
     let watchdog_dir = dir.clone();
     tokio::spawn(async move {
-        let owner = crate::single_instance::watch_ownership(&watchdog_dir).await;
-        let _ = lost_tx.send(owner);
+        let outcome = crate::single_instance::watch_ownership(&watchdog_dir).await;
+        let _ = lost_tx.send(outcome);
     });
 
     // Signal handlers are installed HERE, not at the end of boot. Everything

@@ -25,6 +25,7 @@
 //! | `hangar daemon stop`          | signal the exact recorded PID via `nix` + remove PID file|
 //! | `hangar daemon restart`       | `stop` then `start`                                      |
 //! | `hangar daemon setup`         | ensure db + socket token, then `start`                   |
+//! | `hangar daemon prune`         | report/remove unowned leaked hangar homes under the temp dir |
 //!
 //! # Deliberately NOT wired
 //!
@@ -2428,6 +2429,9 @@ pub enum DaemonCommand {
     Restart,
     /// One-command bring-up: ensure the store + socket-auth token, then `start`.
     Setup,
+    /// Report hangar homes left behind under the system temp dir, and with
+    /// `--yes` delete the ones no live process still owns.
+    Prune(PruneArgs),
     /// Rebuild one stale Claude structured interview from durable hook history.
     ReprojectClaudeInterview(ReprojectClaudeInterviewArgs),
     /// View + edit the daemon's user-config knobs (`list`/`get`/`set`).
@@ -2438,6 +2442,33 @@ pub enum DaemonCommand {
     #[command(subcommand)]
     Cred(DaemonCredCommand),
 }
+
+/// Options for `hangar daemon prune`.
+///
+/// The verb reports by default and only acts under `--yes`, because acting
+/// means deleting a directory tree. It never signals a process, under either
+/// mode: the ownership records that would name the target live in a
+/// world-writable temp tree, so a stale or copied one can name any pid on the
+/// machine, up to and including the developer's real daemon.
+#[derive(Args, Debug, Clone)]
+pub struct PruneArgs {
+    /// Actually delete the homes that no live process owns. Without it, nothing
+    /// on disk is touched. Homes with a live owner are always left alone.
+    #[arg(long)]
+    pub yes: bool,
+    /// Only consider homes untouched for at least this many days (default 1).
+    ///
+    /// A live run's home looks exactly like a leaked one: no daemon is ever
+    /// spawned into an ephemeral home, so nothing records an owner there. Age
+    /// is what separates "a run that finished yesterday" from "a run that is
+    /// still going". `0` removes that gate.
+    #[arg(long, value_name = "DAYS", default_value_t = PRUNE_DEFAULT_MIN_AGE_DAYS)]
+    pub older_than: u64,
+}
+
+/// Default `--older-than`: a home touched within the last day is presumed to
+/// belong to a run that is still going.
+const PRUNE_DEFAULT_MIN_AGE_DAYS: u64 = 1;
 
 /// Arguments for one controlled Claude interview reprojection.
 #[derive(Args, Debug)]
@@ -8174,6 +8205,7 @@ async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()>
         DaemonCommand::Stop => run_daemon_stop(),
         DaemonCommand::Restart => run_daemon_restart(),
         DaemonCommand::Setup => run_daemon_setup().await,
+        DaemonCommand::Prune(args) => run_daemon_prune(&args),
         DaemonCommand::ReprojectClaudeInterview(args) => {
             run_daemon_reproject_claude_interview(args, format).await
         }
@@ -8636,7 +8668,36 @@ async fn run_daemon_run() -> Result<()> {
 /// stderr go to the daemon's own rolling log, not this terminal.
 fn run_daemon_start() -> Result<()> {
     // Ephemeral: this verb exists to leave a daemon running after `ainb` exits.
-    start_or_upgrade_daemon(true, LauncherLifetime::Ephemeral)
+    start_or_upgrade_daemon(true, LauncherLifetime::Ephemeral).map(|_| ())
+}
+
+/// What [`ensure_hangar_daemon`] did about this process's hangar home.
+///
+/// Reported rather than swallowed because the autostart has two callers with
+/// opposite needs. The TUI treats every outcome the same (it renders the offline
+/// panel until a daemon appears), but `ainb run`'s Codex remote thread connects
+/// to the daemon on its very next statement, so for it a silent
+/// [`Self::SkippedEphemeralHome`] is not a skip at all: it is a connect failure
+/// a few lines later, with nothing in the message naming the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonAutostart {
+    /// A daemon is expected on this home: one was spawned, an older release was
+    /// handed off, or a live one already owned it.
+    ///
+    /// Deliberately ONE variant, not two. A separate "already running" reading
+    /// is unobservable: `start_daemon_if_stopped` is a no-op when a live owner
+    /// holds the home, so the difference is only a pid read taken a moment
+    /// earlier, and both readings mean the same thing to every caller. Splitting
+    /// them would invite a caller to branch on a race.
+    Started,
+    /// The home is ephemeral and nobody asked for it, so no daemon was started
+    /// and none ever will be for this home. A caller that needs the daemon must
+    /// turn this into an error naming the remedy (set `$AINB_HANGAR_HOME` to a
+    /// durable path); a caller that only wants one if it is useful may ignore it.
+    SkippedEphemeralHome,
+    /// The spawn was attempted and failed. Non-fatal by design: the error is
+    /// already logged, and the TUI still launches.
+    Failed,
 }
 
 /// Best-effort autostart of the Hangar daemon before the TUI connects.
@@ -8645,33 +8706,125 @@ fn run_daemon_start() -> Result<()> {
 /// and swallowed so the TUI still launches (it shows the offline panel until the
 /// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
 /// `mcp_pool`'s `ensure_daemon` warn-and-continue.
-pub fn ensure_hangar_daemon(launcher: LauncherLifetime) {
-    if let Err(e) = start_or_upgrade_daemon(false, launcher) {
-        tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+pub fn ensure_hangar_daemon(launcher: LauncherLifetime) -> DaemonAutostart {
+    let home = ainb_hangar_daemon::hangar_dir().ok();
+    ensure_hangar_daemon_with(home.as_deref(), hangar_home_was_requested(), || {
+        match start_or_upgrade_daemon(false, launcher) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+                DaemonAutostart::Failed
+            }
+        }
+    })
+}
+
+/// [`ensure_hangar_daemon`] with its two impure inputs and its one side effect
+/// passed in: the resolved home, whether it was asked for, and the spawn itself.
+///
+/// The gate's headline promise is that nothing is SPAWNED into an ephemeral
+/// home, and only a seam can prove that. Asserting on the predicate alone
+/// leaves the wiring between predicate and spawn untested, which is how a gate
+/// that is computed and then ignored still passes its suite.
+///
+/// `home` is `None` only when the hangar home cannot be resolved at all. There
+/// is then no path to judge, so the spawn runs and fails (or succeeds) on its
+/// own terms rather than being declined on a guess.
+fn ensure_hangar_daemon_with<F>(
+    home: Option<&std::path::Path>,
+    home_was_requested: bool,
+    spawn: F,
+) -> DaemonAutostart
+where
+    F: FnOnce() -> DaemonAutostart,
+{
+    if let Some(home) = home {
+        if !autostart_allowed(home, home_was_requested) {
+            tracing::info!(
+                home = %home.display(),
+                "hangar home is ephemeral; not autostarting a daemon"
+            );
+            return DaemonAutostart::SkippedEphemeralHome;
+        }
     }
+    spawn()
+}
+
+/// Was this process's hangar home asked for, or merely derived from `$HOME`?
+///
+/// `ainb_hangar_core::hangar_home` reads `$AINB_HANGAR_HOME` first and falls
+/// back to `~/.agents-in-a-box`, so a set, non-empty value is the one signal
+/// that separates "the caller chose this home" from "this home is wherever
+/// `$HOME` happened to point".
+///
+/// The environment read lives here, alone, so [`autostart_allowed`] stays a
+/// pure function: `std::env::set_var` is process-global and this suite is
+/// multi-threaded, so the decision has to be testable without mutating it.
+///
+/// This function is the ONE impure input the whole autostart gate turns on, so
+/// its rule is split out into [`home_was_requested`] and pinned there: reading
+/// it wrong (crediting an empty value, say) silently re-enables the spawn this
+/// gate exists to prevent, and every other test in the gate would still pass.
+fn hangar_home_was_requested() -> bool {
+    home_was_requested(std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV).as_deref())
+}
+
+/// Does this raw `$AINB_HANGAR_HOME` value mean "the caller chose this home"?
+///
+/// Set-and-non-empty, which is EXACTLY the test
+/// `ainb_hangar_core::paths::hangar_home` applies before honouring the variable
+/// (`var_os(..).filter(|p| !p.is_empty())`). The two must agree: a value this
+/// says was requested but that one ignores would credit an explicit choice to a
+/// home derived from `$HOME`, which is the ephemeral case the gate declines.
+fn home_was_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
+/// Should the autostart bring a daemon up for this home?
+///
+/// No, when the home is ephemeral AND was derived from `$HOME` rather than
+/// asked for. Nothing consumes such a daemon, and the home is deleted the
+/// moment the harness exits, taking every guard that could address the process
+/// later with it: the pid file, the single-instance lock and `hangar daemon
+/// stop` are all home-scoped. The whole boot (store open, migrations, socket
+/// bind, sweepers) is spent to produce a process whose only future is the
+/// parent-death watchdog. Do not spawn it; the watchdog stays the backstop for
+/// every other way a daemon reaches such a home.
+///
+/// An explicit `$AINB_HANGAR_HOME` under the temp dir is a deliberate choice
+/// (every tripwire in this repo makes it, and does want a daemon), so it still
+/// autostarts, as does any home under a real `$HOME`. The explicit CLI verbs
+/// (`hangar daemon start`, `daemon run`, `daemon setup`) and the Daemons
+/// screen's control never come through here: an explicit request is honoured
+/// whatever the home looks like. Issue #784 follow-up.
+fn autostart_allowed(hangar_home: &std::path::Path, home_was_requested: bool) -> bool {
+    home_was_requested || !is_under_temp_dir(hangar_home)
 }
 
 /// Start a missing daemon, or hand an older released owner to this Ainb
 /// binary. Used by the Daemons screen's explicit upgrade control.
 pub(crate) fn start_or_upgrade_daemon_from_current(launcher: LauncherLifetime) -> Result<()> {
-    start_or_upgrade_daemon(false, launcher)
+    start_or_upgrade_daemon(false, launcher).map(|_| ())
 }
 
 /// Start a missing daemon, or hand off an older recorded release to this one.
 ///
 /// Unknown, equal, prerelease, and newer owners are deliberately left alone:
 /// autostart may upgrade a released daemon but must not guess or downgrade.
-fn start_or_upgrade_daemon(announce: bool, launcher: LauncherLifetime) -> Result<()> {
+fn start_or_upgrade_daemon(announce: bool, launcher: LauncherLifetime) -> Result<DaemonAutostart> {
     let pid = running_daemon_pid().ok().flatten();
     let running = running_daemon_version(pid);
-    let result = if pid.is_some()
-        && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION"))
-    {
-        restart_daemon(announce, launcher)
-    } else {
-        start_daemon_if_stopped(announce, launcher)
-    };
-    result
+    if pid.is_some() && daemon_upgrade_required(running.as_deref(), env!("CARGO_PKG_VERSION")) {
+        restart_daemon(announce, launcher)?;
+        return Ok(DaemonAutostart::Started);
+    }
+    start_daemon_if_stopped(announce, launcher)?;
+    // `start_daemon_if_stopped` is a no-op when a live owner already holds the
+    // home, so this reports "a daemon is expected here" either way. The pid read
+    // above is not consulted for the outcome: it was taken before the spawn, so
+    // a daemon that appeared in between would make the two disagree, and no
+    // caller can act on the difference anyway.
+    Ok(DaemonAutostart::Started)
 }
 
 /// File name of the captured daemon stderr, inside the daemon's log dir.
@@ -8720,18 +8873,44 @@ fn open_daemon_stderr_log(log_dir: &std::path::Path) -> Result<std::fs::File> {
 /// reached through symlinks on macOS (`/tmp` -> `/private/tmp`), so a caller
 /// that resolved its home would otherwise slip past a raw prefix test.
 fn is_under_temp_dir(path: &std::path::Path) -> bool {
-    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let resolved = real(path);
+    let resolved = canonical_or_self(path);
+    temp_roots()
+        .iter()
+        .any(|root| path.starts_with(root) || resolved.starts_with(canonical_or_self(root)))
+}
+
+/// The roots [`is_under_temp_dir`] treats as "the system temp dir", and the
+/// only places [`run_daemon_prune`] will ever look for a leaked home.
+///
+/// A `TMPDIR=/` makes every path on the machine read as ephemeral, the real
+/// home included, so a root that contains everything is dropped: nothing is
+/// learned from it, and prune would offer to delete the whole filesystem.
+fn temp_roots() -> Vec<std::path::PathBuf> {
     [
         std::env::temp_dir(),
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/var/tmp"),
     ]
-    .iter()
-    // A `TMPDIR=/` makes every path on the machine read as ephemeral, the real
-    // home included. Nothing is learned from a root that contains everything.
-    .filter(|root| root.parent().is_some())
-    .any(|root| path.starts_with(root) || resolved.starts_with(real(root)))
+    .into_iter()
+    .filter(|root| !contains_the_whole_filesystem(root))
+    .collect()
+}
+
+/// Does this candidate temp root contain every path on the machine?
+///
+/// Asked of BOTH forms, because [`is_under_temp_dir`] decides membership with
+/// both: a raw prefix test against the root as written, and a resolved prefix
+/// test against its canonical form. A `TMPDIR=/..` has a raw parent (`/`) and
+/// so walks past a raw-only check, while the form membership actually uses
+/// resolves to `/` and matches every path there is.
+fn contains_the_whole_filesystem(root: &std::path::Path) -> bool {
+    root.parent().is_none() || canonical_or_self(root).parent().is_none()
+}
+
+/// `path` with every symlink resolved, or `path` itself when it cannot be
+/// resolved (it may not exist yet, which is not an error to any caller here).
+fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Does the process launching a daemon stay alive to use it?
@@ -9235,6 +9414,983 @@ fn clear_daemon_version_record() {
 
 fn run_daemon_stop() -> Result<()> {
     stop_daemon(true)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// `hangar daemon prune`: home-scoped cleanup of homes that already leaked.
+//
+// Older releases (and any pre-#784 binary still installed) spawn a daemon into
+// a home derived from an ephemeral `$HOME`. When the harness exits, the home is
+// deleted and the daemon keeps running with no pid file, no lock and no `stop`
+// that can reach it. This verb is the operator's way back: it works from the
+// homes that are still on disk.
+//
+// REMOVING A DIRECTORY IS THE ONLY MUTATION THIS VERB PERFORMS. It signals
+// nothing, ever, in either mode. The records that would name a target - a
+// home's `daemon.lock` and `daemon.pid` - live in a world-writable temp tree,
+// so any local process can leave a stale or copied one there naming any pid on
+// the machine, the developer's real daemon included. There is no evidence
+// available inside such a home that separates "the daemon this home leaked"
+// from "a pid someone wrote into a file", so no pid read out of one may ever
+// authorize a signal. A home whose records name a live process is reported,
+// with the literal command to stop it, and left where it is: the human running
+// that command is the only party who can tell the two apart.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// What one leaked home's OWN ownership records say about its owner.
+///
+/// Every variant is decided from that home's own `hangar/daemon.lock` and
+/// `hangar/daemon.pid`, and nothing else. The process table is NEVER scanned for
+/// a matching argv: a `hangar daemon run` command line does not say which home
+/// it serves, so matching on it would credit daemons belonging to other homes,
+/// including a developer's real one (the hazard documented in
+/// `single_instance::is_hangar_daemon_args`). The process table is consulted
+/// only to ask what a pid a record already named is running.
+///
+/// The variants below split "a live process is named" three ways because the
+/// REPORT differs, not because the action does: every one of them is left
+/// alone. Prune signals nothing, so the only decision left is remove or keep,
+/// and any live pid keeps the home.
+#[derive(Debug, PartialEq, Eq)]
+enum PruneVerdict {
+    /// Not ours to touch: outside every temp root, under the invoking user's
+    /// real home, unresolvable, or the home this very process resolved.
+    Protected,
+    /// A live process on this machine is running with this home as its `$HOME`
+    /// or its `$AINB_HANGAR_HOME`.
+    ///
+    /// Not decided from any record inside the home: it is read from the process
+    /// table, which is the only place a home in ACTIVE use differs from a leaked
+    /// one. Since #784 no daemon is ever spawned into an ephemeral home, so a
+    /// live run leaves no lock and no pid file, and every other verdict here
+    /// would read it as litter.
+    ///
+    /// Also the verdict every candidate takes when the process table cannot
+    /// answer at all: a missing answer is not evidence that nothing is running.
+    InUse,
+    /// Touched too recently to be presumed abandoned (see `--older-than`).
+    Recent,
+    /// Neither record names anyone: nothing ever recorded an owner for this
+    /// home.
+    NoOwner,
+    /// A record naming a process that is gone.
+    DeadOwner(u32),
+    /// The home's OWN ownership lock names a live process the process table
+    /// positively identifies as a hangar daemon.
+    LiveDaemon(u32),
+    /// A record naming a live process that is positively NOT a hangar daemon:
+    /// the pid was recycled after the daemon died.
+    Stranger(u32),
+    /// A live pid whose ownership of this home cannot be proven: the process
+    /// table could not answer, or the pid is named only by `daemon.pid`, which
+    /// is a status note rather than the ownership record.
+    Unconfirmed(u32),
+    /// A record exists but yields no pid (unreadable, empty, or garbage).
+    /// Fails closed: an unparsed file is not evidence that nothing is running.
+    Unreadable,
+}
+
+impl PruneVerdict {
+    /// The pid this home's records name as a LIVE owner, if any.
+    ///
+    /// Drives both the remedy line and the summary's left-alone breakdown, so
+    /// the two can never disagree about which homes have an owner.
+    const fn live_owner(&self) -> Option<u32> {
+        match self {
+            Self::LiveDaemon(pid) | Self::Stranger(pid) | Self::Unconfirmed(pid) => Some(*pid),
+            Self::Protected
+            | Self::InUse
+            | Self::Recent
+            | Self::NoOwner
+            | Self::DeadOwner(_)
+            | Self::Unreadable => None,
+        }
+    }
+
+    /// May `--yes` delete this home?
+    ///
+    /// Only when both records agree that nobody is alive. `Unreadable` fails
+    /// closed (an unparsed file is not evidence that nothing is running),
+    /// `Protected` is the guard's refusal, and `InUse`/`Recent` are the two
+    /// answers that keep a home whose records say nothing at all: a live
+    /// ephemeral run has no owner record to name it.
+    const fn is_removable(&self) -> bool {
+        matches!(self, Self::NoOwner | Self::DeadOwner(_))
+    }
+}
+
+/// What prune actually did about one home.
+///
+/// Deliberately has no variant that names a signalled process: removing a
+/// directory is the only mutation this verb performs, so there is no outcome
+/// left for one to describe.
+#[derive(Debug, PartialEq, Eq)]
+enum PruneAction {
+    /// Dry run: the home is removable and `--yes` would delete it. Nothing was
+    /// touched.
+    Reported,
+    /// A live owner (or an unreadable record, or the guard) forbids removal, in
+    /// a dry run or otherwise. The home stays exactly as it is, and so does
+    /// whatever process its records name.
+    LeftAlone,
+    /// The home directory was deleted.
+    Removed,
+    /// The home could not be deleted.
+    RemoveFailed(String),
+}
+
+/// A home prune has already validated, carrying the EXACT path the guard
+/// approved.
+///
+/// Handing [`prunable_in`]'s caller the raw path back would mean the delete
+/// re-resolves every component a second time, so a symlink swapped in after the
+/// guard answered would send `remove_dir_all` somewhere the guard never saw.
+/// Temp roots are world-writable, which makes that a race an unprivileged local
+/// process can actually run. One resolution, carried through to the removal, and
+/// nothing downstream re-derives it.
+struct PrunableHome(std::path::PathBuf);
+
+/// The trees prune must never enter, resolved once per run.
+///
+/// Passed in rather than read inside the guard so every refusal is testable
+/// against a fabricated subject. With the real values, a fabricated home is
+/// already saved by the temp-root refusal, so a broken identity or real-home
+/// check would go unnoticed.
+struct ProtectedRoots {
+    /// The hangar home THIS process resolved. Standing our own daemon's home
+    /// down mid-verb is not cleanup.
+    mine: Option<std::path::PathBuf>,
+    /// The invoking user's home directory, from `dirs::home_dir()`.
+    real_home: Option<std::path::PathBuf>,
+}
+
+impl ProtectedRoots {
+    /// The roots as this process actually sees them.
+    fn current() -> Self {
+        Self {
+            mine: ainb_hangar_daemon::hangar_dir().ok(),
+            real_home: dirs::home_dir(),
+        }
+    }
+
+    /// Explicit roots, so a test can isolate one refusal at a time. With the
+    /// real values every fabricated subject is already saved by the temp-root
+    /// check, and a broken refusal here would go unnoticed.
+    #[cfg(test)]
+    fn of(mine: Option<&std::path::Path>, real_home: Option<&std::path::Path>) -> Self {
+        Self {
+            mine: mine.map(std::path::Path::to_path_buf),
+            real_home: real_home.map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// Does `resolved` sit under a tree prune may not touch?
+    fn refuses(&self, resolved: &std::path::Path) -> bool {
+        let ours = self.mine.as_deref().is_some_and(|mine| canonical_or_self(mine) == resolved);
+        let under_real_home = self
+            .real_home
+            .as_deref()
+            .is_some_and(|home| resolved.starts_with(canonical_or_self(home)));
+        ours || under_real_home
+    }
+}
+
+/// May prune touch this home at all?
+///
+/// The refusals are absolute, and the SHAPE test is the load-bearing one. A
+/// prefix test ("resolves somewhere under a temp root") approves the temp root
+/// itself and every tree beneath it, so a single symlink turns `--yes` into a
+/// `remove_dir_all` of the whole temp tree. What prune exists to delete has
+/// exactly one shape, so that shape is what is approved:
+///
+/// ```text
+/// <temp root>/<one component>/.agents-in-a-box
+/// ```
+///
+/// The leaf must be named `.agents-in-a-box`, its parent must be a DIRECT child
+/// of a temp root (so the approved path is always strictly two levels deeper
+/// than the root, never the root itself), and it must be a directory.
+///
+/// On top of that:
+///
+/// * The path must RESOLVE at all, because an unresolvable path is one the
+///   guard cannot speak about, and the resolved path is the one carried to the
+///   removal.
+/// * No component of the resolved path may be a symlink, checked with
+///   `symlink_metadata` AFTER the resolution. Temp roots are world-writable, so
+///   an unprivileged local process can swap a component for a symlink in the
+///   window between `canonicalize` and `remove_dir_all`; a resolved path with a
+///   symlink component is that swap, and it is refused rather than followed.
+/// * It must not be the home this process resolved, and it must not sit under
+///   `dirs::home_dir()`, checked INDEPENDENTLY of the temp-root test rather
+///   than as its complement: the two are not opposites, because `$TMPDIR` is
+///   attacker-influenced and a `TMPDIR` that is an ancestor of the real home
+///   would otherwise make the whole home enumerable and deletable. Prune always
+///   runs from a real shell with a real `$HOME`, so nothing legitimate lives
+///   under both.
+///
+/// The roots arrive as an argument so each refusal is testable on its own.
+fn prunable_in(home: &std::path::Path, protected: &ProtectedRoots) -> Option<PrunableHome> {
+    let resolved = std::fs::canonicalize(home).ok()?;
+    if !resolved.is_dir() {
+        return None;
+    }
+    if resolved.file_name() != Some(std::ffi::OsStr::new(ainb_hangar_core::paths::HANGAR_DIR)) {
+        return None;
+    }
+    let root = resolved.parent()?.parent()?;
+    let directly_under_temp = temp_roots()
+        .iter()
+        .any(|temp| root == temp.as_path() || root == canonical_or_self(temp));
+    if !directly_under_temp || protected.refuses(&resolved) || has_symlink_component(&resolved) {
+        return None;
+    }
+    Some(PrunableHome(resolved))
+}
+
+/// Is any component of this already-resolved path a symlink right now?
+///
+/// `canonicalize` answers about the moment it ran. This re-reads every
+/// component with `symlink_metadata` (which does NOT follow links), so a
+/// component swapped for a symlink after the resolution is caught instead of
+/// silently redirecting the removal. A component we cannot stat counts as a
+/// symlink: prune fails closed on every unknown.
+fn has_symlink_component(resolved: &std::path::Path) -> bool {
+    resolved.ancestors().any(|component| {
+        component.parent().is_some()
+            && !std::fs::symlink_metadata(component)
+                .is_ok_and(|meta| !meta.file_type().is_symlink())
+    })
+}
+
+/// What one ownership record (the lock, or the pid file) says.
+///
+/// Absent and unreadable demand OPPOSITE handling, so they are not one `Option`:
+/// an absent record is evidence of nobody, while an unreadable one is evidence
+/// of nothing at all and must keep the home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerRecord {
+    Absent,
+    Unreadable,
+    Pid(u32),
+}
+
+fn read_owner_record(path: &std::path::Path) -> OwnerRecord {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OwnerRecord::Absent,
+        Err(_) => OwnerRecord::Unreadable,
+        Ok(text) => match text.trim().parse::<u32>() {
+            // Pid 0 is "this process group" to `kill`, never a daemon.
+            Ok(pid) if pid > 0 => OwnerRecord::Pid(pid),
+            _ => OwnerRecord::Unreadable,
+        },
+    }
+}
+
+/// What the process table says a recorded pid is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidState {
+    /// No such process.
+    Dead,
+    /// Positively a hangar daemon: `ps` answered with a recognised daemon argv.
+    Daemon,
+    /// Positively something else: `ps` answered, and not with a daemon.
+    NotADaemon,
+    /// The process table could not answer. NOT proof of anything.
+    Unknown,
+}
+
+/// Ask the process table what `pid` is, with every unknown answering
+/// [`PidState::Unknown`].
+///
+/// The polarity is the whole point. `holder_is_live_daemon` deliberately fails
+/// OPEN (an unreadable `ps` answers "yes, respect the holder") because there it
+/// arbitrates a lock, where a false negative puts two daemons on one home. Here
+/// the answer decides how a home is DESCRIBED, and a confident "that pid is our
+/// daemon" printed about a process nobody proved anything about is a claim the
+/// report cannot make. So `ps` is asked directly and a missing answer is a
+/// missing proof; `holder_is_live_daemon` is then required on top, so a pid must
+/// clear both gates before the report names it a hangar daemon.
+///
+/// No answer here authorizes anything but a sentence. Prune signals nothing, in
+/// either mode: every live pid, confirmed or not, keeps its home and is handed
+/// to the operator with the literal command that stops it.
+fn inspect_pid(pid: u32) -> PidState {
+    if !pid_is_running(pid) {
+        return PidState::Dead;
+    }
+    let Ok(signed) = i32::try_from(pid) else {
+        return PidState::Unknown;
+    };
+    pid_state_from_argv(
+        ainb_hangar_daemon::single_instance::process_argv(signed).as_deref(),
+        || ainb_hangar_daemon::single_instance::holder_is_live_daemon(signed),
+    )
+}
+
+/// The identity half of [`inspect_pid`], as a pure function so the fail-CLOSED
+/// polarity is testable without a wedged `ps`.
+///
+/// `args` is `None` when the process table could not answer. `confirm` is
+/// `holder_is_live_daemon`, which answers YES in exactly that case; it is
+/// required IN ADDITION to a positive argv, never instead of one.
+fn pid_state_from_argv(args: Option<&str>, confirm: impl FnOnce() -> bool) -> PidState {
+    let Some(args) = args else {
+        return PidState::Unknown;
+    };
+    if argv_credits_a_daemon(args) && confirm() {
+        PidState::Daemon
+    } else {
+        PidState::NotADaemon
+    }
+}
+
+/// Read one home's own ownership records and classify its owner.
+fn prune_verdict(home: &PrunableHome) -> PruneVerdict {
+    prune_verdict_from(
+        read_owner_record(&ainb_hangar_daemon::single_instance::lock_path_in(&home.0)),
+        read_owner_record(&ainb_hangar_daemon::pid_path_in(&home.0)),
+        &inspect_pid,
+    )
+}
+
+/// The decision table, as a pure function over what the two records say, so
+/// every row is testable without a process or a filesystem.
+///
+/// The LOCK is the ownership record: the daemon publishes it as the first
+/// statement of `boot` and holds it for its whole life, while `daemon.pid` is a
+/// last-write-wins note written at the END of boot. So the lock is the only
+/// record that can authorize a signal, and it is also the only record that can
+/// prove a live owner during the boot window in which the pid file does not
+/// exist yet, which is the window where deciding from the pid file alone
+/// deletes a live daemon's home.
+///
+/// A pid the pid file names alone still FORBIDS removal (it is a claim, and a
+/// live one), it simply cannot authorize signalling: that file is home-agnostic
+/// evidence, and a stale one left in a leaked temp home can name any pid at all,
+/// including the developer's real daemon.
+fn prune_verdict_from(
+    lock: OwnerRecord,
+    pidfile: OwnerRecord,
+    inspect: &dyn Fn(u32) -> PidState,
+) -> PruneVerdict {
+    if let OwnerRecord::Pid(pid) = lock {
+        match inspect(pid) {
+            PidState::Daemon => return PruneVerdict::LiveDaemon(pid),
+            PidState::NotADaemon => return PruneVerdict::Stranger(pid),
+            PidState::Unknown => return PruneVerdict::Unconfirmed(pid),
+            PidState::Dead => {}
+        }
+    }
+    if let OwnerRecord::Pid(pid) = pidfile {
+        match inspect(pid) {
+            PidState::NotADaemon => return PruneVerdict::Stranger(pid),
+            PidState::Daemon | PidState::Unknown => return PruneVerdict::Unconfirmed(pid),
+            PidState::Dead => {}
+        }
+    }
+    // Nothing live is named by either record.
+    if matches!(lock, OwnerRecord::Unreadable) || matches!(pidfile, OwnerRecord::Unreadable) {
+        return PruneVerdict::Unreadable;
+    }
+    match (lock, pidfile) {
+        (OwnerRecord::Pid(pid), _) | (_, OwnerRecord::Pid(pid)) => PruneVerdict::DeadOwner(pid),
+        _ => PruneVerdict::NoOwner,
+    }
+}
+
+/// The homes a live process on this machine is running in, read ONCE per run
+/// from the process table.
+///
+/// `None` means the process table could not answer. That is not "nothing is
+/// running": it is no evidence at all, so it fails CLOSED and every candidate
+/// reads as [`PruneVerdict::InUse`].
+///
+/// Read-only, and it is the whole interaction prune has with the process table
+/// here: the paths are compared, never the pids, and nothing is ever signalled.
+struct LiveHomes(Option<std::collections::BTreeSet<std::path::PathBuf>>);
+
+/// The environment variables that name a process's hangar home.
+///
+/// `$HOME` names the PARENT of the home (`hangar_home` appends
+/// `.agents-in-a-box` to it), `$AINB_HANGAR_HOME` names the home itself. Both
+/// readings are compared, so either variable identifies the same directory.
+const LIVE_HOME_ENV_KEYS: [&str; 2] = ["HOME", ainb_hangar_core::paths::HANGAR_HOME_ENV];
+
+impl LiveHomes {
+    /// Ask `ps` for every process's environment and collect the two variables
+    /// that name a hangar home.
+    ///
+    /// `ps axeww` is the one spelling both `ps` implementations in play accept
+    /// (macOS BSD `ps` and Linux procps): `e` appends the environment, `ww`
+    /// stops it being truncated to the terminal width. Follows
+    /// `single_instance::process_argv`'s style: one short-lived `ps`, its own
+    /// child killed by handle if it wedges, and every failure answering "could
+    /// not read" rather than "nothing found".
+    fn from_process_table() -> Self {
+        Self(read_process_table_homes())
+    }
+
+    /// Is this resolved home, or the directory that would be `$HOME` for it,
+    /// claimed by a live process?
+    ///
+    /// `true` when the process table could not answer, which is what makes the
+    /// gate fail closed.
+    fn claims(&self, resolved_home: &std::path::Path) -> bool {
+        let Some(homes) = &self.0 else {
+            return true;
+        };
+        [Some(resolved_home), resolved_home.parent()]
+            .into_iter()
+            .flatten()
+            .any(|candidate| homes.contains(candidate))
+    }
+
+    /// A process table that answered, naming exactly these homes.
+    #[cfg(test)]
+    fn answered(paths: &[&std::path::Path]) -> Self {
+        Self(Some(
+            paths
+                .iter()
+                .flat_map(|path| [path.to_path_buf(), canonical_or_self(path)])
+                .collect(),
+        ))
+    }
+
+    /// A process table that could not answer.
+    #[cfg(test)]
+    const fn unreadable() -> Self {
+        Self(None)
+    }
+}
+
+/// Run `ps` and collect the home paths its environment dump names, or `None`
+/// when `ps` could not be run, wedged, exited non-zero, or answered without
+/// showing a single environment.
+///
+/// The pipe is drained on its OWN thread while the timeout is enforced here,
+/// which `single_instance::process_ps_field`'s poll-then-read shape cannot do.
+/// That shape is correct for the one short line it asks for; a whole machine's
+/// environment is far larger than a pipe buffer, so `ps` blocks writing, never
+/// exits, and a poll-first reader times out on every healthy run. Silently:
+/// this gate fails CLOSED, so the symptom was prune reporting every home as in
+/// use and removing nothing, forever.
+fn read_process_table_homes() -> Option<std::collections::BTreeSet<std::path::PathBuf>> {
+    let mut child = std::process::Command::new("ps")
+        .arg("axeww")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let read = std::io::Read::read_to_string(&mut stdout, &mut text);
+        // A closed receiver means we already gave up; dropping the text is the
+        // whole cleanup.
+        let _ = tx.send(read.ok().map(|_| text));
+    });
+    let Ok(Some(text)) = rx.recv_timeout(PRUNE_PS_TIMEOUT) else {
+        // Reap our own child by its exact handle, which also unblocks the
+        // reader thread. No other pid is ever signalled by this verb.
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    if !child.wait().is_ok_and(|status| status.success()) {
+        return None;
+    }
+    process_table_homes(&text)
+}
+
+/// The homes a `ps` dump names, or `None` when the dump is not an ANSWER.
+///
+/// Exiting 0 is not the same as answering. A `ps` that runs, succeeds and
+/// prints no environment at all is `ps` declining the `e` flag (a hardened
+/// kernel, a container with no `/proc`, a busybox `ps` that ignores it, output
+/// something else truncated), not a machine on which nothing is running. Every
+/// machine that can reach this code has at least one process with a `HOME`, so
+/// a dump carrying no `HOME=` assignment anywhere is treated as "could not
+/// answer" and fails CLOSED, exactly as an unrunnable `ps` does. Read as a
+/// complete answer it named no homes, so every home on the machine reported as
+/// free and `--yes` deleted the lot.
+fn process_table_homes(text: &str) -> Option<std::collections::BTreeSet<std::path::PathBuf>> {
+    if !text.contains("HOME=") {
+        return None;
+    }
+    Some(home_paths_in_process_table(text))
+}
+
+/// How long prune waits for its `ps`, mirroring `single_instance`'s budget.
+const PRUNE_PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Every `HOME=` / `AINB_HANGAR_HOME=` value in a `ps axeww` dump, as a pure
+/// function so the parse is testable without a process table.
+///
+/// Each value is stored raw AND resolved: `ps` reports `HOME=/tmp/x` while the
+/// candidate resolves to `/private/tmp/x` on macOS, and a comparison that saw
+/// only one of the two would miss the match and delete a live home.
+fn home_paths_in_process_table(text: &str) -> std::collections::BTreeSet<std::path::PathBuf> {
+    let mut homes = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        for (key, value) in assignments_in_line(line) {
+            if !LIVE_HOME_ENV_KEYS.contains(&key) || value.is_empty() {
+                continue;
+            }
+            let raw = std::path::PathBuf::from(value);
+            homes.insert(canonical_or_self(&raw));
+            homes.insert(raw);
+        }
+    }
+    homes
+}
+
+/// Split one `ps` line into its `KEY=VALUE` assignments, each value running to
+/// the next assignment rather than to the next space.
+///
+/// `ps` prints the environment space-separated and unquoted, so tokenizing on
+/// whitespace recorded `/tmp/my` for a `HOME=/tmp/my home`: the truncated path
+/// matched no candidate, the live run read as abandoned, and `--yes` deleted
+/// its home. The next ` KEY=` boundary is the only structure the dump has left,
+/// so that is where a value is cut.
+///
+/// What no parse at this layer can resolve, because `ps` emits neither quoting
+/// nor lengths to tell it from a real second assignment: a value whose own text
+/// contains a space followed by something env-key shaped (`HOME=/tmp/a b=c`)
+/// still ends at the wrong place, and a value containing a newline is lost with
+/// the line split.
+fn assignments_in_line(line: &str) -> Vec<(&str, &str)> {
+    // (start of the key, byte index of its `=`), in the order they appear.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut key_start = Some(0_usize);
+    for (i, byte) in line.bytes().enumerate() {
+        match byte {
+            // Only a space can begin a new assignment; everything after an `=`
+            // belongs to the value until one arrives.
+            b' ' => key_start = Some(i + 1),
+            b'=' => {
+                if let Some(start) = key_start.take() {
+                    if i > start && !line.as_bytes()[start].is_ascii_digit() {
+                        spans.push((start, i));
+                    }
+                }
+            }
+            b if is_env_key_byte(b) => {}
+            _ => key_start = None,
+        }
+    }
+    spans
+        .iter()
+        .enumerate()
+        .map(|(idx, &(start, eq))| {
+            // Up to the space before the next assignment, or the end of the
+            // line for the last one.
+            let end = spans
+                .get(idx + 1)
+                .map_or(line.len(), |(next, _)| next.saturating_sub(1))
+                .max(eq + 1);
+            (&line[start..eq], &line[eq + 1..end])
+        })
+        .collect()
+}
+
+/// Bytes an environment variable name may be made of. `=` and space are the
+/// two that end one, and anything else rules the token out as a key.
+const fn is_env_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Everything outside one home's own records that decides whether prune may
+/// remove it, resolved ONCE per run.
+///
+/// Passed in rather than read inside the decision so every gate is testable
+/// against a fabricated home: with the real values a fixture is always saved by
+/// some earlier refusal, which is how a broken later gate goes unnoticed.
+struct PruneContext {
+    protected: ProtectedRoots,
+    live: LiveHomes,
+    /// A home touched more recently than this is presumed to belong to a run
+    /// that is still going.
+    min_age: std::time::Duration,
+    now: std::time::SystemTime,
+}
+
+impl PruneContext {
+    /// The gates as this process actually sees them.
+    fn current(min_age: std::time::Duration) -> Self {
+        Self {
+            protected: ProtectedRoots::current(),
+            live: LiveHomes::from_process_table(),
+            min_age,
+            now: std::time::SystemTime::now(),
+        }
+    }
+
+    /// Explicit gates, so a test can isolate one refusal at a time.
+    #[cfg(test)]
+    fn of(protected: ProtectedRoots, live: LiveHomes, min_age: std::time::Duration) -> Self {
+        Self {
+            protected,
+            live,
+            min_age,
+            now: std::time::SystemTime::now(),
+        }
+    }
+}
+
+/// Classify one home and, when `apply`, carry the verdict out.
+///
+/// The order is the guarantee. `prunable_in` speaks first, so the developer's
+/// own home is `Protected` whatever else is true of it. The live-process check
+/// comes next, because it is the only gate that can see a home in ACTIVE use:
+/// since #784 no daemon is spawned into an ephemeral home, so a running session
+/// leaves no lock and no pid file, and the record-based verdicts below would
+/// read it as `NoOwner` litter and delete it out from under the session.
+///
+/// The age gate is the backstop for a live run `ps` did not attribute, and it
+/// speaks LAST of the three, after the home's own records. Both answers keep
+/// the home, so the ordering cannot widen what `--yes` may remove; it decides
+/// which SENTENCE the operator gets, and only the record-based one carries the
+/// pid and the literal command that stops it. Since [`touched_within`] started
+/// reading the files inside `hangar/`, a daemon rewriting its heartbeat keeps
+/// its own home permanently fresh, so answering `Recent` first would withhold
+/// the remedy [`describe_verdict`] promises from the one case that needs it.
+///
+/// `apply` chooses between reporting a removal and performing it. It cannot
+/// widen WHAT is removable: a home with a live owner takes the same
+/// [`PruneAction::LeftAlone`] under `--yes` as it does in a dry run, and
+/// nothing here signals that owner.
+fn prune_home_in(
+    home: &std::path::Path,
+    ctx: &PruneContext,
+    apply: bool,
+) -> (PruneVerdict, PruneAction) {
+    let Some(home) = prunable_in(home, &ctx.protected) else {
+        return (PruneVerdict::Protected, PruneAction::LeftAlone);
+    };
+    let verdict = if ctx.live.claims(&home.0) {
+        PruneVerdict::InUse
+    } else {
+        let recorded = prune_verdict(&home);
+        if recorded.live_owner().is_some() {
+            recorded
+        } else if touched_within(&home.0, ctx.now, ctx.min_age) {
+            PruneVerdict::Recent
+        } else {
+            recorded
+        }
+    };
+    let action = match (verdict.is_removable(), apply) {
+        (false, _) => PruneAction::LeftAlone,
+        (true, false) => PruneAction::Reported,
+        (true, true) => remove_home(&home),
+    };
+    (verdict, action)
+}
+
+/// Was this home touched less than `min_age` ago?
+///
+/// The NEWEST mtime across three places, because they move for different
+/// reasons:
+///
+/// * the home dir, whose mtime changes when the run creates or drops a
+///   top-level entry;
+/// * `<home>/hangar`, whose mtime changes when a socket, lock or log file
+///   appears or goes;
+/// * the files directly INSIDE `<home>/hangar` (`daemon.pid`, `daemon.lock`,
+///   `daemon.heartbeat`, `daemon.binary`, and whatever else is there), which is
+///   where a live run's continuous writing actually lands.
+///
+/// The third is not redundant with the second. POSIX moves a directory's mtime
+/// when an entry is created, renamed or removed, never when a file already
+/// inside it is written, so a daemon rewriting its heartbeat every few seconds
+/// leaves both directories looking untouched. Reading only the two directories
+/// aged out a home that was being written to continuously, and `--yes` deleted
+/// it out from under the run.
+///
+/// Fails closed on every unknown: an mtime we cannot read, a `hangar/` we
+/// cannot list, or a clock that reports a file in the future all keep the home.
+/// `min_age` of zero disables the gate outright, which is what `--older-than 0`
+/// asks for.
+fn touched_within(
+    home: &std::path::Path,
+    now: std::time::SystemTime,
+    min_age: std::time::Duration,
+) -> bool {
+    if min_age.is_zero() {
+        return false;
+    }
+    let hangar = home.join("hangar");
+    let mut candidates = vec![home.to_path_buf(), hangar.clone()];
+    match std::fs::read_dir(&hangar) {
+        Ok(entries) => {
+            for entry in entries {
+                // An entry we cannot even name is an unknown, and every unknown
+                // keeps the home.
+                let Ok(entry) = entry else { return true };
+                candidates.push(entry.path());
+            }
+        }
+        // A `hangar/` that is there but cannot be listed hides exactly the
+        // files this gate exists to read.
+        Err(_) if hangar.exists() => return true,
+        Err(_) => {}
+    }
+    candidates
+        .iter()
+        .filter(|path| path.exists())
+        .any(|path| !modified_at_least_ago(path, now, min_age))
+}
+
+/// Is `path`'s mtime provably at least `min_age` old?
+///
+/// `false` for every unreadable mtime and every mtime in the future, which is
+/// what makes [`touched_within`] fail closed.
+fn modified_at_least_ago(
+    path: &std::path::Path,
+    now: std::time::SystemTime,
+    min_age: std::time::Duration,
+) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= min_age)
+}
+
+fn remove_home(home: &PrunableHome) -> PruneAction {
+    match std::fs::remove_dir_all(&home.0) {
+        Ok(()) => PruneAction::Removed,
+        Err(e) => PruneAction::RemoveFailed(e.to_string()),
+    }
+}
+
+/// Every hangar home sitting under a temp root: `<temp root>/*/.agents-in-a-box`.
+///
+/// One level deep, which is the exact shape a `HOME=$(mktemp -d)` harness
+/// leaves. Deduped by resolved path (`$TMPDIR` and `/tmp` are the same
+/// directory wherever `TMPDIR` is unset) and sorted, so a dry run and the
+/// `--yes` run that follows it list the same homes in the same order.
+fn leaked_hangar_homes() -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut homes = Vec::new();
+    // Resolved once: the enumerator asks the same guard question of every
+    // entry, and re-reading the roots per entry would let them drift mid-walk.
+    let protected = ProtectedRoots::current();
+    for root in temp_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let home = entry.path().join(ainb_hangar_core::paths::HANGAR_DIR);
+            if !home.is_dir() || prunable_in(&home, &protected).is_none() {
+                continue;
+            }
+            if seen.insert(canonical_or_self(&home)) {
+                homes.push(home);
+            }
+        }
+    }
+    homes.sort();
+    homes
+}
+
+/// The sentence for one verdict.
+///
+/// Every live owner ends in the LITERAL command that stops it, because prune
+/// will not: a description of the remedy ("stop it yourself and re-run") leaves
+/// the operator to work out the pid and the verb, and the pid is the one piece
+/// of the situation only this report knows.
+fn describe_verdict(verdict: &PruneVerdict) -> String {
+    match verdict {
+        PruneVerdict::Protected => "protected; left alone".to_string(),
+        PruneVerdict::InUse => "in use by a live process; left alone".to_string(),
+        PruneVerdict::Recent => "touched too recently to presume abandoned; left alone".to_string(),
+        PruneVerdict::NoOwner => "stale home, no owner".to_string(),
+        PruneVerdict::DeadOwner(pid) => format!("stale home, dead pid {pid}"),
+        PruneVerdict::LiveDaemon(pid) => {
+            format!("live owner: pid {pid} (a hangar daemon){}", remedy(*pid))
+        }
+        // No remedy for a stranger: prune has positively classified this pid as
+        // NOT a hangar daemon, so a paste-ready `kill` would be this tool
+        // pointing the operator at someone else's process.
+        PruneVerdict::Stranger(pid) => {
+            format!("live owner: pid {pid} (not a hangar daemon); left alone")
+        }
+        PruneVerdict::Unconfirmed(pid) => {
+            format!("live owner: pid {pid} (unconfirmed){}", remedy(*pid))
+        }
+        PruneVerdict::Unreadable => "unreadable record; left alone".to_string(),
+    }
+}
+
+/// The remedy clause for a home with a live owner.
+///
+/// Paste-ready on purpose. Prune has no way to tell this home's leaked daemon
+/// from a pid someone wrote into a world-writable file, so the human who can is
+/// handed the exact command rather than an instruction to compose one.
+fn remedy(pid: u32) -> String {
+    format!(" (kill {pid} to stop it, then re-run prune); left alone")
+}
+
+/// The suffix describing what `--yes` did, or `None` when nothing happened.
+fn describe_action(action: &PruneAction) -> Option<String> {
+    match action {
+        PruneAction::Reported | PruneAction::LeftAlone => None,
+        PruneAction::Removed => Some("removed".to_string()),
+        PruneAction::RemoveFailed(e) => Some(format!("could not remove: {e}")),
+    }
+}
+
+/// What a whole prune run did, counted so the summary can never imply a signal.
+///
+/// Removals and left-alone homes are counted SEPARATELY rather than summed into
+/// one "acted on N" figure: that figure read as "N daemons dealt with", which is
+/// exactly the claim this verb must not make.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PruneTally {
+    /// Homes deleted (`--yes`), or that `--yes` would delete (dry run).
+    removed: usize,
+    /// Homes kept, for any reason.
+    left_alone: usize,
+    /// The subset of `left_alone` whose records name a live process. Reported
+    /// on its own line so "left alone" never reads as "failed".
+    live_owner: usize,
+    /// The subset of `left_alone` a live process is running in. Counted apart
+    /// from `live_owner` because the evidence is different: that one is a pid
+    /// written inside the home, this one is the process table naming the home.
+    in_use: usize,
+    /// The subset of `left_alone` skipped only for being too recent.
+    recent: usize,
+}
+
+impl PruneTally {
+    const fn record(&mut self, verdict: &PruneVerdict, action: &PruneAction) {
+        match action {
+            PruneAction::Removed | PruneAction::Reported => self.removed += 1,
+            PruneAction::LeftAlone | PruneAction::RemoveFailed(_) => {
+                self.left_alone += 1;
+                if verdict.live_owner().is_some() {
+                    self.live_owner += 1;
+                }
+                match verdict {
+                    PruneVerdict::InUse => self.in_use += 1,
+                    PruneVerdict::Recent => self.recent += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// The closing summary line, as a pure function so its wording is pinned.
+///
+/// `applied` only changes the tense. It never changes which bucket a home fell
+/// into, because `--yes` does not widen what prune may touch.
+fn describe_summary(tally: &PruneTally, applied: bool) -> String {
+    let verb = if applied {
+        "home(s) removed"
+    } else {
+        "home(s) would be removed"
+    };
+    let mut reasons = Vec::new();
+    if tally.live_owner > 0 {
+        reasons.push(format!("{} with a live owner", tally.live_owner));
+    }
+    if tally.in_use > 0 {
+        reasons.push(format!("{} in use by a live process", tally.in_use));
+    }
+    if tally.recent > 0 {
+        reasons.push(format!("{} too recent", tally.recent));
+    }
+    let live = if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", reasons.join(", "))
+    };
+    let nudge = if !applied && tally.removed > 0 {
+        "; re-run with --yes to remove them"
+    } else {
+        ""
+    };
+    format!(
+        "{} {verb}, {} left alone{live}{nudge}",
+        tally.removed, tally.left_alone
+    )
+}
+
+/// Everything one prune run decided, with nothing printed yet.
+///
+/// The verb's whole guarantee is the `--yes` -> `apply` threading: with `apply`
+/// false nothing on disk may be touched. That is a property of the loop, not of
+/// any one home, so the loop is a value-returning function and the CLI wrapper
+/// below is left with nothing but `println!`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PruneReport {
+    /// One line per home, in the order they were considered.
+    lines: Vec<String>,
+    tally: PruneTally,
+    /// The closing line, without the `hangar daemon prune: ` prefix.
+    summary: String,
+}
+
+/// Classify (and, when `apply`, remove) every home in `homes`.
+///
+/// Pure apart from the removals it is asked for: the gates arrive in `ctx` and
+/// the report comes back as data, so a test can drive a real dry run and a real
+/// `--yes` run over the same fabricated homes and compare what survived.
+fn prune_all(homes: &[std::path::PathBuf], ctx: &PruneContext, apply: bool) -> PruneReport {
+    if homes.is_empty() {
+        return PruneReport {
+            lines: Vec::new(),
+            tally: PruneTally::default(),
+            summary: "no hangar homes under the system temp dir".to_string(),
+        };
+    }
+    let mut report = PruneReport::default();
+    for home in homes {
+        let (verdict, action) = prune_home_in(home, ctx, apply);
+        report.tally.record(&verdict, &action);
+        let suffix = describe_action(&action).map_or_else(String::new, |a| format!(" -> {a}"));
+        report.lines.push(format!(
+            "{} - {}{}",
+            home.display(),
+            describe_verdict(&verdict),
+            suffix
+        ));
+    }
+    report.summary = describe_summary(&report.tally, apply);
+    report
+}
+
+/// `hangar daemon prune`: report every hangar home left under the system temp
+/// dir, and with `--yes` delete the ones that are stale, unowned and idle.
+fn run_daemon_prune(args: &PruneArgs) -> Result<()> {
+    let report = prune_all(
+        &leaked_hangar_homes(),
+        &PruneContext::current(prune_min_age(args)),
+        args.yes,
+    );
+    for line in &report.lines {
+        println!("{line}");
+    }
+    println!("hangar daemon prune: {}", report.summary);
+    Ok(())
+}
+
+/// The age threshold `--older-than DAYS` asks for.
+///
+/// Named rather than inlined so the argv -> threshold path is assertable: this
+/// and `args.yes` are the whole of what the verb reads, and an `--older-than`
+/// that never reached the gate would leave `--yes` deleting today's runs with a
+/// green suite.
+///
+/// Saturating, so an absurd day count clamps to "keep everything" instead of
+/// wrapping into a threshold that removes it.
+const fn prune_min_age(args: &PruneArgs) -> std::time::Duration {
+    std::time::Duration::from_secs(args.older_than.saturating_mul(60 * 60 * 24))
 }
 
 /// `hangar daemon restart`: `stop` (if running) then `start`.
@@ -10972,6 +12128,1703 @@ mod ephemeral_home_watchdog_tests {
             LauncherLifetime::Ephemeral,
         );
         assert_eq!(command.get_envs().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod autostart_gate_tests {
+    //! The autostart must not spawn a daemon into a home that dies with the
+    //! run. PR #786 bound such a daemon to its parent; this is the step before
+    //! it, where the process is never spawned at all.
+    //!
+    //! Every case drives the pure predicate with an explicit flag. Reading (let
+    //! alone setting) `$AINB_HANGAR_HOME` here would be process-global and this
+    //! suite is multi-threaded, so a sibling test could flip the answer
+    //! underneath these.
+
+    use super::{
+        DaemonAutostart, autostart_allowed, ensure_hangar_daemon_with, hangar_home_was_requested,
+        home_was_requested,
+    };
+
+    /// A home of the shape a `HOME=$(mktemp -d)` harness produces under `root`.
+    fn ephemeral_home(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("bj.Q9x7fk").join(".agents-in-a-box")
+    }
+
+    /// Every temp root [`super::is_under_temp_dir`] recognises, so the gate is
+    /// proven against `$TMPDIR` (macOS `/var/folders/...`) as well as the fixed
+    /// roots the recording harnesses use.
+    fn temp_roots() -> Vec<std::path::PathBuf> {
+        vec![
+            std::env::temp_dir(),
+            std::path::PathBuf::from("/tmp"),
+            std::path::PathBuf::from("/var/tmp"),
+        ]
+    }
+
+    #[test]
+    fn skips_an_ephemeral_home_nobody_asked_for() {
+        for root in temp_roots() {
+            let home = ephemeral_home(&root);
+            assert!(
+                !autostart_allowed(&home, false),
+                "a home under {} is deleted with its creator; spawning a daemon \
+                 into it is pure waste",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn autostarts_an_ephemeral_home_that_was_asked_for() {
+        // Every hangar tripwire sets `$AINB_HANGAR_HOME` to a temp dir and then
+        // expects a daemon on it. Gating that would take the whole suite red.
+        for root in temp_roots() {
+            let home = ephemeral_home(&root);
+            assert!(
+                autostart_allowed(&home, true),
+                "an explicit AINB_HANGAR_HOME under {} is a deliberate choice",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn autostarts_a_real_home() {
+        // The Homebrew daemon's home, with and without the env var set.
+        let home = std::path::Path::new("/Users/example/.agents-in-a-box");
+        assert!(autostart_allowed(home, false));
+        assert!(autostart_allowed(home, true));
+    }
+
+    /// The headline behaviour, at the seam where the gate actually meets the
+    /// spawn: no process is launched for an ephemeral home nobody asked for.
+    ///
+    /// Asserting on [`autostart_allowed`] alone leaves the wiring untested, and
+    /// a gate that is computed and then ignored passes such a suite unchanged.
+    #[test]
+    fn never_spawns_into_an_ephemeral_home_nobody_asked_for() {
+        for root in temp_roots() {
+            let spawned = std::cell::Cell::new(false);
+            let outcome = ensure_hangar_daemon_with(Some(&ephemeral_home(&root)), false, || {
+                spawned.set(true);
+                DaemonAutostart::Started
+            });
+            assert_eq!(outcome, DaemonAutostart::SkippedEphemeralHome);
+            assert!(
+                !spawned.get(),
+                "a home under {} is deleted with its creator; nothing may be \
+                 spawned into it",
+                root.display()
+            );
+        }
+    }
+
+    /// The other half of the same wiring: the gate declines exactly one shape
+    /// and lets every other one through to the spawn untouched.
+    #[test]
+    fn spawns_for_a_real_home_and_for_a_requested_ephemeral_one() {
+        let real = std::path::Path::new("/Users/example/.agents-in-a-box");
+        let cases: Vec<(std::path::PathBuf, bool)> = std::iter::once((real.to_path_buf(), false))
+            .chain(temp_roots().into_iter().map(|r| (ephemeral_home(&r), true)))
+            .collect();
+        for (home, requested) in cases {
+            let spawned = std::cell::Cell::new(false);
+            let outcome = ensure_hangar_daemon_with(Some(&home), requested, || {
+                spawned.set(true);
+                DaemonAutostart::Started
+            });
+            assert_eq!(outcome, DaemonAutostart::Started, "home {}", home.display());
+            assert!(spawned.get(), "home {}", home.display());
+        }
+    }
+
+    /// An unresolvable hangar home is not a reason to decline: there is no path
+    /// to judge, so the spawn RUNS and reports on its own terms.
+    ///
+    /// The assertion that matters is `spawned`. Comparing the returned outcome
+    /// to what the stub returned would pin nothing at all - the function hands
+    /// the stub's value straight back, so that comparison holds even if the
+    /// spawn is never reached. What can actually break here is the gate
+    /// inventing a decision about a home it never saw, so the outcome is
+    /// asserted only against the one value the gate can produce by itself.
+    #[test]
+    fn spawns_when_the_home_cannot_be_resolved() {
+        for requested in [false, true] {
+            let spawned = std::cell::Cell::new(false);
+            let outcome = ensure_hangar_daemon_with(None, requested, || {
+                spawned.set(true);
+                DaemonAutostart::Failed
+            });
+            assert!(
+                spawned.get(),
+                "no path to judge is not grounds to decline (requested={requested})"
+            );
+            assert_ne!(
+                outcome,
+                DaemonAutostart::SkippedEphemeralHome,
+                "the gate reported an ephemeral home it never saw a path for"
+            );
+        }
+    }
+
+    /// The one impure input the whole gate turns on: set-and-non-empty means
+    /// the caller chose this home, and nothing else does.
+    ///
+    /// Crediting an empty value here would make every `$HOME`-derived ephemeral
+    /// home look deliberate, re-enabling the exact spawn the gate exists to
+    /// prevent, and every other test in this module would still pass.
+    #[test]
+    fn only_a_set_non_empty_hangar_home_counts_as_requested() {
+        use std::ffi::OsStr;
+        assert!(
+            !home_was_requested(None),
+            "unset means the home came from $HOME"
+        );
+        assert!(
+            !home_was_requested(Some(OsStr::new(""))),
+            "`AINB_HANGAR_HOME=` is ignored by hangar_home, so it is not a choice"
+        );
+        for value in ["/tmp/x/.agents-in-a-box", "~/.agents-in-a-box", " "] {
+            assert!(
+                home_was_requested(Some(OsStr::new(value))),
+                "value {value:?}"
+            );
+        }
+    }
+
+    /// The reader is wired to the right variable, asserted against a FIXED
+    /// expectation.
+    ///
+    /// This suite runs under a harness that always sets `$AINB_HANGAR_HOME` to a
+    /// real path (`is_some_and(!is_empty)`), so the reader's answer here is
+    /// known ahead of time: `true`. Re-deriving the expectation by calling
+    /// `home_was_requested` on the same variable the reader reads would compare
+    /// the function under test with itself, and pass for a reader wired to the
+    /// wrong variable, or to no variable at all.
+    ///
+    /// `set_var` is process-global and this suite is multi-threaded, so the
+    /// variable is read, never written.
+    #[test]
+    fn the_env_reader_reads_the_hangar_home_variable() {
+        let raw = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        assert_eq!(
+            ainb_hangar_core::paths::HANGAR_HOME_ENV,
+            "AINB_HANGAR_HOME",
+            "the reader is pointed at the variable hangar_home honours"
+        );
+        let Some(value) = raw else {
+            // No harness value to judge: the rule itself is pinned above, and
+            // there is nothing here that could distinguish a correct reader.
+            assert!(
+                !hangar_home_was_requested(),
+                "an unset variable is not a choice"
+            );
+            return;
+        };
+        assert!(
+            !value.is_empty(),
+            "this suite is expected to run with a real AINB_HANGAR_HOME"
+        );
+        assert!(
+            hangar_home_was_requested(),
+            "a set, non-empty AINB_HANGAR_HOME is a deliberate choice"
+        );
+    }
+
+    #[test]
+    fn autostarts_the_running_users_real_home() {
+        // Same claim against the home this machine actually resolves, so the
+        // test fails if the temp roots ever start prefixing it.
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let home = home.join(".agents-in-a-box");
+        if super::is_under_temp_dir(&home) {
+            // This suite is itself running under an ephemeral `$HOME`, which is
+            // the case the other tests cover. Nothing to assert here.
+            return;
+        }
+        assert!(autostart_allowed(&home, false));
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    //! Every row of `hangar daemon prune`'s decision table, against homes this
+    //! test fabricates in its own `TempDir`.
+    //!
+    //! The load-bearing property is the one that is easiest to lose: prune
+    //! signals NOTHING. Removing a directory is its only mutation, so a home
+    //! whose records name any live process is reported and kept, in a dry run
+    //! and under `--yes` alike. Three tests exist for that alone, one per shape
+    //! of live owner, and each holds a `Child` handle proving the process it
+    //! spawned outlived the run.
+
+    use super::{
+        DaemonCommand, HangarCommand, LiveHomes, OwnerRecord, PRUNE_DEFAULT_MIN_AGE_DAYS, PidState,
+        ProtectedRoots, PruneAction, PruneArgs, PruneContext, PruneTally, PruneVerdict,
+        contains_the_whole_filesystem, describe_action, describe_summary, describe_verdict,
+        has_symlink_component, home_paths_in_process_table, leaked_hangar_homes,
+        pid_state_from_argv, process_table_homes, prune_all, prune_home_in, prune_min_age,
+        prune_verdict_from,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    /// Every gate that lives OUTSIDE a home's own ownership records, wide open:
+    /// the real protected roots, a process table that answered and named
+    /// nothing, and no age threshold.
+    ///
+    /// The decision-table tests want exactly this, so their subject reaches the
+    /// records. Each test that is ABOUT one of these gates narrows that one gate
+    /// and leaves the rest open, which is what makes its refusal attributable.
+    fn every_outer_gate_open() -> PruneContext {
+        PruneContext::of(
+            ProtectedRoots::current(),
+            LiveHomes::answered(&[]),
+            Duration::ZERO,
+        )
+    }
+
+    /// A pid no live process can ever wear, for fixtures that need a recorded
+    /// owner that is definitively gone.
+    ///
+    /// Deliberately NOT a just-reaped child's pid: that number goes straight
+    /// back into the allocator, so between writing the fixture and reading it
+    /// the kernel may hand it to something real, and the test would then be
+    /// asserting about a stranger's process. This value is above every
+    /// platform's `pid_max` (macOS 99999, Linux at most 2^30), so `kill` can
+    /// only ever answer `ESRCH` for it, and it still fits in a positive `i32`.
+    const UNRECYCLABLE_PID: u32 = 2_000_000_000;
+
+    /// A child this test spawned, held as a `Child` for its whole life.
+    ///
+    /// Signals go THROUGH that handle, never to a raw pid: `Child::kill` is a
+    /// no-op once the child has been reaped, so this cannot signal a pid the
+    /// kernel has since recycled onto somebody else's process. The same handle
+    /// answers `alive`, for the same reason.
+    ///
+    /// The reaper thread is load-bearing: an unreaped child stays a zombie, and
+    /// `kill(pid, 0)` succeeds for a zombie, so the bounded exit-wait inside
+    /// prune would time out on a process that had already died. It polls
+    /// `try_wait` rather than blocking in `wait` so the handle is never held
+    /// across a wait, which is what lets `Drop` take it to signal. A real daemon
+    /// is detached and never our child, so it never becomes one.
+    struct OwnedChild {
+        pid: u32,
+        child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
+    }
+
+    impl OwnedChild {
+        /// Spawn `program` as a long sleeper. `program` decides how prune reads
+        /// it: a path ending in `ainb-hangar-daemon` is a daemon by argv, any
+        /// other name is a stranger.
+        fn spawn(program: &std::path::Path) -> Self {
+            Self::spawn_with(program, None)
+        }
+
+        /// A sleeper whose `$HOME` is `home`, which is exactly how a live
+        /// ephemeral run shows up in the process table: the harness sets `HOME`
+        /// and every hangar path is derived from it.
+        fn spawn_with_home(home: &std::path::Path) -> Self {
+            Self::spawn_with(&sleep_binary(), Some(home))
+        }
+
+        fn spawn_with(program: &std::path::Path, home: Option<&std::path::Path>) -> Self {
+            let mut command = std::process::Command::new(program);
+            if let Some(home) = home {
+                command.env("HOME", home);
+            }
+            let child = command
+                .arg("120")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn test child");
+            let pid = child.id();
+            let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+            let reaper = std::sync::Arc::clone(&child);
+            std::thread::spawn(move || {
+                // Ends when the child does, which the `sleep` argument bounds
+                // even if nothing ever signals it.
+                while reaper
+                    .lock()
+                    .expect("reap test child")
+                    .try_wait()
+                    .is_ok_and(|exited| exited.is_none())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            });
+            Self { pid, child }
+        }
+
+        fn alive(&self) -> bool {
+            self.child
+                .lock()
+                .expect("probe test child")
+                .try_wait()
+                .is_ok_and(|exited| exited.is_none())
+        }
+    }
+
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            // Through the handle, so a child the reaper already collected is
+            // not signalled at all. Never by pid, and never by name.
+            let _ = self.child.lock().expect("stop test child").kill();
+        }
+    }
+
+    fn sleep_binary() -> std::path::PathBuf {
+        ["/bin/sleep", "/usr/bin/sleep"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists())
+            .expect("a sleep binary")
+    }
+
+    /// A `sleep` reachable under the name a hangar daemon sidecar carries, so a
+    /// child of ours reads as a daemon to `holder_is_live_daemon` without
+    /// anybody's real daemon being involved.
+    fn daemon_shaped_sleep(dir: &std::path::Path) -> std::path::PathBuf {
+        let link = dir.join("ainb-hangar-daemon");
+        std::os::unix::fs::symlink(sleep_binary(), &link).expect("symlink daemon-shaped sleep");
+        link
+    }
+
+    /// A hangar home of the shape a `HOME=$(mktemp -d)` run leaves behind.
+    fn fabricate_home(root: &std::path::Path, pid_file: Option<&str>) -> std::path::PathBuf {
+        let home = root.join(ainb_hangar_core::paths::HANGAR_DIR);
+        std::fs::create_dir_all(home.join("hangar")).expect("mkdir hangar home");
+        if let Some(text) = pid_file {
+            std::fs::write(ainb_hangar_daemon::pid_path_in(&home), text).expect("write pid file");
+        }
+        home
+    }
+
+    /// Publish this home's OWN ownership lock naming `pid`, the way a daemon
+    /// does as the first statement of `boot`.
+    fn record_lock_owner(home: &std::path::Path, pid: u32) {
+        std::fs::write(
+            ainb_hangar_daemon::single_instance::lock_path_in(home),
+            format!("{pid}"),
+        )
+        .expect("write ownership lock");
+    }
+
+    /// Row 1: neither record exists. Nothing ever recorded an owner, so the
+    /// home is just litter.
+    #[test]
+    fn prune_removes_a_home_with_no_recorded_owner() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), false),
+            (PruneVerdict::NoOwner, PruneAction::Reported)
+        );
+        assert!(home.is_dir(), "a dry run must not delete anything");
+
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), true),
+            (PruneVerdict::NoOwner, PruneAction::Removed)
+        );
+        assert!(!home.exists());
+    }
+
+    /// Row 2: a record naming a process that is gone.
+    #[test]
+    fn prune_removes_a_home_whose_recorded_pid_is_dead() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dead = UNRECYCLABLE_PID;
+        let home = fabricate_home(root.path(), Some(&format!("{dead}\n")));
+        record_lock_owner(&home, dead);
+
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), false),
+            (PruneVerdict::DeadOwner(dead), PruneAction::Reported)
+        );
+        assert!(home.is_dir());
+
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), true),
+            (PruneVerdict::DeadOwner(dead), PruneAction::Removed)
+        );
+        assert!(!home.exists());
+    }
+
+    /// Row 3, the headline refusal: a home whose OWN ownership lock names a
+    /// live hangar daemon is reported and left completely alone, under `--yes`
+    /// as much as in a dry run.
+    ///
+    /// This is the case the verb used to SIGTERM and then SIGKILL. It cannot:
+    /// the lock lives in a world-writable temp tree, so a stale or copied one
+    /// naming the developer's real daemon reaches this exact branch, and
+    /// nothing available inside the home tells the two apart. The process stays
+    /// up, the home stays on disk, and the report hands the operator the
+    /// command.
+    #[test]
+    fn prune_leaves_a_live_daemon_its_home_recorded_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let daemon = OwnedChild::spawn(&daemon_shaped_sleep(root.path()));
+        let home = fabricate_home(root.path(), Some(&format!("{}\n", daemon.pid)));
+        record_lock_owner(&home, daemon.pid);
+
+        for apply in [false, true] {
+            assert_eq!(
+                prune_home_in(&home, &every_outer_gate_open(), apply),
+                (PruneVerdict::LiveDaemon(daemon.pid), PruneAction::LeftAlone),
+                "apply={apply}"
+            );
+            assert!(
+                daemon.alive(),
+                "prune signalled a pid it read out of a world-writable file \
+                 (apply={apply})"
+            );
+            assert!(home.is_dir(), "apply={apply}");
+        }
+
+        // And the report names the remedy prune declined to perform itself.
+        let pid = daemon.pid;
+        let sentence = describe_verdict(&PruneVerdict::LiveDaemon(pid));
+        assert!(
+            sentence.contains(&format!("kill {pid}")),
+            "the operator is left without the command: {sentence}"
+        );
+    }
+
+    /// The lock alone still decides the verdict: `daemon.pid` is written at the
+    /// END of boot, so a daemon that took the lock seconds ago has none yet.
+    /// Deciding from the pid file alone reads that home as ownerless and
+    /// deletes it out from under a live daemon.
+    #[test]
+    fn prune_keeps_a_home_a_live_daemon_claimed_with_the_lock_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let daemon = OwnedChild::spawn(&daemon_shaped_sleep(root.path()));
+        let home = fabricate_home(root.path(), None);
+        record_lock_owner(&home, daemon.pid);
+
+        for apply in [false, true] {
+            assert_eq!(
+                prune_home_in(&home, &every_outer_gate_open(), apply),
+                (PruneVerdict::LiveDaemon(daemon.pid), PruneAction::LeftAlone),
+                "apply={apply}"
+            );
+            assert!(
+                home.is_dir(),
+                "a home whose lock names a live daemon is not litter (apply={apply})"
+            );
+            assert!(daemon.alive(), "apply={apply}");
+        }
+    }
+
+    /// The pid file is a home-agnostic note written at the end of boot, and a
+    /// leaked temp home can carry a stale one naming any pid on the machine, up
+    /// to and including the developer's real daemon. So a live daemon the lock
+    /// does not name is reported and left alone, with its home kept as the
+    /// record of the claim.
+    #[test]
+    fn prune_never_signals_a_daemon_the_ownership_lock_does_not_name() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let daemon = OwnedChild::spawn(&daemon_shaped_sleep(root.path()));
+        let home = fabricate_home(root.path(), Some(&format!("{}\n", daemon.pid)));
+
+        for apply in [false, true] {
+            assert_eq!(
+                prune_home_in(&home, &every_outer_gate_open(), apply),
+                (
+                    PruneVerdict::Unconfirmed(daemon.pid),
+                    PruneAction::LeftAlone
+                ),
+                "apply={apply}"
+            );
+            assert!(
+                daemon.alive(),
+                "a daemon this home never claimed must survive prune"
+            );
+            assert!(home.is_dir());
+        }
+    }
+
+    /// Row 4, the false-positive guard: the recorded pid is alive but belongs to
+    /// something else entirely (the daemon died and its pid was recycled).
+    /// Signalling it is exactly the accident this verb must never have, so the
+    /// process keeps running and its home is kept as the record of the claim.
+    #[test]
+    fn prune_leaves_a_live_non_daemon_pid_and_its_home_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let stranger = OwnedChild::spawn(&sleep_binary());
+        let home = fabricate_home(root.path(), Some(&format!("{}\n", stranger.pid)));
+
+        for apply in [false, true] {
+            assert_eq!(
+                prune_home_in(&home, &every_outer_gate_open(), apply),
+                (PruneVerdict::Stranger(stranger.pid), PruneAction::LeftAlone),
+                "apply={apply}"
+            );
+            assert!(stranger.alive(), "an unrelated process must survive prune");
+            assert!(home.is_dir(), "its home is the only record of the claim");
+        }
+    }
+
+    /// Row 5: the pid file exists but yields no pid. Fails closed - a file we
+    /// cannot read is not evidence that nothing is running.
+    #[test]
+    fn prune_leaves_an_unreadable_pid_file_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for content in ["", "   \n", "not-a-pid", "0\n"] {
+            let home = fabricate_home(root.path(), Some(content));
+            assert_eq!(
+                prune_home_in(&home, &every_outer_gate_open(), true),
+                (PruneVerdict::Unreadable, PruneAction::LeftAlone),
+                "content {content:?}"
+            );
+            assert!(home.is_dir(), "content {content:?}");
+        }
+    }
+
+    /// Nothing outside the temp roots is prunable, however it is reached. A
+    /// symlink under a temp root pointing out of it resolves outside, and prune
+    /// deletes trees, so the check is on the RESOLVED path.
+    #[test]
+    fn prune_refuses_a_home_outside_the_temp_roots() {
+        // A directory that is genuinely outside every temp root, that certainly
+        // exists, and that this test only ever reads through: the crate's own
+        // source dir standing in for the real `$HOME` such a symlink would
+        // point at in the wild.
+        let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        if super::is_under_temp_dir(outside) {
+            // Built from inside a temp root, so there is no "outside" to aim a
+            // symlink at and nothing to prove here.
+            return;
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let link = root.path().join(ainb_hangar_core::paths::HANGAR_DIR);
+        std::os::unix::fs::symlink(outside, &link).expect("symlink out of the temp roots");
+
+        // Dry run for the same reason as the test below: the subject resolves
+        // to a real source tree, so a broken guard must go red, not act.
+        assert_eq!(
+            prune_home_in(&link, &every_outer_gate_open(), false),
+            (PruneVerdict::Protected, PruneAction::LeftAlone),
+            "a temp-root path that RESOLVES outside is not prunable"
+        );
+        assert_eq!(
+            prune_home_in(
+                std::path::Path::new("/etc"),
+                &every_outer_gate_open(),
+                false
+            ),
+            (PruneVerdict::Protected, PruneAction::LeftAlone)
+        );
+        assert!(
+            !leaked_hangar_homes().contains(&link),
+            "the enumerator must not offer it either"
+        );
+        assert!(outside.is_dir(), "sanity: the symlink target still exists");
+    }
+
+    /// The identity refusal, isolated so that ONLY it can save the subject: a
+    /// fabricated home that is under a temp root and records no owner, so every
+    /// other guard in the chain says "remove".
+    ///
+    /// Asserted with `--yes`, and safe to: the subject is this test's own
+    /// `TempDir`, so a broken identity check deletes a fixture and goes red
+    /// rather than deleting anything real.
+    #[test]
+    fn prune_refuses_the_home_it_is_told_is_its_own() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mine = fabricate_home(root.path(), None);
+        assert_eq!(
+            prune_home_in(
+                &mine,
+                &PruneContext::of(
+                    ProtectedRoots::of(Some(&mine), None),
+                    LiveHomes::answered(&[]),
+                    Duration::ZERO,
+                ),
+                true,
+            ),
+            (PruneVerdict::Protected, PruneAction::LeftAlone)
+        );
+        assert!(
+            mine.is_dir(),
+            "prune removed the home this process resolved"
+        );
+    }
+
+    /// The real-home refusal, isolated the same way: a home that is under a
+    /// temp root, records no owner, and is not this process's own, so ONLY the
+    /// `dirs::home_dir()` check can save it.
+    ///
+    /// It is a separate gate from the temp-root test, not its complement.
+    /// `$TMPDIR` is attacker-influenced, and one pointing at an ancestor of the
+    /// real home makes every path in that home read as ephemeral: the
+    /// enumerator would then offer the user's actual `~/.agents-in-a-box`, and
+    /// `--yes` would delete it. Fixtures stand in for both roots, so a broken
+    /// guard deletes a `TempDir` and goes red instead of deleting a real home.
+    #[test]
+    fn prune_refuses_a_home_under_the_real_home_dir() {
+        // The fixture stands in for `$HOME` itself, so its `.agents-in-a-box`
+        // has the exact shape prune approves and every other gate passes it.
+        let real_home = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(real_home.path(), None);
+        let gates = |protected: ProtectedRoots| {
+            PruneContext::of(protected, LiveHomes::answered(&[]), Duration::ZERO)
+        };
+
+        // Without the guard this home is plain litter, which is what makes the
+        // refusal below attributable to the guard and nothing else.
+        assert_eq!(
+            prune_home_in(&home, &gates(ProtectedRoots::of(None, None)), false),
+            (PruneVerdict::NoOwner, PruneAction::Reported),
+            "fixture is not the shape this test needs"
+        );
+
+        assert_eq!(
+            prune_home_in(
+                &home,
+                &gates(ProtectedRoots::of(None, Some(real_home.path()))),
+                true
+            ),
+            (PruneVerdict::Protected, PruneAction::LeftAlone)
+        );
+        assert!(home.is_dir(), "prune removed a home under the real $HOME");
+    }
+
+    /// The same refusal against the home this process ACTUALLY resolved, which
+    /// also proves the enumerator never offers it.
+    ///
+    /// Asserted in DRY RUN, deliberately. This is the one test whose subject is
+    /// the developer's live hangar home, so it must stay harmless even when the
+    /// code under test is wrong: passing `true` here makes the test's safety
+    /// depend on the very guard it is checking, and a broken guard then deletes
+    /// that home for real instead of going red. The isolated case above is what
+    /// proves the guard itself.
+    #[test]
+    fn prune_never_touches_the_home_this_process_resolved() {
+        let Ok(mine) = ainb_hangar_daemon::hangar_dir() else {
+            return;
+        };
+        assert_eq!(
+            prune_home_in(&mine, &every_outer_gate_open(), false),
+            (PruneVerdict::Protected, PruneAction::LeftAlone)
+        );
+        let listed = leaked_hangar_homes();
+        assert!(
+            !listed.contains(&mine),
+            "prune listed its own home: {}",
+            mine.display()
+        );
+    }
+
+    /// The polarity that separates a lock arbiter from a killer: `ps` failing to
+    /// answer is not proof of ownership, so it never yields a signalable
+    /// verdict, whichever record named the pid.
+    ///
+    /// `single_instance::holder_is_live_daemon` answers YES in exactly this
+    /// case, and is right to: there it decides whether to steal a lock, where a
+    /// false negative puts two daemons on one home. Reusing that answer to
+    /// authorize a SIGKILL is what inverts it into a hazard.
+    #[test]
+    fn prune_never_confirms_a_pid_the_process_table_cannot_identify() {
+        let unknown = |_: u32| PidState::Unknown;
+        for (lock, pidfile) in [
+            (OwnerRecord::Pid(7), OwnerRecord::Pid(7)),
+            (OwnerRecord::Pid(7), OwnerRecord::Absent),
+            (OwnerRecord::Absent, OwnerRecord::Pid(7)),
+        ] {
+            assert_eq!(
+                prune_verdict_from(lock, pidfile, &unknown),
+                PruneVerdict::Unconfirmed(7),
+                "lock {lock:?}, pid file {pidfile:?}"
+            );
+        }
+    }
+
+    /// The same polarity one layer down, where the process table is actually
+    /// read: an argv `ps` could not produce is UNKNOWN even when the
+    /// lock-arbitration predicate beside it fails open and says yes.
+    #[test]
+    fn an_unreadable_process_table_is_never_proof_of_a_daemon() {
+        assert_eq!(pid_state_from_argv(None, || true), PidState::Unknown);
+        // And a positive argv still needs that predicate to agree.
+        let daemon = "/opt/homebrew/bin/ainb-hangar-daemon";
+        assert_eq!(pid_state_from_argv(Some(daemon), || true), PidState::Daemon);
+        assert_eq!(
+            pid_state_from_argv(Some(daemon), || false),
+            PidState::NotADaemon
+        );
+        // A self-exec'd cargo test binary wears the daemon argv without being
+        // one, and prune signals nothing on shape alone.
+        assert_eq!(
+            pid_state_from_argv(
+                Some("/repo/target/debug/deps/ainb-9f hangar daemon run"),
+                || { true }
+            ),
+            PidState::NotADaemon
+        );
+    }
+
+    /// The path the guard approved is the path that gets deleted.
+    ///
+    /// `prunable_in` resolves the home once; re-deriving it at delete time would
+    /// resolve every component a second time, and under a world-writable temp
+    /// root a symlink swapped in between the two sends the delete somewhere the
+    /// guard never approved. Reaching one temp-root home through a symlink left
+    /// in another makes the difference observable: the RESOLVED directory is the
+    /// leaked home, and it is what must go.
+    #[test]
+    fn prune_removes_the_exact_path_it_validated() {
+        let leaked = tempfile::tempdir().expect("tempdir");
+        let resolved = fabricate_home(leaked.path(), None);
+        let decoy = tempfile::tempdir().expect("tempdir");
+        let reached_by = decoy.path().join(ainb_hangar_core::paths::HANGAR_DIR);
+        std::os::unix::fs::symlink(&resolved, &reached_by).expect("symlink into the temp root");
+
+        assert_eq!(
+            prune_home_in(&reached_by, &every_outer_gate_open(), true),
+            (PruneVerdict::NoOwner, PruneAction::Removed)
+        );
+        assert!(
+            !resolved.exists(),
+            "prune deleted something other than the path it validated"
+        );
+    }
+
+    /// The shape `--yes` may delete is exactly `<temp root>/<one component>/
+    /// .agents-in-a-box`, and nothing else that merely LIVES under a temp root.
+    ///
+    /// A prefix test ("resolves somewhere under a temp root") approves the temp
+    /// root itself, every sibling tree beside a leaked home, and every tree a
+    /// symlink resolves into, so one symlink turns `--yes` into a
+    /// `remove_dir_all` of a whole temp tree. Each subject below is a real
+    /// directory this test created, so a guard that regressed deletes a fixture
+    /// and goes red rather than deleting anything real.
+    #[test]
+    fn prune_refuses_everything_but_the_exact_leaked_home_shape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let nested = root.path().join("session");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+        let too_deep = fabricate_home(&nested, None);
+        let wrong_leaf = root.path().join("hangar-home");
+        std::fs::create_dir_all(&wrong_leaf).expect("mkdir wrong leaf");
+        let file_root = tempfile::tempdir().expect("tempdir");
+        let a_file = file_root.path().join(ainb_hangar_core::paths::HANGAR_DIR);
+        std::fs::write(&a_file, "not a home").expect("write file");
+
+        for (subject, why) in [
+            (
+                root.path().to_path_buf(),
+                "the temp-dir entry a leaked home sits IN is not a home",
+            ),
+            (
+                std::env::temp_dir(),
+                "the temp root itself is the whole temp tree",
+            ),
+            (
+                too_deep,
+                "two levels down is somebody else's tree, not a leaked home",
+            ),
+            (wrong_leaf, "a directory not named .agents-in-a-box"),
+            (a_file, "a FILE with the right name is not a home"),
+        ] {
+            assert_eq!(
+                prune_home_in(&subject, &every_outer_gate_open(), false),
+                (PruneVerdict::Protected, PruneAction::LeftAlone),
+                "{} was approved: {why}",
+                subject.display()
+            );
+            assert!(subject.exists(), "{}", subject.display());
+        }
+    }
+
+    /// The post-resolution symlink re-check, driven directly.
+    ///
+    /// `canonicalize` answers about the moment it ran, and temp roots are
+    /// world-writable, so an unprivileged local process can swap a component for
+    /// a symlink in the window between the guard's answer and
+    /// `remove_dir_all`. Re-reading every component with `symlink_metadata` is
+    /// what turns that swap into a refusal, and it is asserted here rather than
+    /// through `prunable_in` because no path `canonicalize` returns can carry a
+    /// symlink component in the first place: the race is exactly what the
+    /// re-check exists for, and only the re-check can be shown it.
+    #[test]
+    fn a_symlinked_component_is_refused_not_followed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join(ainb_hangar_core::paths::HANGAR_DIR))
+            .expect("mkdir real home");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink parent");
+
+        assert!(
+            has_symlink_component(&link.join(ainb_hangar_core::paths::HANGAR_DIR)),
+            "a swapped parent component must be caught"
+        );
+        assert!(
+            has_symlink_component(&root.path().join("gone").join("x")),
+            "a component we cannot stat is an unknown, and prune fails closed"
+        );
+        let clean = std::fs::canonicalize(real.join(ainb_hangar_core::paths::HANGAR_DIR))
+            .expect("canonicalize");
+        assert!(
+            !has_symlink_component(&clean),
+            "a fully resolved path has nothing to refuse: {}",
+            clean.display()
+        );
+    }
+
+    /// The rest of the decision table, driven directly so every row is pinned
+    /// without a process or a filesystem in the way.
+    #[test]
+    fn prune_verdict_table() {
+        let daemon = |_: u32| PidState::Daemon;
+        let dead = |_: u32| PidState::Dead;
+        let stranger = |_: u32| PidState::NotADaemon;
+        use OwnerRecord::{Absent, Pid, Unreadable};
+
+        // Only the lock authorizes a signal.
+        assert_eq!(
+            prune_verdict_from(Pid(9), Absent, &daemon),
+            PruneVerdict::LiveDaemon(9)
+        );
+        assert_eq!(
+            prune_verdict_from(Absent, Pid(9), &daemon),
+            PruneVerdict::Unconfirmed(9)
+        );
+        // A live process that is positively not a daemon keeps its home either
+        // way: the pid was recycled, and the claim is all we have.
+        assert_eq!(
+            prune_verdict_from(Pid(9), Absent, &stranger),
+            PruneVerdict::Stranger(9)
+        );
+        assert_eq!(
+            prune_verdict_from(Absent, Pid(9), &stranger),
+            PruneVerdict::Stranger(9)
+        );
+        // Nothing live named by either record.
+        assert_eq!(
+            prune_verdict_from(Pid(9), Pid(9), &dead),
+            PruneVerdict::DeadOwner(9)
+        );
+        assert_eq!(
+            prune_verdict_from(Absent, Absent, &dead),
+            PruneVerdict::NoOwner
+        );
+        // An unreadable record is not evidence that nothing is running, so it
+        // outranks every removal verdict, including a dead pid beside it.
+        assert_eq!(
+            prune_verdict_from(Unreadable, Absent, &dead),
+            PruneVerdict::Unreadable
+        );
+        assert_eq!(
+            prune_verdict_from(Absent, Unreadable, &dead),
+            PruneVerdict::Unreadable
+        );
+        assert_eq!(
+            prune_verdict_from(Unreadable, Pid(9), &dead),
+            PruneVerdict::Unreadable
+        );
+    }
+
+    /// Under `--yes`, EVERY verdict that names a live pid keeps its home. The
+    /// row-level tests above each prove one shape against a real process; this
+    /// pins the whole column, so a new live-owner verdict cannot be added
+    /// straight into the removal branch.
+    #[test]
+    fn no_live_owner_verdict_is_ever_removable() {
+        for verdict in [
+            PruneVerdict::LiveDaemon(9),
+            PruneVerdict::Stranger(9),
+            PruneVerdict::Unconfirmed(9),
+            PruneVerdict::Unreadable,
+            PruneVerdict::Protected,
+        ] {
+            assert!(!verdict.is_removable(), "{verdict:?}");
+        }
+        assert!(PruneVerdict::NoOwner.is_removable());
+        assert!(PruneVerdict::DeadOwner(9).is_removable());
+    }
+
+    /// The summary counts removals and left-alone homes separately, and says
+    /// how many of the latter have a live owner.
+    ///
+    /// The count it replaced summed the two into "acted on N home(s)", which
+    /// read as "N daemons dealt with" - a claim the verb cannot make now that
+    /// it signals nothing. Fed from `record` rather than hand-set fields, so
+    /// the summary and the per-home decisions cannot drift apart.
+    #[test]
+    fn prune_summary_separates_removals_from_homes_left_alone() {
+        let mut tally = PruneTally::default();
+        tally.record(&PruneVerdict::NoOwner, &PruneAction::Removed);
+        tally.record(&PruneVerdict::DeadOwner(4), &PruneAction::Removed);
+        tally.record(&PruneVerdict::Unreadable, &PruneAction::Removed);
+        tally.record(&PruneVerdict::LiveDaemon(7), &PruneAction::LeftAlone);
+        tally.record(&PruneVerdict::Stranger(8), &PruneAction::LeftAlone);
+        tally.record(&PruneVerdict::Unreadable, &PruneAction::LeftAlone);
+
+        assert_eq!(
+            describe_summary(&tally, true),
+            "3 home(s) removed, 3 left alone (2 with a live owner)"
+        );
+
+        let mut dry = PruneTally::default();
+        dry.record(&PruneVerdict::NoOwner, &PruneAction::Reported);
+        dry.record(&PruneVerdict::LiveDaemon(7), &PruneAction::LeftAlone);
+        assert_eq!(
+            describe_summary(&dry, false),
+            "1 home(s) would be removed, 1 left alone (1 with a live owner); \
+             re-run with --yes to remove them"
+        );
+
+        // Nothing removable: no nudge to re-run, and still no claim of action.
+        let mut kept = PruneTally::default();
+        kept.record(&PruneVerdict::Unreadable, &PruneAction::LeftAlone);
+        assert_eq!(
+            describe_summary(&kept, false),
+            "0 home(s) would be removed, 1 left alone"
+        );
+    }
+
+    /// No summary this verb can print may describe a process being dealt with.
+    ///
+    /// Asserted over the whole cross product rather than the three sentences
+    /// above, because the hazard is a future wording change, not today's.
+    #[test]
+    fn no_prune_summary_can_imply_a_signal() {
+        for verdict in [
+            PruneVerdict::NoOwner,
+            PruneVerdict::DeadOwner(4),
+            PruneVerdict::LiveDaemon(7),
+            PruneVerdict::Stranger(8),
+            PruneVerdict::Unconfirmed(9),
+            PruneVerdict::Unreadable,
+            PruneVerdict::Protected,
+        ] {
+            for action in [
+                PruneAction::Removed,
+                PruneAction::Reported,
+                PruneAction::LeftAlone,
+                PruneAction::RemoveFailed("denied".to_string()),
+            ] {
+                let mut tally = PruneTally::default();
+                tally.record(&verdict, &action);
+                for applied in [false, true] {
+                    let line = describe_summary(&tally, applied);
+                    for banned in ["stop", "kill", "signal", "acted on", "daemon"] {
+                        assert!(
+                            !line.contains(banned),
+                            "{line:?} claims {banned:?} for {verdict:?}/{action:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The enumerator finds the `<temp root>/*/.agents-in-a-box` shape a leaked
+    /// run leaves. Read-only: it classifies nothing and removes nothing.
+    #[test]
+    fn prune_enumerates_hangar_homes_one_level_under_a_temp_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        assert!(
+            leaked_hangar_homes().contains(&home),
+            "{} should be listed",
+            home.display()
+        );
+        assert!(home.is_dir(), "listing must not remove anything");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // The two gates that separate a LIVE ephemeral run from a leaked one.
+    //
+    // Since #784 no daemon is ever spawned into an ephemeral home, so a running
+    // session leaves no ownership lock and no pid file: to the record-based
+    // decision table above, a home in active use and a home abandoned last week
+    // are the same `NoOwner` litter. These are what tell them apart.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// A home a live process is running in is left alone, with `--yes`.
+    ///
+    /// Driven through the REAL process table against a child this test spawned,
+    /// because the wiring from `ps` to the verdict is the part that can rot.
+    /// The child is held as a `Child` handle for its whole life and never
+    /// signalled by pid; prune signals nothing at all.
+    #[test]
+    fn prune_leaves_a_home_a_live_process_is_running_in() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+
+        // Baseline: with nothing running in it, this home is removable litter.
+        // That is what makes the refusal below attributable to this gate.
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), false),
+            (PruneVerdict::NoOwner, PruneAction::Reported),
+            "fixture is not the shape this test needs"
+        );
+
+        let live = OwnedChild::spawn_with_home(root.path());
+        let table = LiveHomes::from_process_table();
+        // The process table must have ANSWERED, and named this child's home.
+        // Without both, the assertion below is satisfied by the fail-closed
+        // path, which is what a `ps` read that never completes looks like: every
+        // home reported in use, and the gate inert.
+        assert!(
+            table
+                .0
+                .as_ref()
+                .is_some_and(|homes| homes
+                    .contains(&std::fs::canonicalize(root.path()).expect("canonicalize"))),
+            "ps did not report the child's $HOME; the gate would be fail-closed, \
+             not working"
+        );
+        let ctx = PruneContext::of(ProtectedRoots::current(), table, Duration::ZERO);
+        assert_eq!(
+            prune_home_in(&home, &ctx, true),
+            (PruneVerdict::InUse, PruneAction::LeftAlone)
+        );
+        assert!(
+            home.is_dir(),
+            "prune deleted a home out from under a live run"
+        );
+        assert!(live.alive(), "prune must never signal anything");
+    }
+
+    /// A process table that cannot answer removes NOTHING.
+    ///
+    /// The polarity that matters: a missing answer is not evidence that nothing
+    /// is running, and this is the gate that stands between `--yes` and a live
+    /// session's home. Failing open here deletes it.
+    #[test]
+    fn an_unreadable_process_table_leaves_every_home_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let ctx = PruneContext::of(
+            ProtectedRoots::current(),
+            LiveHomes::unreadable(),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            prune_home_in(&home, &ctx, true),
+            (PruneVerdict::InUse, PruneAction::LeftAlone)
+        );
+        assert!(home.is_dir());
+    }
+
+    /// Either variable identifies the same home, and neither matches a
+    /// neighbour that merely shares a prefix.
+    #[test]
+    fn a_live_home_is_matched_by_either_environment_variable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let resolved = std::fs::canonicalize(&home).expect("canonicalize");
+        let sibling = root.path().join("sibling");
+
+        assert!(
+            LiveHomes::answered(&[root.path()]).claims(&resolved),
+            "$HOME names the PARENT of the hangar home"
+        );
+        assert!(
+            LiveHomes::answered(&[resolved.as_path()]).claims(&resolved),
+            "$AINB_HANGAR_HOME names the home itself"
+        );
+        assert!(
+            !LiveHomes::answered(&[sibling.as_path()]).claims(&resolved),
+            "an unrelated path must not keep this home"
+        );
+        assert!(!LiveHomes::answered(&[]).claims(&resolved));
+    }
+
+    /// The `ps` dump parse: both variables, raw and resolved, and nothing else.
+    #[test]
+    fn the_process_table_parse_reads_both_home_variables_only() {
+        let homes = home_paths_in_process_table(
+            "1234 /bin/sleep 120 HOME=/tmp/bj.Q9x7fk PATH=/usr/bin \
+             AINB_HANGAR_HOME=/tmp/other/.agents-in-a-box HOMEBREW_PREFIX=/opt/homebrew HOME=",
+        );
+        assert!(homes.contains(std::path::Path::new("/tmp/bj.Q9x7fk")));
+        assert!(homes.contains(std::path::Path::new("/tmp/other/.agents-in-a-box")));
+        assert!(
+            !homes.contains(std::path::Path::new("/opt/homebrew")),
+            "a variable that merely ENDS in HOME is not a hangar home"
+        );
+        assert!(
+            !homes.contains(std::path::Path::new("")),
+            "an empty value names nothing"
+        );
+        assert!(
+            !homes.contains(std::path::Path::new("/usr/bin")),
+            "PATH is not a home"
+        );
+    }
+
+    /// A `ps` that exits 0 while showing no environments has not ANSWERED.
+    ///
+    /// The gate could previously only fail closed on a `ps` it was unable to
+    /// RUN. A `ps` that runs, succeeds and prints no environment at all (a
+    /// hardened kernel, a container with no `/proc`, a busybox `ps` that
+    /// ignores `e`) was read as a complete answer naming no homes, which made
+    /// every home on the machine report as free.
+    #[test]
+    fn a_ps_that_shows_no_environments_is_not_an_answer() {
+        let dump = "  PID TTY           TIME CMD\n\
+                    1 ??         0:12.34 /sbin/launchd\n\
+                 4321 ??         0:00.01 /bin/sleep 120\n";
+        assert!(
+            home_paths_in_process_table(dump).is_empty(),
+            "the fixture must name no homes, or it proves nothing"
+        );
+        assert!(
+            process_table_homes(dump).is_none(),
+            "no HOME= anywhere is `ps` declining, not an empty machine"
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let ctx = PruneContext::of(
+            ProtectedRoots::current(),
+            LiveHomes(process_table_homes(dump)),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            prune_home_in(&home, &ctx, true),
+            (PruneVerdict::InUse, PruneAction::LeftAlone)
+        );
+        assert!(home.is_dir(), "a `ps` that answered nothing deleted a home");
+
+        // A dump that DOES carry an environment is still an answer, so the
+        // check cannot be satisfied by refusing every dump there is.
+        let with_env = format!("{dump}  99 ??         0:00.01 /bin/sleep HOME=/tmp/x\n");
+        assert!(process_table_homes(&with_env).is_some());
+    }
+
+    /// A `$HOME` containing a space survives the parse.
+    ///
+    /// `ps` prints the environment unquoted, so splitting on whitespace
+    /// recorded `/tmp/my` for a `HOME=/tmp/my home dir`. The truncated prefix
+    /// matched no candidate, the live run read as abandoned, and `--yes`
+    /// deleted the home it named.
+    #[test]
+    fn the_process_table_parse_keeps_a_home_containing_a_space() {
+        let homes = home_paths_in_process_table(
+            "4321 ?? 0:00.01 /bin/sleep 120 HOME=/tmp/my home dir PATH=/usr/bin SHELL=/bin/zsh",
+        );
+        assert!(
+            homes.contains(std::path::Path::new("/tmp/my home dir")),
+            "a value runs to the next KEY= boundary, not the next space: {homes:?}"
+        );
+        assert!(
+            !homes.contains(std::path::Path::new("/tmp/my")),
+            "the truncated prefix must never be recorded as a home"
+        );
+        // The last assignment on a line runs to the end of it.
+        let trailing = home_paths_in_process_table(
+            "1 ?? 0:00.01 /bin/sh AINB_HANGAR_HOME=/tmp/a b/.agents-in-a-box",
+        );
+        assert!(
+            trailing.contains(std::path::Path::new("/tmp/a b/.agents-in-a-box")),
+            "{trailing:?}"
+        );
+    }
+
+    /// Set `path`'s mtime back by `age`, so the age gate can be driven against a
+    /// real timestamp rather than a shifted clock.
+    fn backdate(path: &std::path::Path, age: Duration) {
+        let when = std::time::SystemTime::now() - age;
+        let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+        std::fs::File::open(path)
+            .expect("open for set_times")
+            .set_times(times)
+            .expect("backdate");
+    }
+
+    const A_DAY: Duration = Duration::from_secs(60 * 60 * 24);
+
+    /// A home touched inside the threshold is skipped, and the same home is
+    /// removed once it is old enough.
+    ///
+    /// Both halves are needed: a gate that always skips would pass the first
+    /// assertion alone, and prune would then never remove anything again.
+    #[test]
+    fn prune_skips_a_home_touched_more_recently_than_the_threshold() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let gate = || PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY);
+
+        assert_eq!(
+            prune_home_in(&home, &gate(), true),
+            (PruneVerdict::Recent, PruneAction::LeftAlone),
+            "a home written a moment ago belongs to a run that is still going"
+        );
+        assert!(home.is_dir());
+
+        backdate(&home.join("hangar"), A_DAY * 2);
+        backdate(&home, A_DAY * 2);
+        assert_eq!(
+            prune_home_in(&home, &gate(), true),
+            (PruneVerdict::NoOwner, PruneAction::Removed),
+            "an old home is what this verb exists to remove"
+        );
+        assert!(!home.exists());
+    }
+
+    /// The `hangar/` subdir counts, not just the home dir.
+    ///
+    /// It is the half a live session keeps rewriting (sockets, locks, logs),
+    /// while the home dir's own mtime only moves when a top-level entry appears
+    /// or goes. Reading the home dir alone would age out a session that is very
+    /// much alive.
+    #[test]
+    fn the_age_gate_reads_the_hangar_subdir_too() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        backdate(&home, A_DAY * 2);
+
+        assert_eq!(
+            prune_home_in(
+                &home,
+                &PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY),
+                true
+            ),
+            (PruneVerdict::Recent, PruneAction::LeftAlone),
+            "a fresh hangar/ is a live session, whatever the home dir's mtime says"
+        );
+        assert!(home.is_dir());
+    }
+
+    /// A file INSIDE `hangar/` is the sign of life both directory mtimes miss.
+    ///
+    /// POSIX moves a directory's mtime when an entry appears, is renamed or
+    /// goes, never when a file already inside it is written. A daemon rewriting
+    /// `daemon.heartbeat` every few seconds therefore leaves the home dir and
+    /// `hangar/` both looking untouched, and a gate that read only those two
+    /// aged out a continuously active home and let `--yes` delete it.
+    #[test]
+    fn the_age_gate_reads_the_files_inside_the_hangar_dir() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let heartbeat = home.join("hangar").join("daemon.heartbeat");
+        std::fs::write(&heartbeat, b"alive").expect("write heartbeat");
+        // Exactly the shape POSIX produces: the file inside is seconds old and
+        // both directories around it look a couple of days stale.
+        backdate(&home.join("hangar"), A_DAY * 2);
+        backdate(&home, A_DAY * 2);
+
+        let gate = || PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY);
+        assert_eq!(
+            prune_home_in(&home, &gate(), true),
+            (PruneVerdict::Recent, PruneAction::LeftAlone),
+            "a heartbeat written seconds ago is a run that is still going"
+        );
+        assert!(home.is_dir(), "prune deleted a home being written to");
+
+        // And the gate lets go once nothing inside is fresh either, so the
+        // assertion above cannot be satisfied by a gate that keeps everything.
+        backdate(&heartbeat, A_DAY * 2);
+        backdate(&home.join("hangar"), A_DAY * 2);
+        backdate(&home, A_DAY * 2);
+        assert_eq!(
+            prune_home_in(&home, &gate(), true),
+            (PruneVerdict::NoOwner, PruneAction::Removed),
+            "an old home is what this verb exists to remove"
+        );
+        assert!(!home.exists());
+    }
+
+    /// A home whose records name a LIVE daemon says so, even while the age gate
+    /// would keep it anyway.
+    ///
+    /// Not a safety property: both answers keep the home. It is the only
+    /// sentence that carries the pid and the literal command that stops it, and
+    /// a live daemon rewriting its heartbeat keeps its own home permanently
+    /// inside the age window, so answering `Recent` first would withhold that
+    /// remedy from every real leaked daemon there is.
+    #[test]
+    fn a_live_recorded_owner_outranks_the_age_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let daemon = OwnedChild::spawn(&daemon_shaped_sleep(root.path()));
+        let home = fabricate_home(root.path(), None);
+        record_lock_owner(&home, daemon.pid);
+
+        // Everything here was written seconds ago, so the age gate on its own
+        // would answer `Recent`.
+        let ctx = PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY);
+        assert_eq!(
+            prune_home_in(&home, &ctx, true),
+            (PruneVerdict::LiveDaemon(daemon.pid), PruneAction::LeftAlone)
+        );
+        assert!(home.is_dir());
+        assert!(daemon.alive(), "prune must never signal anything");
+    }
+
+    /// A `hangar/` that cannot be listed keeps the home.
+    ///
+    /// It hides exactly the files the gate above exists to read, so it is an
+    /// unknown, and every unknown here fails closed.
+    #[test]
+    fn a_hangar_dir_that_cannot_be_listed_keeps_the_home() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let hangar = home.join("hangar");
+        backdate(&hangar, A_DAY * 2);
+        backdate(&home, A_DAY * 2);
+        let restore = std::fs::metadata(&hangar).expect("stat hangar dir").permissions();
+        std::fs::set_permissions(&hangar, std::fs::Permissions::from_mode(0o000))
+            .expect("make hangar dir unlistable");
+
+        let verdict = prune_home_in(
+            &home,
+            &PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY),
+            false,
+        );
+        let still_listable = std::fs::read_dir(&hangar).is_ok();
+        std::fs::set_permissions(&hangar, restore).expect("restore hangar dir");
+
+        if still_listable {
+            // Only a caller that ignores the permission bit (root) reaches
+            // here. The fixture is then not the shape this test needs, and
+            // asserting on it would prove nothing.
+            return;
+        }
+        assert_eq!(verdict, (PruneVerdict::Recent, PruneAction::LeftAlone));
+        assert!(home.is_dir());
+    }
+
+    /// `--older-than 0` is the escape hatch, and it is the ONLY thing that turns
+    /// the age gate off.
+    #[test]
+    fn a_zero_threshold_disables_the_age_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        assert_eq!(
+            prune_home_in(&home, &every_outer_gate_open(), false),
+            (PruneVerdict::NoOwner, PruneAction::Reported)
+        );
+    }
+
+    /// Parse a whole `ainb hangar daemon prune …` argv through the REAL clap
+    /// surface and hand back the `PruneArgs` the verb body would receive.
+    ///
+    /// The root command plus every registered subcommand, which is what
+    /// `main` builds: a `PruneArgs` constructed by hand proves nothing about
+    /// the flags, the defaults, or the value parsers clap actually applies.
+    fn parse_prune_args(argv: &[&str]) -> PruneArgs {
+        use clap::FromArgMatches;
+        let registry = crate::cli::registry::CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let matches = app
+            .try_get_matches_from(argv)
+            .unwrap_or_else(|e| panic!("clap rejected {argv:?}: {e}"));
+        let (name, sub) = matches.subcommand().expect("subcommand present");
+        assert_eq!(name, "hangar", "expected the hangar subtree for {argv:?}");
+        match HangarCommand::from_arg_matches(sub).expect("extract HangarCommand") {
+            HangarCommand::Daemon(DaemonCommand::Prune(args)) => args,
+            other => panic!("expected `hangar daemon prune`, got {other:?}"),
+        }
+    }
+
+    /// The dry-run promise, at the one place `--yes` is ever read.
+    ///
+    /// `run_daemon_prune` is the sole reader of this flag and the sole caller
+    /// that threads it into `prune_all`'s `apply`. Every test above drives
+    /// `apply` directly, so a bare `prune` that arrived here with `apply` true
+    /// would delete on the default invocation and none of them would notice.
+    #[test]
+    fn the_prune_verb_asks_for_apply_only_with_yes() {
+        assert!(
+            !parse_prune_args(&["ainb", "hangar", "daemon", "prune"]).yes,
+            "a bare `prune` must never delete anything"
+        );
+        assert!(parse_prune_args(&["ainb", "hangar", "daemon", "prune", "--yes"]).yes);
+    }
+
+    /// `--older-than DAYS` reaches the age gate, in days.
+    ///
+    /// The flag and the threshold are separated by a conversion, so both ends
+    /// are asserted: the parsed number, and the `Duration` the gate is handed.
+    #[test]
+    fn older_than_reaches_the_age_threshold_in_days() {
+        let three = parse_prune_args(&["ainb", "hangar", "daemon", "prune", "--older-than", "3"]);
+        assert_eq!(three.older_than, 3);
+        assert_eq!(prune_min_age(&three), A_DAY * 3);
+
+        let off = parse_prune_args(&["ainb", "hangar", "daemon", "prune", "--older-than", "0"]);
+        assert_eq!(prune_min_age(&off), Duration::ZERO, "`0` disables the gate");
+
+        // Saturating, not wrapping: an absurd day count keeps everything.
+        let absurd = format!("{}", u64::MAX);
+        let huge =
+            parse_prune_args(&["ainb", "hangar", "daemon", "prune", "--older-than", &absurd]);
+        assert_eq!(prune_min_age(&huge), Duration::from_secs(u64::MAX));
+    }
+
+    /// The default is a day, so a bare `prune --yes` never reaches today's runs.
+    ///
+    /// Asserted through clap's own `default_value_t`, which is what production
+    /// parses. The previous assertion read a hand-written `Default` impl that
+    /// `run_daemon_prune` never calls, so `default_value_t` could have been
+    /// changed to anything at all and this test would still have been green.
+    #[test]
+    fn prune_defaults_to_a_one_day_threshold() {
+        let args = parse_prune_args(&["ainb", "hangar", "daemon", "prune"]);
+        assert_eq!(args.older_than, 1);
+        assert_eq!(args.older_than, PRUNE_DEFAULT_MIN_AGE_DAYS);
+        assert!(!args.yes);
+        assert_eq!(prune_min_age(&args), A_DAY);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // The verb body: the `--yes` -> `apply` threading IS the dry-run promise.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// A dry run touches nothing; `--yes` removes the removable homes and only
+    /// those. Driven over the same three fabricated homes, in the same order,
+    /// so the two runs are comparable.
+    #[test]
+    fn the_prune_verb_removes_nothing_without_apply() {
+        let removable_root = tempfile::tempdir().expect("tempdir");
+        let removable = fabricate_home(removable_root.path(), None);
+        let live_root = tempfile::tempdir().expect("tempdir");
+        let daemon = OwnedChild::spawn(&daemon_shaped_sleep(live_root.path()));
+        let owned = fabricate_home(live_root.path(), None);
+        record_lock_owner(&owned, daemon.pid);
+        let recent_root = tempfile::tempdir().expect("tempdir");
+        let recent = fabricate_home(recent_root.path(), None);
+
+        let homes = vec![removable.clone(), owned.clone(), recent.clone()];
+        // Only `recent` stays inside the age window, so each home in this run is
+        // kept (or removed) for a different reason.
+        let gates = || PruneContext::of(ProtectedRoots::current(), LiveHomes::answered(&[]), A_DAY);
+        backdate(&removable.join("hangar"), A_DAY * 2);
+        backdate(&removable, A_DAY * 2);
+        backdate(&owned.join("hangar"), A_DAY * 2);
+        backdate(&owned, A_DAY * 2);
+
+        let dry = prune_all(&homes, &gates(), false);
+        assert_eq!(
+            dry.tally,
+            PruneTally {
+                removed: 1,
+                left_alone: 2,
+                live_owner: 1,
+                in_use: 0,
+                recent: 1,
+            }
+        );
+        assert_eq!(
+            dry.summary,
+            "1 home(s) would be removed, 2 left alone (1 with a live owner, 1 too recent); \
+             re-run with --yes to remove them"
+        );
+        assert_eq!(dry.lines.len(), 3);
+        for home in &homes {
+            assert!(home.is_dir(), "a dry run removed {}", home.display());
+        }
+
+        let applied = prune_all(&homes, &gates(), true);
+        assert_eq!(
+            applied.tally, dry.tally,
+            "--yes cannot widen what is removable"
+        );
+        assert!(!removable.exists(), "the removable home survived --yes");
+        assert!(owned.is_dir(), "--yes removed a home with a live owner");
+        assert!(
+            recent.is_dir(),
+            "--yes removed a home inside the age window"
+        );
+        assert!(daemon.alive(), "prune must never signal anything");
+    }
+
+    /// An empty machine gets the sentence the operator sees most often, and no
+    /// per-home lines to go with it.
+    #[test]
+    fn the_prune_verb_says_so_when_there_is_nothing_to_report() {
+        let report = prune_all(&[], &every_outer_gate_open(), true);
+        assert_eq!(report.lines, Vec::<String>::new());
+        assert_eq!(report.summary, "no hangar homes under the system temp dir");
+        assert_eq!(report.tally, PruneTally::default());
+    }
+
+    /// Every `describe_action` sentence, including the two that print nothing.
+    ///
+    /// The action suffix is what tells an operator whether a home is still on
+    /// disk, so a `RemoveFailed` that rendered as "removed" (or as nothing at
+    /// all) would report a deletion that never happened.
+    #[test]
+    fn describe_action_says_only_what_apply_actually_did() {
+        assert_eq!(describe_action(&PruneAction::Reported), None);
+        assert_eq!(describe_action(&PruneAction::LeftAlone), None);
+        assert_eq!(
+            describe_action(&PruneAction::Removed),
+            Some("removed".to_string())
+        );
+        assert_eq!(
+            describe_action(&PruneAction::RemoveFailed("Permission denied".to_string())),
+            Some("could not remove: Permission denied".to_string())
+        );
+    }
+
+    /// One line per home: the path, the verdict, and the action if there was
+    /// one.
+    ///
+    /// The exact text, because these lines ARE the verb's output. A dry run
+    /// carries no arrow at all, which is what distinguishes "this would be
+    /// removed" from "this was".
+    #[test]
+    fn each_home_line_is_the_path_the_verdict_and_the_action() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+
+        let dry = prune_all(std::slice::from_ref(&home), &every_outer_gate_open(), false);
+        assert_eq!(
+            dry.lines,
+            vec![format!("{} - stale home, no owner", home.display())]
+        );
+        assert!(home.is_dir());
+
+        let applied = prune_all(std::slice::from_ref(&home), &every_outer_gate_open(), true);
+        assert_eq!(
+            applied.lines,
+            vec![format!(
+                "{} - stale home, no owner -> removed",
+                home.display()
+            )]
+        );
+        assert!(!home.exists());
+    }
+
+    /// A removal that FAILS is reported as such and counted with the homes left
+    /// alone.
+    ///
+    /// The one action no other test produces, and the one whose miscounting
+    /// would be worst: the directory is still on disk, so tallying it as a
+    /// removal would have the summary claim a cleanup that did not happen.
+    /// Produced for real, by taking write permission off the directory the home
+    /// sits in so the final `rmdir` cannot succeed.
+    #[test]
+    fn a_removal_that_fails_is_reported_and_counted_as_left_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = fabricate_home(root.path(), None);
+        let restore = std::fs::metadata(root.path()).expect("stat temp root").permissions();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("make the home's parent read-only");
+
+        let report = prune_all(std::slice::from_ref(&home), &every_outer_gate_open(), true);
+
+        std::fs::set_permissions(root.path(), restore).expect("restore temp root");
+        if !home.exists() {
+            // Only a caller that ignores the permission bit (root) reaches
+            // here. The fixture is then not the shape this test needs.
+            return;
+        }
+        assert_eq!(
+            report.tally,
+            PruneTally {
+                removed: 0,
+                left_alone: 1,
+                live_owner: 0,
+                in_use: 0,
+                recent: 0,
+            },
+            "a failed removal is not a removal"
+        );
+        let expected = format!(
+            "{} - stale home, no owner -> could not remove: ",
+            home.display()
+        );
+        assert!(
+            report.lines[0].starts_with(&expected),
+            "expected a line starting {expected:?}, got {:?}",
+            report.lines[0]
+        );
+        assert_eq!(
+            report.summary, "0 home(s) removed, 1 left alone",
+            "the summary must not imply the home is gone"
+        );
+    }
+
+    /// Both protected roots resolve on the machine this suite runs on.
+    ///
+    /// Every other refusal test feeds `ProtectedRoots::of` a fixture, so a
+    /// `current()` that quietly returned `None` for both fields would leave the
+    /// real guard inert with a green suite: `refuses` answers `false` for a
+    /// `None` root, by design.
+    #[test]
+    fn the_real_protected_roots_both_resolve() {
+        let roots = ProtectedRoots::current();
+        assert!(
+            roots.mine.is_some(),
+            "this process could not resolve its own hangar home, so prune would \
+             not recognise it"
+        );
+        assert!(
+            roots.real_home.is_some(),
+            "dirs::home_dir() answered nothing, so the real-$HOME refusal is inert"
+        );
+    }
+
+    /// The roots that decide what `--yes` may ever look at.
+    ///
+    /// This list is the outer boundary of the whole verb: a root added here
+    /// widens what can be enumerated and deleted, and a root that contains
+    /// everything (`TMPDIR=/`) would offer the entire filesystem, which is why
+    /// a parentless root is dropped.
+    #[test]
+    fn the_temp_roots_are_the_system_temp_dir_and_the_fixed_ones() {
+        let roots = super::temp_roots();
+        for expected in [
+            std::env::temp_dir(),
+            std::path::PathBuf::from("/tmp"),
+            std::path::PathBuf::from("/var/tmp"),
+        ] {
+            assert!(
+                roots.contains(&expected),
+                "{} is missing",
+                expected.display()
+            );
+        }
+        for root in &roots {
+            assert!(
+                !contains_the_whole_filesystem(root),
+                "{} contains the whole filesystem",
+                root.display()
+            );
+        }
+    }
+
+    /// The guard is asked of the RESOLVED root, because that is one of the two
+    /// forms membership is decided with.
+    ///
+    /// `is_under_temp_dir` answers `true` when the raw path is under the root
+    /// as written OR the resolved path is under the resolved root. A root whose
+    /// raw form has a parent but whose resolved form is `/` therefore passed a
+    /// raw-only check while matching every path on the machine, which is the
+    /// `TMPDIR=/` catastrophe wearing one extra component.
+    #[test]
+    fn a_temp_root_that_resolves_to_the_filesystem_root_is_dropped() {
+        let disguised = std::path::Path::new("/..");
+        assert!(
+            disguised.parent().is_some(),
+            "the raw form has a parent, which is exactly why a raw-only check \
+             lets this root through"
+        );
+        assert_eq!(
+            std::fs::canonicalize(disguised).expect("canonicalize /.."),
+            std::path::Path::new("/"),
+            "the form membership uses IS the filesystem root"
+        );
+        assert!(contains_the_whole_filesystem(disguised));
+
+        // And an ordinary temp root is still kept, so the guard cannot be
+        // satisfied by dropping everything.
+        assert!(!contains_the_whole_filesystem(&std::env::temp_dir()));
+        assert!(!contains_the_whole_filesystem(std::path::Path::new("/tmp")));
     }
 }
 

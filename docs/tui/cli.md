@@ -4769,6 +4769,7 @@ Commands:
   stop                        Stop the running daemon: signal the exact recorded PID, then remove the PID file
   restart                     Restart the daemon: `stop` (if running) then `start`
   setup                       One-command bring-up: ensure the store + socket-auth token, then `start`
+  prune                       Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
   reproject-claude-interview  Rebuild one stale Claude structured interview from durable hook history
   config                      View + edit the daemon's user-config knobs (`list`/`get`/`set`)
   cred                        Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
@@ -4883,6 +4884,37 @@ Usage: ainb hangar daemon setup [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar daemon prune`
+
+Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
+
+```console
+$ ainb hangar daemon prune --help
+Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
+
+Usage: ainb hangar daemon prune [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --yes
+          Actually delete the homes that no live process owns. Without it, nothing on disk is touched. Homes with a live owner are always left alone
+
+      --older-than <DAYS>
+          Only consider homes untouched for at least this many days (default 1).
+          
+          A live run's home looks exactly like a leaked one: no daemon is ever spawned into an ephemeral home, so nothing records an owner there. Age is what separates "a run that finished yesterday" from "a run that is still going". `0` removes that gate.
+          
+          [default: 1]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb hangar daemon reproject-claude-interview`
