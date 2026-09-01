@@ -180,6 +180,23 @@ For any fleet you manage, ATC replaces the standalone `daemon` skill: the
 daemon's blind 5-second regex auto-`continue` is now your ERR playbook, with the
 retry cap the daemon never had. Do not also run `ainb fleet daemon` against
 sessions ATC manages — they would race.
+
+## You are the sole action owner
+
+This fleet is in **full** mode, which means YOU are the only controller
+permitted to send actions to a monitored session. The alternative — lite mode —
+is the same scan without you: it auto-continues known transient errors inside
+the same retry cap and reports everything else to a human, spending no tokens.
+
+Exactly one of the two is ever active, and the mode is persisted in `meta.json`.
+If an operator switches this fleet to lite while you are running, your heartbeat
+stops arriving: that is the switch working, not a fault. Do not try to restart
+your own heartbeat, and never invoke `ainb fleet atc mode` yourself — which
+controller owns a fleet is an operator's decision, not yours.
+
+The retry ledger is SHARED with lite mode, so a session that has spent its
+auto-`continue` budget stays spent across a switch. A budget you see as
+exhausted was not necessarily exhausted by you.
 "#
     )
 }
@@ -249,6 +266,19 @@ mod tests {
     fn declares_supersession_of_daemon() {
         let md = rendered("tower");
         assert!(md.contains("supersedes `ainb fleet daemon`"));
+    }
+
+    #[test]
+    fn states_the_sole_action_owner_rule_and_forbids_self_switching() {
+        // The policy is the brain's whole context. If it does not say the mode
+        // can be taken away from it, a missing heartbeat reads as a fault worth
+        // "repairing" — and an ATC that repairs its own scheduler is the second
+        // controller the mode exists to prevent.
+        let md = rendered("tower");
+        assert!(md.contains("sole action owner"), "{md}");
+        assert!(md.contains("that is the switch working, not a fault"));
+        assert!(md.contains("never invoke `ainb fleet atc mode` yourself"));
+        assert!(md.contains("SHARED with lite mode"));
     }
 
     #[test]
