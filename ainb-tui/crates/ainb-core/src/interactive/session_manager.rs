@@ -117,7 +117,63 @@ pub struct SessionMetadata {
     pub codex_thread_id: Option<String>,
 }
 
+/// Whether shared Codex remote control can work in this process's hangar home.
+///
+/// `ensure_hangar_daemon` never spawns a daemon into an ephemeral home, and
+/// reports that rather than failing, because its other caller (the TUI) is right
+/// to ignore it. Here the daemon is connected to in the very next statement, so
+/// the skip has to be acted on: ignored, it arrives as a socket-level connect
+/// error with nothing in it about the home.
+///
+/// Acting on it means DEGRADING, not failing. An ephemeral home costs the
+/// session exactly one feature, the shared remote thread; a plain `codex` in
+/// the pane is what a session with the feature switched off already runs.
+/// Failing instead turned `ainb run --tool codex` under an isolated `$HOME`
+/// from a working launch into a hard error, and the error path then deleted the
+/// worktree the run had just created. That is worse than the leak it prevents.
+///
+/// [`crate::cli::hangar::DaemonAutostart::Failed`] deliberately passes through.
+/// A failed spawn is already logged and may still have left a usable daemon
+/// (another process's, on a durable home); only the ephemeral-home skip is a
+/// promise that no daemon will EVER appear for this home.
+///
+/// `home` is a closure so the path is resolved only on the degrading path.
+fn shared_remote_control_available(
+    outcome: crate::cli::hangar::DaemonAutostart,
+    home: impl FnOnce() -> String,
+) -> bool {
+    if outcome == crate::cli::hangar::DaemonAutostart::SkippedEphemeralHome {
+        warn!("{}", ephemeral_hangar_home_warning(&home()));
+        return false;
+    }
+    true
+}
+
+/// What the user is told when an ephemeral home costs them shared remote
+/// control, built here rather than inline in the `warn!` so the sentence that
+/// names the remedy is a value a test can read.
+fn ephemeral_hangar_home_warning(home: &str) -> String {
+    format!(
+        "hangar home {home} is ephemeral; set AINB_HANGAR_HOME to a durable path to use \
+         Codex shared remote control - launching this session without it"
+    )
+}
+
+/// The hangar home this process resolved, for the message above.
+fn resolved_hangar_home() -> String {
+    ainb_hangar_daemon::hangar_dir().map_or_else(
+        |_| "<unresolved>".to_string(),
+        |home| home.display().to_string(),
+    )
+}
+
 /// Create or resume one exact shared Codex app-server thread for Interactive.
+///
+/// `Ok(None)` is a successful launch WITHOUT shared remote control: the reason
+/// has already been warned about, and the session runs the provider CLI
+/// directly, which is the same path a non-Codex session and a Codex session
+/// with the feature disabled take. Callers must not treat it as a failure, and
+/// in particular must not roll back a worktree over it.
 pub(crate) async fn ensure_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
@@ -125,31 +181,55 @@ pub(crate) async fn ensure_codex_remote_thread(
     skip_permissions: bool,
     headroom_enabled: bool,
     existing_thread_id: Option<String>,
-) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
     if headroom_enabled {
         anyhow::bail!(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
-    // Ephemeral: `ainb run` prints its summary and exits, while the daemon has
-    // to keep serving the tmux session it just created.
-    crate::cli::hangar::ensure_hangar_daemon(crate::cli::hangar::LauncherLifetime::Ephemeral);
-    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
-    client
-        .codex_session_ensure(ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+    ensure_codex_remote_thread_with(
+        // Ephemeral: `ainb run` prints its summary and exits, while the daemon
+        // has to keep serving the tmux session it just created.
+        || {
+            crate::cli::hangar::ensure_hangar_daemon(
+                crate::cli::hangar::LauncherLifetime::Ephemeral,
+            )
+        },
+        resolved_hangar_home,
+        ainb_hangar_proto::fleet::CodexSessionEnsureParams {
             session_id: session_id.to_string(),
             cwd: cwd.display().to_string(),
             model: model.map(str::to_owned),
             thread_id: existing_thread_id,
             skip_permissions,
-        })
-        .await
-        .map_err(|error| {
-            let message = format_codex_remote_control_failure(&error.to_string());
-            warn!(error = %error, "{message}");
-            anyhow::Error::msg(error.to_string()).context(message)
-        })
+        },
+    )
+    .await
+}
+
+/// [`ensure_codex_remote_thread`] with its two impure inputs passed in: the
+/// autostart outcome and the home to name when that outcome is a skip.
+///
+/// The seam is what makes the degrade testable at all. The ephemeral branch
+/// returns BEFORE the daemon connect, and that ordering is the whole claim:
+/// checking [`shared_remote_control_available`] on its own would leave "and
+/// then the launch still succeeds" untested, which is how a degrade that is
+/// computed and then ignored still passes its suite.
+async fn ensure_codex_remote_thread_with(
+    autostart: impl FnOnce() -> crate::cli::hangar::DaemonAutostart,
+    home: impl FnOnce() -> String,
+    params: ainb_hangar_proto::fleet::CodexSessionEnsureParams,
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
+    if !shared_remote_control_available(autostart(), home) {
+        return Ok(None);
+    }
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
+    client.codex_session_ensure(params).await.map(Some).map_err(|error| {
+        let message = format_codex_remote_control_failure(&error.to_string());
+        warn!(error = %error, "{message}");
+        anyhow::Error::msg(error.to_string()).context(message)
+    })
 }
 
 /// Short actionable TUI message for a shared Codex bridge failure.
@@ -173,16 +253,19 @@ fn format_codex_remote_control_failure(cause: &str) -> &'static str {
 
 /// Wait briefly for the freshly started remote terminal to publish its exact
 /// thread identity through the daemon's app-server event stream.
+///
+/// `Ok(None)` carries the same meaning as in [`ensure_codex_remote_thread`]:
+/// shared remote control is unavailable and the session runs without it.
 pub(crate) async fn claim_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
     model: Option<&str>,
     skip_permissions: bool,
     headroom_enabled: bool,
-) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let remote = ensure_codex_remote_thread(
+        let Some(remote) = ensure_codex_remote_thread(
             session_id,
             cwd,
             model,
@@ -190,9 +273,15 @@ pub(crate) async fn claim_codex_remote_thread(
             headroom_enabled,
             None,
         )
-        .await?;
+        .await?
+        else {
+            // Shared remote control is unavailable, so there is no thread to
+            // wait for. Report that once rather than spending the 10s deadline
+            // re-asking a question whose answer cannot change.
+            return Ok(None);
+        };
         if remote.thread_id.is_some() {
-            return Ok(remote);
+            return Ok(Some(remote));
         }
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!("Codex started but did not publish a remote thread within 10 seconds");
@@ -861,7 +950,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -943,7 +1032,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1106,7 +1195,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1190,7 +1279,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -4248,6 +4337,80 @@ trust_level = "trusted"
                 "--dangerously-skip-permissions",
                 "--continue",
             ]
+        );
+    }
+
+    /// A skipped autostart must be read as "shared remote control is off for
+    /// this session", and the warning must name the remedy.
+    ///
+    /// The gate reports the skip instead of failing, since the TUI is right to
+    /// ignore it. Discarding it here turned "no daemon will ever run on this
+    /// home" into a socket connect error a line later, with nothing in the
+    /// message about `$AINB_HANGAR_HOME`.
+    #[test]
+    fn an_ephemeral_hangar_home_turns_codex_remote_control_off_with_the_remedy() {
+        use crate::cli::hangar::DaemonAutostart;
+
+        assert!(
+            !super::shared_remote_control_available(DaemonAutostart::SkippedEphemeralHome, || {
+                "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string()
+            }),
+            "an ephemeral home has no daemon to connect to, now or ever"
+        );
+
+        let message = super::ephemeral_hangar_home_warning("/tmp/bj.Q9x7fk/.agents-in-a-box");
+        assert!(
+            message.contains("/tmp/bj.Q9x7fk/.agents-in-a-box"),
+            "the warning must name the home: {message}"
+        );
+        assert!(
+            message.contains("AINB_HANGAR_HOME"),
+            "the warning must name the remedy: {message}"
+        );
+
+        // A daemon that is expected, and a spawn that merely failed, both fall
+        // through: only the ephemeral-home skip promises no daemon will appear.
+        for outcome in [DaemonAutostart::Started, DaemonAutostart::Failed] {
+            assert!(
+                super::shared_remote_control_available(outcome, || panic!(
+                    "{outcome:?} must not resolve the home"
+                )),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// The degrade itself, which the classifier above cannot show: an ephemeral
+    /// home yields NO remote thread and NO error, so the caller launches the
+    /// session (plain `codex` in the pane) instead of failing and rolling back
+    /// the worktree it just created.
+    ///
+    /// Driving the seam rather than `ensure_codex_remote_thread` keeps the test
+    /// off the daemon socket, and still pins the ordering that matters: the
+    /// ephemeral answer returns before the connect, so no daemon is needed for
+    /// this launch to succeed.
+    #[tokio::test]
+    async fn an_ephemeral_hangar_home_launches_codex_without_a_remote_thread() {
+        use crate::cli::hangar::DaemonAutostart;
+
+        let remote = super::ensure_codex_remote_thread_with(
+            || DaemonAutostart::SkippedEphemeralHome,
+            || "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string(),
+            ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                cwd: "/worktree".to_string(),
+                model: None,
+                thread_id: None,
+                skip_permissions: false,
+            },
+        )
+        .await
+        .expect("an ephemeral home must not fail the launch");
+
+        assert!(
+            remote.is_none(),
+            "the session must launch with no shared remote thread, exactly as one with the \
+             feature disabled does"
         );
     }
 }

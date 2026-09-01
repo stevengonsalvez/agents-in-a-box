@@ -123,7 +123,13 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         )
         .await
         {
-            Ok(remote) => Some(remote),
+            // `Ok(None)` is a launch WITHOUT shared remote control (an
+            // ephemeral hangar home, already warned about). It takes the same
+            // path a non-Codex session takes: plain provider argv, no
+            // rollback, no error. Failing here instead deleted the worktree
+            // created three steps ago over a feature the session can run
+            // without.
+            Ok(remote) => remote,
             Err(error) => {
                 rollback_failed_interactive_launch(session_id, None, worktree_manager.as_ref())
                     .await;
@@ -201,7 +207,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         )
         .await
         {
-            Ok(remote) => Some(remote),
+            Ok(remote) => remote,
             Err(error) => {
                 rollback_failed_interactive_launch(
                     session_id,
