@@ -566,7 +566,7 @@ pub enum AppEvent {
     // NOTE: no `FactoryReset` variant. Factory reset is destructive and is
     // reachable ONLY through `SetupMenuSelect`'s confirmation gate (see
     // `SetupMenuItem::is_dangerous`). A bare event variant was an unconfirmed
-    // second door to the same wipe, with no dispatcher — removed 2026-09.
+    // second door to the same wipe, with no dispatcher (removed 2026-09).
     // Changelog viewer events
     ShowChangelog,       // Navigate to changelog view (v key)
     ChangelogBack,       // Return to home screen (Esc)
