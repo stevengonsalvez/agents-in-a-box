@@ -2106,6 +2106,38 @@ mod tests {
     // tests pin the confirmation step in place.
     // ========================================================================
 
+    struct RestoreAinbHome {
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for RestoreAinbHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("AINB_HOME", v),
+                None => std::env::remove_var("AINB_HOME"),
+            }
+        }
+    }
+
+    /// Take the crate-wide env lock and point `AINB_HOME` at a fresh tempdir
+    /// until the returned guard drops.
+    fn pin_ainb_home() -> RestoreAinbHome {
+        let dir = tempfile::tempdir().expect("tempdir");
+        RestoreAinbHome {
+            _guard: crate::headroom::HEADROOM_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            previous: {
+                let previous = std::env::var("AINB_HOME").ok();
+                std::env::set_var("AINB_HOME", dir.path());
+                previous
+            },
+            _dir: dir,
+        }
+    }
+
     /// Point `AINB_HOME` at a tempdir for the duration of `body`.
     ///
     /// Opening the bulk dialog probes worktrees, which builds a
@@ -2117,34 +2149,23 @@ mod tests {
     /// so a failing assertion inside `body` cannot leave a deleted tempdir path
     /// in the env for every later test in the binary.
     fn with_ainb_home<R>(body: impl FnOnce() -> R) -> R {
-        struct RestoreAinbHome {
-            previous: Option<String>,
-            _guard: std::sync::MutexGuard<'static, ()>,
-            _dir: tempfile::TempDir,
-        }
-
-        impl Drop for RestoreAinbHome {
-            fn drop(&mut self) {
-                match self.previous.take() {
-                    Some(v) => std::env::set_var("AINB_HOME", v),
-                    None => std::env::remove_var("AINB_HOME"),
-                }
-            }
-        }
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _restore = RestoreAinbHome {
-            _guard: crate::headroom::HEADROOM_ENV_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            previous: {
-                let previous = std::env::var("AINB_HOME").ok();
-                std::env::set_var("AINB_HOME", dir.path());
-                previous
-            },
-            _dir: dir,
-        };
+        let _restore = pin_ainb_home();
         body()
+    }
+
+    /// `with_ainb_home` for an async body. `stop_interactive_session` falls back
+    /// to `SessionStore::load()`, which reads `AINB_HOME`, so the bulk-stop tests
+    /// need the same isolation the synchronous ones get.
+    // The env guard is deliberately held across the await: that is what makes the
+    // isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::future_not_send)]
+    async fn with_ainb_home_async<F, Fut, R>(body: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let _restore = pin_ainb_home();
+        body().await
     }
 
     /// Two checked, running interactive sessions, plus their ids in list order.
@@ -2439,6 +2460,45 @@ mod tests {
             };
             assert_eq!(delete_ids.len(), 3, "Delete still covers everything");
             assert!(delete_ids.contains(&boss_id));
+            assert!(
+                dialog.message.contains("the other 1 cannot be stopped"),
+                "a Boss row is excluded because it has no stop path, not because it \
+                 is already stopped: {}",
+                dialog.message
+            );
+        });
+    }
+
+    /// When the excluded rows are merely already stopped, the message must say
+    /// so rather than claiming they cannot be stopped at all.
+    #[test]
+    fn bulk_dialog_names_already_stopped_rows_as_the_reason_they_are_excluded() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["running"]);
+            let stopped = resumable_session(
+                "stopped",
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                SessionStatus::Stopped,
+            );
+            state.selected_sessions.insert(stopped.id);
+            state.workspaces[0].add_session(stopped);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the running session"
+            );
+            assert!(
+                dialog.message.contains("the other 1 are already stopped"),
+                "{}",
+                dialog.message
+            );
         });
     }
 
@@ -2474,37 +2534,40 @@ mod tests {
     /// stopped: the count is what the user reads to know the operation worked.
     #[tokio::test]
     async fn bulk_stop_reports_already_stopped_sessions_separately() {
-        use crate::models::SessionStatus;
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
 
-        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
-        let mut ids = Vec::new();
-        for (name, status) in [
-            ("running", SessionStatus::Running),
-            ("already", SessionStatus::Stopped),
-        ] {
-            let mut session = resumable_session(
-                name,
-                SessionMode::Interactive,
-                SessionAgentType::Claude,
-                status,
-            );
-            session.tmux_session_name = None;
-            ids.push(session.id);
-            ws.add_session(session);
-        }
-        let mut state = AppState::new();
-        state.workspaces.push(ws);
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            let mut ids = Vec::new();
+            for (name, status) in [
+                ("running", SessionStatus::Running),
+                ("already", SessionStatus::Stopped),
+            ] {
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    status,
+                );
+                session.tmux_session_name = None;
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
 
-        state.bulk_stop_sessions(ids).await;
+            state.bulk_stop_sessions(ids).await;
 
-        let message = state
-            .notifications
-            .iter()
-            .map(|n| n.message.clone())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        assert!(message.contains("Stopped 1 session(s)"), "{message}");
-        assert!(message.contains("1 already stopped"), "{message}");
+            let message = state
+                .notifications
+                .iter()
+                .map(|n| n.message.clone())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(message.contains("Stopped 1 session(s)"), "{message}");
+            assert!(message.contains("1 already stopped"), "{message}");
+        })
+        .await;
     }
 
     /// A selection that is already entirely stopped has nothing to stop, so
@@ -2534,6 +2597,18 @@ mod tests {
             let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.options.is_none(), "nothing left to stop");
             assert!(!dialog.selected_option, "Default = No");
+            assert!(
+                dialog.message.contains("already stopped"),
+                "the message must say why Stop is absent, and these sessions are \
+                 resumable, so claiming they cannot be stopped and resumed would be \
+                 the opposite of the truth: {}",
+                dialog.message
+            );
+            assert!(
+                !dialog.message.contains("None of these sessions can be stopped"),
+                "{}",
+                dialog.message
+            );
         });
     }
 
@@ -2593,50 +2668,53 @@ mod tests {
     /// bug destroyed, so it is asserted against real directories.
     #[tokio::test]
     async fn bulk_stop_preserves_every_worktree() {
-        use crate::models::SessionStatus;
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let mut ws = crate::models::Workspace::new("ws".to_string(), tmp.path().to_path_buf());
-        let mut ids = Vec::new();
-        let mut worktrees = Vec::new();
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tmp.path().to_path_buf());
+            let mut ids = Vec::new();
+            let mut worktrees = Vec::new();
 
-        for name in ["alpha", "beta", "gamma"] {
-            let worktree = tmp.path().join(name);
-            std::fs::create_dir_all(&worktree).expect("create worktree");
-            std::fs::write(worktree.join("uncommitted.txt"), b"work").expect("write file");
+            for name in ["alpha", "beta", "gamma"] {
+                let worktree = tmp.path().join(name);
+                std::fs::create_dir_all(&worktree).expect("create worktree");
+                std::fs::write(worktree.join("uncommitted.txt"), b"work").expect("write file");
 
-            let mut session = resumable_session(
-                name,
-                SessionMode::Interactive,
-                SessionAgentType::Claude,
-                SessionStatus::Running,
-            );
-            session.workspace_path = worktree.to_string_lossy().to_string();
-            // No tmux session name: nothing to kill, so the test never shells
-            // out to tmux and never touches another session's server.
-            session.tmux_session_name = None;
-            ids.push(session.id);
-            worktrees.push(worktree);
-            ws.add_session(session);
-        }
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                session.workspace_path = worktree.to_string_lossy().to_string();
+                // No tmux session name: nothing to kill, so the test never shells
+                // out to tmux and never touches another session's server.
+                session.tmux_session_name = None;
+                ids.push(session.id);
+                worktrees.push(worktree);
+                ws.add_session(session);
+            }
 
-        let mut state = AppState::new();
-        state.workspaces.push(ws);
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
 
-        state.bulk_stop_sessions(ids.clone()).await;
+            state.bulk_stop_sessions(ids.clone()).await;
 
-        for worktree in &worktrees {
-            assert!(worktree.is_dir(), "Stop must keep {}", worktree.display());
-            assert!(
-                worktree.join("uncommitted.txt").exists(),
-                "Stop must keep the uncommitted work in {}",
-                worktree.display()
-            );
-        }
-        for id in &ids {
-            let session = state.find_session(*id).expect("session still registered");
-            assert!(matches!(session.status, SessionStatus::Stopped));
-        }
+            for worktree in &worktrees {
+                assert!(worktree.is_dir(), "Stop must keep {}", worktree.display());
+                assert!(
+                    worktree.join("uncommitted.txt").exists(),
+                    "Stop must keep the uncommitted work in {}",
+                    worktree.display()
+                );
+            }
+            for id in &ids {
+                let session = state.find_session(*id).expect("session still registered");
+                assert!(matches!(session.status, SessionStatus::Stopped));
+            }
+        })
+        .await;
     }
 }
 
