@@ -2353,11 +2353,11 @@ mod tests {
     /// the sessions whose work "Delete all" would destroy.
     #[test]
     fn bulk_uncommitted_warning_names_the_dirty_sessions() {
-        assert_eq!(AppState::format_bulk_uncommitted_warning(&[], 0), None);
+        assert_eq!(AppState::format_bulk_uncommitted_warning(&[], 0, 2), None);
 
         let dirty = vec![("alpha".to_string(), 3), ("beta".to_string(), 1)];
         let warning =
-            AppState::format_bulk_uncommitted_warning(&dirty, 0).expect("dirty sessions warn");
+            AppState::format_bulk_uncommitted_warning(&dirty, 0, 2).expect("dirty sessions warn");
         assert!(warning.contains("4 uncommitted file(s)"), "{}", warning);
         assert!(warning.contains("2 session(s)"), "{}", warning);
         assert!(warning.contains("alpha (3)"), "{}", warning);
@@ -2365,7 +2365,7 @@ mod tests {
 
         let many: Vec<(String, usize)> = (1usize..=5).map(|i| (format!("s{i}"), i)).collect();
         let warning =
-            AppState::format_bulk_uncommitted_warning(&many, 0).expect("dirty sessions warn");
+            AppState::format_bulk_uncommitted_warning(&many, 0, 5).expect("dirty sessions warn");
         assert!(warning.contains("and 2 more"), "{}", warning);
     }
 
@@ -2375,7 +2375,7 @@ mod tests {
     #[test]
     fn bulk_uncommitted_warning_reports_what_could_not_be_checked() {
         let warning =
-            AppState::format_bulk_uncommitted_warning(&[], 3).expect("unchecked sessions warn");
+            AppState::format_bulk_uncommitted_warning(&[], 3, 3).expect("unchecked sessions warn");
         assert!(
             warning.contains("could not check 3 session(s)"),
             "{}",
@@ -2384,7 +2384,7 @@ mod tests {
 
         let dirty = vec![("alpha".to_string(), 2)];
         let warning =
-            AppState::format_bulk_uncommitted_warning(&dirty, 2).expect("dirty sessions warn");
+            AppState::format_bulk_uncommitted_warning(&dirty, 2, 3).expect("dirty sessions warn");
         assert!(warning.contains("alpha (2)"), "{}", warning);
         assert!(
             warning.contains("2 more could not be checked"),
@@ -2711,13 +2711,20 @@ mod tests {
             let mut state = AppState::new();
             state.workspaces.push(ws);
 
-            let id_names: Vec<(uuid::Uuid, String)> =
-                ids.iter().map(|id| (*id, "n".to_string())).collect();
+            let id_names: Vec<(uuid::Uuid, String)> = ids
+                .iter()
+                .zip(["alpha", "beta"])
+                .map(|(id, name)| (*id, name.to_string()))
+                .collect();
             let status = AppState::bulk_uncommitted_counts(&id_names);
 
             assert_eq!(status.with_worktree, 1, "one tree, not two");
             assert_eq!(status.dirty.len(), 1, "probed once");
             assert_eq!(status.dirty[0].1, 1, "one dirty file, not two");
+            assert_eq!(
+                status.dirty[0].0, "alpha, beta",
+                "both sessions map to the dirty tree, so both are named"
+            );
             assert_eq!(status.unchecked, 0);
         });
     }
@@ -2794,6 +2801,38 @@ mod tests {
         let err = crate::git::WorktreeManager::uncommitted_file_count_at(&nested)
             .expect_err("a plain directory is not a checkout");
         assert!(format!("{err}").contains("no .git"), "{err}");
+    }
+
+    /// In a bulk selection the name is the point of the warning, even when only
+    /// one of the selected sessions turns out to be dirty. Only a one-row dialog
+    /// drops it, because there the name is the row the user is looking at.
+    #[test]
+    fn bulk_warning_names_the_dirty_session_even_when_only_one_is_dirty() {
+        let dirty = vec![("beta".to_string(), 3)];
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&dirty, 0, 12)
+            .expect("one dirty session in a bulk selection still warns");
+        assert!(bulk.contains("beta (3)"), "{bulk}");
+
+        let single = AppState::format_bulk_uncommitted_warning(&dirty, 0, 1)
+            .expect("a single-row dialog still warns");
+        assert_eq!(single, "⚠️ 3 uncommitted file(s) in worktree");
+    }
+
+    /// A single-row dialog must not hedge in the plural about "1 session(s)"
+    /// when its own worktree could not be read.
+    #[test]
+    fn single_row_unchecked_warning_reads_singly() {
+        let single = AppState::format_bulk_uncommitted_warning(&[], 1, 1)
+            .expect("an unreadable worktree warns");
+        assert_eq!(
+            single,
+            "⚠️ could not check this worktree for uncommitted work"
+        );
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&[], 2, 6)
+            .expect("unreadable worktrees warn");
+        assert!(bulk.contains("could not check 2 session(s)"), "{bulk}");
     }
 
     /// Multi-select ids come out in list order, once each.
