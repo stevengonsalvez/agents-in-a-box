@@ -916,6 +916,37 @@ pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::S
         )
 }
 
+/// What one worktree has to lose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UncommittedProbe {
+    /// No worktree is registered for the session, so there is nothing to lose.
+    NoWorktree,
+    Clean,
+    Dirty(usize),
+    /// The worktree exists but its status could not be read. Never fold this
+    /// into Clean: a delete confirmation that says nothing is read as "nothing
+    /// to lose".
+    Unknown,
+}
+
+/// Read one session's worktree status. Shared by the single-row and the bulk
+/// confirmation so both dialogs answer the same way for the same session.
+fn session_uncommitted_probe(
+    worktree_manager: &crate::git::WorktreeManager,
+    session_id: Uuid,
+) -> UncommittedProbe {
+    use crate::git::WorktreeError;
+    match worktree_manager.uncommitted_file_count(session_id) {
+        Ok(0) => UncommittedProbe::Clean,
+        Ok(count) => UncommittedProbe::Dirty(count),
+        // A session with no registered worktree is an ordinary case, not a
+        // failure: warning about it every time trains the user to skip past the
+        // warning that matters.
+        Err(WorktreeError::NotFound(_)) => UncommittedProbe::NoWorktree,
+        Err(_) => UncommittedProbe::Unknown,
+    }
+}
+
 /// Label for a selected id that no longer resolves to a session. The id is kept
 /// in the bulk action (so nothing silently drops out of a delete) but a full
 /// 36-character uuid would eat three rows of the dialog on its own.
@@ -6648,24 +6679,14 @@ impl AppState {
     /// Running sessions are excluded so a bulk resume never kills+recreates a
     /// live tmux session. Order is unspecified (sourced from a HashSet).
     pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
-        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+        use crate::models::SessionStatus;
         self.selected_sessions
             .iter()
             .copied()
             .filter(|id| {
-                self.find_session(*id)
-                    .map(|s| {
-                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
-                            && matches!(
-                                s.agent_type,
-                                SessionAgentType::Claude
-                                    | SessionAgentType::Codex
-                                    | SessionAgentType::Gemini
-                                    | SessionAgentType::Copilot
-                            );
-                        is_interactive && matches!(s.status, SessionStatus::Stopped)
-                    })
-                    .unwrap_or(false)
+                self.find_session(*id).is_some_and(|s| {
+                    is_stoppable_interactive(s) && matches!(s.status, SessionStatus::Stopped)
+                })
             })
             .collect()
     }
@@ -6684,7 +6705,13 @@ impl AppState {
             .map(|s| s.id)
             .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
             .collect();
-        ordered.extend(self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)));
+        // Ids that resolve to no session have no list position, so they are
+        // sorted rather than left in HashSet order, which Rust randomises per
+        // process and would make the dialog text differ run to run.
+        let mut orphans: Vec<Uuid> =
+            self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)).collect();
+        orphans.sort();
+        ordered.extend(orphans);
         ordered
     }
 
@@ -7752,7 +7779,9 @@ impl AppState {
     }
 
     /// Check if a session's worktree has uncommitted changes.
-    /// Returns None for Shell sessions (no dedicated worktree) or if no uncommitted changes.
+    /// Returns None for Shell sessions (no dedicated worktree) or if there is
+    /// nothing to lose. Shares `session_uncommitted_probe` with the bulk path so
+    /// the two dialogs cannot report different answers for the same session.
     fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
         use crate::git::WorktreeManager;
         use crate::models::SessionAgentType;
@@ -7765,14 +7794,15 @@ impl AppState {
             return None;
         }
 
-        // Try to check worktree status
         let worktree_manager = WorktreeManager::new().ok()?;
-        let count = worktree_manager.uncommitted_file_count(session_id).ok()?;
-
-        if count > 0 {
-            Some(format!("⚠️ {} uncommitted file(s) in worktree", count))
-        } else {
-            None
+        match session_uncommitted_probe(&worktree_manager, session_id) {
+            UncommittedProbe::Dirty(count) => {
+                Some(format!("⚠️ {count} uncommitted file(s) in worktree"))
+            }
+            UncommittedProbe::Unknown => {
+                Some("⚠️ could not check this worktree for uncommitted work".to_string())
+            }
+            UncommittedProbe::NoWorktree | UncommittedProbe::Clean => None,
         }
     }
 
@@ -7803,13 +7833,16 @@ impl AppState {
 
         // Stop only means something for interactive agent sessions: it kills
         // tmux and the session resumes later. Boss (Docker) and Shell sessions
-        // have no such path, so a selection containing one gets the binary
-        // delete confirmation rather than a Stop button that would lie.
-        let all_stoppable = session_ids
+        // have no such path, so a mixed selection offers Stop for the sessions
+        // it actually applies to rather than dropping the safe option for
+        // everyone because one row cannot use it.
+        let stoppable: Vec<Uuid> = session_ids
             .iter()
-            .all(|id| self.find_session(*id).is_some_and(is_stoppable_interactive));
+            .copied()
+            .filter(|id| self.find_session(*id).is_some_and(is_stoppable_interactive))
+            .collect();
 
-        self.confirmation_dialog = Some(if all_stoppable {
+        self.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
@@ -7817,19 +7850,15 @@ impl AppState {
                      Delete removes {count} worktree(s)."
                 ),
                 warning,
-                (
-                    "Stop all",
-                    ConfirmAction::BulkStopSessions(session_ids.clone()),
-                ),
+                ("Stop all", ConfirmAction::BulkStopSessions(stoppable)),
                 ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
             )
-        } else {
+        } else if stoppable.is_empty() {
             ConfirmationDialog {
                 title: format!("Delete {count} Session(s)"),
                 message: format!(
-                    "{summary}\nThis removes {count} worktree(s). The selection includes \
-                     sessions that cannot be stopped and resumed, so Delete is the only \
-                     option offered."
+                    "{summary}\nThis removes {count} worktree(s). None of these sessions \
+                     can be stopped and resumed, so Delete is the only option offered."
                 ),
                 confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
                 selected_option: false, // Default = No
@@ -7837,6 +7866,21 @@ impl AppState {
                 options: None,
                 selected_index: 0,
             }
+        } else {
+            let stoppable_count = stoppable.len();
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop applies to the {stoppable_count} that can be resumed \
+                     and keeps their worktrees. Delete removes all {count} worktree(s)."
+                ),
+                warning,
+                (
+                    &format!("Stop {stoppable_count}"),
+                    ConfirmAction::BulkStopSessions(stoppable),
+                ),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
         });
     }
 
@@ -7866,10 +7910,16 @@ impl AppState {
     /// A session whose worktree status cannot be read is NOT reported as clean:
     /// it is counted as unchecked so the dialog can say so, because "unknown"
     /// and "nothing to lose" must never look the same on a delete confirmation.
-    /// Shell sessions have no dedicated worktree, so they are skipped entirely.
+    /// A session with no registered worktree has nothing to lose and is not
+    /// counted either way. Shell sessions are skipped entirely.
     fn bulk_uncommitted_counts(&self, session_ids: &[Uuid]) -> (Vec<(String, usize)>, usize) {
         use crate::git::WorktreeManager;
         use crate::models::SessionAgentType;
+
+        /// Probes in flight at once. Each one forks a `git status`, so the fan
+        /// out is bounded: a 40-row selection must not spawn 40 threads and 40
+        /// child processes off a single keypress.
+        const MAX_CONCURRENT_PROBES: usize = 8;
 
         // Sessions with a worktree worth probing, paired with their names.
         let mut probes: Vec<(Uuid, String)> = Vec::new();
@@ -7888,26 +7938,33 @@ impl AppState {
         };
 
         // `uncommitted_file_count` shells out to `git status` per worktree and
-        // this runs inline on a keypress, so the probes go out together: a
-        // 12-session selection costs about one status call, not twelve.
-        let counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = probes
-                .iter()
-                .map(|(id, _)| {
-                    let worktree_manager = &worktree_manager;
-                    let id = *id;
-                    scope.spawn(move || worktree_manager.uncommitted_file_count(id).map_err(|_| ()))
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
-        });
+        // this runs inline on a keypress, so probes go out in bounded batches:
+        // a 12-session selection costs about two status calls, not twelve.
+        let mut results: Vec<UncommittedProbe> = Vec::with_capacity(probes.len());
+        for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
+            let batch_results: Vec<UncommittedProbe> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(id, _)| {
+                        let worktree_manager = &worktree_manager;
+                        let id = *id;
+                        scope.spawn(move || session_uncommitted_probe(worktree_manager, id))
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or(UncommittedProbe::Unknown))
+                    .collect()
+            });
+            results.extend(batch_results);
+        }
 
         let mut dirty = Vec::new();
-        for ((_, name), count) in probes.into_iter().zip(counts) {
-            match count {
-                Ok(0) => {}
-                Ok(count) => dirty.push((name, count)),
-                Err(()) => unchecked += 1,
+        for ((_, name), probe) in probes.into_iter().zip(results) {
+            match probe {
+                UncommittedProbe::Clean | UncommittedProbe::NoWorktree => {}
+                UncommittedProbe::Dirty(count) => dirty.push((name, count)),
+                UncommittedProbe::Unknown => unchecked += 1,
             }
         }
         (dirty, unchecked)
@@ -10210,29 +10267,38 @@ impl AppState {
         let worktree_path = self.find_session(session_id).map(|s| s.workspace_path.clone());
 
         let result: anyhow::Result<()> = if let Some(ref name) = tmux_name {
-            // Hard constraint: kill only the exact named session. NEVER kill-server.
+            // Hard constraint: kill only the exact named session, never a prefix
+            // match. `-t name` resolves exact, then prefix, then fnmatch, so
+            // killing "feat-auth" would take out a live "feat-auth-2"; `=name`
+            // forces exact. NEVER kill-server.
             let output = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", name])
+                .args(["kill-session", "-t", &format!("={name}")])
                 .output()
-                .await?;
+                .await;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // tmux returns non-zero when the session is already gone — treat as success
-                // since the post-condition (no tmux session) is what we care about.
-                if stderr.contains("can't find session") || stderr.contains("no server running") {
-                    info!("tmux session '{}' already gone — proceeding", name);
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Failed to kill tmux session '{}': {}",
-                        name,
-                        stderr
-                    ));
+            // Every exit path below falls through to the audit record and the
+            // Stopped flip: a failed kill still has to leave a trail.
+            match output {
+                Err(e) => Err(anyhow::anyhow!("Failed to run tmux kill-session: {e}")),
+                Ok(output) if output.status.success() => {
+                    info!("Killed tmux session: {name}");
+                    Ok(())
                 }
-            } else {
-                info!("Killed tmux session: {}", name);
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // tmux returns non-zero when the session is already gone, which
+                    // is the post-condition we want, so treat it as success.
+                    if stderr.contains("can't find session") || stderr.contains("no server running")
+                    {
+                        info!("tmux session '{name}' already gone, proceeding");
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Failed to kill tmux session '{name}': {stderr}"
+                        ))
+                    }
+                }
             }
-            Ok(())
         } else {
             warn!(
                 "No tmux_session_name for {} — nothing to kill, just marking Stopped",
@@ -10273,10 +10339,22 @@ impl AppState {
     /// `by-session/<uuid>` symlinks all survive and every session stays
     /// resumable. The caller refreshes the workspace view once afterwards.
     async fn bulk_stop_sessions(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
         let total = session_ids.len();
         let mut stopped = 0;
+        let mut already_stopped = 0;
         let mut failed = 0;
         for id in session_ids {
+            // Already Stopped means there is nothing to kill; counting it as a
+            // stop would report "Stopped 10" for work that stopped 5.
+            if self
+                .find_session(id)
+                .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
+            {
+                already_stopped += 1;
+                continue;
+            }
             if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
                 error!("Failed to stop session {}: {}", id, e);
                 failed += 1;
@@ -10287,6 +10365,10 @@ impl AppState {
         if failed > 0 {
             self.add_warning_notification(format!(
                 "Stopped {stopped}/{total} sessions ({failed} failed)"
+            ));
+        } else if already_stopped > 0 {
+            self.add_success_notification(format!(
+                "Stopped {stopped} session(s) ({already_stopped} already stopped)"
             ));
         } else {
             self.add_success_notification(format!("Stopped {stopped} session(s)"));
