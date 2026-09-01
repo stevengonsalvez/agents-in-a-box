@@ -245,20 +245,29 @@ impl RemoteRepoManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // `git clone` can leave a partially-initialised directory behind on
-            // failure (e.g. auth rejected mid-transfer). `is_cached()` only
-            // checks for a `.git` entry, so a broken partial would be treated as
-            // a warm cache on the next attempt and never re-cloned after the
-            // user fixes credentials. Remove it so the retry starts clean.
-            if cache_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&cache_path) {
-                    warn!(
-                        "Failed to remove partial clone at {}: {}",
-                        cache_path.display(),
-                        e
-                    );
-                }
-            }
+            // Deliberately leave whatever `git clone` wrote at `cache_path`.
+            //
+            // This used to remove the directory so a partial clone (auth
+            // rejected mid-transfer, say) could not masquerade as a warm cache
+            // on the next attempt. That cleanup could not tell a partial of its
+            // own making from a complete clone another process had just
+            // published into the same path, because the two are indistinguishable
+            // from the final path alone. Concurrent launches against one
+            // uncached repo therefore ended with the loser deleting the
+            // winner's finished repository, taking every worktree gitlinked
+            // into it with it, and leaving the path uncached so the next launch
+            // raced again.
+            //
+            // Nothing here may delete a shared path it did not create.
+            //
+            // The cost is that a partial does still read as a warm cache on the
+            // next attempt, because `cache_path_is_populated` only tests for a
+            // `.git` entry, and there is no in-app way to clear it: the user
+            // has to remove the directory by hand. That is a bad failure worth
+            // fixing properly, by cloning into private staging and publishing
+            // with an atomic rename so a finished clone is distinguishable from
+            // an interrupted one. It is not worth fixing with a delete that
+            // cannot tell the two apart.
             return Err(classify_git_error(&stderr, &url));
         }
 
@@ -1252,6 +1261,53 @@ fn classify_git_error(stderr: &str, url: &str) -> RemoteRepoError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A failed clone must leave the cache directory exactly as it found it.
+    ///
+    /// This behaviour has been flipped twice: 98c61245 added a `remove_dir_all`
+    /// so a partial clone could not masquerade as a warm cache, and 90d98105
+    /// removed it again after that cleanup was found deleting whole
+    /// repositories that a concurrent process had just published into the same
+    /// path, orphaning every worktree gitlinked into them. The deletion cannot
+    /// distinguish its own partial from a peer's finished clone, so it must not
+    /// happen at all. Pin it, so a third flip has to argue with a red test.
+    #[test]
+    fn a_failed_clone_leaves_the_cache_directory_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        let source = RepoSource::from_input("https://github.com/owner/does-not-exist").unwrap();
+        let parsed = source.parse_components().unwrap();
+        let cache_path = manager.get_cache_path(&parsed);
+
+        // Content a peer put here, with no `.git` yet, so `is_cached` is false
+        // and `clone_repo` proceeds to clone rather than short-circuiting on
+        // the warm-cache branch. `git clone` then refuses a non-empty
+        // destination, which is precisely how the losing racer failed in the
+        // incident: no network required, and the failure is deterministic.
+        std::fs::create_dir_all(&cache_path).unwrap();
+        let sentinel = cache_path.join("sentinel");
+        std::fs::write(&sentinel, b"a peer's work").unwrap();
+        assert!(!manager.is_cached(&parsed), "precondition: cache is cold");
+
+        let err = manager
+            .clone_repo(&source, &parsed)
+            .expect_err("cloning into a non-empty directory should fail");
+
+        assert!(
+            matches!(err, RemoteRepoError::CloneFailed(_)),
+            "unexpected error variant: {err:?}"
+        );
+        assert!(
+            sentinel.exists(),
+            "the failed clone deleted a cache directory it did not create"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"a peer's work",
+            "the failed clone modified a cache directory it did not create"
+        );
+    }
 
     #[test]
     fn test_cache_path_generation() {
