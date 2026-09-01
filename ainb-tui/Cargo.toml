@@ -135,6 +135,8 @@ ansi-to-tui = "8.0.1"
 # Dracula theme + extra grammars (two-face). syntect→ratatui span conversion
 # is inlined.
 similar = { version = "2", features = ["inline"] }
+# Display width for sizing terminal text; already in the tree via ratatui.
+unicode-width = "0.2"
 two-face = "0.5"
 # TRANSITIVE VERSION CAP, not a real dependency: time 0.3.48 (released
 # 2026-06-11/12) fails to compile against this graph — E0119 "conflicting

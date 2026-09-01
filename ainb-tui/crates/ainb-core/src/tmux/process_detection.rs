@@ -138,7 +138,7 @@ impl ClaudeProcessDetector {
     /// * `Err(_)` - Error running tmux command
     pub fn session_exists(&self, tmux_session_name: &str) -> Result<bool> {
         let output = Command::new("tmux")
-            .args(&["has-session", "-t", tmux_session_name])
+            .args(["has-session", "-t", &format!("={tmux_session_name}")])
             .output()
             .context("Failed to execute tmux has-session")?;
 
