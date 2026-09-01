@@ -4517,15 +4517,7 @@ impl EventHandler {
                     // tri-option Stop / Delete / Cancel dialog so the user can
                     // soft-stop without losing the worktree. Boss/Docker, SSH,
                     // and Shell sessions stick with the binary delete flow.
-                    use crate::models::{SessionAgentType, SessionMode};
-                    let is_interactive_agent = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive_agent = crate::app::state::is_stoppable_interactive(session);
                     let session_id = session.id;
                     if is_interactive_agent {
                         state.show_delete_or_stop_confirmation(session_id);
