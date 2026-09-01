@@ -1838,6 +1838,7 @@ mod tests {
     /// against serde's actual output.
     fn fully_populated() -> AppConfig {
         AppConfig {
+            inherited: toml::Table::new(),
             version: "9.9.9".to_string(),
             authentication: AuthenticationConfig {
                 cli_provider: CliProvider::Codex,

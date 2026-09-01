@@ -355,12 +355,10 @@ fn cmd_reset(force: bool) -> Result<()> {
 
 /// Show all config file locations with existence markers
 fn cmd_path(format: OutputFormat) -> Result<()> {
-    // Merge order, not a claimed precedence ranking. `load` applies these in
-    // order and each overrides the previous, so this IS the precedence — and
-    // today it runs the surprising way round, with the system file last and
-    // therefore strongest. Printing the real order beats printing a ranking
-    // the loader does not implement.
-    let paths = AppConfig::get_config_paths();
+    // Reversed: `get_config_paths` returns lowest precedence first, because
+    // that is the order `load` merges in. Users want the strongest file at the
+    // top.
+    let paths: Vec<_> = AppConfig::get_config_paths().into_iter().rev().collect();
 
     match format {
         OutputFormat::Json => {
@@ -377,8 +375,8 @@ fn cmd_path(format: OutputFormat) -> Result<()> {
             println!("{json}");
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            println!("Configuration file locations, in load order:");
-            println!("(each file overrides the ones above it)");
+            println!("Configuration file locations (highest precedence first):");
+            println!("(the most specific file wins, key by key)");
             println!("{}", "\u{2501}".repeat(60));
 
             for (scope, path) in &paths {
@@ -390,12 +388,6 @@ fn cmd_path(format: OutputFormat) -> Result<()> {
                 println!("  {marker} {}: {}", scope.label(), path.display());
             }
 
-            println!();
-            println!(
-                "Note: the system file currently overrides the user's, and the user's\n\
-                 overrides a project's. That is the reverse of what you would expect\n\
-                 and is being fixed; until then, keep settings in one of these files."
-            );
             println!();
             println!("Use 'ainb config edit' to open the user config in your editor.");
         }
