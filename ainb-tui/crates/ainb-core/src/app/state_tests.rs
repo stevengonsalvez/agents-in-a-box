@@ -2276,11 +2276,11 @@ mod tests {
     /// the sessions whose work "Delete all" would destroy.
     #[test]
     fn bulk_uncommitted_warning_names_the_dirty_sessions() {
-        assert_eq!(AppState::format_bulk_uncommitted_warning(&[]), None);
+        assert_eq!(AppState::format_bulk_uncommitted_warning(&[], 0), None);
 
         let dirty = vec![("alpha".to_string(), 3), ("beta".to_string(), 1)];
         let warning =
-            AppState::format_bulk_uncommitted_warning(&dirty).expect("dirty sessions warn");
+            AppState::format_bulk_uncommitted_warning(&dirty, 0).expect("dirty sessions warn");
         assert!(warning.contains("4 uncommitted file(s)"), "{}", warning);
         assert!(warning.contains("2 session(s)"), "{}", warning);
         assert!(warning.contains("alpha (3)"), "{}", warning);
@@ -2288,8 +2288,101 @@ mod tests {
 
         let many: Vec<(String, usize)> = (1usize..=5).map(|i| (format!("s{i}"), i)).collect();
         let warning =
-            AppState::format_bulk_uncommitted_warning(&many).expect("dirty sessions warn");
-        assert!(warning.contains("+2 more"), "{}", warning);
+            AppState::format_bulk_uncommitted_warning(&many, 0).expect("dirty sessions warn");
+        assert!(warning.contains("and 2 more"), "{}", warning);
+    }
+
+    /// A worktree whose status cannot be read must never read as clean: the
+    /// dialog says it could not be checked, so "no warning" keeps meaning
+    /// "nothing to lose".
+    #[test]
+    fn bulk_uncommitted_warning_reports_what_could_not_be_checked() {
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&[], 3).expect("unchecked sessions warn");
+        assert!(
+            warning.contains("could not check 3 session(s)"),
+            "{}",
+            warning
+        );
+
+        let dirty = vec![("alpha".to_string(), 2)];
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&dirty, 2).expect("dirty sessions warn");
+        assert!(warning.contains("alpha (2)"), "{}", warning);
+        assert!(
+            warning.contains("2 more could not be checked"),
+            "{}",
+            warning
+        );
+    }
+
+    /// Stop is meaningless for a Boss (Docker) session: killing tmux leaves the
+    /// container running. A selection containing one must fall back to the
+    /// binary delete confirmation, defaulting to No, rather than offering a
+    /// Stop button that would lie about what happened.
+    #[test]
+    fn bulk_dialog_without_a_stop_path_falls_back_to_delete_confirmation() {
+        use crate::models::SessionStatus;
+
+        let (mut state, _ids) = state_with_checked_sessions(&["alpha"]);
+        let boss = resumable_session(
+            "boss",
+            SessionMode::Boss,
+            SessionAgentType::Claude,
+            SessionStatus::Running,
+        );
+        let boss_id = boss.id;
+        state.workspaces[0].add_session(boss);
+        state.selected_sessions.insert(boss_id);
+
+        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+        assert!(state.pending_async_action.is_none(), "still asks first");
+        let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+        assert!(
+            dialog.options.is_none(),
+            "no Stop option for a Boss session"
+        );
+        assert!(!dialog.selected_option, "Default = No");
+        assert!(matches!(
+            dialog.confirm_action,
+            ConfirmAction::BulkDeleteSessions(_)
+        ));
+    }
+
+    /// A checked id that no longer resolves to a session still takes part in the
+    /// bulk action (nothing silently drops out of a delete), but the dialog
+    /// shows a short label rather than a full 36-character uuid.
+    #[test]
+    fn bulk_dialog_labels_unresolvable_ids_without_dumping_a_uuid() {
+        let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
+        let stale = uuid::Uuid::new_v4();
+        state.selected_sessions.insert(stale);
+
+        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+        let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+        assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
+        assert!(
+            !dialog.message.contains(&stale.to_string()),
+            "the full uuid would eat three rows of the dialog: {}",
+            dialog.message
+        );
+        let queued = match &dialog.confirm_action {
+            ConfirmAction::BulkDeleteSessions(queued) | ConfirmAction::BulkStopSessions(queued) => {
+                queued.clone()
+            }
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert!(queued.contains(&stale), "stale ids stay in the action");
+        assert!(queued.contains(&ids[0]));
+    }
+
+    /// Multi-select ids come out in list order, once each.
+    #[test]
+    fn selected_session_ids_in_order_dedups_and_follows_the_list() {
+        let (state, ids) = state_with_checked_sessions(&["alpha", "beta", "gamma"]);
+        assert_eq!(state.selected_session_ids_in_order(), ids);
     }
 
     /// Stop must leave every worktree on disk. This is the outcome the original
