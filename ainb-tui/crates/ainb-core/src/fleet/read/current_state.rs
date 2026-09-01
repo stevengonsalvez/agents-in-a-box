@@ -180,8 +180,13 @@ impl CurrentStateIndex {
     /// Compare fresh live probes with fresh hook materialization without
     /// assigning policy to either source. Suitable for every ATC presentation.
     #[must_use]
-    pub fn evidence_census(&self, probes: &ProbeIndex, hooks_ready: bool, now_ms: i64) -> EvidenceCensus {
-        let active_cwds = probes.fresh_cwds(now_ms);
+    pub fn evidence_census(
+        &self,
+        probes: &ProbeIndex,
+        hooks_ready: bool,
+        now_ms: i64,
+    ) -> EvidenceCensus {
+        let active_cwds = probes.expected_hook_cwds(now_ms);
         let active_probes = active_cwds.len();
         let fresh_hook_states = active_cwds
             .iter()

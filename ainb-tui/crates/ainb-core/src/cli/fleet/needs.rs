@@ -12,8 +12,8 @@ use crate::fleet::discover::{
 };
 use crate::fleet::enrich_cache;
 use crate::fleet::read::{
-    AskUserQuestionData, ClassifyInput, CurrentStateIndex, NeedsContext, NeedsRow, ProbeIndex,
-    Resolution, capture_pane, classify, discover_from_probes, last_ask_user_question,
+    AskUserQuestionData, ClassifyInput, CurrentStateIndex, NeedsRow, ProbeIndex, Resolution,
+    capture_pane, classify, discover_from_probes, last_ask_user_question,
     latest_transcript_for_cwd,
 };
 use crate::fleet::types::{Session, SessionSource};
@@ -46,25 +46,23 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     // so a Claude session ainb never launched (hand-started, or `kind: "bg"`)
     // can enter the fleet at all: it has no ainb record, no broker row and
     // possibly no tmux pane, so its probe file is its only trace.
-    let probes = tokio::task::spawn_blocking(ProbeIndex::load)
-        .await
-        .unwrap_or_default();
+    let probes = tokio::task::spawn_blocking(ProbeIndex::load).await.unwrap_or_default();
     let known = merge_sessions(vec![ainb, peers, jobs]);
     // Probe discovery ADDS sessions, it must never duplicate one.
     //
-    // `merge_sessions` merges on stable identity (id / peer_id / tmux_session /
-    // bg_job_id) and deliberately never on cwd. A probe Session carries
-    // Claude's own session id and none of the other keys, so it matches nothing
-    // and every already-known session was emitted twice — once as `ainb`, once
-    // as `probe`. Keep only probes for a cwd nothing else claims, which is
-    // exactly the population this discovery exists to reach.
-    let claimed: std::collections::HashSet<&str> =
-        known.iter().map(|s| s.cwd.as_str()).filter(|c| !c.is_empty()).collect();
-    let unclaimed: Vec<Session> = discover_from_probes(&probes)
+    // `merge_sessions` merges on stable identity, never cwd. Keep every probe
+    // unless an existing session has its exact id or pid: two agents can work
+    // from one directory and must never hide each other.
+    let discovered: Vec<Session> = discover_from_probes(&probes)
         .into_iter()
-        .filter(|s| !claimed.contains(s.cwd.as_str()))
+        .filter(|probe| {
+            !known.iter().any(|session| {
+                session.id == probe.id
+                    || matches!((session.pid, probe.pid), (Some(a), Some(b)) if a == b)
+            })
+        })
         .collect();
-    let merged = merge_sessions(vec![known, unclaimed]);
+    let merged = merge_sessions(vec![known, discovered]);
     let (rows, census) = classify_all(merged, &probes, idle_override, enrich).await;
 
     if matches!(format, OutputFormat::Text) {
@@ -232,17 +230,20 @@ async fn classify_all(
         // silently killed ATC's capped auto-`continue`, which is the whole
         // reason the retry ledger exists.
         //
-        // So: `waiting` short-circuits, because a structured ASK/WAIT read the
-        // instant it happens beats anything the lower tiers can infer. Every
-        // other status falls through and is used only to enrich the census —
-        // an idle probe has no `last_assistant_text` and no error visibility,
-        // so the transcript path is strictly better placed to classify it.
+        // A hook WAIT/ASK carries the exact prompt and tool, so it wins over
+        // Claude's generic `waitingFor`. Every other status falls through and
+        // is used only to enrich the census.
         let probe_status = probes.peek_status(&session);
         let probe_asserts_work = probe_status == Some("busy") || probe_status == Some("shell");
         if probe_asserts_work {
             census.running += 1;
         }
         if probe_status == Some("waiting") {
+            if let Resolution::Hook(row) = index.resolve(&session, now_ms, stale_ms) {
+                census.hook += 1;
+                hook_rows.push(*row);
+                continue;
+            }
             if let Some(resolution) = probes.resolve(&session, probe_ask, idle_threshold, now_ms) {
                 census.probe += 1;
                 match resolution {

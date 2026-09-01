@@ -42,6 +42,9 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// connect and `sysinfo` process lookups — work that must NEVER run on the UI
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
+/// Evidence needs fresh process checks, unlike daemon rows. Avoid one `ps` per
+/// historical probe on every screen refresh.
+const EVIDENCE_INTERVAL_MS: i64 = 30_000;
 
 /// How long a lifecycle action may run before the row gives up on it. Generous:
 /// a real restart genuinely takes seconds. The point is only that a wedged
@@ -62,6 +65,8 @@ pub struct Snapshot {
     pub hook_health: Option<HookHealth>,
     /// Hook evidence freshness, collected beside the wiring health.
     pub evidence_census: Option<EvidenceCensus>,
+    /// Clock of the last process-backed evidence census.
+    evidence_collected_at_ms: i64,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -336,6 +341,7 @@ impl DaemonsState {
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
             evidence_census: guard.evidence_census,
+            evidence_collected_at_ms: guard.evidence_collected_at_ms,
         }
     }
 }
@@ -424,23 +430,31 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
-    let probes = ProbeIndex::load();
     let hooks_ready = hook_health.as_ref().is_some_and(|health| {
         health.script_ready
             && health.hook_binary_ready
-            && health
-                .agents
-                .iter()
-                .any(|agent| agent.agent == "claude" && agent.wiring_ready)
+            && health.agents.iter().any(|agent| agent.agent == "claude" && agent.wiring_ready)
     });
-    let evidence_census = CurrentStateIndex::load().evidence_census(&probes, hooks_ready, now_ms());
+    let now = now_ms();
+    let collect_evidence = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .evidence_collected_at_ms
+        .saturating_add(EVIDENCE_INTERVAL_MS)
+        <= now;
+    let evidence_census = collect_evidence
+        .then(|| CurrentStateIndex::load().evidence_census(&ProbeIndex::load(), hooks_ready, now));
+    if let Some(evidence_census) = evidence_census {
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.evidence_census = Some(evidence_census);
+        guard.evidence_collected_at_ms = now;
+    }
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
-            guard.collected_at_ms = now_ms();
+            guard.collected_at_ms = now;
             guard.hook_health = hook_health;
-            guard.evidence_census = Some(evidence_census);
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
@@ -512,10 +526,10 @@ pub fn render(
     // lines because they had no DaemonKind, and it sat on "collecting…" when
     // its separate async fetch wedged. Those three are real rows now, so the
     // panel was a second place to look that showed strictly less.
-    if chunks[0].height >= 14 {
+    if chunks[0].height >= 15 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(7), Constraint::Length(7)])
+            .constraints([Constraint::Min(7), Constraint::Length(8)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot, state);
         render_hook_section(
@@ -802,7 +816,10 @@ fn render_hook_section(
 
 fn evidence_line(evidence: Option<EvidenceCensus>) -> Line<'static> {
     let Some(evidence) = evidence else {
-        return Line::from(Span::styled("Claude hook evidence unavailable", Style::default().fg(STOPPED_RED)));
+        return Line::from(Span::styled(
+            "Claude hook evidence unavailable",
+            Style::default().fg(STOPPED_RED),
+        ));
     };
     let style = match evidence.health {
         EvidenceHealth::Healthy => Style::default().fg(HEALTHY_GREEN),
@@ -812,7 +829,9 @@ fn evidence_line(evidence: Option<EvidenceCensus>) -> Line<'static> {
     Line::from(Span::styled(
         format!(
             "Claude hook {}  ·  {} active probe(s), {} fresh state",
-            evidence.health.label(), evidence.active_probes, evidence.fresh_hook_states
+            evidence.health.label(),
+            evidence.active_probes,
+            evidence.fresh_hook_states
         ),
         style,
     ))
@@ -1059,6 +1078,7 @@ mod tests {
             collected_at_ms: now_ms(),
             hook_health: None,
             evidence_census: None,
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1113,6 +1133,7 @@ mod tests {
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),
             evidence_census: Some(EvidenceCensus::from_counts(true, 1, 1)),
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1354,10 +1375,13 @@ mod tests {
     #[test]
     fn renders_silent_and_unavailable_hook_evidence_as_warnings() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        let shared = state.shared.as_ref().expect("seeded state");
+        let shared = Arc::clone(state.shared.as_ref().expect("seeded state"));
         shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(true, 2, 0));
         let silent = render_to_string(&mut state, None, 120, 24);
-        assert!(silent.contains("Claude hook Silent"), "silent warning missing: {silent}");
+        assert!(
+            silent.contains("Claude hook Silent"),
+            "silent warning missing: {silent}"
+        );
 
         shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(false, 2, 2));
         let unavailable = render_to_string(&mut state, None, 120, 24);

@@ -298,6 +298,9 @@ pub fn load_dir(dir: &Path) -> Vec<ClaudeProbe> {
 /// rewrite, and wrongly abstaining merely costs a pane scan, while wrongly
 /// trusting a frozen probe hides a stuck session indefinitely.
 pub const HEALTHY_MAX_AGE_MIN: i64 = 30;
+/// A new probe has not had time to reach the materializer yet, so it cannot
+/// make hook evidence silent on its own.
+const EVIDENCE_GRACE_MS: i64 = 2 * 60_000;
 
 /// Minutes a probe has held its current status, or `None` when the stamp is
 /// unusable (absent, or in the future — a clock skew we will not reason about).
@@ -330,30 +333,21 @@ fn humanize_minutes(mins: i64) -> String {
 /// long-dead session cannot answer for a session running in the same cwd today.
 #[derive(Debug, Default)]
 pub struct ProbeIndex {
-    /// The freshest live probe per cwd, for RESOLVING a session.
-    by_cwd: HashMap<String, ClaudeProbe>,
     /// Every live probe, for DISCOVERY. Two Claude sessions can share a cwd,
     /// and collapsing them here would delete the loser from the fleet
     /// entirely — including a blocked one losing to a busy sibling.
     all: Vec<ClaudeProbe>,
-    /// By Claude's own session id — the EXACT correlation, used ahead of cwd.
-    ///
-    /// cwd alone is ambiguous the moment two sessions share a directory, and
-    /// the cwd map keeps only the freshest: a session blocked on a question
-    /// would be masked by an idle sibling that merely flipped status more
-    /// recently, which is precisely the case this tier exists to surface.
+    /// By Claude's own session id — the only safe resolver correlation.
+    /// Cwd alone is ambiguous across both Claude siblings and other providers.
     by_session: HashMap<String, ClaudeProbe>,
 }
 
 impl ProbeIndex {
     /// Load and gate every probe under `dir`.
     ///
-    /// When two live probes share a cwd (two Claude sessions in one directory)
-    /// the most recently updated wins: it is the one whose status was last
-    /// observed to change, so it is the freshest claim about that directory.
+    /// Every live probe is retained for discovery and exact-id resolution.
     #[must_use]
     pub fn load_from(dir: &Path) -> Self {
-        let mut by_cwd: HashMap<String, ClaudeProbe> = HashMap::new();
         let mut all: Vec<ClaudeProbe> = Vec::new();
         let mut by_session: HashMap<String, ClaudeProbe> = HashMap::new();
         for probe in load_dir(dir) {
@@ -364,18 +358,8 @@ impl ProbeIndex {
             if !probe.session_id.is_empty() {
                 by_session.insert(probe.session_id.clone(), probe.clone());
             }
-            match by_cwd.get(&probe.cwd) {
-                Some(existing) if existing.status_updated_at >= probe.status_updated_at => {}
-                _ => {
-                    by_cwd.insert(probe.cwd.clone(), probe);
-                }
-            }
         }
-        Self {
-            by_cwd,
-            all,
-            by_session,
-        }
+        Self { all, by_session }
     }
 
     /// Load from the default `~/.claude/sessions`. An unresolvable home yields
@@ -390,7 +374,7 @@ impl ProbeIndex {
     /// Whether any live probe was found. Drives the tier-liveness reporting.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_cwd.is_empty()
+        self.all.is_empty()
     }
 
     /// Number of live probes indexed.
@@ -399,23 +383,18 @@ impl ProbeIndex {
         self.all.len()
     }
 
-    /// Number of working directories with a live, recently-updated probe.
-    /// Several Claude sessions sharing one directory still need only one hook
-    /// state row, so this mirrors the hook reader's cwd key.
+    /// Directories with fresh Claude activity that should have generated hook
+    /// evidence. Idle and just-started sessions are quiet by design.
     #[must_use]
-    pub fn fresh_cwd_count(&self, now_ms: i64) -> usize {
-        self.fresh_cwds(now_ms).len()
-    }
-
-    /// Working directories with a live, recently-updated probe.
-    #[must_use]
-    pub fn fresh_cwds(&self, now_ms: i64) -> std::collections::HashSet<&str> {
+    pub fn expected_hook_cwds(&self, now_ms: i64) -> std::collections::HashSet<&str> {
         self.all
             .iter()
             .filter(|probe| {
                 probe.status_updated_at > 0
-                    && probe.status_updated_at <= now_ms
-                    && now_ms - probe.status_updated_at <= HEALTHY_MAX_AGE_MIN * 60_000
+                    && now_ms.saturating_sub(probe.status_updated_at) >= EVIDENCE_GRACE_MS
+                    && now_ms.saturating_sub(probe.status_updated_at)
+                        <= HEALTHY_MAX_AGE_MIN * 60_000
+                    && matches!(probe.status.as_str(), "busy" | "shell" | "waiting")
             })
             .map(|probe| probe.cwd.as_str())
             .collect::<std::collections::HashSet<_>>()
@@ -436,12 +415,9 @@ impl ProbeIndex {
         self.probe_for(session).map(|p| p.status.as_str())
     }
 
-    /// The probe that speaks for this session: its own id when the session came
-    /// from a probe, else the freshest probe in its directory.
+    /// The probe that speaks for this session, matched by Claude's own id.
     fn probe_for(&self, session: &Session) -> Option<&ClaudeProbe> {
-        self.by_session
-            .get(&session.id)
-            .or_else(|| (!session.cwd.is_empty()).then(|| self.by_cwd.get(&session.cwd)).flatten())
+        self.by_session.get(&session.id)
     }
 
     /// Resolve one session against tier A, or `None` to abstain to tier B.
@@ -630,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn index_keys_by_cwd_and_drops_dead_pids() {
+    fn index_keys_by_session_and_drops_dead_pids() {
         let dir = tempfile::tempdir().unwrap();
         let me = std::process::id();
         let started_str = chrono::DateTime::from_timestamp_millis(
@@ -643,7 +619,7 @@ mod tests {
         std::fs::write(
             dir.path().join("live.json"),
             format!(
-                r#"{{"pid":{me},"cwd":"/w/live","status":"busy","procStart":"{started_str}","statusUpdatedAt":5}}"#
+                r#"{{"pid":{me},"sessionId":"live-session","cwd":"/w/live","status":"busy","procStart":"{started_str}","statusUpdatedAt":5}}"#
             ),
         )
         .unwrap();
@@ -662,7 +638,11 @@ mod tests {
 
         let index = ProbeIndex::load_from(dir.path());
         assert_eq!(index.len(), 1, "only the live probe is indexed");
-        assert!(index.resolve(&session_at("/w/live"), None, 5, 60_000).is_some());
+        assert!(
+            index
+                .resolve(&session_ided("live-session", "/w/live"), None, 5, 60_000)
+                .is_some()
+        );
         assert!(
             index.resolve(&session_at("/w/dead"), None, 5, 60_000).is_none(),
             "a dead pid must not answer for its cwd"
@@ -672,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn newest_status_wins_when_two_live_probes_share_a_cwd() {
+    fn exact_session_id_prevents_sibling_probe_attribution() {
         let dir = tempfile::tempdir().unwrap();
         let me = std::process::id();
         let started_str = chrono::DateTime::from_timestamp_millis(
@@ -698,14 +678,9 @@ mod tests {
         // from the fleet entirely.
         assert_eq!(index.len(), 2);
         assert_eq!(discover_from_probes(&index).len(), 2);
-        // Resolving by cwd alone still takes the freshest, since cwd cannot
-        // distinguish them. busy (the newer stamp) short-circuits Healthy: at
-        // now=400_000 it is 6.5m old, inside the 30m freshness window, while
-        // the idle sibling is 6.6m old and so past the 5m idle threshold.
-        assert!(matches!(
-            index.resolve(&session_at("/w/same"), None, 5, 400_000),
-            Some(Resolution::Healthy)
-        ));
+        // Cwd alone cannot prove which agent a probe belongs to. It must
+        // abstain instead of letting the fresh busy sibling hide another row.
+        assert!(index.resolve(&session_at("/w/same"), None, 5, 400_000).is_none());
         // Correlating by Claude's own id reaches the OTHER probe, which cwd
         // alone can never do — the case where a blocked session is masked by a
         // sibling that merely flipped status more recently. `sess-old` is idle
@@ -727,20 +702,25 @@ mod tests {
     }
 
     #[test]
-    fn fresh_cwd_count_requires_a_recent_stamp_and_deduplicates_directories() {
+    fn expected_hook_cwds_require_sustained_non_idle_activity() {
         let now = 60 * 60_000;
-        let mut fresh = probe("busy", now - 1_000);
+        let fresh = probe("busy", now - EVIDENCE_GRACE_MS);
         let mut same_cwd = fresh.clone();
         same_cwd.session_id = "cs2".into();
         let mut stale = fresh.clone();
         stale.cwd = "/w/stale".into();
         stale.status_updated_at = now - (HEALTHY_MAX_AGE_MIN + 1) * 60_000;
-        fresh.status_updated_at = now - 2_000;
+        let mut idle = fresh.clone();
+        idle.cwd = "/w/idle".into();
+        idle.status = "idle".into();
+        let mut new = fresh.clone();
+        new.cwd = "/w/new".into();
+        new.status_updated_at = now - EVIDENCE_GRACE_MS + 1;
         let index = ProbeIndex {
-            all: vec![fresh, same_cwd, stale],
+            all: vec![fresh, same_cwd, stale, idle, new],
             ..ProbeIndex::default()
         };
-        assert_eq!(index.fresh_cwd_count(now), 1);
+        assert_eq!(index.expected_hook_cwds(now).len(), 1);
     }
 
     #[test]
