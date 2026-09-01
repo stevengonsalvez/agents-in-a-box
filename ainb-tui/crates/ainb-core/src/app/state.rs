@@ -7751,9 +7751,7 @@ impl AppState {
 
         let names: Vec<String> = session_ids
             .iter()
-            .map(|id| {
-                self.find_session(*id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string())
-            })
+            .map(|id| self.find_session(*id).map_or_else(|| id.to_string(), |s| s.name.clone()))
             .collect();
         let warning =
             Self::format_bulk_uncommitted_warning(&self.bulk_uncommitted_counts(&session_ids));
@@ -7774,7 +7772,7 @@ impl AppState {
         ];
 
         self.confirmation_dialog = Some(ConfirmationDialog {
-            title: format!("Stop or Delete {} Session(s)", count),
+            title: format!("Stop or Delete {count} Session(s)"),
             message: format!(
                 "{}\nStop keeps every worktree and resumes later. Delete removes {} worktree(s).",
                 Self::format_bulk_session_summary(&names),
@@ -7798,11 +7796,17 @@ impl AppState {
             return "No sessions selected".to_string();
         }
         let shown = names.len().min(MAX_NAMED);
-        let mut summary = format!("{} session(s): {}", names.len(), names[..shown].join(", "));
-        if names.len() > shown {
-            summary.push_str(&format!(", and {} more", names.len() - shown));
-        }
-        summary
+        let more = names.len() - shown;
+        let tail = if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        };
+        format!(
+            "{} session(s): {}{tail}",
+            names.len(),
+            names[..shown].join(", ")
+        )
     }
 
     /// `(session name, uncommitted file count)` for every selected session whose
@@ -7841,7 +7845,7 @@ impl AppState {
         let shown = dirty.len().min(MAX_NAMED);
         let listed = dirty[..shown]
             .iter()
-            .map(|(name, count)| format!("{} ({})", name, count))
+            .map(|(name, count)| format!("{name} ({count})"))
             .collect::<Vec<_>>()
             .join(", ");
         let more = if dirty.len() > shown {
@@ -10187,11 +10191,10 @@ impl AppState {
         }
         if failed > 0 {
             self.add_warning_notification(format!(
-                "Stopped {}/{} sessions ({} failed)",
-                stopped, total, failed
+                "Stopped {stopped}/{total} sessions ({failed} failed)"
             ));
         } else {
-            self.add_success_notification(format!("Stopped {} session(s)", stopped));
+            self.add_success_notification(format!("Stopped {stopped} session(s)"));
         }
     }
 
