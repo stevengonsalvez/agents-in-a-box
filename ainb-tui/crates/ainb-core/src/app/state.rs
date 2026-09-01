@@ -3826,7 +3826,7 @@ pub enum AsyncAction {
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
-    BulkStopSessions(Vec<Uuid>), // Soft-stop multiple interactive sessions (tmux only; preserves worktrees)
+    BulkStopSessions(Vec<Uuid>),           // Soft-stop many sessions (tmux only; keeps worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
     AttachToContainer(Uuid),               // Attach to a container session
@@ -7752,9 +7752,7 @@ impl AppState {
         let names: Vec<String> = session_ids
             .iter()
             .map(|id| {
-                self.find_session(*id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| id.to_string())
+                self.find_session(*id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string())
             })
             .collect();
         let warning =
