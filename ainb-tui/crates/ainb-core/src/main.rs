@@ -1284,8 +1284,11 @@ async fn run_tui_loop(
 
                         info!("Killing other tmux session '{}'", session_name);
 
+                        // `=name` is an exact target. A bare `-t` resolves
+                        // exact, then prefix, so killing "feat-auth" could take
+                        // out a live "feat-auth-2".
                         let output = Command::new("tmux")
-                            .args(["kill-session", "-t", &session_name])
+                            .args(["kill-session", "-t", &format!("={session_name}")])
                             .output()
                             .await;
 
@@ -1339,8 +1342,9 @@ async fn run_tui_loop(
                         for session_name in &session_names {
                             info!("Killing other tmux session '{}'", session_name);
 
+                            // Exact target, see the single-session kill above.
                             let output = Command::new("tmux")
-                                .args(["kill-session", "-t", session_name])
+                                .args(["kill-session", "-t", &format!("={session_name}")])
                                 .output()
                                 .await;
 
@@ -1716,8 +1720,9 @@ async fn run_tui_loop(
 
                         if let Some((tmux_name, workspace_name)) = shell_info {
                             // Kill the tmux session
+                            // Exact target: a bare `-t` prefix-matches.
                             let _ = Command::new("tmux")
-                                .args(["kill-session", "-t", &tmux_name])
+                                .args(["kill-session", "-t", &format!("={tmux_name}")])
                                 .output()
                                 .await;
 
