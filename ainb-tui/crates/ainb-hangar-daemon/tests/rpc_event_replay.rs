@@ -368,3 +368,61 @@ async fn replay_never_crosses_workspace_boundary() {
         .expect("workspace A resumes its own log");
     assert_eq!(ev["title"], "issue-A");
 }
+
+/// `board_card_create` mints a real issue row, so it must announce it through
+/// the same `IssueCreated` push `issue_create` uses. Before this, a card-created
+/// issue never reached the issue list, Kanban titles or inbox until a full
+/// snapshot refresh: the issue existed in the store and nowhere on screen.
+#[tokio::test]
+async fn board_card_create_announces_the_minted_issue() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut driver = Client::connect(&socket_path).await;
+    driver.auth_from_file(dir.path()).await;
+    let created = driver
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": seed::WS_SLUG, "name": "Pipeline" }),
+        )
+        .await;
+    assert!(created["error"].is_null(), "board_create must ack: {created}");
+    let board_id = created["result"]["boards"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("board id in boards_list result: {created}"))
+        .to_string();
+    let carded = driver
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({
+                "workspace_id": seed::WS_SLUG,
+                "board_id": board_id,
+                "title": "card-minted-issue",
+            }),
+        )
+        .await;
+    assert!(carded["error"].is_null(), "board_card_create must ack: {carded}");
+
+    // The minted issue's IssueCreated must land durably (replayable), exactly
+    // like an issue_create would.
+    let head = wait_for_head(&store, WS_ID, 1).await;
+    assert!(head >= 1, "board_card_create logged an event, head={head}");
+
+    let mut sub = Client::connect(&socket_path).await;
+    sub.auth_from_file(dir.path()).await;
+    let cursor = sub.subscribe_since(seed::WS_SLUG, Some(0)).await;
+    let mut saw_issue_created = false;
+    for _ in 0..cursor {
+        let ev = sub
+            .next_event(Duration::from_secs(5))
+            .await
+            .expect("replay must deliver each backlog event");
+        if ev["event"] == "issue_created" && ev["title"] == "card-minted-issue" {
+            saw_issue_created = true;
+        }
+    }
+    assert!(
+        saw_issue_created,
+        "board_card_create must push IssueCreated for the minted issue"
+    );
+}
