@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.1] - 2026-09-01
+### Fixed
+- **git**: never delete a shared repo cache on clone failure
+- **hangar**: stop the summary counting tests a build error never ran
+- a project config now overrides the user's, not the other way round
+- keep the user's value when a project layer disagrees
+- offer the antigravity provider in the settings rows
+- save the user's own values, not the merged view
+
+### Documentation
+- drop the precedence warning now that it is fixed
+
+
 ## [1.23.0] - 2026-09-01
 ### Added
 - feat!: retire gpt-5.4 from the Codex model picker
