@@ -1233,7 +1233,7 @@ async fn handle(
         methods::HANGAR_BOARD_COLUMN_REORDER => handle_board_column_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_ADD => handle_board_card(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
-        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
+        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
         methods::HANGAR_ISSUE_RUN => handle_issue_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
@@ -9253,8 +9253,10 @@ fn normalise_fsm_state<'a>(raw: Option<&'a str>) -> Result<Option<&'a str>, RpcE
 async fn handle_board_card_create(
     pool: &SqlitePool,
     req: &RpcRequest,
+    events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::board::BoardRepo;
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
@@ -9368,6 +9370,15 @@ async fn handle_board_card_create(
         )
         .await
         .map_err(|e| store_err(&e))?;
+    }
+    // A card create inserts a real issue row, so announce it exactly like
+    // `issue_create` does: without this push the issue list, Kanban titles and
+    // inbox never learn the issue exists until a full snapshot refresh.
+    if let Some(row) = snapshots::issue_row(pool, ws.as_str(), &issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        events.emit(ws.as_str(), HangarEvent::IssueCreated(row));
     }
     boards_list_value(pool, &ws).await
 }
