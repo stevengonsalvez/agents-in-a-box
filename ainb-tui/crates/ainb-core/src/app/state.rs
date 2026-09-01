@@ -7820,7 +7820,7 @@ impl AppState {
             .find_session(session_id)
             .map_or_else(|| unknown_session_label(session_id), |s| s.name.clone());
         let status = Self::bulk_uncommitted_counts(&[(session_id, name)]);
-        Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked)
+        Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, 1)
     }
 
     /// Show the tri-option Stop all / Delete all / Cancel dialog for every
@@ -7879,7 +7879,7 @@ impl AppState {
         } else {
             "their worktrees".to_string()
         };
-        let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked);
+        let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, count);
         let summary = Self::format_bulk_session_summary(&id_names);
 
         self.confirmation_dialog = Some(if stoppable.len() == count {
@@ -7975,7 +7975,7 @@ impl AppState {
         /// child processes off a single keypress.
         const MAX_CONCURRENT_PROBES: usize = 8;
 
-        let Ok(worktree_manager) = WorktreeManager::new() else {
+        let Ok(worktree_manager) = WorktreeManager::for_reading() else {
             warn!("Cannot resolve worktrees: uncommitted work is unknown for this selection");
             return BulkWorktreeStatus {
                 dirty: Vec::new(),
@@ -7990,28 +7990,41 @@ impl AppState {
         // resolved, including ones with no session row and Shell sessions: what
         // delete removes is whatever `by-session/<uuid>` points at, so anything
         // with a directory gets probed and counted.
-        let mut probes: Vec<(PathBuf, String)> = Vec::new();
-        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut probes: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let mut seen: HashMap<PathBuf, usize> = HashMap::new();
         let mut status = BulkWorktreeStatus::default();
         for (id, name) in names {
-            let Some(dir) = worktree_manager.session_dir(*id) else {
+            let dir = match worktree_manager.session_dir(*id) {
                 // Nothing on disk: deleting this session destroys no files.
-                continue;
+                Ok(None) => continue,
+                Ok(Some(dir)) => dir,
+                Err(e) => {
+                    // The link is there and could not be followed, which is
+                    // unknown, not empty.
+                    warn!("Could not resolve the worktree for {id}: {e}");
+                    status.unchecked += 1;
+                    status.with_worktree += 1;
+                    continue;
+                }
             };
             // Canonicalise before deduping, or /tmp and /private/tmp count twice
             // on macOS. Fall back to the raw path when it cannot be resolved.
             let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-            if seen.insert(key) {
+            // Sessions sharing a tree are named together: naming only the first
+            // would tell the user the others have nothing to lose.
+            if let Some(&idx) = seen.get(&key) {
+                probes[idx].1.push(name.clone());
+            } else {
+                seen.insert(key, probes.len());
                 status.with_worktree += 1;
-                probes.push((dir, name.clone()));
+                probes.push((dir, vec![name.clone()]));
             }
         }
 
         // `git status` is a subprocess per tree and this runs inline on a
         // keypress. Batching does not reduce the number of calls, one per tree
         // either way; it bounds how many run at once so a large selection cannot
-        // spawn a thread and a child process per tree all at the same time. A
-        // single probe skips the threads entirely.
+        // spawn a thread and a child process per tree all at the same time.
         let mut counts: Vec<Result<usize, ()>> = Vec::with_capacity(probes.len());
         for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
             let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
@@ -8026,10 +8039,10 @@ impl AppState {
             counts.extend(batch_counts);
         }
 
-        for ((_, name), count) in probes.into_iter().zip(counts) {
+        for ((_, names), count) in probes.into_iter().zip(counts) {
             match count {
                 Ok(0) => {}
-                Ok(count) => status.dirty.push((name, count)),
+                Ok(count) => status.dirty.push((names.join(", "), count)),
                 Err(()) => status.unchecked += 1,
             }
         }
@@ -8039,12 +8052,22 @@ impl AppState {
     /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
     /// the work "Delete all" would destroy, so it names the dirty sessions
     /// rather than reporting a bare total.
+    /// `selected` is how many rows the dialog is about, which decides the
+    /// wording: on a one-row dialog naming the session and saying "1 session(s)"
+    /// repeats what the user is looking at, but in a bulk selection the name is
+    /// the whole point of the warning.
     fn format_bulk_uncommitted_warning(
         dirty: &[(String, usize)],
         unchecked: usize,
+        selected: usize,
     ) -> Option<String> {
         if dirty.is_empty() {
-            return (unchecked > 0).then(|| {
+            if unchecked == 0 {
+                return None;
+            }
+            return Some(if selected == 1 {
+                "⚠️ could not check this worktree for uncommitted work".to_string()
+            } else {
                 format!("⚠️ could not check {unchecked} session(s) for uncommitted work")
             });
         }
@@ -8055,10 +8078,7 @@ impl AppState {
         } else {
             String::new()
         };
-        if dirty.len() == 1 && unchecked == 0 {
-            // One row: naming it and saying "1 session(s)" repeats what the user
-            // is already looking at, and a long branch name would wrap the
-            // banner across three rows.
+        if selected == 1 && unchecked == 0 {
             return Some(format!("⚠️ {total} uncommitted file(s) in worktree"));
         }
         Some(format!(
@@ -10432,10 +10452,9 @@ impl AppState {
                 .find_session(id)
                 .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
             {
+                // The dialog excludes these from the action, so their check was
+                // never cleared and there is nothing to restore.
                 already_stopped += 1;
-                // Unchecked optimistically on confirmation, but nothing was done
-                // to it, so put the check back like the failure path does.
-                self.selected_sessions.insert(id);
                 continue;
             }
             if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
