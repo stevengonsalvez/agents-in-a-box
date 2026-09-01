@@ -219,6 +219,86 @@ pub struct DaemonStatus {
     pub reason: String,
 }
 
+/// Probe a LITE instance: its controller is the resident scan loop, so liveness
+/// is that process's own heartbeat, not a timer's stamp and not a tmux session.
+///
+/// Reports `Degraded` rather than `Stopped` when the instance is provisioned in
+/// lite mode with no scanner running: the fleet HAS a designated owner and that
+/// owner is absent, which is a different problem from an unconfigured ATC and
+/// takes a different fix (`ainb daemon atc start`, not `fleet atc setup`).
+fn probe_atc_lite(
+    paths: &crate::fleet::atc::paths::AtcPaths,
+    meta: &crate::fleet::atc::meta::AtcMeta,
+    now_ms: i64,
+) -> DaemonStatus {
+    use crate::fleet::atc::heartbeat::HeartbeatState;
+    use crate::fleet::atc::supervisor::lite_heartbeat_id;
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, is_pid_alive};
+
+    let kind = DaemonKind::Atc;
+    let name = meta.name.clone();
+    let channel = Some(format!("{name} · LITE · no LLM"));
+    let last_active = std::fs::read_to_string(&paths.heartbeat_state)
+        .ok()
+        .map(|s| HeartbeatState::from_json_or_default(&s))
+        .and_then(|s| s.last_active_ms);
+
+    let Some(hb) = DaemonHeartbeat::read(&lite_heartbeat_id(&name)) else {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            channel,
+            last_activity_at: last_active,
+            reason: format!(
+                "lite mode is the owner of this fleet but no scanner is running; \
+`ainb daemon atc start` starts it"
+            ),
+            ..DaemonStatus::running(kind)
+        };
+    };
+    if !is_pid_alive(hb.pid) {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Stopped,
+            pid: Some(hb.pid),
+            channel,
+            last_activity_at: last_active,
+            ..DaemonStatus::stopped(
+                kind,
+                format!("lite scanner pid {} is gone (crashed?)", hb.pid),
+            )
+        };
+    }
+    let age = now_ms.saturating_sub(hb.last_heartbeat_at);
+    if age > stale_after_ms() {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            pid: Some(hb.pid),
+            channel,
+            last_activity_at: last_active,
+            reason: format!(
+                "lite scanner alive (pid {}) but its last scan was {}s ago — wedged?",
+                hb.pid,
+                age / 1000
+            ),
+            ..DaemonStatus::running(kind)
+        };
+    }
+    DaemonStatus {
+        kind,
+        state: DaemonState::Running,
+        pid: Some(hb.pid),
+        connected: true,
+        channel,
+        last_activity_at: last_active,
+        error_count: hb.error_count,
+        last_error: hb.last_error.clone(),
+        reason: format!("lite scanner alive — last scan {}s ago", age / 1000),
+        ..DaemonStatus::running(kind)
+    }
+}
+
 impl DaemonStatus {
     fn stopped(kind: DaemonKind, reason: impl Into<String>) -> Self {
         Self {
@@ -809,12 +889,29 @@ pub(crate) fn probe_atc_with(
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
     use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    use crate::fleet::atc::supervisor::SupervisorMode;
 
     let kind = DaemonKind::Atc;
     let atc_root = home.join("atc");
     let names = list_instance_names_in(&atc_root);
     if names.is_empty() {
         return DaemonStatus::stopped(kind, "no ATC instance provisioned");
+    }
+
+    // A LITE instance is a different daemon wearing the same row: no scheduler,
+    // no brain session, a resident scan loop instead. Probing it with the
+    // full-mode signals (heartbeat_enabled, tmux session liveness) would report
+    // a perfectly healthy lite fleet as stopped-or-degraded forever.
+    for name in &names {
+        let p = AtcPaths::under_root(&atc_root, name);
+        let Some(meta) =
+            std::fs::read_to_string(&p.meta).ok().and_then(|s| AtcMeta::from_json(&s).ok())
+        else {
+            continue;
+        };
+        if meta.mode == SupervisorMode::Lite {
+            return probe_atc_lite(&p, &meta, now_ms);
+        }
     }
 
     // Pick the most-recently-beating instance as the representative row, and
@@ -826,7 +923,7 @@ pub(crate) fn probe_atc_with(
     // its last (pre-disable) heartbeat looks — counting it was the M2 false
     // "running". Track how many enabled instances we saw so we can distinguish
     // "all disabled" from "none have beaten yet".
-    let mut best: Option<(String, HeartbeatState, u32)> = None;
+    let mut best: Option<(String, HeartbeatState, u32, String)> = None;
     let mut enabled_count = 0_usize;
     for name in &names {
         let p = AtcPaths::under_root(&atc_root, name);
@@ -836,7 +933,10 @@ pub(crate) fn probe_atc_with(
         // possibly-running instance. `AtcMeta::new` defaults `heartbeat_enabled`
         // to true, matching this.
         let heartbeat_enabled = meta.as_ref().map_or(true, |m| m.heartbeat_enabled);
-        let interval_min = meta.map_or(15, |m| m.heartbeat_interval_min.max(1));
+        let interval_min = meta.as_ref().map_or(15, |m| m.heartbeat_interval_min.max(1));
+        let provider = meta
+            .as_ref()
+            .map_or_else(|| "claude".to_string(), |m| m.provider.clone());
         if !heartbeat_enabled {
             // Disabled instances are never a running-source. Skip before reading
             // the heartbeat state so a stale beat can't promote it.
@@ -850,15 +950,15 @@ pub(crate) fn probe_atc_with(
             continue;
         };
         let take = match &best {
-            Some((_, prev, _)) => hbs.last_heartbeat_ms > prev.last_heartbeat_ms,
+            Some((_, prev, _, _)) => hbs.last_heartbeat_ms > prev.last_heartbeat_ms,
             None => true,
         };
         if take {
-            best = Some((name.clone(), hbs, interval_min));
+            best = Some((name.clone(), hbs, interval_min, provider.clone()));
         }
     }
 
-    let Some((name, hbs, interval_min)) = best else {
+    let Some((name, hbs, interval_min, provider)) = best else {
         // No enabled instance produced a usable heartbeat. If NONE of the
         // provisioned instances are even enabled, the daemon is configured off.
         if enabled_count == 0 {
@@ -927,7 +1027,7 @@ pub(crate) fn probe_atc_with(
             kind,
             state: DaemonState::Degraded,
             connected: false,
-            channel: Some(format!("{name} (every {interval_min}m)")),
+            channel: Some(format!("{name} · FULL({provider}) · every {interval_min}m")),
             last_activity_at: hbs.last_active_ms,
             reason: format!(
                 "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; `ainb daemon atc start` respawns it"
@@ -944,7 +1044,7 @@ pub(crate) fn probe_atc_with(
         version: None,
         version_current: None,
         connected: true,
-        channel: Some(format!("{name} (every {interval_min}m)")),
+        channel: Some(format!("{name} · FULL({provider}) · every {interval_min}m")),
         last_activity_at: hbs.last_active_ms,
         error_count: 0,
         last_error: None,
