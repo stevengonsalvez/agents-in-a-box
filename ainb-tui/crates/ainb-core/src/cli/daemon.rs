@@ -601,12 +601,12 @@ fn atc(action: Action) -> Result<String> {
                             _ => None,
                         };
                         crate::cli::fleet::atc_supervisor::restart_lite(&name, signalled)?;
-                        Ok(match signalled {
-                            Some(pid) => {
+                        Ok(signalled.map_or_else(
+                            || format!("ATC '{name}' lite scanner started"),
+                            |pid| {
                                 format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
-                            }
-                            None => format!("ATC '{name}' lite scanner started"),
-                        })
+                            },
+                        ))
                     }
                 }
             }
@@ -734,14 +734,14 @@ fn fleet_daemon(action: Action) -> Result<String> {
                 }
             }
         }
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
-        }
-        // Unreachable: `control` intercepts Pair before any handler.
-        // Provision / remove-orphan are ATC-only for the same reason: they are
-        // offered by `Action::for_kind` only there.
-        Action::Pair | Action::Provision | Action::RemoveOrphan => {
+        // Unreachable: `control` intercepts pair and the mode switches before
+        // any handler, and provision / remove-orphan are offered by
+        // `Action::for_kind` on ATC only.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
