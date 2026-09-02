@@ -99,7 +99,10 @@ impl Client {
         let token_path = ainb_hangar_proto::auth::token_file_in(dir);
         let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
         let resp = self
-            .call(methods::AUTH_HELLO, serde_json::json!({ "token": token.trim() }))
+            .call(
+                methods::AUTH_HELLO,
+                serde_json::json!({ "token": token.trim() }),
+            )
             .await
             .expect("auth reply");
         assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
@@ -166,12 +169,18 @@ async fn a_subscribed_connection_outlives_the_idle_window_an_unsubscribed_one_do
             plain.call(methods::HANGAR_HEALTH, serde_json::json!({})).await.is_some()
         }
     };
-    assert!(!plain_alive, "an idle request/response connection must be reclaimed");
+    assert!(
+        !plain_alive,
+        "an idle request/response connection must be reclaimed"
+    );
 
     // The subscribed connection still answers after the same quiet period.
     let health = subscribed
         .call(methods::HANGAR_HEALTH, serde_json::json!({}))
         .await
         .expect("subscribed connection must still be served after the idle window");
-    assert!(health["error"].is_null(), "health must ack over the surviving link: {health}");
+    assert!(
+        health["error"].is_null(),
+        "health must ack over the surviving link: {health}"
+    );
 }
