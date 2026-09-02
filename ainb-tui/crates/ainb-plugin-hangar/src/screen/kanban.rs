@@ -531,13 +531,27 @@ fn card_title(c: &CardSummary, now_ms: i64) -> String {
     );
     if let Some(branch) = c.branch.as_deref() {
         title.push_str(" · ");
-        title.push_str(branch);
+        title.push_str(&elide_branch(branch));
     }
     if let Some(chip) = card_pr_chip(c) {
         title.push_str(" · ");
         title.push_str(&chip);
     }
     title
+}
+
+/// `ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8` -> `ainb/…3N9GP8` (crisp B1, Q14): a branch
+/// whose last segment is a ULID-length token keeps its prefix plus the same
+/// last-6 chars the `#<short_id>` id line shows, so a 28-char branch no longer
+/// wraps the title and pushes the PR chip off the tile. A short human slug
+/// (`ainb/fix-login`) is left alone.
+fn elide_branch(branch: &str) -> String {
+    let (prefix, last) = branch.rsplit_once('/').map_or(("", branch), |(p, l)| (p, l));
+    if last.chars().count() <= 12 {
+        return branch.to_string();
+    }
+    let sep = if prefix.is_empty() { "" } else { "/" };
+    format!("{prefix}{sep}…{}", short_id(last))
 }
 
 /// Build the [`CardSummary`] list for one board column from the wire rows.
@@ -1127,8 +1141,13 @@ mod tests {
 
         let card = &state.board_columns(NOW)[2].cards[0];
         assert!(
-            card.title.contains(&format!("ainb/{TASK_ULID}")) && card.title.ends_with("PR ✓"),
-            "branch + PR chip both on the title: {:?}",
+            card.title.contains("ainb/…0SCAKH") && card.title.ends_with("PR ✓"),
+            "elided branch + PR chip both on the title: {:?}",
+            card.title
+        );
+        assert!(
+            !card.title.contains(TASK_ULID),
+            "the 26-char branch slug never reaches the tile (crisp B1, Q14): {:?}",
             card.title
         );
         assert!(
@@ -1141,6 +1160,23 @@ mod tests {
         // The parent issue still names the card, on the id line, where it costs
         // the run's artifacts nothing.
         assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
+    }
+
+    /// The branch elide keeps a human slug whole and only shortens a ULID-length
+    /// last segment, prefix intact, to the id line's last-6 token.
+    #[test]
+    fn elide_branch_shortens_only_ulid_length_slugs() {
+        assert_eq!(elide_branch("ainb/fix-login"), "ainb/fix-login");
+        assert_eq!(elide_branch("main"), "main");
+        assert_eq!(
+            elide_branch("ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8"),
+            "ainb/…3N9GP8"
+        );
+        assert_eq!(elide_branch("01M1FKF4BDNQ3JK5CQSS3N9GP8"), "…3N9GP8");
+        assert_eq!(
+            elide_branch("feature/ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8"),
+            "feature/ainb/…3N9GP8"
+        );
     }
 
     /// A captured PR whose CI has not resolved yet (or is unknown) renders the
