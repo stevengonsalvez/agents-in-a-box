@@ -10263,6 +10263,10 @@ mod text_input_guard_tests {
             ),
             "Ctrl+C must still quit from a plugin screen"
         );
+        assert!(
+            EventHandler::handle_key_event(char_key('q'), &mut state).is_some(),
+            "q must still reach the host fallthrough on a plugin screen"
+        );
 
         // Declare text-capture (as the plugin's frame would via
         // `RenderResult.captures_text`): now the host must treat it as
