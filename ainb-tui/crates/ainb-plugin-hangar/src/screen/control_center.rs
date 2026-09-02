@@ -343,16 +343,18 @@ pub struct ControlCenterState {
     option_cursor: usize,
     /// The last `attention/answer` verdict that did NOT deliver (refused as
     /// ambiguous, no live target, delivery failed, already answered elsewhere),
-    /// rendered under the title until the next answer or refresh clears it. A
-    /// swallowed refusal read as "I pressed 2 and nothing happened" while the
-    /// agent stayed blocked.
-    note: Option<String>,
+    /// painted on the title row. Keyed to the card it was about: it clears on
+    /// the next delivered answer, and on any refresh where that card is no
+    /// longer open (answered elsewhere, session gone). A swallowed refusal read
+    /// as "I pressed 2 and nothing happened" while the agent stayed blocked.
+    note: Option<(String, String)>,
 }
 
 impl ControlCenterState {
-    /// Surface an answer verdict the daemon returned instead of a delivery.
-    pub fn set_note(&mut self, note: impl Into<String>) {
-        self.note = Some(note.into());
+    /// Surface an answer verdict the daemon returned instead of a delivery,
+    /// about the card `attention_id`.
+    pub fn set_note(&mut self, attention_id: impl Into<String>, note: impl Into<String>) {
+        self.note = Some((attention_id.into(), note.into()));
     }
 
     /// Clear the answer note (a delivered answer, or a fresh board).
@@ -363,7 +365,7 @@ impl ControlCenterState {
     /// The current answer note, if any.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
-        self.note.as_deref()
+        self.note.as_ref().map(|(_, n)| n.as_str())
     }
 
     /// Rebuild the board from an `attention/list` / `attention/subscribe`
@@ -388,6 +390,11 @@ impl ControlCenterState {
             .filter(|id| cards.iter().any(|c| &c.id == *id))
             .cloned();
         self.selected_id = keep.or_else(|| cards.first().map(|c| c.id.clone()));
+        // A refusal about a card that left the open set is stale: the row was
+        // answered from another surface or its session is gone.
+        if self.note.as_ref().is_some_and(|(id, _)| !cards.iter().any(|c| &c.id == id)) {
+            self.note = None;
+        }
         self.cards = cards;
         self.clamp_option_cursor();
     }
@@ -1452,7 +1459,7 @@ mod tests {
             1,
             &ask_payload("q?", &["x", "y"]),
         )]);
-        state.set_note("not delivered (no live session): target exited");
+        state.set_note("a1", "not delivered (no live session): target exited");
         let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
         render_control_center(&mut buf, 140, 0, 19, &state, 1_000);
         let title = title_row_text(&buf);
@@ -1469,6 +1476,36 @@ mod tests {
             !title.contains("not delivered"),
             "a delivered answer clears the note"
         );
+    }
+
+    /// The note is about ONE card: a refresh that still lists that card keeps
+    /// it (the agent is still blocked), a refresh where the card is gone clears
+    /// it (answered elsewhere or the session exited), so a stale refusal never
+    /// hangs over the cards that come after.
+    #[test]
+    fn answer_note_clears_when_its_card_leaves_the_board() {
+        let mut state = ControlCenterState::default();
+        let a1 = row(
+            "a1",
+            "ask_user_question",
+            1,
+            &ask_payload("q?", &["x", "y"]),
+        );
+        let a2 = row(
+            "a2",
+            "ask_user_question",
+            2,
+            &ask_payload("r?", &["p", "q"]),
+        );
+        state.set_attention(&[a1.clone(), a2.clone()]);
+        state.set_note("a1", "not delivered (ambiguous target): 2 sessions");
+        state.set_attention(&[a1, a2.clone()]);
+        assert!(
+            state.note().is_some(),
+            "card still open: the refusal stands"
+        );
+        state.set_attention(&[a2]);
+        assert!(state.note().is_none(), "card gone: the refusal is stale");
     }
 
     #[test]
