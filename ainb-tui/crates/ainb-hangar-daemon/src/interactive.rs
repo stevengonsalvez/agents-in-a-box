@@ -124,10 +124,11 @@ pub fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) 
         return;
     }
     let root = config.as_object_mut().expect("checked is_object");
-    root.insert("bypassPermissionsModeAccepted".into(), serde_json::Value::Bool(true));
-    let projects = root
-        .entry("projects")
-        .or_insert_with(|| serde_json::json!({}));
+    root.insert(
+        "bypassPermissionsModeAccepted".into(),
+        serde_json::Value::Bool(true),
+    );
+    let projects = root.entry("projects").or_insert_with(|| serde_json::json!({}));
     if !projects.is_object() {
         *projects = serde_json::json!({});
     }
@@ -138,16 +139,26 @@ pub fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) 
         .entry(key.clone())
         .or_insert_with(|| serde_json::json!({}));
     if let Some(obj) = entry.as_object_mut() {
-        obj.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
-        obj.insert("hasTrustDialogHooksAccepted".into(), serde_json::Value::Bool(true));
+        obj.insert(
+            "hasTrustDialogAccepted".into(),
+            serde_json::Value::Bool(true),
+        );
+        obj.insert(
+            "hasTrustDialogHooksAccepted".into(),
+            serde_json::Value::Bool(true),
+        );
     }
     match serde_json::to_string_pretty(&config) {
         Ok(bytes) => {
             let tmp = path.with_extension("json.hangar-tmp");
             let wrote = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path));
             match wrote {
-                Ok(()) => tracing::info!(workdir = %key, "interactive: pre-trusted workdir in .claude.json"),
-                Err(e) => tracing::warn!(error = %e, "interactive: failed to write .claude.json trust"),
+                Ok(()) => {
+                    tracing::info!(workdir = %key, "interactive: pre-trusted workdir in .claude.json")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "interactive: failed to write .claude.json trust")
+                }
             }
         }
         Err(e) => tracing::warn!(error = %e, "interactive: failed to serialize .claude.json"),
@@ -571,15 +582,28 @@ mod tests {
     #[test]
     fn pre_trust_merges_the_workdir_into_the_child_homes_claude_json() {
         let home = tempfile::tempdir().unwrap();
-        let env = vec![("HOME".to_string(), home.path().to_string_lossy().to_string())];
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
         let wd = Path::new("/srv/worktrees/task-1");
 
         pre_trust_claude_workdir(&env, wd);
         let path = home.path().join(".claude.json");
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"], true);
-        assert_eq!(v["bypassPermissionsModeAccepted"], true, "YOLO acceptance is pre-recorded");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"],
+            true
+        );
+        assert_eq!(
+            v["bypassPermissionsModeAccepted"], true,
+            "YOLO acceptance is pre-recorded"
+        );
 
         // Seed unrelated state and a second project, then re-trust: nothing lost.
         let seeded = serde_json::json!({
@@ -591,11 +615,24 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_string(&seeded).unwrap()).unwrap();
         pre_trust_claude_workdir(&env, wd);
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["oauthAccount"]["emailAddress"], "x@y", "unrelated keys survive");
-        assert_eq!(v["projects"]["/other"]["hasTrustDialogAccepted"], false, "other projects untouched");
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["allowedTools"][0], "Read", "existing project keys kept");
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["oauthAccount"]["emailAddress"], "x@y",
+            "unrelated keys survive"
+        );
+        assert_eq!(
+            v["projects"]["/other"]["hasTrustDialogAccepted"], false,
+            "other projects untouched"
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["allowedTools"][0], "Read",
+            "existing project keys kept"
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
     }
 
     /// No HOME in the child env means nothing to write: the launch proceeds and
