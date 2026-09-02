@@ -957,6 +957,172 @@ async fn a_permission_round_trips_through_fleet_action() {
     harness.finish().await;
 }
 
+/// The Control Center's path (move 1 test T3, the answer half): the SAME
+/// permission answered through `attention/answer`, never `fleet/action`. The
+/// answer is the option's LABEL, as an inbox that renders the adapter's own
+/// options sends it, and the non-default option, so a delivery that quietly
+/// took the highlighted default (defect 26) cannot pass. Asserts the row flips
+/// to the answering surface, the turn completes, the adapter saw exactly one
+/// permission response and it selected the operator's option, and a second
+/// answer loses first-answer-wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
+    let evidence = tempfile::tempdir().expect("evidence dir");
+    let log = evidence.path().join("rpc.log");
+    let harness = Harness::start(
+        &[
+            ("FAKE_ACP_PERMISSION_SESSIONS", "*"),
+            ("FAKE_ACP_CHUNKS", "1"),
+            ("FAKE_ACP_RPC_LOG", log.to_str().expect("utf8")),
+        ],
+        |_| {},
+    )
+    .await;
+    let mut client = harness.client().await;
+    let (session_key, _scope) = harness.create_session(&mut client, None).await;
+
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "rm -rf /tmp/fixture",
+                "request_id": "req-acp-attention-answer",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent}");
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+
+    let (attention_id, payload) = harness.await_open_attention(&session_key).await;
+    assert_eq!(payload["kind"], "acp_permission", "{payload}");
+    let (kind,): (String,) = sqlx::query_as("SELECT kind FROM attention WHERE id = ?")
+        .bind(&attention_id)
+        .fetch_one(harness.store.pool())
+        .await
+        .expect("attention row");
+    assert_eq!(kind, "approval", "the row the inbox lists under PERM");
+
+    // Free text the adapter never offered is refused with the row untouched:
+    // an inbox cannot type a sentence into a closed option set.
+    let refused = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": attention_id,
+                "answer": "looks fine to me",
+                "answered_by": "tui",
+            }),
+        )
+        .await;
+    assert!(refused["error"].is_null(), "{refused}");
+    assert_eq!(
+        refused["result"]["outcome"], "delivery_failed",
+        "free text is refused: {refused}"
+    );
+    let (still_open,): (String,) = sqlx::query_as("SELECT state FROM attention WHERE id = ?")
+        .bind(&attention_id)
+        .fetch_one(harness.store.pool())
+        .await
+        .expect("attention row");
+    assert_eq!(still_open, "open", "the refusal left the ask open");
+
+    // The operator's pick, by label, NOT the first/allow option.
+    let answered = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": attention_id,
+                "answer": "Reject",
+                "answered_by": "tui",
+            }),
+        )
+        .await;
+    assert!(answered["error"].is_null(), "{answered}");
+    assert_eq!(
+        answered["result"]["outcome"], "delivered",
+        "the label reached the adapter's responder: {answered}"
+    );
+    let via = answered["result"]["via"].as_str().unwrap_or_default();
+    assert!(
+        via.starts_with("acp (") && via.contains("reject-once"),
+        "delivered over ACP with the option id it resolved to, not tmux: {via}"
+    );
+
+    // The turn the permission blocked completes, and the adapter ACTED on the
+    // operator's option rather than the default.
+    harness.await_delivered(&message_id, &session_key).await;
+    let text = harness.transcript_text(&session_key).await;
+    assert!(
+        text.contains("permission:selected:reject-once"),
+        "the adapter observed the operator's selection: {text}"
+    );
+    assert!(
+        !text.contains("permission:selected:allow-once") && !text.contains("permission:cancelled"),
+        "never the default and never a cancellation: {text}"
+    );
+    let recorded = std::fs::read_to_string(&log).expect("rpc log");
+    let permissions: Vec<&str> =
+        recorded.lines().filter(|line| line.starts_with("permission:")).collect();
+    assert_eq!(
+        permissions.len(),
+        1,
+        "exactly one permission response reached the adapter: {permissions:?}"
+    );
+    assert!(
+        permissions[0].ends_with(":selected"),
+        "and it was a selection: {permissions:?}"
+    );
+
+    // The row names the surface that answered, not a generic operator, and the
+    // Fleet session no longer advertises the ask.
+    let (state, answered_by, answer): (String, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT state, answered_by, answer FROM attention WHERE id = ?")
+            .bind(&attention_id)
+            .fetch_one(harness.store.pool())
+            .await
+            .expect("attention row");
+    assert_eq!(state, "answered");
+    assert_eq!(answered_by.as_deref(), Some("tui"));
+    assert_eq!(answer.as_deref(), Some("Reject"));
+    let (attention_state, current): (String, Option<String>) = sqlx::query_as(
+        "SELECT attention_state, current_request_fingerprint FROM fleet_session \
+         WHERE session_key = ?",
+    )
+    .bind(&session_key)
+    .fetch_one(harness.store.pool())
+    .await
+    .expect("fleet row");
+    assert_eq!(attention_state, "NONE");
+    assert_eq!(current, None);
+
+    // First-answer-wins: a second surface is told who won and nothing is
+    // delivered again (the log still holds one permission line).
+    let late = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": attention_id,
+                "answer": "Allow once",
+                "answered_by": "web",
+            }),
+        )
+        .await;
+    assert_eq!(late["result"]["outcome"], "already_answered", "{late}");
+    assert_eq!(late["result"]["by"], "tui", "{late}");
+    assert_eq!(
+        std::fs::read_to_string(&log)
+            .expect("rpc log")
+            .lines()
+            .filter(|line| line.starts_with("permission:"))
+            .count(),
+        1,
+        "the loser delivered nothing"
+    );
+
+    harness.finish().await;
+}
+
 /// The optimistic-concurrency guard on `fleet/action`, with the version
 /// CONTROLLED rather than observed: an answer naming a version older than the
 /// session's is refused BEFORE it reaches the pool, the ask survives, and no
