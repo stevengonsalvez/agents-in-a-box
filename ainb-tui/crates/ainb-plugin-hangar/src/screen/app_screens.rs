@@ -2682,6 +2682,46 @@ mod help_overlay_tests {
         }
     }
 
+    /// Every SCREEN-LOCAL key the overlay advertises (the rows below the
+    /// `screens` block) must be a key the screen can receive: a router key
+    /// (`B`, `K`, `q`, ...) is consumed before any screen reducer runs, so a hint
+    /// on one would document a dead binding (issue #450). Single keys and
+    /// slash groups (`j/k`, `n/r/x`) are checked; words (`enter`, `tab`, `esc`,
+    /// `1-9`, `^P`) are not chars the router claims.
+    #[test]
+    fn help_overlay_screen_keys_are_not_router_keys() {
+        use crate::screen::router::is_router_key;
+        let mut in_screens = false;
+        for line in HELP_LINES {
+            let mut tokens = line.split_whitespace().peekable();
+            if let Some(first) = tokens.peek() {
+                if *first == "screens" {
+                    in_screens = true;
+                } else if !line.starts_with(' ') && !first.is_empty() {
+                    in_screens = false;
+                }
+            }
+            if in_screens || line.starts_with("esc close") || line.starts_with("Hangar") {
+                continue;
+            }
+            for tok in tokens {
+                let keys: Vec<char> = if tok.len() == 1 {
+                    tok.chars().collect()
+                } else if tok.split('/').all(|k| k.chars().count() == 1) {
+                    tok.split('/').filter_map(|k| k.chars().next()).collect()
+                } else {
+                    continue;
+                };
+                for key in keys {
+                    assert!(
+                        !is_router_key(key),
+                        "help advertises screen key {key:?} on {line:?}, but the router eats it"
+                    );
+                }
+            }
+        }
+    }
+
     /// A pane shorter than the table paints its first rows (the title and the
     /// global keys) inside the viewport and nothing below it, instead of
     /// centring the block so the rows that survive are the middle ones.
