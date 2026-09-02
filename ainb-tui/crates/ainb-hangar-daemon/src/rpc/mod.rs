@@ -255,7 +255,8 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
 const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Idle read bound for a connection holding a live subscription: long enough
 /// that a quiet operator never trips it, finite so a wedged peer is reclaimed.
-const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24 * 3600);
 /// Test override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
 const IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_IDLE_MS";
 /// Test override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
