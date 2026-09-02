@@ -177,6 +177,15 @@ pub(crate) fn route_answer(pane: Option<&str>, labels: Option<&[String]>, answer
         return Route::Text;
     };
     if !picker_visible(pane, labels) {
+        // Picker chrome that is NOT this row's options is a later question (or
+        // another tool's prompt): typing into it would answer the wrong thing,
+        // so refuse and leave the row open for the surface that sees the pane.
+        if highlighted_option(pane).is_some() {
+            return Route::Refuse(
+                "a different picker is on the agent's screen; this row's options are gone"
+                    .to_string(),
+            );
+        }
         return Route::Text;
     }
     match picker_position(labels, answer) {
@@ -264,11 +273,15 @@ fn picker_position(labels: &[String], answer: &str) -> Option<usize> {
     }
 }
 
-/// Route a picker answer into `target`: press the option's DIGIT (which moves
-/// the highlight to that option absolutely, whatever it was on), confirm the
-/// highlight moved, press Enter, confirm the picker closed, and read back the
-/// answered echo when the pane shows one. Any `Failed` reopens the row through
-/// the caller's compensation path.
+/// Route a picker answer into `target` by pressing the option's DIGIT, then
+/// read the pane until it settles. Claude Code 2.1.258 COMMITS on the number
+/// key (probed live 2026-09-02: `2` alone closed a three-option
+/// `AskUserQuestion` and echoed `→ Green` within 1.5s, before any Enter); older
+/// builds only moved the highlight and needed Enter. [`picker_step`] tells the
+/// two apart from the capture, so Enter is sent only when the picker is still
+/// open with the highlight on our option, and never into the prompt that
+/// replaces a closed picker. Any `Failed` reopens the row through the caller's
+/// compensation path.
 async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> SendOutcome {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_send_picker_key;
@@ -280,55 +293,72 @@ async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Sen
             reason: format!("picker key {digit} failed: {e:#}"),
         };
     }
-    // The digit must have moved the highlight before Enter commits anything.
-    let mut highlighted = false;
-    for _ in 0..10 {
+    let mut committed = false;
+    for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(pane) = capture_pane(target, 0).await {
-            if highlighted_option(&pane) == Some(position) {
-                highlighted = true;
-                break;
+        let Ok(pane) = capture_pane(target, 0).await else {
+            continue;
+        };
+        match picker_step(&pane, labels, position) {
+            PickerStep::Delivered => {
+                return SendOutcome::Tmux {
+                    tmux_session: target.to_string(),
+                };
             }
-        }
-    }
-    if !highlighted {
-        return SendOutcome::Failed {
-            reason: format!("picker highlight did not move to option {digit}; nothing confirmed"),
-        };
-    }
-    if let Err(e) = tmux_send_picker_key(target, "Enter").await {
-        return SendOutcome::Failed {
-            reason: format!("picker Enter key failed: {e:#}"),
-        };
-    }
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let Ok(after) = capture_pane(target, 0).await else {
-            continue;
-        };
-        if picker_visible(&after, labels) {
-            continue;
-        }
-        // The picker closed. When the pane already echoes the recorded answer,
-        // it must name OUR option; a different label means the agent took
-        // another option and the row must not read as answered with ours.
-        if let Some(echoed) = echoed_option(&after, labels) {
-            if echoed != position {
+            PickerStep::Recorded(other) => {
                 return SendOutcome::Failed {
                     reason: format!(
                         "agent recorded option {} ({}) instead of option {digit}",
-                        echoed + 1,
-                        labels[echoed]
+                        other + 1,
+                        labels[other]
                     ),
                 };
             }
+            PickerStep::Commit if !committed => {
+                if let Err(e) = tmux_send_picker_key(target, "Enter").await {
+                    return SendOutcome::Failed {
+                        reason: format!("picker Enter key failed: {e:#}"),
+                    };
+                }
+                committed = true;
+            }
+            PickerStep::Commit | PickerStep::Pending => {}
         }
-        return SendOutcome::Tmux {
-            tmux_session: target.to_string(),
-        };
     }
     SendOutcome::Failed {
-        reason: "picker still open after routing the answer by position".to_string(),
+        reason: format!(
+            "picker still open after key {digit}: the highlight never settled on option {digit} and the picker never closed"
+        ),
+    }
+}
+
+/// What one pane capture says about a picker answer in flight.
+#[derive(Debug, PartialEq, Eq)]
+enum PickerStep {
+    /// The picker is gone and the pane does not name another option: the key
+    /// committed our option (the echo, when rendered, names it).
+    Delivered,
+    /// The picker is gone and the answered echo names a DIFFERENT option.
+    Recorded(usize),
+    /// The picker is still open with the highlight on our option: a build
+    /// that moves on the digit and commits on Enter.
+    Commit,
+    /// The picker is still open and the highlight has not reached our option.
+    Pending,
+}
+
+/// Classify `pane` after the option digit was sent for `position`.
+fn picker_step(pane: &str, labels: &[String], position: usize) -> PickerStep {
+    if !picker_visible(pane, labels) {
+        return match echoed_option(pane, labels) {
+            Some(other) if other != position => PickerStep::Recorded(other),
+            _ => PickerStep::Delivered,
+        };
+    }
+    if highlighted_option(pane) == Some(position) {
+        PickerStep::Commit
+    } else {
+        PickerStep::Pending
     }
 }
 
@@ -357,11 +387,31 @@ fn highlighted_option(pane: &str) -> Option<usize> {
     })
 }
 
-/// The option the pane's "→ <label>" answered echo names, if any.
+/// The option the pane's "→ <label>" answered echo names, if any. The label
+/// verbatim first; then, for an echo the pane wrapped mid-label, the ONE label
+/// the surviving text is a prefix of (two candidates is no verdict); last, for
+/// an echo with trailing decoration, the longest label probe that prefixes it.
+/// Never the first label that merely shares a prefix, so `deploy later` is not
+/// read back as `deploy`.
 fn echoed_option(pane: &str, labels: &[String]) -> Option<usize> {
     let echo = pane.lines().rev().find(|l| l.contains("→ "))?;
-    let after = echo.split("→ ").last()?.trim();
-    labels.iter().position(|l| after.starts_with(picker_probe(l)))
+    let after = echo.rsplit("→ ").next()?.trim();
+    if after.is_empty() {
+        return None;
+    }
+    if let Some(i) = labels.iter().position(|l| l.trim() == after) {
+        return Some(i);
+    }
+    let mut by_prefix = labels.iter().enumerate().filter(|(_, l)| l.trim().starts_with(after));
+    if let (Some((i, _)), None) = (by_prefix.next(), by_prefix.next()) {
+        return Some(i);
+    }
+    labels
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| after.starts_with(picker_probe(l)))
+        .max_by_key(|(_, l)| picker_probe(l).len())
+        .map(|(i, _)| i)
 }
 
 /// The leading slice of an option label a wrapped pane render still shows
@@ -718,6 +768,42 @@ mod tests {
         assert_eq!(echoed_option(PICKER_PANE, &l), None);
     }
 
+    /// Labels that share a prefix resolve to the one the echo actually names:
+    /// verbatim wins, and a wrapped echo takes the longest matching probe, so a
+    /// correct delivery of `deploy later` is not failed as "recorded deploy".
+    #[test]
+    fn echoed_option_prefers_the_exact_then_the_longest_label() {
+        let l = vec!["deploy".to_string(), "deploy later".to_string()];
+        assert_eq!(
+            echoed_option("  ⎿  · When? → deploy later\n❯ ", &l),
+            Some(1)
+        );
+        assert_eq!(echoed_option("  ⎿  · When? → deploy\n❯ ", &l), Some(0));
+        // Wrapped mid-label: the surviving text is a prefix of one label only.
+        assert_eq!(echoed_option("  ⎿  · When? → deploy late\nr", &l), Some(1));
+        // Wrapped so early that both labels fit: no verdict, not "the first".
+        assert_eq!(echoed_option("  ⎿  · When? → dep\nloy later", &l), None);
+        // Trailing decoration after a full label: the longest probe wins.
+        assert_eq!(echoed_option("  ⎿  · When? → deploy later ✓", &l), Some(1));
+        assert_eq!(echoed_option("  ⎿  · When? → ", &l), None);
+    }
+
+    /// The per-capture verdict behind `deliver_picker`, both picker behaviours:
+    /// a build that commits on the digit (picker gone, echo names ours), one
+    /// that only moves the highlight (still open, highlight on ours: commit),
+    /// a highlight that has not moved yet, and an echo naming another option.
+    #[test]
+    fn picker_step_tells_commit_on_digit_from_highlight_only() {
+        let l = labels();
+        assert_eq!(picker_step(ANSWERED_PANE, &l, 1), PickerStep::Delivered);
+        assert_eq!(picker_step(ANSWERED_PANE, &l, 0), PickerStep::Recorded(1));
+        let closed_no_echo = "● Thinking…\n❯ ";
+        assert_eq!(picker_step(closed_no_echo, &l, 1), PickerStep::Delivered);
+        assert_eq!(picker_step(PICKER_PANE, &l, 1), PickerStep::Pending);
+        let moved = PICKER_PANE.replace(" ❯ 1.", "   1.").replace("   2. api", " ❯ 2. api");
+        assert_eq!(picker_step(&moved, &l, 1), PickerStep::Commit);
+    }
+
     /// The routing table: no picker on screen (plain shell, closed picker, no
     /// tmux target, broker transport) types the answer as before; a visible
     /// picker routes an option by position and REFUSES free text or an option
@@ -744,6 +830,17 @@ mod tests {
             route_answer(Some(ANSWERED_PANE), Some(&l), "api/app.db"),
             Route::Text,
             "picker gone"
+        );
+        assert!(
+            matches!(
+                route_answer(
+                    Some("Which region?\n❯ 1. eu-west\n  2. us-east"),
+                    Some(&l),
+                    "api/app.db"
+                ),
+                Route::Refuse(_)
+            ),
+            "a later question's picker is refused, never typed into"
         );
         assert_eq!(
             route_answer(Some(PICKER_PANE), Some(&l), "api/app.db"),
