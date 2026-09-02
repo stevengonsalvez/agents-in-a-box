@@ -1071,11 +1071,20 @@ fn atc_help_lines(snapshot: &Snapshot, selected: usize) -> Vec<String> {
     atc.help.clone()
 }
 
-/// Wrap help lines to `width`, preserving each line's leading indent so the
-/// "limits:" continuations stay visually attached to the mode they belong to.
+/// Wrap help lines to `width`, preserving each line's leading indent.
 ///
 /// Done here rather than with `Paragraph::wrap` because the caller has to budget
-/// the block's height, and only the wrapped count is the real height.
+/// the block's height, and only the WRAPPED count is the real height.
+///
+/// The indent is load-bearing: `mode_help` indents its "limits:" lines so they
+/// read as belonging to the mode above them. An earlier version seeded the first
+/// output line from the first WORD, which silently dropped that indent and
+/// detached every limits line from its mode.
+///
+/// ponytail: a single word longer than `width` is emitted over-long rather than
+/// hard-split. Nothing in `mode_help` comes close, and an over-long line is
+/// clipped horizontally without changing the line COUNT, so the height budget
+/// stays correct. Hard-split if that ever stops being true.
 fn wrap_help(lines: &[String], width: u16) -> Vec<String> {
     let width = usize::from(width).max(20);
     let mut out = Vec::new();
@@ -1084,25 +1093,30 @@ fn wrap_help(lines: &[String], width: u16) -> Vec<String> {
             out.push(line.clone());
             continue;
         }
-        let indent: String =
-            line.chars().take_while(|c| c.is_whitespace()).chain("  ".chars()).collect();
-        let mut current = String::new();
+        let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        // Continuations sit two columns inside the original indent, so a wrapped
+        // line is visibly a continuation and not a new bullet.
+        let hang = format!("{lead}  ");
+        let mut current = lead.clone();
+        let mut has_word = false;
         for word in line.split_whitespace() {
-            let prospective = if current.is_empty() {
-                word.chars().count()
-            } else {
+            let prospective = if has_word {
                 current.chars().count() + 1 + word.chars().count()
+            } else {
+                current.chars().count() + word.chars().count()
             };
-            if prospective > width && !current.is_empty() {
+            if prospective > width && has_word {
                 out.push(std::mem::take(&mut current));
-                current.push_str(&indent);
+                current.push_str(&hang);
+                has_word = false;
             }
-            if !current.trim().is_empty() {
+            if has_word {
                 current.push(' ');
             }
             current.push_str(word);
+            has_word = true;
         }
-        if !current.trim().is_empty() {
+        if has_word {
             out.push(current);
         }
     }
