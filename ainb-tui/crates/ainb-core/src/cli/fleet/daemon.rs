@@ -33,8 +33,12 @@ fn atc_holding_the_fleet() -> Option<String> {
     // full mode but the wrong one here: a lite scanner that has not started yet
     // still OWNS the fleet, and letting an uncapped daemon take the gap is how
     // you get two controllers a minute apart.
-    if crate::cli::daemon::atc_mode() == Some(crate::fleet::atc::SupervisorMode::Lite) {
-        return Some("lite supervisor".to_string());
+    if let Some((name, _)) = crate::cli::daemon::atc_named_mode()
+        .filter(|(_, mode)| *mode == crate::fleet::atc::SupervisorMode::Lite)
+    {
+        // The NAME, like every other branch here: the doc-comment above promises
+        // it because a bare refusal is unactionable on a busy host.
+        return Some(format!("{name} (lite)"));
     }
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
     let status =

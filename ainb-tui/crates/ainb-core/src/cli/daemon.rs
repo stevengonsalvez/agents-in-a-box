@@ -413,11 +413,22 @@ fn respawn_atc_session(name: &str) -> Result<String> {
 /// would put the wrong switch on the Daemons menu.
 #[must_use]
 pub fn atc_mode() -> Option<crate::fleet::atc::SupervisorMode> {
+    atc_named_mode().map(|(_, mode)| mode)
+}
+
+/// The single provisioned instance's name AND mode, when both are unambiguous.
+///
+/// Callers that report a refusal need the NAME: "ATC 'tower (lite)' is
+/// supervising this fleet" is actionable on a host running many things, and
+/// "ATC 'lite supervisor'" is not.
+#[must_use]
+pub fn atc_named_mode() -> Option<(String, crate::fleet::atc::SupervisorMode)> {
     let name = atc_instance().ok()?;
     let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
     let paths = crate::fleet::atc::paths::AtcPaths::under_root(&root, &name);
     let raw = std::fs::read_to_string(&paths.meta).ok()?;
-    Some(crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok()?.mode)
+    let mode = crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok()?.mode;
+    Some((name, mode))
 }
 
 /// Switch the supervisor mode by delegating to the verb that owns the
