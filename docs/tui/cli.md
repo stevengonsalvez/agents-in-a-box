@@ -2947,6 +2947,9 @@ Options:
       --provider <provider>
           Full-mode brain (claude | codex). Remembered across a switch to lite, which runs no brain. A provider ainb cannot drive is refused, not faked
 
+      --no-reconcile
+          Persist the mode without starting or stopping either controller. The old one still stands down on its next action
+
   -h, --help
           Print help (see a summary with '-h')
 ```
