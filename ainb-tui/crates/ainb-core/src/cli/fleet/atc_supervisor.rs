@@ -490,6 +490,68 @@ fn start_lite_supervisor(name: &str) -> Result<()> {
     detach(&["fleet", "atc", "supervise", name])
 }
 
+/// A held single-instance lock for one lite scanner. Released on drop, including
+/// on the error paths out of `supervise`.
+struct LiteLock(std::path::PathBuf);
+
+impl Drop for LiteLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Take the exclusive right to be `name`'s lite scanner, or fail saying who has
+/// it.
+///
+/// `create_new(true)` is `O_CREAT|O_EXCL`: the kernel guarantees exactly one
+/// winner among any number of racing processes, which a check-then-write cannot.
+///
+/// A lock file left by a crashed scanner must not wedge the instance forever, so
+/// a lock whose recorded pid is not a live scanner is reclaimed. That reclaim is
+/// itself racy in principle — two processes could both decide to reclaim — but
+/// it is bounded: reclaiming means unlink-then-retry-create, and the retry is
+/// still `O_EXCL`, so one of them still loses.
+fn acquire_lite_lock(name: &str) -> Result<LiteLock> {
+    use std::io::Write;
+    let dir = crate::fleet::daemons::heartbeat::daemons_dir()?;
+    std::fs::create_dir_all(&dir).ok();
+    let path = dir.join(format!("{}.lock", lite_heartbeat_id(name)));
+
+    for attempt in 0..2 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                let _ = writeln!(f, "{}", std::process::id());
+                return Ok(LiteLock(path));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Someone holds it. Is that someone still alive?
+                if let Some(pid) = live_lite_pid(name) {
+                    bail!(
+                        "a lite scanner already owns ATC '{name}' (pid {pid}); refusing to start a \
+second one. Two scanners double-spend the retry budget and send `continue` twice into the same \
+pane. Stop it with `ainb daemon atc stop`."
+                    );
+                }
+                if attempt == 0 {
+                    // Stale lock from a crashed scanner: reclaim once.
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                bail!(
+                    "could not take the lite-scanner lock for ATC '{name}' ({}); another process \
+took it first",
+                    path.display()
+                );
+            }
+            Err(e) => bail!(
+                "could not take the lite-scanner lock {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    unreachable!("the loop either returns or bails")
+}
+
 /// The pid of a lite scanner that is provably still running for `name`.
 ///
 /// Identity, not liveness: a recycled pid is a tombstone, not a running
@@ -531,20 +593,22 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
     // registers itself at all — see the heartbeat block below.
     let hb_id = lite_heartbeat_id(&name);
 
-    // THE second-scanner guard, and the reason it lives HERE rather than only in
-    // `start_lite_supervisor`: that check-then-detach is a TOCTOU. Two callers
-    // inside the ~100ms it takes a child to boot both see no live pid and both
-    // detach. The child itself is the only place that can refuse authoritatively,
-    // because by the time it runs, any earlier sibling has already registered.
-    if !dry_run {
-        if let Some(pid) = live_lite_pid(&name) {
-            bail!(
-                "a lite scanner already owns ATC '{name}' (pid {pid}); refusing to start a \
-second one. Two scanners double-spend the retry budget and send `continue` twice \
-into the same pane. Stop it with `ainb daemon atc stop`."
-            );
-        }
-    }
+    // THE second-scanner guard. A read-then-write check is not enough here, and
+    // was not: two children booting within the same ~100ms window both see no
+    // live pid, both write their own heartbeat, and both scan. Narrowing that
+    // window is not the same as closing it, and "exactly one controller" is the
+    // one property this whole module exists to provide.
+    //
+    // So the guard is an ATOMIC create: `create_new` is O_CREAT|O_EXCL, and
+    // exactly one of N racing processes can win it. The loser exits. The lock is
+    // released on the way out, and a lock left behind by a crash is reclaimed by
+    // the identity check inside `acquire_lite_lock` rather than wedging the
+    // instance forever.
+    let _lock = if dry_run {
+        None
+    } else {
+        Some(acquire_lite_lock(&name)?)
+    };
 
     let mut heartbeat = crate::fleet::daemons::DaemonHeartbeat::starting();
     heartbeat.set_connected(true, Some(format!("{name} · lite scan")));
@@ -992,6 +1056,47 @@ mod tests {
         assert_eq!(report.reported, 3);
         assert_eq!(report.err, 0);
         assert!(state.continue_counts.is_empty(), "no budget is spent");
+    }
+
+    #[test]
+    fn only_one_of_many_racing_scanners_can_take_the_lock() {
+        // The property a check-then-write could never give: N processes race,
+        // exactly one wins. Exercised through the real filesystem primitive,
+        // because the guarantee IS the primitive (O_CREAT|O_EXCL) rather than
+        // anything in our own logic.
+        let dir = std::env::temp_dir().join(format!("atc-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("race.lock");
+        let _ = std::fs::remove_file(&path);
+
+        let winners: usize = (0..16)
+            .filter(|_| {
+                std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_ok()
+            })
+            .count();
+        assert_eq!(winners, 1, "exactly one contender may hold the lock");
+
+        // And releasing it lets the next one in, so a clean exit does not wedge
+        // the instance.
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_ok(),
+            "a released lock must be retakeable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lock_is_released_when_its_guard_drops() {
+        let dir = std::env::temp_dir().join(format!("atc-lock-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("drop.lock");
+        std::fs::write(&path, "1").unwrap();
+        {
+            let _guard = LiteLock(path.clone());
+        }
+        assert!(!path.exists(), "the guard must unlink on drop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
