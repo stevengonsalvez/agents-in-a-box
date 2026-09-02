@@ -170,8 +170,14 @@ pub(crate) fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: 
     let Some(obj) = entry.as_object_mut() else {
         return PreTrust::LeftAlone("project entry is not an object".to_string());
     };
-    obj.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
-    obj.insert("hasTrustDialogHooksAccepted".into(), serde_json::Value::Bool(true));
+    obj.insert(
+        "hasTrustDialogAccepted".into(),
+        serde_json::Value::Bool(true),
+    );
+    obj.insert(
+        "hasTrustDialogHooksAccepted".into(),
+        serde_json::Value::Bool(true),
+    );
 
     let bytes = match serde_json::to_vec_pretty(&config) {
         Ok(b) => b,
@@ -201,11 +207,8 @@ fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Resu
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.hangar-{}-{seq}.tmp", std::process::id()));
     let result = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)?;
+        let mut f =
+            std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -644,7 +647,10 @@ mod tests {
         let path = home.path().join(".claude.json");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
         assert_eq!(
             v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"],
             true
@@ -667,7 +673,10 @@ mod tests {
         assert_eq!(pre_trust_claude_workdir(&env, wd), PreTrust::Written);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["oauthAccount"]["emailAddress"], "x@y", "unrelated keys survive");
+        assert_eq!(
+            v["oauthAccount"]["emailAddress"], "x@y",
+            "unrelated keys survive"
+        );
         assert_eq!(
             v["projects"]["/other"]["hasTrustDialogAccepted"], false,
             "other projects untouched"
@@ -676,7 +685,10 @@ mod tests {
             v["projects"]["/srv/worktrees/task-1"]["allowedTools"][0], "Read",
             "existing project keys kept"
         );
-        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
     }
 
     /// The rename never widens the file: a 0600 config stays 0600, and the
@@ -692,7 +704,10 @@ mod tests {
             "HOME".to_string(),
             home.path().to_string_lossy().to_string(),
         )];
-        assert_eq!(pre_trust_claude_workdir(&env, Path::new("/w/x")), PreTrust::Written);
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
         assert_eq!(file_mode(&path), Some(0o600));
         let leftovers: Vec<_> = std::fs::read_dir(home.path())
             .unwrap()
@@ -706,7 +721,10 @@ mod tests {
     /// the dialog surfaces as before rather than a stray file appearing.
     #[test]
     fn pre_trust_without_home_is_a_no_op() {
-        assert_eq!(pre_trust_claude_workdir(&[], Path::new("/srv/x")), PreTrust::NoHome);
+        assert_eq!(
+            pre_trust_claude_workdir(&[], Path::new("/srv/x")),
+            PreTrust::NoHome
+        );
     }
 
     /// An unparseable or non-object config is left byte-identical: the old
@@ -726,7 +744,11 @@ mod tests {
                 pre_trust_claude_workdir(&env, Path::new("/w/x")),
                 PreTrust::LeftAlone(_)
             ));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "byte-identical");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "byte-identical"
+            );
         }
     }
 
@@ -741,7 +763,10 @@ mod tests {
             "HOME".to_string(),
             home.path().to_string_lossy().to_string(),
         )];
-        assert_eq!(pre_trust_claude_workdir(&env, Path::new("/w/x")), PreTrust::Written);
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["projects"]["/w/x"]["hasTrustDialogAccepted"], true);
