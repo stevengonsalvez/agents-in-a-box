@@ -977,6 +977,24 @@ impl HangarPlugin {
         }
     }
 
+    /// Whether the next automatic redial is due: the initial gap after the drop
+    /// for the first attempt, then `2s << attempts` capped at
+    /// [`Self::RECONNECT_MAX_GAP`] after the previous attempt.
+    fn reconnect_due(&self) -> bool {
+        let Some(lost_at) = self.link_lost_at else {
+            return false;
+        };
+        match self.link_last_redial {
+            None => lost_at.elapsed() >= Self::RECONNECT_INITIAL_GAP,
+            Some(last) => {
+                let gap = Self::RECONNECT_INITIAL_GAP
+                    .saturating_mul(1u32 << self.link_redial_attempts.min(4))
+                    .min(Self::RECONNECT_MAX_GAP);
+                last.elapsed() >= gap
+            }
+        }
+    }
+
     /// Remember that a live link just dropped so [`Self::pump_reconnect`] dials
     /// again. Only an established link counts: a failed first dial is the
     /// offline empty state's business (`[s]` start), not a reconnect.
@@ -992,13 +1010,25 @@ impl HangarPlugin {
         }
     }
 
+    /// Pause before the first automatic reconnect and the backoff floor. The
+    /// first dial is NOT immediate: the render that paints "offline" must return
+    /// before any host round trip, or a host that answers the dial slowly (or a
+    /// test harness that never does) wedges that frame.
+    const RECONNECT_INITIAL_GAP: std::time::Duration = std::time::Duration::from_secs(2);
     /// Longest pause between two automatic reconnect attempts.
     const RECONNECT_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// Re-dial a link that dropped after it was up (called from `render`, where
-    /// host IO is safe), with exponential backoff from 2s to
-    /// [`Self::RECONNECT_MAX_GAP`], for as long as the link stays down. Stands
-    /// aside while an `[s]` daemon-start window owns the dialing.
+    /// host IO is safe), with exponential backoff from
+    /// [`Self::RECONNECT_INITIAL_GAP`] to [`Self::RECONNECT_MAX_GAP`], for as
+    /// long as the link stays down. Stands aside while an `[s]` daemon-start
+    /// window owns the dialing.
+    ///
+    /// Frames keep coming while the link is down (`wants_redraw`), which the
+    /// host's redraw governor caps after ~20s of continuous redraws; past that
+    /// cap the host still grants one render per 5s idle tick, so the pump keeps
+    /// running unattended at that cadence, which is coarser than every backoff
+    /// step here except the first.
     async fn pump_reconnect(&mut self, host: &HostClient) {
         let Some(lost_at) = self.link_lost_at else {
             return;
@@ -1023,9 +1053,7 @@ impl HangarPlugin {
         if self.daemon_start_redial_until.is_some() {
             return;
         }
-        let gap = std::time::Duration::from_secs(2u64 << self.link_redial_attempts.min(4))
-            .min(Self::RECONNECT_MAX_GAP);
-        let due = self.link_last_redial.is_none_or(|last| last.elapsed() >= gap);
+        let due = self.reconnect_due();
         if due {
             self.link_last_redial = Some(std::time::Instant::now());
             self.link_redial_attempts = self.link_redial_attempts.saturating_add(1);
@@ -6094,6 +6122,28 @@ mod tests {
             p.wants_redraw(),
             "frames keep coming so the reconnect pump runs"
         );
+    }
+
+    /// The redial schedule: nothing inside the initial gap after the drop (the
+    /// "offline" frame must return first), then a doubling backoff from the last
+    /// attempt capped at 30s, and a reset once the link is back.
+    #[test]
+    fn reconnect_backoff_schedule() {
+        use std::time::{Duration, Instant};
+        let mut p = HangarPlugin::new();
+        assert!(!p.reconnect_due(), "no drop, nothing due");
+        p.link_lost_at = Some(Instant::now());
+        assert!(!p.reconnect_due(), "the first redial waits the initial gap");
+        p.link_lost_at = Some(Instant::now() - Duration::from_secs(3));
+        assert!(p.reconnect_due(), "first redial due after the initial gap");
+        // After N attempts the gap is 2s << N, capped at 30s.
+        for (attempts, gap_secs) in [(1u32, 4u64), (2, 8), (3, 16), (4, 30), (9, 30)] {
+            p.link_redial_attempts = attempts;
+            p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs - 1));
+            assert!(!p.reconnect_due(), "attempt {attempts}: not yet at {gap_secs}s");
+            p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs + 1));
+            assert!(p.reconnect_due(), "attempt {attempts}: due after {gap_secs}s");
+        }
     }
 
     /// A first dial that never came up is the offline empty state's business
