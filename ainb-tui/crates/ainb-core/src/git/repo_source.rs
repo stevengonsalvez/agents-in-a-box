@@ -92,7 +92,11 @@ impl RepoSource {
             return Ok(RepoSource::LocalPath(expanded));
         }
 
-        // GitHub shorthand: owner/repo (no spaces, exactly one slash, no protocol)
+        // GitHub shorthand: owner/repo (no spaces, exactly one slash, no protocol).
+        // Stricter than [`github_shorthand`], which callers that already KNOW
+        // their value is a remote use instead: this branch rejects a `.`
+        // anywhere, so a dotted repo NAME (`mrdoob/three.js`) falls through to
+        // the no-protocol-URL heuristic below. Keep the two in step.
         if !input.contains(' ')
             && input.matches('/').count() == 1
             && !input.contains(':')
@@ -115,6 +119,36 @@ impl RepoSource {
 
         // Fallback: treat as local path
         Ok(RepoSource::LocalPath(PathBuf::from(input)))
+    }
+
+    /// Read `owner/repo` as a GitHub shorthand, for callers whose input is a
+    /// remote by declaration (`ainb run --remote-repo`, and anything else that
+    /// has already ruled out a local path).
+    ///
+    /// Looser than [`RepoSource::from_input`]'s own shorthand branch in exactly
+    /// one way: a dot is allowed in the repo NAME, so `mrdoob/three.js` and
+    /// `socketio/socket.io` classify as shorthands instead of falling through
+    /// to the no-protocol-URL heuristic and parsing as `https://mrdoob/three.js`.
+    /// A dot in the OWNER still disqualifies the value, which is what keeps a
+    /// host-shaped `gitlab.com/repo` out: it belongs to that heuristic, and
+    /// answering it with a GitHub clone turns a parse error into a misleading
+    /// "check your git credentials".
+    ///
+    /// `None` for anything carrying a scheme, host, path, or leading `-`;
+    /// those are left to `from_input` to classify.
+    pub(crate) fn github_shorthand(input: &str) -> Option<Self> {
+        let (owner, repo) = input.trim().split_once('/')?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        let bare = |segment: &str| {
+            !segment.is_empty()
+                && !segment.contains(['/', '\\', ':', '@'])
+                && !segment.contains(char::is_whitespace)
+                && !segment.starts_with(['-', '.', '~'])
+        };
+        (bare(owner) && !owner.contains('.') && bare(repo)).then(|| Self::GithubShorthand {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        })
     }
 
     /// Convert to canonical git URL for cloning.
