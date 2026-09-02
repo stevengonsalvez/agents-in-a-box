@@ -2638,6 +2638,9 @@ impl HangarPlugin {
         self.snapshot_generation = self.snapshot_generation.saturating_add(1);
         self.snapshot_fetch_cursor = 0;
         self.snapshot_response_ids.clear();
+        // An answer whose reply was lost with the link never gets one: drop
+        // its slot with the rest of the in-flight correlation.
+        self.answers_in_flight.clear();
     }
 
     fn try_fetch_fleet_snapshot(
