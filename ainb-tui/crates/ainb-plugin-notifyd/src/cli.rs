@@ -162,11 +162,12 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     if let Some(p) = &record.antigravity_hooks_json {
         println!("antigravity hooks: {}", p.display());
     }
-    // A per-agent install failure is isolated, so the only signal at this level
-    // is the agent missing from the record. Say which, rather than reporting a
-    // clean install of something that did not happen.
-    for agent in agents.iter().filter(|a| !record.agents.contains(a)) {
-        println!("{}: FAILED — see the log for the cause", agent.name());
+    // A per-agent install failure is isolated, so without this the command
+    // reports a clean install of something that did not happen. Read off the
+    // report, never off `record.agents`: that list is cumulative, so an agent
+    // wired yesterday and broken today is still in it.
+    for (agent, error) in &report.failures {
+        println!("{}: FAILED — {error}", agent.name());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
