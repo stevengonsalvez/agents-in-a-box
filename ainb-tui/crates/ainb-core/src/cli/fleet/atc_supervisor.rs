@@ -116,6 +116,41 @@ pub async fn mode(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     let previous_provider = meta.provider.clone();
     let unchanged = previous == target && previous_provider == provider;
 
+    // PRE-FLIGHT, and the ordering is the whole point. The ledger handover used
+    // to be armed inside reconcile, AFTER both schedulers had been torn down; a
+    // failure there set a flag, fell through to starting the scanner, and then
+    // rolled the mode back to full — leaving no timer, no cron, and a scanner
+    // that reads mode=full and exits. Zero controllers, under an error message
+    // saying the instance was left in full mode.
+    //
+    // Arming first makes a failure free: nothing has been persisted and nothing
+    // torn down, so bailing here leaves the fleet exactly as it was.
+    if !unchanged && !no_reconcile && target == SupervisorMode::Lite {
+        // Ownership from the LOCAL, non-destructive signal only. `setup`
+        // installs the local unit ONLY when daemon registration failed, and
+        // `repair` guarantees exactly one scheduler, so a full instance with no
+        // local unit was being scheduled — and therefore counted — by the
+        // daemon. Asking the daemon instead would mean unregistering it first,
+        // which is a teardown, which is what this ordering exists to avoid.
+        if !timer::is_installed(&meta.name) {
+            arm_daemon_handoff(&meta.name).with_context(|| {
+                format!(
+                    "refusing to switch ATC '{}' to lite: the daemon's spent retry budgets are \
+unreadable from here, and the handover that seals them could not be armed. Nothing was changed",
+                    meta.name
+                )
+            })?;
+        }
+    }
+    // Switching AWAY from lite: drop any handover that never got consumed, so it
+    // cannot fire during an unrelated later switch and seal budgets the local
+    // ledger was tracking accurately.
+    if !unchanged && !no_reconcile && target == SupervisorMode::Full {
+        if let Err(e) = disarm_daemon_handoff(&meta.name) {
+            tracing::warn!(error = %e, "atc mode: could not clear a pending ledger handover");
+        }
+    }
+
     // 1. Persist first — this alone stands the outgoing controller down, because
     //    both controllers re-read the mode before every send.
     meta.mode = target;
@@ -138,15 +173,6 @@ its next action, but neither controller was started or stopped"
     } else {
         reconcile_controllers(&meta, previous_provider != provider).await
     };
-
-    // A reconcile that could not establish the new mode's safety property must
-    // not leave the fleet in that mode. Roll the persisted mode back, so the
-    // fleet keeps the owner whose invariants still hold.
-    if let Some(why) = reconcile.failed.clone() {
-        meta.mode = previous;
-        meta.provider.clone_from(&previous_provider);
-        return Err(rollback_error(&why, &paths, &meta, previous, target));
-    }
 
     let summary = json!({
         "action": "mode",
@@ -191,31 +217,6 @@ its next action, but neither controller was started or stopped"
     Ok(())
 }
 
-/// Roll the persisted mode back after a failed reconcile, and build the error.
-///
-/// Split out only to keep `mode` under the line cap; the interesting part is the
-/// second branch. A rollback that ITSELF fails is the one case where an operator
-/// has to intervene by hand, so the message names the file and both modes rather
-/// than reporting a generic write failure.
-fn rollback_error(
-    why: &str,
-    paths: &AtcPaths,
-    reverted: &AtcMeta,
-    previous: SupervisorMode,
-    attempted: SupervisorMode,
-) -> anyhow::Error {
-    match write_meta(paths, reverted) {
-        Ok(()) => anyhow::anyhow!("{why}. The instance was left in {} mode.", previous.id()),
-        Err(e) => anyhow::anyhow!(
-            "{why}. WORSE: the rollback to {} mode also failed ({e}), so {} now records {} with \
-its safety handover unarmed. Fix that file before starting either controller.",
-            previous.id(),
-            paths.meta.display(),
-            attempted.id()
-        ),
-    }
-}
-
 /// Print the current mode without touching anything.
 fn report(meta: &AtcMeta, format: OutputFormat, extra: Option<&str>) -> Result<()> {
     if matches!(format, OutputFormat::Text) {
@@ -244,10 +245,6 @@ fn report(meta: &AtcMeta, format: OutputFormat, extra: Option<&str>) -> Result<(
 /// What the reconcile step actually managed to do, reported rather than assumed.
 #[derive(Debug, Default)]
 struct Reconcile {
-    /// Set when reconcile hit something that makes the new mode unsafe to leave
-    /// in place. The caller ROLLS THE MODE BACK and fails, rather than reporting
-    /// a switch whose safety property does not hold.
-    failed: Option<String>,
     lite_stopped_pid: Option<u32>,
     lite_started: bool,
     scheduler_asserted: bool,
@@ -265,54 +262,17 @@ async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconc
             // now stands down, so nothing would be sent — but a scheduler firing
             // into a refusal every few minutes is noise an operator has to
             // explain, and the point of the toggle is that the other half is off.
-            // Read the local unit BEFORE tearing it down: it is the proxy
-            // `daemon_owned_the_ledger` falls back on, and after the teardown it
-            // is gone, so every switch would conclude the daemon owned the
-            // ledger and seal budgets that never needed sealing.
-            let had_local_timer = timer::is_installed(&meta.name);
             match timer::teardown(&meta.name) {
                 Ok(_) => out.scheduler_removed = true,
                 Err(e) => out.notes.push(format!("local heartbeat timer not removed: {e}")),
             }
-            let cron = unregister_daemon_cron(&meta.name).await;
-            if cron == CronOwnership::Disabled {
-                out.scheduler_removed = true;
-            } else if cron == CronOwnership::Unknown {
-                out.notes.push(
+            match unregister_daemon_cron(&meta.name).await {
+                CronOwnership::Disabled => out.scheduler_removed = true,
+                CronOwnership::NotRegistered => {}
+                CronOwnership::Unknown => out.notes.push(
                     "daemon heartbeat cron not unregistered (daemon down?); the beat stands down on its own"
                         .to_string(),
-                );
-            }
-            if daemon_owned_the_ledger(cron, had_local_timer) {
-                // THE LEDGER HANDOFF, armed here and performed by the scanner's
-                // first tick. While the daemon scheduled the beat it also OWNED
-                // the retry ledger, so `continue_counts` is empty while the real
-                // budget sits in its `atc_retry` table, which no client RPC can
-                // read. Taking the empty file at face value would hand every
-                // broken session a fresh budget — the one-ledger rule inverted.
-                //
-                // Arming a flag beats sealing here. Sealing here means shelling
-                // `fleet needs` mid-switch to learn who is erroring: latency at
-                // exactly the wrong moment, and a failure that fails OPEN, since
-                // a scan that errors leaves the budgets untouched and the switch
-                // still completes. The scanner has that roster on every tick
-                // anyway, for free, and cannot skip it.
-                match arm_daemon_handoff(&meta.name) {
-                    Ok(()) => out.notes.push(
-                        "retry ledger handed over from the daemon: the first lite scan seals every \
-erroring session at the cap, so none of them restart their budget"
-                            .to_string(),
-                    ),
-                    // NOT a note. A note here would tell the operator the switch
-                    // succeeded while leaving the ledger in exactly the state the
-                    // handover exists to prevent — every session the daemon had
-                    // escalated holding a fresh budget. A guarantee that
-                    // degrades to a warning is not a guarantee.
-                    Err(e) => out.failed = Some(format!(
-                        "could not arm the retry-ledger handover: {e}. Refusing to leave the fleet \
-in lite mode with the daemon's spent budgets unreadable and unsealed"
-                    )),
-                }
+                ),
             }
             if provider_changed {
                 out.notes.push(format!(
@@ -424,9 +384,25 @@ it. `ainb kill {}` then `ainb daemon atc start` to bring up {} instead",
 /// Record that the daemon owned the retry ledger, so the lite scanner's first
 /// tick seals it. Pure local file write: no RPC, no subprocess, no roster.
 fn arm_daemon_handoff(name: &str) -> Result<()> {
+    set_handoff_flag(name, true)
+}
+
+/// Clear a handover that was armed but never consumed.
+///
+/// Without this, a flag armed by a switch to lite whose scanner never ticked
+/// survives into an unrelated later switch and seals budgets the LOCAL ledger
+/// had been tracking accurately.
+fn disarm_daemon_handoff(name: &str) -> Result<()> {
+    set_handoff_flag(name, false)
+}
+
+fn set_handoff_flag(name: &str, armed: bool) -> Result<()> {
     let paths = AtcPaths::resolve(name)?;
     let mut state = read_heartbeat_state(&paths);
-    state.pending_daemon_handoff = true;
+    if state.pending_daemon_handoff == armed {
+        return Ok(());
+    }
+    state.pending_daemon_handoff = armed;
     write_heartbeat_state_checked(&paths, &state)
 }
 
@@ -495,6 +471,29 @@ pub fn ensure_lite_running(name: &str) -> Result<()> {
     start_lite_supervisor(name)
 }
 
+/// Wait for a signalled scanner to actually exit, then start its replacement.
+///
+/// `restart` used to SIGTERM and start immediately. A process does not die at
+/// the instant it is signalled, so microseconds later it is still alive and
+/// still identity-`Matched` — `start_lite_supervisor` saw a live scanner, early
+/// returned Ok, and the CLI reported "restarted (replaced pid N)" over a fleet
+/// that then had no scanner at all.
+pub fn restart_lite(name: &str, stopped: Option<u32>) -> Result<()> {
+    if stopped.is_some() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while live_lite_pid(name).is_some() {
+            if std::time::Instant::now() >= deadline {
+                bail!(
+                    "the previous lite scanner for ATC '{name}' did not exit within 10s of \
+SIGTERM; refusing to start a second one beside it"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    start_lite_supervisor(name)
+}
+
 /// Stop the lite scanner for `name`, reporting what was actually established.
 ///
 /// Public so `ainb daemon atc stop` can take down whichever controller is really
@@ -516,11 +515,21 @@ fn start_lite_supervisor(name: &str) -> Result<()> {
 
 /// A held single-instance lock for one lite scanner. Released on drop, including
 /// on the error paths out of `supervise`.
-struct LiteLock(std::path::PathBuf);
+struct LiteLock {
+    path: std::path::PathBuf,
+    pid: u32,
+}
 
 impl Drop for LiteLock {
+    /// Unlink ONLY while the file still names us.
+    ///
+    /// An unconditional unlink meant that after any reclaim, whichever process
+    /// exited first deleted whatever lock happened to be there — including a
+    /// successor's, letting a third scanner in behind it.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if lock_holder(&self.path) == Some(self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -540,31 +549,29 @@ fn acquire_lite_lock(name: &str) -> Result<LiteLock> {
     let dir = crate::fleet::daemons::heartbeat::daemons_dir()?;
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join(format!("{}.lock", lite_heartbeat_id(name)));
+    let me = std::process::id();
 
     for attempt in 0..2 {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
-                let _ = writeln!(f, "{}", std::process::id());
-                return Ok(LiteLock(path));
+                // Claim it by name IMMEDIATELY. Until this write lands the file
+                // is an anonymous lock, and `reclaim_if_dead` below refuses to
+                // touch one of those precisely because it might be this.
+                f.write_all(format!("{me}\n").as_bytes())
+                    .with_context(|| format!("claiming {}", path.display()))?;
+                f.sync_all().ok();
+                return Ok(LiteLock { path, pid: me });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Someone holds it. Is that someone still alive?
-                if let Some(pid) = live_lite_pid(name) {
-                    bail!(
-                        "a lite scanner already owns ATC '{name}' (pid {pid}); refusing to start a \
-second one. Two scanners double-spend the retry budget and send `continue` twice into the same \
-pane. Stop it with `ainb daemon atc stop`."
-                    );
-                }
-                if attempt == 0 {
-                    // Stale lock from a crashed scanner: reclaim once.
-                    let _ = std::fs::remove_file(&path);
+                if attempt == 0 && reclaim_if_dead(&path) {
                     continue;
                 }
+                let held = lock_holder(&path)
+                    .map_or_else(|| "unknown pid".to_string(), |p| format!("pid {p}"));
                 bail!(
-                    "could not take the lite-scanner lock for ATC '{name}' ({}); another process \
-took it first",
-                    path.display()
+                    "a lite scanner already owns ATC '{name}' ({held}); refusing to start a \
+second one. Two scanners double-spend the retry budget and send `continue` twice into the same \
+pane. Stop it with `ainb daemon atc stop`."
                 );
             }
             Err(e) => bail!(
@@ -574,6 +581,31 @@ took it first",
         }
     }
     unreachable!("the loop either returns or bails")
+}
+
+/// The pid recorded inside a lock file, when it names one.
+fn lock_holder(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Remove a lock whose holder is provably gone, returning whether it did.
+///
+/// Staleness is judged from the pid inside the LOCK, not from the scanner's
+/// heartbeat. Using the heartbeat opened a window: between a winner's
+/// `create_new` and its first heartbeat write there is no heartbeat to find, so
+/// a concurrent starter read the winner's brand-new lock as stale, unlinked it,
+/// and took its own — two scanners, from the very guard meant to prevent them.
+///
+/// A lock with no readable pid is therefore treated as LIVE, never stale: it is
+/// most likely one that was created microseconds ago and not yet claimed.
+fn reclaim_if_dead(path: &std::path::Path) -> bool {
+    let Some(pid) = lock_holder(path) else {
+        return false;
+    };
+    if crate::fleet::daemons::is_pid_alive(pid) {
+        return false;
+    }
+    std::fs::remove_file(path).is_ok()
 }
 
 /// The pid of a lite scanner that is provably still running for `name`.
@@ -809,10 +841,20 @@ async fn tick(paths: &AtcPaths, cap: u32, dry_run: bool) -> Result<LiteReport> {
     // this tick rather than one tick later. See `HeartbeatState::pending_daemon_handoff`.
     let sealed = if state.pending_daemon_handoff {
         let n = seal_erroring_at_cap(&rows, cap, &mut state);
-        // Cleared only on a tick that actually SAW a roster: `tick` returns Err
-        // before here when the scan fails, so a failed scan cannot consume the
-        // handover and let the next tick hand out fresh budgets.
-        state.pending_daemon_handoff = false;
+        // Consumed only on a tick that actually SAW something. `fleet needs`
+        // exits 0 with an empty array whenever no session is visible — tmux off
+        // PATH, a daemon blip, a host mid-reboot — and clearing the flag on that
+        // would silently hand every escalated session a fresh budget, which is
+        // the precise fail-open this design exists to close. An empty roster is
+        // not evidence of a healthy fleet; it is the absence of evidence.
+        if rows.is_empty() {
+            tracing::warn!(
+                "atc lite: ledger handover held — the roster was empty, which is not proof \
+that nothing is erroring"
+            );
+        } else {
+            state.pending_daemon_handoff = false;
+        }
         n
     } else {
         0
@@ -1163,9 +1205,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("atc-lock-drop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("drop.lock");
-        std::fs::write(&path, "1").unwrap();
+        std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
         {
-            let _guard = LiteLock(path.clone());
+            let _guard = LiteLock {
+                path: path.clone(),
+                pid: std::process::id(),
+            };
         }
         assert!(!path.exists(), "the guard must unlink on drop");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1235,6 +1280,69 @@ mod tests {
         )];
         assert_eq!(seal_erroring_at_cap(&rows, 3, &mut state), 0);
         assert!(state.continue_counts.is_empty());
+    }
+
+    #[test]
+    fn an_empty_roster_holds_the_handover_instead_of_consuming_it() {
+        // `fleet needs` exits 0 with [] whenever nothing is visible (tmux off
+        // PATH, a daemon blip). Consuming the handover on that would silently
+        // hand every escalated session a fresh budget — the fail-open this
+        // design exists to close. Absence of evidence is not evidence.
+        let mut state = HeartbeatState {
+            pending_daemon_handoff: true,
+            ..HeartbeatState::default()
+        };
+        let sealed = seal_erroring_at_cap(&[], DEFAULT_ERR_RETRY_CAP, &mut state);
+        assert_eq!(sealed, 0);
+        // `tick` only clears the flag when the roster is non-empty; the seal
+        // itself never clears it, so the flag is still armed here.
+        assert!(
+            state.pending_daemon_handoff,
+            "an empty roster must not consume the handover"
+        );
+    }
+
+    #[test]
+    fn a_lock_with_no_readable_holder_is_treated_as_live() {
+        // The window that let two scanners run: between a winner's create_new
+        // and its claim write there is no pid in the file. Reading that as
+        // stale let a concurrent starter unlink a brand-new lock.
+        let dir = std::env::temp_dir().join(format!("atc-lock-anon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("anon.lock");
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            !reclaim_if_dead(&path),
+            "an unclaimed lock must never be reclaimed"
+        );
+        assert!(path.exists(), "and must not be unlinked");
+
+        // A lock naming a pid that cannot be alive IS stale.
+        std::fs::write(&path, "4294967290\n").unwrap();
+        assert!(reclaim_if_dead(&path), "a dead holder must be reclaimable");
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropping_a_lock_we_no_longer_hold_leaves_it_alone() {
+        // After a reclaim the file may belong to a successor. An unconditional
+        // unlink on drop would delete THEIR lock and let a third scanner in.
+        let dir = std::env::temp_dir().join(format!("atc-lock-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("own.lock");
+        std::fs::write(&path, "999999\n").unwrap();
+        {
+            let _guard = LiteLock {
+                path: path.clone(),
+                pid: std::process::id(),
+            };
+        }
+        assert!(
+            path.exists(),
+            "a lock held by someone else must survive our drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
