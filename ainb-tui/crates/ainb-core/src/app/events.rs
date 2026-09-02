@@ -3137,12 +3137,22 @@ impl EventHandler {
                 }
                 return None;
             }
+            // Hook actions belong to the Hooks panel, which owns its own
+            // in-flight state, so they are applied here like the menu keys
+            // rather than routed through an AppEvent into app state.
+            KeyCode::Char('I') => {
+                daemons.dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install);
+                return None;
+            }
+            KeyCode::Char('B') => {
+                daemons.dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning);
+                return None;
+            }
             _ => {}
         }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-            KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
             // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
             // (headroom) and `S` (hangar) wrote status fields whose only
             // renderer was the System services panel, so after that panel was

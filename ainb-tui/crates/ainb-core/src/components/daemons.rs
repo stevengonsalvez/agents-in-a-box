@@ -15,11 +15,11 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
 };
 
-use crate::app::state::DaemonsOverlayState;
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
+use ainb_plugin_notifyd::install::BinaryIntent;
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -96,6 +96,15 @@ pub struct DaemonsState {
             std::time::Instant,
         ),
     >,
+    /// The in-flight hook install/repair, if one is running. Same shape and
+    /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
+    /// box is a panel rather than a row, so it needs its own slot.
+    hooks_inflight: Option<(
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        std::time::Instant,
+    )>,
+    /// What the last hook action reported, shown in the Hooks box.
+    hooks_status: Option<String>,
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
@@ -323,6 +332,48 @@ impl DaemonsState {
         }
     }
 
+    /// Install or repair the hooks off the UI thread.
+    ///
+    /// [`BinaryIntent::Install`] repoints at the INSTALLED ainb, which is what
+    /// rescues a pointer left aimed at a deleted worktree build.
+    /// [`BinaryIntent::PinRunning`] deliberately aims at the binary running
+    /// now, for testing a local build's hooks.
+    pub fn dispatch_hooks(&mut self, intent: BinaryIntent) {
+        if self.hooks_inflight.is_some() {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.hooks_inflight = Some((rx, std::time::Instant::now()));
+        self.hooks_status = Some(
+            match intent {
+                BinaryIntent::Install => "installing hooks…",
+                BinaryIntent::PinRunning => "pinning the running binary…",
+            }
+            .to_string(),
+        );
+        std::thread::spawn(move || {
+            let _ = tx.send(run_hook_action(intent));
+        });
+    }
+
+    /// Drain a finished hook action. A channel poll, not I/O — same reasoning
+    /// as [`DaemonsState::poll_actions`].
+    fn poll_hooks(&mut self) {
+        let Some((rx, started)) = self.hooks_inflight.as_mut() else {
+            return;
+        };
+        if let Ok(line) = rx.try_recv() {
+            self.hooks_status = Some(line);
+            self.hooks_inflight = None;
+        } else if started.elapsed() > ACTION_TIMEOUT {
+            self.hooks_status = Some(format!(
+                "hook repair did not finish within {}s",
+                ACTION_TIMEOUT.as_secs()
+            ));
+            self.hooks_inflight = None;
+        }
+    }
+
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
     pub fn snapshot(&mut self) -> Snapshot {
@@ -341,6 +392,39 @@ impl DaemonsState {
 /// Runs on a throwaway thread. The captured argv, exit status, and output are
 /// what the row's error view shows verbatim — the operator sees the actual
 /// failure, not our summary of it.
+/// Run one hook install/repair in-process and report it in one line.
+///
+/// In-process, not shelled: unlike a daemon lifecycle verb there is no separate
+/// process to talk to, and the repair is exactly the library call `ainb doctor
+/// --fix-hooks` would make.
+fn run_hook_action(intent: BinaryIntent) -> String {
+    let paths = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => paths,
+        Err(error) => return format!("hook repair failed: {error:#}"),
+    };
+    match intent {
+        BinaryIntent::Install => match ainb_plugin_notifyd::repair_or_install_hooks(&paths) {
+            Ok(report) => format!(
+                "hooks installed for {}",
+                report
+                    .record
+                    .agents
+                    .iter()
+                    .map(|agent| agent.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Err(error) => format!("hook repair failed: {error:#}"),
+        },
+        BinaryIntent::PinRunning => {
+            match ainb_plugin_notifyd::install::pin_running_hook_binary(&paths) {
+                Ok(target) => format!("hooks pinned to {}", target.path.display()),
+                Err(error) => format!("pinning the running binary failed: {error:#}"),
+            }
+        }
+    }
+}
+
 fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome {
     let argv = format!("ainb daemon {kind_id} {verb}");
     // Never self-exec a test harness: under `cargo test` current_exe() is the
@@ -453,13 +537,9 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut DaemonsState,
-    runtime: Option<&DaemonsOverlayState>,
-) {
+pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     state.poll_actions();
+    state.poll_hooks();
     let snapshot = state.snapshot();
     // Clamp before painting: the collector can shrink the table under us.
     state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
@@ -497,17 +577,17 @@ pub fn render(
     // lines because they had no DaemonKind, and it sat on "collecting…" when
     // its separate async fetch wedged. Those three are real rows now, so the
     // panel was a second place to look that showed strictly less.
-    if chunks[0].height >= 14 {
+    if chunks[0].height >= 15 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(7), Constraint::Length(7)])
+            .constraints([Constraint::Min(7), Constraint::Length(8)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot, state);
         render_hook_section(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
-            runtime,
+            state.hooks_status.as_deref(),
             snapshot.collected_at_ms > 0,
         );
     } else {
@@ -649,7 +729,7 @@ fn render_hook_section(
     frame: &mut Frame,
     area: Rect,
     health: Option<&HookHealth>,
-    runtime: Option<&DaemonsOverlayState>,
+    status: Option<&str>,
     collected: bool,
 ) {
     let block = Block::default()
@@ -665,6 +745,11 @@ fn render_hook_section(
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" install / repair", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "  B",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" pin running", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -704,21 +789,33 @@ fn render_hook_section(
                 })
                 .collect::<Vec<_>>()
                 .join("   ");
-            let issue =
-                runtime.and_then(|runtime| runtime.hooks_repair_status.as_deref()).map_or_else(
-                    || {
-                        health.issues.first().map_or_else(
-                            || "✓ wiring healthy".to_string(),
-                            |issue| {
-                                format!(
-                                    "! {}: {} — {}",
-                                    issue.component, issue.message, issue.repair
-                                )
-                            },
-                        )
-                    },
-                    |status| format!("I {status}"),
-                );
+            let issue = status.map_or_else(
+                || {
+                    health.issues.first().map_or_else(
+                        || "✓ wiring healthy".to_string(),
+                        |issue| {
+                            format!(
+                                "! {}: {} — {}",
+                                issue.component, issue.message, issue.repair
+                            )
+                        },
+                    )
+                },
+                |status| format!("I {status}"),
+            );
+            // The pointer and the binary you are looking at are separate facts,
+            // and the failure being diagnosed here is precisely them being
+            // different. One combined line hid that; two lines cannot.
+            let pointer = health
+                .hook_binary
+                .as_ref()
+                .map_or_else(|| "(no pointer)".to_string(), |p| p.display().to_string());
+            let running = health
+                .running_binary
+                .as_ref()
+                .map_or_else(|| "(unknown)".to_string(), |p| p.display().to_string());
+            let pointer_matches_running =
+                health.hook_binary.is_some() && health.hook_binary == health.running_binary;
             vec![
                 Line::from(vec![
                     Span::styled("version ", Style::default().fg(MUTED_GRAY)),
@@ -729,7 +826,7 @@ fn render_hook_section(
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "script {}  ·  ainb binary {} ({}){}",
+                        "script {}  ·  hooks {} ({}) → {pointer}",
                         if health.script_ready { "✓" } else { "✗" },
                         if health.hook_binary_ready {
                             "✓"
@@ -737,15 +834,19 @@ fn render_hook_section(
                             "✗"
                         },
                         health.hook_binary_mode.map(|mode| mode.label()).unwrap_or("unknown"),
-                        health
-                            .hook_binary
-                            .as_ref()
-                            .map_or_else(String::new, |target| format!(" · {}", target.display()),),
                     ),
                     Style::default().fg(if health.script_ready && health.hook_binary_ready {
                         HEALTHY_GREEN
                     } else {
                         STOPPED_RED
+                    }),
+                )),
+                Line::from(Span::styled(
+                    format!("running → {running}"),
+                    Style::default().fg(if pointer_matches_running {
+                        MUTED_GRAY
+                    } else {
+                        GOLD
                     }),
                 )),
                 Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
@@ -1039,6 +1140,7 @@ mod tests {
             hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
             hook_binary_mode: Some(HookBinaryMode::Release),
             hook_binary_ready: true,
+            running_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
             agents: vec![
                 HookAgentHealth {
                     agent: "claude".to_string(),
@@ -1084,30 +1186,20 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
-    fn render_to_string(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> String {
+    fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
     /// Render and return the buffer as LINES, so a test can ask which row the
     /// cursor is drawn on rather than only whether a glyph exists somewhere.
-    fn render_to_lines(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> Vec<String> {
+    fn render_to_lines(state: &mut DaemonsState, w: u16, h: u16) -> Vec<String> {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
             .map(|y| {
@@ -1149,7 +1241,7 @@ mod tests {
             let target =
                 state.selected_kind().expect("a populated table always has a selected row");
 
-            let lines = render_to_lines(&mut state, None, 160, 30);
+            let lines = render_to_lines(&mut state, 160, 30);
             let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
             assert_eq!(
                 marked.len(),
@@ -1162,40 +1254,6 @@ mod tests {
                 marked[0].trim(),
                 target.display_name()
             );
-        }
-    }
-
-    fn system_runtime() -> DaemonsOverlayState {
-        DaemonsOverlayState {
-            selected: crate::app::state::DaemonRow::ORDER[0],
-            mcp_alive: true,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: ProxyStatus {
-                running: true,
-                port: 8787,
-                pid: Some(42),
-                tokens_saved: Some(9),
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: true,
-            approve_reason: "serving".to_string(),
-            hangar_running: true,
-            hangar_reason: "running".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            loading: false,
-            last_refreshed: None,
-            fetch_rx: None,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
         }
     }
 
@@ -1226,7 +1284,7 @@ mod tests {
             ),
             status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
         ]);
-        let out = render_to_string(&mut state, None, 120, 12);
+        let out = render_to_string(&mut state, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
         assert!(out.contains("HEALTH"), "header missing");
@@ -1252,7 +1310,7 @@ mod tests {
             true,
             Some("Telegram (@seam)"),
         )]);
-        let out = render_to_string(&mut state, None, 120, 8);
+        let out = render_to_string(&mut state, 120, 8);
         assert!(
             out.contains("Telegram (@seam)"),
             "seeded row missing: {out}"
@@ -1276,8 +1334,7 @@ mod tests {
             )],
             hook_health(),
         );
-        let runtime = system_runtime();
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         // The System services panel is gone on purpose: everything it listed is
         // a real table row now, so a second panel would show strictly less.
         assert!(
@@ -1323,7 +1380,7 @@ mod tests {
             ),
         ]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(out.contains("start"), "menu must offer start: {out}");
         assert!(out.contains("restart"), "menu must offer restart: {out}");
         assert!(out.contains("stop"), "menu must offer stop: {out}");
@@ -1391,7 +1448,7 @@ mod tests {
                 detail: "cmd: ainb daemon atc start\nexit: exit status: 1\n\nstderr:\nsocket already bound by pid 4412".to_string(),
             },
         );
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("✗ failed"),
             "row must badge the failure: {out}"
@@ -1406,7 +1463,7 @@ mod tests {
         // because this row HAS an error.
         state.move_menu(3);
         state.confirm_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("socket already bound by pid 4412"),
             "the error view must show the real stderr: {out}"
@@ -1427,7 +1484,7 @@ mod tests {
             Some("sock"),
         )]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             !out.contains("view last error"),
             "nothing failed here, so there is nothing to view: {out}"
@@ -1542,11 +1599,39 @@ mod tests {
     }
 
     #[test]
-    fn renders_hook_repair_progress_from_runtime_state() {
+    /// The reported failure was a pointer aimed at a deleted worktree while a
+    /// perfectly good ainb was running. The panel has to show BOTH paths, or
+    /// the only way to see the mismatch is to go and read the pointer file.
+    #[test]
+    fn hook_panel_shows_the_pointer_and_the_running_binary() {
+        let mut health = hook_health();
+        health.hook_binary = Some(PathBuf::from("/gone/worktree/target/debug/ainb"));
+        health.hook_binary_ready = false;
+        health.hook_binary_mode = Some(HookBinaryMode::Dev);
+        health.running_binary = Some(PathBuf::from("/home/u/.local/bin/ainb"));
+        let mut state = seeded_state_with_hook(Vec::new(), health);
+
+        let out = render_to_string(&mut state, 160, 30);
+
+        assert!(
+            out.contains("/gone/worktree/target/debug/ainb"),
+            "the hook pointer must be visible: {out}"
+        );
+        assert!(
+            out.contains("/home/u/.local/bin/ainb"),
+            "the running binary must be visible beside it: {out}"
+        );
+        assert!(
+            out.contains("B pin running"),
+            "the pin-running action must be advertised: {out}"
+        );
+    }
+
+    #[test]
+    fn renders_hook_repair_progress_from_its_own_state() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        let mut runtime = system_runtime();
-        runtime.hooks_repair_status = Some("hooks repaired for claude, codex".to_string());
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        state.hooks_status = Some("hooks repaired for claude, codex".to_string());
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("I hooks repaired for claude, codex"),
             "hook repair status missing: {out}"
@@ -1577,7 +1662,7 @@ mod tests {
         // sees an empty snapshot (the collector hasn't published yet) and must
         // render an empty table without panicking.
         let mut state = DaemonsState::default();
-        let _ = render_to_string(&mut state, None, 100, 10);
+        let _ = render_to_string(&mut state, 100, 10);
         // The collector handle is now installed (spawned lazily on first render).
         assert!(
             state.shared.is_some(),
