@@ -341,9 +341,31 @@ pub struct ControlCenterState {
     selected_id: Option<String>,
     /// The highlighted ASK option on the selected card.
     option_cursor: usize,
+    /// The last `attention/answer` verdict that did NOT deliver (refused as
+    /// ambiguous, no live target, delivery failed, already answered elsewhere),
+    /// rendered under the title until the next answer or refresh clears it. A
+    /// swallowed refusal read as "I pressed 2 and nothing happened" while the
+    /// agent stayed blocked.
+    note: Option<String>,
 }
 
 impl ControlCenterState {
+    /// Surface an answer verdict the daemon returned instead of a delivery.
+    pub fn set_note(&mut self, note: impl Into<String>) {
+        self.note = Some(note.into());
+    }
+
+    /// Clear the answer note (a delivered answer, or a fresh board).
+    pub fn clear_note(&mut self) {
+        self.note = None;
+    }
+
+    /// The current answer note, if any.
+    #[must_use]
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
     /// Rebuild the board from an `attention/list` / `attention/subscribe`
     /// snapshot, preserving the human's focus and option cursor.
     ///
@@ -695,6 +717,9 @@ fn render_title(buf: &mut WireBuffer, area_w: u16, row: u16, state: &ControlCent
         area_w,
     );
     x = put_str(buf, x, row, &format!("{need} need you"), WAIT_AMBER, area_w);
+    if let Some(note) = state.note() {
+        x = put_str(buf, x, row, &format!("   ⚠ {note}"), ALERT_RED, area_w);
+    }
     // The hotkey hint next to the control (feedback_keybinding_hints_near_control).
     let hint = "C control-center";
     let hint_w = u16::try_from(hint.chars().count()).unwrap_or(0);
@@ -1407,6 +1432,35 @@ mod tests {
             marker_painted,
             "the selection marker must stay on-screen when the board overflows"
         );
+    }
+
+    /// The painted text of row 0, left to right (cells are painted in order).
+    fn title_row_text(buf: &ainb_plugin_sdk::WireBuffer) -> String {
+        let mut cells: Vec<_> = buf.cells.iter().filter(|(c, _)| c.y == 0).collect();
+        cells.sort_by_key(|(c, _)| c.x);
+        cells.iter().map(|(_, cell)| cell.symbol.as_str()).collect()
+    }
+
+    /// A non-delivered answer verdict is painted on the title row (the operator
+    /// pressed a digit and the agent is STILL blocked); a delivered one clears it.
+    #[test]
+    fn answer_note_renders_on_the_title_row_until_cleared() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("a1", "ask_user_question", 1, &ask_payload("q?", &["x", "y"]))]);
+        state.set_note("not delivered (no live session): target exited");
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
+        render_control_center(&mut buf, 140, 0, 19, &state, 1_000);
+        let title = title_row_text(&buf);
+        assert!(
+            title.contains("not delivered (no live session)"),
+            "the refusal must be visible on the title row: {title:?}"
+        );
+
+        state.clear_note();
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
+        render_control_center(&mut buf, 140, 0, 19, &state, 1_000);
+        let title = title_row_text(&buf);
+        assert!(!title.contains("not delivered"), "a delivered answer clears the note");
     }
 
     #[test]
