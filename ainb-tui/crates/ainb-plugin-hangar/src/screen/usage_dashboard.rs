@@ -65,7 +65,8 @@ pub struct UsageState {
     total_runs: i64,
     /// The per-agent breakdown rows, heaviest cost first.
     agents: Vec<AgentUsageRow>,
-    /// The recent-runs timeline rows, newest finished first (P10 / D19).
+    /// The recent-runs timeline rows: failed first, then successes, each group
+    /// newest finished first (P10 / D19, crisp B1).
     runs: Vec<RunHistoryRow>,
     /// The `agent_id -> display_name` roster from the cached `hangar/agents_list`
     /// (crisp B1, defect 8), so the per-agent rows read `impl-1`, not a ULID.
@@ -128,6 +129,10 @@ impl UsageState {
     pub fn apply_run_history(&mut self, ws: &str, history: RunHistoryResult) {
         self.enter_ws(ws);
         self.runs = history.runs;
+        // Failed runs first (crisp B1, Q10): the one row an operator opens this
+        // screen for was at the bottom of a chronological list. Stable, so each
+        // group keeps the daemon's newest-first order.
+        self.runs.sort_by_key(|r| r.outcome == "success");
     }
 
     /// The per-agent rows (read accessor for tests / glue).
@@ -567,19 +572,41 @@ mod tests {
         let mut buf = WireBuffer::new(80, 24);
         render_usage(&mut buf, 80, 0, 22, &state);
 
-        // Find the "recent runs" header row, then assert the two run rows below it.
+        // Find the "recent runs" header row, then assert the two run rows below
+        // it: the FAILED run floats first (crisp B1, Q10) although the daemon
+        // listed the newer success ahead of it.
         let header = (0..22)
             .find(|&r| row_text(&buf, r, 80) == "recent runs")
             .expect("recent runs header rendered");
         let r0 = row_text(&buf, header + 1, 80);
-        assert!(r0.contains('✓'), "success glyph: {r0}");
-        assert!(r0.contains("codex"), "provider: {r0}");
-        assert!(r0.contains("success"), "outcome: {r0}");
-        assert!(r0.contains("$0.0231"), "cost: {r0}");
-        assert!(r0.contains("1.4s"), "duration 1400ms -> 1.4s: {r0}");
+        assert!(r0.contains('✗'), "failure glyph first: {r0}");
+        assert!(r0.contains("failed"), "outcome: {r0}");
         let r1 = row_text(&buf, header + 2, 80);
-        assert!(r1.contains('✗'), "failure glyph: {r1}");
-        assert!(r1.contains("failed"), "outcome: {r1}");
+        assert!(r1.contains('✓'), "success glyph: {r1}");
+        assert!(r1.contains("codex"), "provider: {r1}");
+        assert!(r1.contains("success"), "outcome: {r1}");
+        assert!(r1.contains("$0.0231"), "cost: {r1}");
+        assert!(r1.contains("1.4s"), "duration 1400ms -> 1.4s: {r1}");
+    }
+
+    /// Crisp B1 (Q10): failed first is a STABLE partition, so successes keep the
+    /// daemon's newest-first order among themselves and so do failures.
+    #[test]
+    fn recent_runs_partition_failed_first_keeping_order_within_each_group() {
+        let mut state = UsageState::default();
+        state.apply_run_history(
+            "ws-a",
+            RunHistoryResult {
+                runs: vec![
+                    run_row("s2", "claude", "success", 1, 1, 0.0, Some(0), 400),
+                    run_row("f2", "claude", "failed", 1, 1, 0.0, Some(0), 300),
+                    run_row("s1", "claude", "success", 1, 1, 0.0, Some(0), 200),
+                    run_row("f1", "claude", "failed", 1, 1, 0.0, Some(0), 100),
+                ],
+            },
+        );
+        let ids: Vec<&str> = state.runs().iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, vec!["f2", "f1", "s2", "s1"]);
     }
 
     #[test]
