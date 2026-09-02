@@ -76,6 +76,14 @@ pub struct AtcModeView {
     pub name: String,
     pub mode: SupervisorMode,
     pub provider: String,
+    /// The mode help, rendered once by the collector.
+    ///
+    /// `mode_help` rebuilds the whole provider registry (five `Arc`s, a HashMap,
+    /// a Vec) and allocates seven `String`s. Calling it from `render` ran that
+    /// every frame while the ATC row was selected, in the file whose entire
+    /// design is about keeping work off the UI thread. It is a pure function of
+    /// (mode, provider), so it belongs on the snapshot with everything else.
+    pub help: Vec<String>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -485,10 +493,12 @@ fn collect_atc_mode() -> Option<AtcModeView> {
     };
     let paths = AtcPaths::under_root(&root, name);
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta).ok()?).ok()?;
+    let help = crate::fleet::atc::mode_help(meta.mode, &meta.provider);
     Some(AtcModeView {
         name: meta.name,
         mode: meta.mode,
         provider: meta.provider,
+        help,
     })
 }
 
@@ -550,13 +560,44 @@ pub fn render(
     // than an overlay on purpose: an operator about to switch the thing that
     // drives their whole fleet should be reading what each mode does WHILE the
     // row's real state is still on screen, not instead of it.
-    let atc_help = atc_help_lines(&snapshot, state.selected);
-    let help_height = u16::try_from(atc_help.len()).unwrap_or(0);
-    // Never let the help squeeze the table below a usable size; on a short
-    // terminal the footer hint still points at the CLI verb.
-    let help_height = if inner.height >= help_height + 10 {
-        help_height
+    // WRAP FIRST, then budget. `mode_help`'s longest line is ~95 chars, so on an
+    // 80-column terminal an unwrapped Paragraph clipped it to
+    // "never resolves an ambiguo" — the stated limit of the mode cut off exactly
+    // where it matters, on the screen whose whole purpose is to inform a switch.
+    // The height must come from the WRAPPED count or the extra lines overflow
+    // the chunk they were budgeted into.
+    let atc_help = wrap_help(&atc_help_lines(&snapshot, state.selected), inner.width);
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
+    // The eviction order is: help first, then the Hooks box, then never the
+    // table. Budgeting only against the table let the help silently delete the
+    // hook-health panel on a 19-23 row terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    // HOOKS_SECTION_ROWS + HOOKS_MIN_TABLE is what `render` below requires to
+    // draw both.
+    // The eviction order is: help first, then never the Hooks box, then never
+    // the table. Budgeting only against the table let the help silently delete
+    // the hook-health panel on a mid-size terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    //
+    // `render` below draws the Hooks section only when the table chunk still has
+    // 14 rows, so that is the number the help has to respect.
+    const HOOKS_NEEDS: u16 = 14;
+    const TABLE_MIN: u16 = 7;
+    const FOOTER: u16 = 1;
+    let without_help = inner.height.saturating_sub(FOOTER);
+    let with_help = inner.height.saturating_sub(wanted + FOOTER);
+    let help_height = if wanted == 0 {
+        0
+    } else if with_help >= HOOKS_NEEDS {
+        // Room for the table, the Hooks box and the help.
+        wanted
+    } else if without_help < HOOKS_NEEDS && with_help >= TABLE_MIN {
+        // The Hooks box was not going to fit at this height anyway, so the help
+        // is not what evicted it — show it while the table stays usable.
+        wanted
     } else {
+        // Showing the help would cost the operator a panel of real state. The
+        // footer still names the CLI verb that prints the same text.
         0
     };
     let chunks = Layout::default()
@@ -592,7 +633,16 @@ pub fn render(
     if help_height > 0 {
         render_atc_help(frame, chunks[1], &atc_help);
     }
-    render_footer(frame, chunks[2], state, snapshot.atc.as_ref());
+    // The hint follows the SELECTION, not merely "an ATC exists somewhere":
+    // advertising a mode switch while the cursor sits on the bridge promises a
+    // menu entry that `Action::for_kind_in_mode` will not offer.
+    let atc_selected = snapshot.rows.get(state.selected).map(|r| r.kind) == Some(DaemonKind::Atc);
+    render_footer(
+        frame,
+        chunks[2],
+        state,
+        snapshot.atc.as_ref().filter(|_| atc_selected),
+    );
     // Overlays paint last so they float above the table.
     if state.error_open.is_some() {
         render_error_view(frame, inner, state);
@@ -1014,7 +1064,45 @@ fn atc_help_lines(snapshot: &Snapshot, selected: usize) -> Vec<String> {
     let Some(atc) = snapshot.atc.as_ref() else {
         return Vec::new();
     };
-    crate::fleet::atc::mode_help(atc.mode, &atc.provider)
+    atc.help.clone()
+}
+
+/// Wrap help lines to `width`, preserving each line's leading indent so the
+/// "limits:" continuations stay visually attached to the mode they belong to.
+///
+/// Done here rather than with `Paragraph::wrap` because the caller has to budget
+/// the block's height, and only the wrapped count is the real height.
+fn wrap_help(lines: &[String], width: u16) -> Vec<String> {
+    let width = usize::from(width).max(20);
+    let mut out = Vec::new();
+    for line in lines {
+        if line.chars().count() <= width {
+            out.push(line.clone());
+            continue;
+        }
+        let indent: String =
+            line.chars().take_while(|c| c.is_whitespace()).chain("  ".chars()).collect();
+        let mut current = String::new();
+        for word in line.split_whitespace() {
+            let prospective = if current.is_empty() {
+                word.chars().count()
+            } else {
+                current.chars().count() + 1 + word.chars().count()
+            };
+            if prospective > width && !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+                current.push_str(&indent);
+            }
+            if !current.trim().is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        if !current.trim().is_empty() {
+            out.push(current);
+        }
+    }
+    out
 }
 
 /// Paint the mode help. The first line (the current owner) is emphasised: it is
@@ -1155,18 +1243,41 @@ mod tests {
         }
     }
 
+    fn atc_view(mode: SupervisorMode, provider: &str) -> AtcModeView {
+        AtcModeView {
+            name: "tower".to_string(),
+            mode,
+            provider: provider.to_string(),
+            help: crate::fleet::atc::mode_help(mode, provider),
+        }
+    }
+
     /// A seeded state whose ATC supervisor mode is known — the shape the mode
     /// toggle and the inline help both read.
     fn seeded_state_with_atc(rows: Vec<DaemonStatus>, mode: SupervisorMode) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
-            atc: Some(AtcModeView {
-                name: "tower".to_string(),
-                mode,
-                provider: "claude".to_string(),
-            }),
+            atc: Some(atc_view(mode, "claude")),
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    /// A seeded state carrying BOTH the ATC mode and hook health, for the
+    /// layout-budget tests.
+    fn seeded_state_with_atc_and_hooks(
+        rows: Vec<DaemonStatus>,
+        mode: SupervisorMode,
+    ) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(atc_view(mode, "claude")),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: Some(hook_health()),
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1250,11 +1361,7 @@ mod tests {
         {
             let shared = state.shared();
             let mut guard = shared.lock().unwrap();
-            guard.atc = Some(AtcModeView {
-                name: "tower".to_string(),
-                mode: SupervisorMode::Lite,
-                provider: "claude".to_string(),
-            });
+            guard.atc = Some(atc_view(SupervisorMode::Lite, "claude"));
         }
         let after = state.menu.as_ref().unwrap().entries(false);
         assert_eq!(before, after, "the open menu must not reshuffle");
@@ -1288,11 +1395,7 @@ mod tests {
         // One source for both surfaces: a screen and a CLI that describe the
         // modes differently is how an operator switches the wrong way.
         let snapshot = Snapshot {
-            atc: Some(AtcModeView {
-                name: "tower".to_string(),
-                mode: SupervisorMode::Lite,
-                provider: "codex".to_string(),
-            }),
+            atc: Some(atc_view(SupervisorMode::Lite, "codex")),
             rows: vec![atc_row()],
             collected_at_ms: now_ms(),
             hook_health: None,
@@ -1306,11 +1409,7 @@ mod tests {
     #[test]
     fn the_help_is_absent_on_every_other_row() {
         let snapshot = Snapshot {
-            atc: Some(AtcModeView {
-                name: "tower".to_string(),
-                mode: SupervisorMode::Full,
-                provider: "claude".to_string(),
-            }),
+            atc: Some(atc_view(SupervisorMode::Full, "claude")),
             rows: vec![
                 status(DaemonKind::Bridge, DaemonState::Running, true, None),
                 atc_row(),
@@ -1320,6 +1419,70 @@ mod tests {
         };
         assert!(atc_help_lines(&snapshot, 0).is_empty(), "bridge row");
         assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
+    }
+
+    #[test]
+    fn the_footer_offers_the_mode_switch_only_on_the_atc_row() {
+        // The footer promised "switch to lite mode" on every row, while the menu
+        // only ever offers it on ATC — a hint for a key that does nothing.
+        let rows = vec![
+            status(DaemonKind::Bridge, DaemonState::Running, true, None),
+            atc_row(),
+        ];
+        let mut state = seeded_state_with_atc(rows, SupervisorMode::Full);
+
+        let on_bridge = render_to_string(&mut state, None, 120, 30);
+        assert!(
+            !on_bridge.contains("switch to lite mode"),
+            "the bridge row must not advertise an ATC-only action: {on_bridge}"
+        );
+
+        state.move_selection(1);
+        let on_atc = render_to_string(&mut state, None, 120, 30);
+        assert!(on_atc.contains("switch to lite mode"), "{on_atc}");
+    }
+
+    #[test]
+    fn the_help_wraps_instead_of_clipping_the_limits_it_exists_to_state() {
+        // On 80 columns the longest help line was cut at "…ambiguo", losing the
+        // limit on the screen whose purpose is to inform a switch.
+        let lines = crate::fleet::atc::mode_help(SupervisorMode::Full, "claude");
+        let wrapped = wrap_help(&lines, 78);
+        assert!(
+            wrapped.iter().all(|l| l.chars().count() <= 78),
+            "a wrapped line still overflows: {wrapped:?}"
+        );
+        // Wrapping inserts a continuation indent, so compare on collapsed
+        // whitespace — the phrase surviving across a line break is the point.
+        let joined = wrapped.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        for phrase in [
+            "never answers an ASK",
+            "no fleet coordination",
+            "spends tokens",
+        ] {
+            assert!(
+                joined.contains(phrase),
+                "wrapping lost {phrase:?}: {joined}"
+            );
+        }
+        assert!(
+            wrapped.len() >= lines.len(),
+            "wrapping cannot shrink the block"
+        );
+    }
+
+    #[test]
+    fn a_mid_size_terminal_keeps_the_hooks_panel_when_the_atc_row_is_selected() {
+        // 22 rows: tall enough for the Hooks box, not for Hooks + 7 help lines.
+        // The help must yield, because it is context and the hook health is
+        // state — and a panel that silently vanished when the cursor moved is
+        // worse than no help.
+        let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, None, 100, 22);
+        assert!(
+            text.contains("Hooks"),
+            "the hook panel must survive: {text}"
+        );
     }
 
     #[test]
