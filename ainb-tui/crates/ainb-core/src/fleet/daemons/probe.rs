@@ -817,7 +817,7 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         home,
         now_ms,
         &crate::tmux::session_alive,
-        &crate::fleet::atc::timer::is_installed,
+        &crate::fleet::atc::timer::installed_instance_names(),
     )
 }
 
@@ -830,11 +830,11 @@ pub(crate) fn probe_atc_with(
     home: &Path,
     now_ms: i64,
     session_alive: &dyn Fn(&str) -> Option<bool>,
-    timer_installed: &dyn Fn(&str) -> bool,
+    installed_timers: &[String],
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
-    use crate::fleet::atc::paths::{AtcPaths, list_instance_dirs_in, list_instance_names_in};
+    use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
 
     let kind = DaemonKind::Atc;
     let atc_root = home.join("atc");
@@ -844,9 +844,11 @@ pub(crate) fn probe_atc_with(
         // provisioned": it fires forever and logs a failure every interval.
         // Name it so the row can offer the teardown, instead of leaving the
         // operator to find it in launchctl.
-        if let Some(orphan) =
-            list_instance_dirs_in(&atc_root).into_iter().find(|name| timer_installed(name))
-        {
+        //
+        // Asked of the installed UNITS, not of the leftover directories: a unit
+        // whose instance dir was deleted outright still fires, and it is the
+        // case a directory scan cannot see.
+        if let Some(orphan) = installed_timers.iter().find(|name| !names.contains(name)).cloned() {
             return DaemonStatus {
                 reason: format!(
                     "{ATC_UNPROVISIONED}, but a heartbeat timer for '{orphan}' is installed \
@@ -1073,11 +1075,24 @@ pub fn probe_mcp_pool() -> DaemonStatus {
     // Probe the socket with a bounded connect BEFORE asking the client: its
     // `query` sets read/write timeouts only after an unbounded connect, so a
     // wedged listener would hang the collector there.
-    let listening = crate::mcp_pool::paths::control_socket().ok().is_some_and(|path| {
-        path.exists() && connect_bounded(&path, SOCKET_PROBE_TIMEOUT).is_some()
+    let socket = crate::mcp_pool::paths::control_socket().ok();
+    let socket_present = socket.as_ref().is_some_and(|path| path.exists());
+    let listening = socket.as_ref().is_some_and(|path| {
+        socket_present && connect_bounded(path, SOCKET_PROBE_TIMEOUT).is_some()
     });
     if !listening || !crate::mcp_pool::client::daemon_alive() {
-        return DaemonStatus::stopped(kind, "control socket not answering".to_string());
+        // "not answering" reads as a wedged daemon. With no socket file at all
+        // nothing was ever listening, which is a different thing to go looking
+        // for, so say which one it is.
+        return DaemonStatus::stopped(
+            kind,
+            if socket_present {
+                "control socket present but not answering (stale?)"
+            } else {
+                "not running (no control socket)"
+            }
+            .to_string(),
+        );
     }
     let runtime = crate::mcp_pool::client::daemon_runtime_status();
     let reason = if runtime.old {
@@ -2232,7 +2247,7 @@ mod tests {
     #[test]
     fn probe_atc_no_instance_is_stopped() {
         let home = TempDir::new().unwrap();
-        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
     }
@@ -2248,7 +2263,7 @@ mod tests {
         std::fs::create_dir_all(&ghost).unwrap();
         std::fs::write(ghost.join("heartbeat.log"), "Error: no ATC instance\n").unwrap();
 
-        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|name| name == "main");
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &["main".to_string()]);
 
         assert_eq!(s.state, DaemonState::Stopped);
         assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
@@ -2257,6 +2272,18 @@ mod tests {
             "the orphan timer must be named: {}",
             s.reason
         );
+    }
+
+    /// The harder case a directory scan cannot see: the instance dir was
+    /// deleted outright, so there is no leftover to iterate, but the unit is
+    /// still on disk and still fires on the next login.
+    #[test]
+    fn probe_atc_names_a_timer_whose_instance_directory_is_gone() {
+        let home = TempDir::new().unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &["main".to_string()]);
+
+        assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
     }
 
     /// The same ghost directory with no timer installed is just leftover state,
@@ -2268,7 +2295,7 @@ mod tests {
         let ghost = home.path().join("atc").join("main");
         std::fs::create_dir_all(&ghost).unwrap();
 
-        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &[]);
 
         assert_eq!(s.scheduler_orphan, None);
         assert!(s.reason.contains("no ATC instance provisioned"));
@@ -2294,7 +2321,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
@@ -2324,7 +2351,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(false), &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(false), &[]);
         assert_eq!(
             s.state,
             DaemonState::Degraded,
@@ -2441,7 +2468,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(
             s.state,
             DaemonState::Stopped,
@@ -2481,7 +2508,7 @@ mod tests {
             )
             .unwrap();
         }
-        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Running);
         assert!(
             s.channel.as_deref().unwrap().contains("on"),
@@ -2510,7 +2537,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale"));
     }
