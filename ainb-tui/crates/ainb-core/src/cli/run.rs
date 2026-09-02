@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
-use tokio::process::Command;
 use tokio::time::{Duration, Instant, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -429,68 +428,66 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
     Ok(current_dir)
 }
 
-/// Clone a remote repository to a local cache directory
+/// Parse a `--remote-repo` value into the source and the host/owner/repo
+/// components `RemoteRepoManager` keys its cache path on.
+///
+/// Reads a bare `owner/repo` as a GitHub shorthand first (see
+/// [`crate::git::RepoSource::github_shorthand`]), falls back to `from_input` for URL forms, and then
+/// REJECTS anything that did not classify as a remote. `from_input` is used
+/// rather than smart-parse `parse_with` so an `owner/repo` value cannot be
+/// captured by a directory of that name under the cwd; both parsers have a
+/// `LocalPath` fallback that swallows unrecognised input, and a local path is
+/// not something this flag can clone: `to_clone_url` hands the raw string to
+/// `git clone`, so a value beginning with `-` would be read by git as an option
+/// rather than a repository. Local checkouts belong on `--repo`.
+fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
+    let source = match crate::git::RepoSource::github_shorthand(remote) {
+        Some(source) => source,
+        None =>
+        {
+            #[allow(deprecated)]
+            crate::git::RepoSource::from_input(remote)
+                .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?
+        }
+    };
+    anyhow::ensure!(
+        source.is_remote(),
+        "--remote-repo needs a remote: `owner/repo`, an https:// URL, or git@host:owner/repo. \
+         Use --repo for a local checkout. Got: {remote}"
+    );
+    let parsed = source
+        .parse_components()
+        .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
+    Ok((source, parsed))
+}
+
+/// Clone (or fetch) a remote repository into AINB's shared clone cache.
+///
+/// Routes through [`RemoteRepoManager`] so the CLI lands clones in the SAME
+/// place the TUI does: `~/.agents-in-a-box/repos/<host>/<owner>/<repo>`. This
+/// used to clone into a private flat `~/.agents-in-a-box/repo-cache/<repo>`,
+/// which gave one GitHub repo two on-disk roots. The workspace list keys its
+/// groups on a session's source repository path, so the same repo rendered as
+/// two identically-named rows depending on whether the session was spawned
+/// from the CLI or the TUI.
 async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
-    // Normalize remote URL
-    let url = if remote.starts_with("http") || remote.starts_with("git@") {
-        remote.to_string()
-    } else {
-        // Assume GitHub shorthand: owner/repo
-        format!("https://github.com/{remote}.git")
-    };
+    let (source, parsed) = parse_remote_repo(remote)?;
+    let manager = crate::git::RemoteRepoManager::new()?;
 
-    // Extract repo name for cache directory (sanitized to prevent path traversal)
-    let repo_name = url
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or("repo")
-        .replace("..", "")
-        .replace(['/', '\\'], "-");
+    // `clone_repo` reports through `info!`, which a plain `ainb run` does not
+    // print, so say something before a transfer that can take minutes. Phrased
+    // for both outcomes rather than probing `is_cached` for a better verb: the
+    // probe would race a concurrent publish and `clone_repo` re-checks anyway.
+    println!("Preparing {}...", source.to_clone_url());
 
-    // Validate repo name is safe
-    let repo_name = if repo_name.is_empty() || repo_name == "." {
-        "repo".to_string()
-    } else {
-        repo_name
-    };
-
-    let cache_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-        .join(".agents-in-a-box")
-        .join("repo-cache");
-
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let repo_path = cache_dir.join(repo_name);
-
-    if repo_path.exists() {
-        info!("Repository already cached, fetching updates...");
-        let output = Command::new("git")
-            .current_dir(&repo_path)
-            .args(["fetch", "--all"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            warn!(
-                "Failed to fetch updates: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    } else {
-        println!("Cloning {url}...");
-        let output = Command::new("git").arg("clone").arg(&url).arg(&repo_path).output().await?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to clone repository: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    Ok(repo_path)
+    // `RemoteRepoManager` shells out synchronously, and this replaced a
+    // `tokio::process::Command::output().await`, so hand it to a blocking
+    // thread rather than holding a runtime worker for the whole transfer. The
+    // TUI's own call sites do the same with this manager.
+    tokio::task::spawn_blocking(move || manager.clone_repo(&source, &parsed))
+        .await
+        .context("clone task panicked")?
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 // The current-branch lookup lives in `crate::git::current_branch_at`. It used
@@ -730,6 +727,127 @@ mod tests {
     use crate::cli::Tool;
 
     use crate::test_support::git_bin;
+
+    /// `--remote-repo` must land in the SAME cache root the TUI clones into:
+    /// `<cache>/<host>/<owner>/<repo>`. The CLI used to clone into a private
+    /// flat `~/.agents-in-a-box/repo-cache/<repo>`, which gave one GitHub repo
+    /// two on-disk roots and split its sessions into two identically-named
+    /// workspace groups (the list keys groups on the source repository path).
+    ///
+    /// Asserts the path the CLI derives, not a clone: no network.
+    #[test]
+    fn remote_repo_resolves_into_the_shared_clone_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = crate::git::RemoteRepoManager::with_cache_dir(tmp.path().to_path_buf())
+            .expect("manager");
+
+        for remote in [
+            "stevengonsalvez/agents-in-a-box",
+            "stevengonsalvez/agents-in-a-box.git",
+            "https://github.com/stevengonsalvez/agents-in-a-box.git",
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote).expect("parse");
+            assert_eq!(
+                manager.get_cache_path(&parsed),
+                tmp.path().join("github.com").join("stevengonsalvez").join("agents-in-a-box"),
+                "{remote} must resolve to the host/owner/repo cache path the TUI uses"
+            );
+        }
+    }
+
+    /// A repo whose NAME contains a dot is an ordinary GitHub shorthand.
+    ///
+    /// `from_input`'s shorthand branch rejects a `.` anywhere in the value, so
+    /// `mrdoob/three.js` became `https://mrdoob/three.js` and failed to parse.
+    /// The inline clone this replaced wrapped bare values into
+    /// `https://github.com/<value>.git`, so these used to clone fine.
+    #[test]
+    fn remote_repo_accepts_shorthand_with_a_dotted_repo_name() {
+        for (remote, owner, repo) in [
+            ("mrdoob/three.js", "mrdoob", "three.js"),
+            ("chartjs/Chart.js", "chartjs", "Chart.js"),
+            ("socketio/socket.io", "socketio", "socket.io"),
+            // Surrounding whitespace is trimmed rather than carried into the
+            // clone URL and the cache directory name.
+            (" mrdoob/three.js\n", "mrdoob", "three.js"),
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote)
+                .unwrap_or_else(|e| panic!("{remote} must parse as a shorthand: {e}"));
+            assert_eq!(
+                (
+                    parsed.host.as_str(),
+                    parsed.owner.as_str(),
+                    parsed.repo_name.as_str()
+                ),
+                ("github.com", owner, repo),
+                "{remote}"
+            );
+        }
+    }
+
+    /// A `--remote-repo` value whose path segments climb out of the cache root
+    /// must be rejected, not joined. `get_cache_path` concatenates
+    /// host/owner/repo onto the cache dir, so `../..` would otherwise land the
+    /// clone on the AINB state directory itself.
+    #[test]
+    fn remote_repo_rejects_path_traversal() {
+        for remote in [
+            "https://github.com/../../evil",
+            "https://github.com/owner/..",
+            "git@github.com:../evil.git",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must not resolve to a cache path"
+            );
+        }
+    }
+
+    /// Anything that does not classify as a remote must be rejected outright.
+    ///
+    /// `from_input` falls back to `LocalPath` for unrecognised input and
+    /// `to_clone_url` then hands that string to `git clone` verbatim, so a
+    /// value starting with `-` would be read by git as an option. The clone
+    /// this replaced wrapped every non-URL value into
+    /// `https://github.com/<value>.git`, which made the shape unreachable;
+    /// routing through `RemoteRepoManager` removes that accidental guard, so
+    /// the flag has to reject non-remotes itself.
+    #[test]
+    fn remote_repo_rejects_values_that_are_not_remotes() {
+        for remote in [
+            "--upload-pack=touch /tmp/pwn",
+            "-u",
+            "/Users/someone/checkout",
+            "~/checkout",
+            "myrepo",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} is not a remote and must not reach `git clone`"
+            );
+        }
+    }
+
+    /// A host-shaped `<host>/<repo>` is NOT a GitHub shorthand.
+    ///
+    /// Reading it as one turns a clean local parse error into a GitHub clone
+    /// attempt, which reports back as "Authentication failed - check your git
+    /// credentials" — the worst available answer for someone who typed a
+    /// GitLab path. The dot in the OWNER segment is what separates it from a
+    /// dotted repo NAME like `mrdoob/three.js`.
+    #[test]
+    fn remote_repo_does_not_read_a_host_path_as_a_shorthand() {
+        for remote in ["gitlab.com/repo", "git.example.com/repo"] {
+            assert!(
+                crate::git::RepoSource::github_shorthand(remote).is_none(),
+                "{remote} has a host-shaped owner and is not a shorthand"
+            );
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must fail locally, not as a GitHub credentials error"
+            );
+        }
+    }
 
     /// Run a git command in `dir`, failing the test with git's own stderr.
     fn git(dir: &std::path::Path, args: &[&str]) {

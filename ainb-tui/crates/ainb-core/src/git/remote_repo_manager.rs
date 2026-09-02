@@ -40,6 +40,26 @@ pub struct RemoteBranch {
     pub is_default: bool,
 }
 
+/// Argv prefixes that end option parsing with `--` before the remote URL.
+///
+/// The URL is user-supplied and reaches git as a positional, so a value
+/// beginning with `-` would otherwise be read as an option, and whatever
+/// positional survives becomes the repository. All three verified against real
+/// git:
+///
+/// - `git clone --upload-pack=<cmd> <dest>` executes `<cmd>` with the
+///   destination as the repository.
+/// - `git ls-remote --symref --upload-pack=<cmd> HEAD` executes `<cmd>` with
+///   the ref pattern as the repository, from ANY cwd — no repo required.
+/// - `git ls-remote --heads --refs --upload-pack=<cmd>` has no positional left,
+///   so it fires only through the fallback to `origin`, i.e. when the process
+///   cwd is a repo with a local origin.
+///
+/// Keep the `--` last in each of these.
+const CLONE_ARGV: [&str; 2] = ["clone", "--"];
+const LS_REMOTE_HEADS_ARGV: [&str; 4] = ["ls-remote", "--heads", "--refs", "--"];
+const LS_REMOTE_SYMREF_ARGV: [&str; 3] = ["ls-remote", "--symref", "--"];
+
 /// Manages remote repository cloning and caching
 pub struct RemoteRepoManager {
     cache_dir: PathBuf,
@@ -111,7 +131,8 @@ impl RemoteRepoManager {
         info!("Listing remote branches for: {}", url);
 
         let output = Command::new("git")
-            .args(["ls-remote", "--heads", "--refs", &url])
+            .args(LS_REMOTE_HEADS_ARGV)
+            .arg(&url)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -179,7 +200,8 @@ impl RemoteRepoManager {
         let url = source.to_clone_url();
 
         let output = Command::new("git")
-            .args(["ls-remote", "--symref", &url, "HEAD"])
+            .args(LS_REMOTE_SYMREF_ARGV)
+            .args([&url, "HEAD"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -234,9 +256,12 @@ impl RemoteRepoManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Standard clone (not --bare) for compatibility with worktree discovery
+        // Standard clone (not --bare) for compatibility with worktree discovery.
+        // `--` ends option parsing: a source string beginning with `-` reaches
+        // here from user input, and git would otherwise read it as an option.
         let output = Command::new("git")
-            .args(["clone", &url])
+            .args(CLONE_ARGV)
+            .arg(&url)
             .arg(&cache_path)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
@@ -1261,6 +1286,114 @@ fn classify_git_error(stderr: &str, url: &str) -> RemoteRepoError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Every git invocation that takes the user-supplied URL as a positional
+    /// must end option parsing first.
+    ///
+    /// A shape pin. The clone and symref sites are each driven against real
+    /// git below; the heads site fires only through git's no-repository
+    /// fallback to `origin`, which needs the process cwd to be a repo with a
+    /// local origin — not something a test can arrange without mutating the cwd
+    /// out from under the parallel suite, so this pin is its only guard.
+    #[test]
+    fn every_git_argv_ends_option_parsing_before_the_url() {
+        for argv in [
+            CLONE_ARGV.as_slice(),
+            LS_REMOTE_HEADS_ARGV.as_slice(),
+            LS_REMOTE_SYMREF_ARGV.as_slice(),
+        ] {
+            assert_eq!(argv.last(), Some(&"--"), "{argv:?} must end with `--`");
+        }
+    }
+
+    /// A source string beginning with `-` must reach git as a repository, not
+    /// as an option.
+    ///
+    /// `git clone <url> <dest>` takes two positionals, so without a `--`
+    /// separator git reads the url as an option and the destination as the
+    /// repository: `git clone --upload-pack=<cmd> <repo>` runs `<cmd>`. Verified
+    /// against real git, and reachable from `ainb run --remote-repo` and from
+    /// any TUI source that survives to `to_clone_url`.
+    #[test]
+    fn a_source_that_looks_like_an_option_cannot_reach_git_as_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let probe = temp_dir.path().join("payload-ran");
+
+        // The destination `clone_repo` derives. A bare repo satisfies "exists
+        // but is not a warm cache" (no `.git` child), so the clone branch runs,
+        // and it is a real repository, which is what makes the payload fire
+        // when git is allowed to treat it as the clone source.
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+        let parsed = ParsedRepo {
+            source: RepoSource::Filter(String::new()),
+            host: "h".to_string(),
+            owner: "o".to_string(),
+            repo_name: "payload-probe.git".to_string(),
+        };
+        let cache_path = manager.get_cache_path(&parsed);
+        std::fs::create_dir_all(&cache_path).unwrap();
+        let init = std::process::Command::new(crate::test_support::git_bin())
+            .args(["init", "-q", "--bare"])
+            .arg(&cache_path)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init --bare failed");
+        assert!(
+            !manager.is_cached(&parsed),
+            "precondition: destination is not a warm cache"
+        );
+
+        // `Filter` passes its string through `to_clone_url` untouched, which is
+        // exactly what an unsanitised remote value would do.
+        let source = RepoSource::Filter(format!("--upload-pack=touch {}", probe.display()));
+
+        let err = manager.clone_repo(&source, &parsed).expect_err("an option is not a repository");
+        assert!(
+            matches!(
+                err,
+                RemoteRepoError::NotFound(_) | RemoteRepoError::CloneFailed(_)
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        // `clone_repo` runs git in the test process's cwd, so a regression
+        // clones into `./payload-probe` there. Clear it before failing.
+        let leaked = std::path::Path::new("payload-probe");
+        let leaked_exists = leaked.exists();
+        if leaked_exists {
+            let _ = std::fs::remove_dir_all(leaked);
+        }
+
+        assert!(
+            !probe.exists(),
+            "git executed the source string as --upload-pack"
+        );
+        assert!(
+            !leaked_exists,
+            "git treated the destination as the clone source"
+        );
+    }
+
+    /// The symref probe passes TWO positionals (`<url>` then `HEAD`), so
+    /// without `--` git consumes the url as an option and reads `HEAD` as the
+    /// repository — executing the payload from any cwd, with no repo and no
+    /// network. Same family as the clone site, and unlike the heads site it
+    /// needs no `origin` to fire, so it can be driven directly.
+    #[test]
+    fn a_default_branch_probe_cannot_run_the_source_string_as_an_option() {
+        let temp_dir = TempDir::new().unwrap();
+        let probe = temp_dir.path().join("symref-ran");
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        // `Filter` passes its string through `to_clone_url` untouched.
+        let source = RepoSource::Filter(format!("--upload-pack=touch {}", probe.display()));
+
+        assert_eq!(manager.get_default_branch_name(&source), None);
+        assert!(
+            !probe.exists(),
+            "git executed the source string as --upload-pack"
+        );
+    }
 
     /// A failed clone must leave the cache directory exactly as it found it.
     ///
