@@ -37,6 +37,7 @@ use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
 use sqlx::SqlitePool;
+use std::time::Duration;
 
 use crate::events::EventSink;
 
@@ -172,12 +173,24 @@ pub(crate) enum Route {
 /// else is refused rather than typed. Without a picker on screen the answer is
 /// text, exactly as before: that is the plain-shell delivery target the
 /// converged harness pins (CC01) and every non-Claude render.
-pub(crate) fn route_answer(pane: Option<&str>, labels: Option<&[String]>, answer: &str) -> Route {
-    let (Some(pane), Some(labels)) = (pane, labels) else {
+pub(crate) fn route_answer(pane: Option<&str>, picker: Option<&Picker>, answer: &str) -> Route {
+    let Some(pane) = pane else {
         return Route::Text;
     };
-    if !picker_visible(pane, labels) {
-        // Picker chrome that is NOT this row's options is a later question (or
+    let Some(picker) = picker else {
+        // A free-text ASK: typed as text, unless SOME picker is on screen
+        // (Enter into an option picker, or a permission dialog, accepts the
+        // highlighted row: an unintended pick or tool approval).
+        if highlighted_option(pane).is_some() {
+            return Route::Refuse(
+                "a picker is on the agent's screen; free text is not typed into it".to_string(),
+            );
+        }
+        return Route::Text;
+    };
+    let labels = picker.labels.as_slice();
+    if !picker_visible(pane, picker) {
+        // Picker chrome that is NOT this row's picker is a later question (or
         // another tool's prompt): typing into it would answer the wrong thing,
         // so refuse and leave the row open for the surface that sees the pane.
         if highlighted_option(pane).is_some() {
@@ -210,31 +223,42 @@ async fn deliver(
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_delivery_preferred;
 
-    let labels = picker_labels(&row.payload);
+    let picker = picker_from_payload(&row.payload);
     let target = session.tmux_session.as_deref().filter(|_| tmux_delivery_preferred());
-    let pane = match (target, labels.as_deref()) {
-        (Some(t), Some(_)) => capture_pane(t, 0).await.ok(),
-        _ => None,
+    // The pane is read whenever keys would go into one, picker or not: a
+    // free-text answer must not be typed into a picker either.
+    let pane = match target {
+        Some(t) => capture_pane(t, 0).await.ok(),
+        None => None,
     };
-    match route_answer(pane.as_deref(), labels.as_deref(), answer) {
+    match route_answer(pane.as_deref(), picker.as_ref(), answer) {
         Route::Text => send(session, answer).await,
         Route::Refuse(reason) => Ok(SendOutcome::Failed { reason }),
         Route::Picker(position) => {
-            let labels = labels.unwrap_or_default();
-            // `route_answer` only yields Picker when a target pane was captured.
-            let Some(target) = target else {
+            // `route_answer` only yields Picker with a pane, hence a target,
+            // and a picker.
+            let (Some(target), Some(picker)) = (target, picker) else {
                 return Ok(SendOutcome::Failed {
                     reason: "picker route without a tmux target".to_string(),
                 });
             };
-            Ok(deliver_picker(target, position, &labels).await)
+            Ok(deliver_picker(target, position, &picker).await)
         }
     }
 }
 
-/// The option labels an ASK payload offers, in display order, or `None` for a
-/// payload that is not a single-question option picker.
-fn picker_labels(payload: &str) -> Option<Vec<String>> {
+/// The single-question option picker an ASK payload describes: the question
+/// text (matched on screen so a later picker with a look-alike first option is
+/// not taken for this one) and its option labels in display order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Picker {
+    question: String,
+    labels: Vec<String>,
+}
+
+/// The picker an ASK payload offers, or `None` for a payload that is not a
+/// single-question option picker (free text, multi-select, not an ASK).
+fn picker_from_payload(payload: &str) -> Option<Picker> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("ASK") {
         return None;
@@ -249,7 +273,13 @@ fn picker_labels(payload: &str) -> Option<Vec<String>> {
         .iter()
         .filter_map(|o| o.get("label").and_then(|l| l.as_str()).map(str::to_string))
         .collect();
-    (!labels.is_empty()).then_some(labels)
+    let question = ctx
+        .get("question")
+        .and_then(|q| q.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (!labels.is_empty()).then_some(Picker { question, labels })
 }
 
 /// The zero-based position `answer` names among `labels`: the label verbatim,
@@ -280,12 +310,21 @@ fn picker_position(labels: &[String], answer: &str) -> Option<usize> {
 /// builds only moved the highlight and needed Enter. [`picker_step`] tells the
 /// two apart from the capture, so Enter is sent only when the picker is still
 /// open with the highlight on our option, and never into the prompt that
-/// replaces a closed picker. Any `Failed` reopens the row through the caller's
-/// compensation path.
-async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> SendOutcome {
+/// replaces a closed picker. Once the picker is gone the pane is watched for
+/// [`PICKER_SETTLE`] more so the answered echo, which renders a beat after the
+/// close, is read: an echo naming OUR option confirms at once, one naming
+/// another option fails the delivery, no echo within the window is a clean
+/// delivery. Any `Failed` reopens the row through the caller's compensation
+/// path.
+///
+/// One `AskUserQuestion` call may carry several questions; the attention row
+/// models the first (the ingest keeps `questions[0]`), so this answers question
+/// 1 and a second question's picker appearing afterwards is the agent moving on,
+/// not a failure of this delivery.
+async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendOutcome {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_send_picker_key;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let digit = (position + 1).to_string();
     if let Err(e) = tmux_send_picker_key(target, &digit).await {
@@ -294,13 +333,14 @@ async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Sen
         };
     }
     let mut committed = false;
-    for _ in 0..30 {
+    let mut gone_since: Option<Instant> = None;
+    for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let Ok(pane) = capture_pane(target, 0).await else {
             continue;
         };
-        match picker_step(&pane, labels, position) {
-            PickerStep::Delivered => {
+        match picker_step(&pane, picker, position) {
+            PickerStep::Confirmed => {
                 return SendOutcome::Tmux {
                     tmux_session: target.to_string(),
                 };
@@ -310,11 +350,20 @@ async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Sen
                     reason: format!(
                         "agent recorded option {} ({}) instead of option {digit}",
                         other + 1,
-                        labels[other]
+                        picker.labels[other]
                     ),
                 };
             }
+            PickerStep::Gone => {
+                let since = *gone_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= PICKER_SETTLE {
+                    return SendOutcome::Tmux {
+                        tmux_session: target.to_string(),
+                    };
+                }
+            }
             PickerStep::Commit if !committed => {
+                gone_since = None;
                 if let Err(e) = tmux_send_picker_key(target, "Enter").await {
                     return SendOutcome::Failed {
                         reason: format!("picker Enter key failed: {e:#}"),
@@ -322,7 +371,8 @@ async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Sen
                 }
                 committed = true;
             }
-            PickerStep::Commit | PickerStep::Pending => {}
+            // A repaint that briefly showed no cursor line is not a close.
+            PickerStep::Commit | PickerStep::Pending => gone_since = None,
         }
     }
     SendOutcome::Failed {
@@ -332,14 +382,19 @@ async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Sen
     }
 }
 
+/// How long a closed picker's pane is watched for the answered echo before a
+/// delivery with no echo counts as clean.
+const PICKER_SETTLE: Duration = Duration::from_millis(2000);
+
 /// What one pane capture says about a picker answer in flight.
 #[derive(Debug, PartialEq, Eq)]
 enum PickerStep {
-    /// The picker is gone and the pane does not name another option: the key
-    /// committed our option (the echo, when rendered, names it).
-    Delivered,
+    /// The picker is gone and the answered echo names OUR option.
+    Confirmed,
     /// The picker is gone and the answered echo names a DIFFERENT option.
     Recorded(usize),
+    /// The picker is gone and no echo has rendered yet.
+    Gone,
     /// The picker is still open with the highlight on our option: a build
     /// that moves on the digit and commits on Enter.
     Commit,
@@ -348,11 +403,12 @@ enum PickerStep {
 }
 
 /// Classify `pane` after the option digit was sent for `position`.
-fn picker_step(pane: &str, labels: &[String], position: usize) -> PickerStep {
-    if !picker_visible(pane, labels) {
-        return match echoed_option(pane, labels) {
-            Some(other) if other != position => PickerStep::Recorded(other),
-            _ => PickerStep::Delivered,
+fn picker_step(pane: &str, picker: &Picker, position: usize) -> PickerStep {
+    if !picker_visible(pane, picker) {
+        return match echoed_option(pane, &picker.labels) {
+            Some(echoed) if echoed == position => PickerStep::Confirmed,
+            Some(other) => PickerStep::Recorded(other),
+            None => PickerStep::Gone,
         };
     }
     if highlighted_option(pane) == Some(position) {
@@ -362,16 +418,19 @@ fn picker_step(pane: &str, labels: &[String], position: usize) -> PickerStep {
     }
 }
 
-/// Is the option picker for `labels` on screen? Requires the picker's live
-/// cursor line (`❯ N.` for an N within the option count) AND the first option's
-/// numbered probe, so a transcript that merely echoes numbered lines after the
-/// picker closed, or an agent printing look-alike lines, does not pass.
-fn picker_visible(pane: &str, labels: &[String]) -> bool {
-    let Some(first) = labels.first() else {
+/// Is THIS picker on screen? Requires the picker's live cursor line (`❯ N.`
+/// for an N within the option count), the first option's numbered probe, and
+/// the question's probe when the payload carried one, so a transcript that
+/// merely echoes numbered lines after the picker closed, an agent printing
+/// look-alike lines, or a later question that happens to open with the same
+/// first option, does not pass.
+fn picker_visible(pane: &str, picker: &Picker) -> bool {
+    let Some(first) = picker.labels.first() else {
         return false;
     };
-    highlighted_option(pane).is_some_and(|i| i < labels.len())
+    highlighted_option(pane).is_some_and(|i| i < picker.labels.len())
         && pane.contains(&format!("1. {}", picker_probe(first)))
+        && (picker.question.is_empty() || pane.contains(picker_probe(&picker.question)))
 }
 
 /// The zero-based option the picker cursor `❯ N.` currently sits on, if a
@@ -652,7 +711,19 @@ mod tests {
     }
 
     fn labels() -> Vec<String> {
-        picker_labels(ASK_PAYLOAD).unwrap()
+        picker().labels
+    }
+
+    fn picker() -> Picker {
+        picker_from_payload(ASK_PAYLOAD).unwrap()
+    }
+
+    /// A picker with `labels` and no question text (an older hook payload).
+    fn bare(labels: &[String]) -> Picker {
+        Picker {
+            question: String::new(),
+            labels: labels.to_vec(),
+        }
     }
 
     /// Option answers resolve to their PICKER POSITION by label (case-insensitive)
@@ -691,10 +762,10 @@ mod tests {
     #[test]
     fn picker_labels_rejects_non_picker_payloads() {
         let multi = ASK_PAYLOAD.replace("\"multi_select\":false", "\"multi_select\":true");
-        assert_eq!(picker_labels(&multi), None);
-        assert_eq!(picker_labels(r#"{"kind":"ERR","context":{}}"#), None);
+        assert_eq!(picker_from_payload(&multi), None);
+        assert_eq!(picker_from_payload(r#"{"kind":"ERR","context":{}}"#), None);
         assert_eq!(
-            picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#),
+            picker_from_payload(r#"{"kind":"ASK","context":{"question":"why?"}}"#),
             None
         );
         assert_eq!(
@@ -737,24 +808,38 @@ mod tests {
     /// a picker.
     #[test]
     fn picker_visible_needs_the_cursor_and_the_first_option() {
-        let l = labels();
-        assert!(picker_visible(PICKER_PANE, &l));
+        let p = picker();
+        assert!(picker_visible(PICKER_PANE, &p));
         assert_eq!(highlighted_option(PICKER_PANE), Some(0));
         let moved = PICKER_PANE.replace(" ❯ 1.", "   1.").replace("   2. api", " ❯ 2. api");
-        assert!(picker_visible(&moved, &l));
+        assert!(picker_visible(&moved, &p));
         assert_eq!(highlighted_option(&moved), Some(1));
-        assert!(!picker_visible(ANSWERED_PANE, &l));
+        assert!(!picker_visible(ANSWERED_PANE, &p));
         assert!(
-            !picker_visible("$ ls\n1. data/boxtrack.db\n2. api/app.db\n$ ", &l),
+            !picker_visible("$ ls\n1. data/boxtrack.db\n2. api/app.db\n$ ", &p),
             "no cursor line"
         );
         assert!(
-            !picker_visible("❯ 1. something else entirely\n  2. nope", &l),
+            !picker_visible("❯ 1. something else entirely\n  2. nope", &p),
             "wrong options"
         );
         assert!(
-            !picker_visible("❯ 7. data/boxtrack.db", &l),
+            !picker_visible("❯ 7. data/boxtrack.db", &p),
             "cursor beyond the option count"
+        );
+        // A later question that happens to open with the same first option is
+        // not this picker: the question text is matched too.
+        let other_question = PICKER_PANE.replace(
+            "Where should Boxtrack's sqlite file live by default?",
+            "Which file should the migration target?",
+        );
+        assert!(
+            !picker_visible(&other_question, &p),
+            "same options, other question"
+        );
+        assert!(
+            picker_visible(&other_question, &bare(&p.labels)),
+            "a payload with no question text falls back to the option match"
         );
     }
 
@@ -794,14 +879,14 @@ mod tests {
     /// a highlight that has not moved yet, and an echo naming another option.
     #[test]
     fn picker_step_tells_commit_on_digit_from_highlight_only() {
-        let l = labels();
-        assert_eq!(picker_step(ANSWERED_PANE, &l, 1), PickerStep::Delivered);
-        assert_eq!(picker_step(ANSWERED_PANE, &l, 0), PickerStep::Recorded(1));
+        let p = picker();
+        assert_eq!(picker_step(ANSWERED_PANE, &p, 1), PickerStep::Confirmed);
+        assert_eq!(picker_step(ANSWERED_PANE, &p, 0), PickerStep::Recorded(1));
         let closed_no_echo = "● Thinking…\n❯ ";
-        assert_eq!(picker_step(closed_no_echo, &l, 1), PickerStep::Delivered);
-        assert_eq!(picker_step(PICKER_PANE, &l, 1), PickerStep::Pending);
+        assert_eq!(picker_step(closed_no_echo, &p, 1), PickerStep::Gone);
+        assert_eq!(picker_step(PICKER_PANE, &p, 1), PickerStep::Pending);
         let moved = PICKER_PANE.replace(" ❯ 1.", "   1.").replace("   2. api", " ❯ 2. api");
-        assert_eq!(picker_step(&moved, &l, 1), PickerStep::Commit);
+        assert_eq!(picker_step(&moved, &p, 1), PickerStep::Commit);
     }
 
     /// The routing table: no picker on screen (plain shell, closed picker, no
@@ -810,24 +895,31 @@ mod tests {
     /// past the digit keys, never typing into it.
     #[test]
     fn route_answer_table() {
-        let l = labels();
+        let p = picker();
         assert_eq!(
-            route_answer(None, Some(&l), "api/app.db"),
+            route_answer(None, Some(&p), "api/app.db"),
             Route::Text,
             "no pane"
         );
         assert_eq!(
-            route_answer(Some(PICKER_PANE), None, "yes"),
+            route_answer(Some("$ "), None, "yes"),
             Route::Text,
-            "free-text ASK"
+            "free-text ASK, plain shell"
+        );
+        assert!(
+            matches!(
+                route_answer(Some(PICKER_PANE), None, "yes"),
+                Route::Refuse(_)
+            ),
+            "free-text ASK with a picker on screen: Enter would accept the highlighted row"
         );
         assert_eq!(
-            route_answer(Some("$ "), Some(&l), "prod"),
+            route_answer(Some("$ "), Some(&p), "prod"),
             Route::Text,
             "plain shell target"
         );
         assert_eq!(
-            route_answer(Some(ANSWERED_PANE), Some(&l), "api/app.db"),
+            route_answer(Some(ANSWERED_PANE), Some(&p), "api/app.db"),
             Route::Text,
             "picker gone"
         );
@@ -835,7 +927,7 @@ mod tests {
             matches!(
                 route_answer(
                     Some("Which region?\n❯ 1. eu-west\n  2. us-east"),
-                    Some(&l),
+                    Some(&p),
                     "api/app.db"
                 ),
                 Route::Refuse(_)
@@ -843,18 +935,19 @@ mod tests {
             "a later question's picker is refused, never typed into"
         );
         assert_eq!(
-            route_answer(Some(PICKER_PANE), Some(&l), "api/app.db"),
+            route_answer(Some(PICKER_PANE), Some(&p), "api/app.db"),
             Route::Picker(1)
         );
         assert_eq!(
-            route_answer(Some(PICKER_PANE), Some(&l), "2"),
+            route_answer(Some(PICKER_PANE), Some(&p), "2"),
             Route::Picker(1)
         );
         assert!(matches!(
-            route_answer(Some(PICKER_PANE), Some(&l), "actually use postgres"),
+            route_answer(Some(PICKER_PANE), Some(&p), "actually use postgres"),
             Route::Refuse(_)
         ));
         let many: Vec<String> = (1..=12).map(|i| format!("option {i}")).collect();
+        let many = bare(&many);
         let pane = format!(
             "❯ 1. option 1\n{}",
             (2..=12).map(|i| format!("  {i}. option {i}")).collect::<Vec<_>>().join("\n")
