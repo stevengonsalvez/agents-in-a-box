@@ -289,17 +289,27 @@ pub async fn serve(
     broker: EventBroker,
 ) {
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    // The cap is logged once per saturation, not once per refused accept: the
+    // runaway client it contains must not turn into a log flood.
+    let mut saturated = false;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let Ok(slot) = slots.clone().try_acquire_owned() else {
-                    tracing::warn!(
-                        max = MAX_CONNECTIONS,
-                        "hangar rpc: connection cap reached; closing new connection"
-                    );
+                    if !saturated {
+                        tracing::warn!(
+                            max = MAX_CONNECTIONS,
+                            "hangar rpc: connection cap reached; closing new connections until one frees"
+                        );
+                        saturated = true;
+                    }
                     drop(stream);
                     continue;
                 };
+                if saturated {
+                    tracing::info!("hangar rpc: connection cap cleared");
+                    saturated = false;
+                }
                 let pool = pool.clone();
                 let health = health.clone();
                 let broker = broker.clone();
@@ -10383,7 +10393,7 @@ async fn run_card_inner(
     // as finished when the task completes (otherwise the issue-lifecycle gate
     // sees an unrun current stage forever and never promotes the issue).
     if let Some(column_id) =
-        ainb_hangar_store::service::pull::current_gated_column(&mut *tx, ws, issue_id)
+        ainb_hangar_store::service::pull::current_gated_column(&mut *tx, ws, board_id, issue_id)
             .await
             .map_err(CardRunError::Db)?
     {
