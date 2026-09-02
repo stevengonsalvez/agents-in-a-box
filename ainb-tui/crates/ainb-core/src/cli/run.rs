@@ -431,13 +431,22 @@ fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 /// Parse a `--remote-repo` value into the source and the host/owner/repo
 /// components `RemoteRepoManager` keys its cache path on.
 ///
-/// Uses `from_input` rather than smart-parse `parse_with`: `--remote-repo` is
-/// remote by contract, and `parse_with` would resolve `owner/repo` to a local
-/// directory of that name under the cwd.
+/// Parses with `from_input` rather than smart-parse `parse_with` so an
+/// `owner/repo` value cannot be captured by a directory of that name under the
+/// cwd, then REJECTS anything that did not classify as a remote. Both parsers
+/// have a `LocalPath` fallback that swallows unrecognised input, and a local
+/// path is not something this flag can clone: `to_clone_url` hands the raw
+/// string to `git clone`, so a value beginning with `-` would be read by git as
+/// an option rather than a repository. Local checkouts belong on `--repo`.
 fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
     #[allow(deprecated)]
     let source = crate::git::RepoSource::from_input(remote)
         .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?;
+    anyhow::ensure!(
+        source.is_remote(),
+        "--remote-repo needs a remote: `owner/repo`, an https:// URL, or git@host:owner/repo. \
+         Use --repo for a local checkout. Got: {remote}"
+    );
     let parsed = source
         .parse_components()
         .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
@@ -455,14 +464,10 @@ fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git
 /// from the CLI or the TUI.
 fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     let (source, parsed) = parse_remote_repo(remote)?;
-
     let manager = crate::git::RemoteRepoManager::new()?;
-    if manager.is_cached(&parsed) {
-        info!("Repository already cached, fetching updates...");
-    } else {
-        println!("Cloning {}...", source.to_clone_url());
-    }
 
+    // Blocking git under `#[tokio::main]`: `ainb run` resolves its repo before
+    // anything else is on the runtime, so there is no task to starve.
     manager.clone_repo(&source, &parsed).map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -744,6 +749,31 @@ mod tests {
             assert!(
                 parse_remote_repo(remote).is_err(),
                 "{remote} must not resolve to a cache path"
+            );
+        }
+    }
+
+    /// Anything that does not classify as a remote must be rejected outright.
+    ///
+    /// `from_input` falls back to `LocalPath` for unrecognised input and
+    /// `to_clone_url` then hands that string to `git clone` verbatim, so a
+    /// value starting with `-` would be read by git as an option. The clone
+    /// this replaced wrapped every non-URL value into
+    /// `https://github.com/<value>.git`, which made the shape unreachable;
+    /// routing through `RemoteRepoManager` removes that accidental guard, so
+    /// the flag has to reject non-remotes itself.
+    #[test]
+    fn remote_repo_rejects_values_that_are_not_remotes() {
+        for remote in [
+            "--upload-pack=touch /tmp/pwn",
+            "-u",
+            "/Users/someone/checkout",
+            "~/checkout",
+            "myrepo",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} is not a remote and must not reach `git clone`"
             );
         }
     }
