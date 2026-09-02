@@ -582,24 +582,28 @@ pub fn render(
     // `render` below draws the Hooks section only when the table chunk still has
     // 14 rows, so that is the number the help has to respect.
     const HOOKS_NEEDS: u16 = 14;
-    const TABLE_MIN: u16 = 7;
     const FOOTER: u16 = 1;
     let without_help = inner.height.saturating_sub(FOOTER);
     let with_help = inner.height.saturating_sub(wanted + FOOTER);
-    let help_height = if wanted == 0 {
-        0
-    } else if with_help >= HOOKS_NEEDS {
-        // Room for the table, the Hooks box and the help.
-        wanted
-    } else if without_help < HOOKS_NEEDS && with_help >= TABLE_MIN {
-        // The Hooks box was not going to fit at this height anyway, so the help
-        // is not what evicted it — show it while the table stays usable.
+    // One rule, not three. An earlier version had a middle band for "the Hooks
+    // box was not going to fit anyway, so show the help": it is unreachable.
+    // That band needs `without_help < 14` (height < 15) and `with_help >= 7`
+    // (height >= wanted + 8) at once, and `wanted` is never below the seven
+    // lines `mode_help` returns — so it asks for a height that is both under and
+    // over 15. Dead code in a size calculation is worse than none: it reads as a
+    // case somebody handled.
+    let help_height = if wanted > 0 && with_help >= HOOKS_NEEDS {
         wanted
     } else {
-        // Showing the help would cost the operator a panel of real state. The
-        // footer still names the CLI verb that prints the same text.
+        // Either there is no help, or showing it would cost the operator a panel
+        // of real state. The footer still names the CLI verb that prints the
+        // same text.
         0
     };
+    debug_assert!(
+        help_height == 0 || without_help >= HOOKS_NEEDS,
+        "the help must never be what evicts the hooks panel"
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1483,6 +1487,37 @@ mod tests {
             text.contains("Hooks"),
             "the hook panel must survive: {text}"
         );
+    }
+
+    #[test]
+    fn the_help_never_evicts_the_hooks_panel_at_any_height() {
+        // A sweep rather than one band: the budget is a size calculation, and
+        // the property is the invariant, not any single terminal size. At every
+        // height where the Hooks box would have been drawn without the help, it
+        // must still be drawn with it.
+        for height in 8..40_u16 {
+            let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            // Selection defaults to the ATC row (index 0) in both, so the only
+            // difference is whether the help is eligible at this height.
+            let with_atc_selected = render_to_string(&mut bare, None, 100, height);
+
+            let mut other = seeded_state_with_atc_and_hooks(
+                vec![
+                    atc_row(),
+                    status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                ],
+                SupervisorMode::Full,
+            );
+            other.move_selection(1); // off the ATC row: no help
+            let without_help = render_to_string(&mut other, None, 100, height);
+
+            if without_help.contains("Hooks") {
+                assert!(
+                    with_atc_selected.contains("Hooks"),
+                    "height {height}: selecting the ATC row deleted the hooks panel"
+                );
+            }
+        }
     }
 
     #[test]
