@@ -88,4 +88,6 @@ Round 2 (single Opus verify pass over the fix delta) dispositioned all 58 round-
 
 Round 3 (verify pass over the round-2 delta): zero open at P2 and above; six P3s plus two carried residuals, all fixed in `c9709a33..fe4d3306`: the closed-picker settle window (the echo renders ~1.5s after the close, so the wrong-option guard now actually runs), free text refused when any picker chrome is on screen (Enter into a permission dialog is a tool approval), the question text matched so a look-alike later picker is not taken for ours, the stage stamp scoped to the launching board, one wire id per attention answer, the connection-cap log latched, one help row per section. Locally the tmux tripwires need a private tmux server (a shared server sizes a detached session to the attached client's 173 columns and clips the tab strip); CI has no attached client.
 
-Round 4: verify pass over the round-3 delta.
+Round 4 (verify pass over the round-3 delta): zero open at P2 and above; eight P3s, all fixed in `eafe0faf..a56c7c0c` (three commits): the question is matched inside the picker block (our own echoed question higher up no longer vouches for a later picker), a picker with its question scrolled off still counts as open, the settle rule is a pure table-tested function, a late close is a delivery rather than a false timeout, an unreadable pane refuses the pick instead of typing blind, the in-flight answer map is cleared with the link, the help pairing guard now fails the row it was written for.
+
+Round 5 (final allowed): verify pass over the round-4 delta.
