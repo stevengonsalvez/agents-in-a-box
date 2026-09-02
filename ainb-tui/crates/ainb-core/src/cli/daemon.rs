@@ -125,7 +125,7 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
     }
     let kind = kind_from_id(kind_id).with_context(|| format!("unknown daemon: {kind_id}"))?;
     let Some((verb, _)) = sub.subcommand() else {
-        bail!("expected start, stop, or restart — try `ainb daemon {kind_id} --help`")
+        bail!("expected a verb, e.g. start; `ainb daemon {kind_id} --help` lists them all")
     };
     let action = Action::from_id(verb).with_context(|| format!("unknown action: {verb}"))?;
     let report = control(kind, action).await?;
@@ -370,11 +370,21 @@ pub fn atc_target_name() -> Result<String> {
 /// dir does not remove its unit, and that unit keeps firing.
 fn unprovisioned_atc_names() -> Result<Vec<String>> {
     use crate::fleet::atc::paths::{list_instance_dirs_in, list_instance_names_in};
-    let root = crate::fleet::plumbing::paths::ainb_home()?.join("atc");
+    let home = crate::fleet::plumbing::paths::ainb_home()?;
+    let root = home.join("atc");
     let provisioned = list_instance_names_in(&root);
+    // Units are named for an instance and live in the user's own launchd /
+    // systemd directory, with no idea which ainb home provisioned them. Reading
+    // them while pointed at a DIFFERENT home would classify that home's live
+    // timer as an orphan, and remove-orphan would then delete it.
+    let units = if crate::fleet::atc::paths::ainb_home().map(|d| d == home).unwrap_or(false) {
+        crate::fleet::atc::timer::installed_instance_names()
+    } else {
+        Vec::new()
+    };
     let mut names: Vec<String> = list_instance_dirs_in(&root)
         .into_iter()
-        .chain(crate::fleet::atc::timer::installed_instance_names())
+        .chain(units)
         .filter(|name| !provisioned.contains(name))
         .collect();
     names.sort();
