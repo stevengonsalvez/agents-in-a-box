@@ -47,7 +47,12 @@ fn transport() -> Transport {
 /// keeps owning structured delivery.
 #[must_use]
 pub fn tmux_delivery_preferred() -> bool {
-    !matches!(transport(), Transport::PeersFirst)
+    // Positive on the tmux variants: a transport added later is NOT assumed to
+    // drive keys into a pane until it says so here.
+    match transport() {
+        Transport::TmuxFirst | Transport::TmuxOnly => true,
+        Transport::PeersFirst => false,
+    }
 }
 
 fn from_peer_id() -> String {
