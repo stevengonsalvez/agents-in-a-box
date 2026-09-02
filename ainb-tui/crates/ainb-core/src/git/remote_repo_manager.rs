@@ -40,6 +40,18 @@ pub struct RemoteBranch {
     pub is_default: bool,
 }
 
+/// Argv prefixes that end option parsing with `--` before the remote URL.
+///
+/// The URL is user-supplied and reaches git as a positional, so a value
+/// beginning with `-` would otherwise be read as an option. `git clone
+/// --upload-pack=<cmd> <dest>` executes `<cmd>` with the destination as the
+/// repository; `git ls-remote --upload-pack=<cmd>` with no repository left
+/// falls back to `origin` and executes `<cmd>` against it. Both verified
+/// against real git. Keep the `--` last in each of these.
+const CLONE_ARGV: [&str; 2] = ["clone", "--"];
+const LS_REMOTE_HEADS_ARGV: [&str; 4] = ["ls-remote", "--heads", "--refs", "--"];
+const LS_REMOTE_SYMREF_ARGV: [&str; 3] = ["ls-remote", "--symref", "--"];
+
 /// Manages remote repository cloning and caching
 pub struct RemoteRepoManager {
     cache_dir: PathBuf,
@@ -111,7 +123,8 @@ impl RemoteRepoManager {
         info!("Listing remote branches for: {}", url);
 
         let output = Command::new("git")
-            .args(["ls-remote", "--heads", "--refs", "--", &url])
+            .args(LS_REMOTE_HEADS_ARGV)
+            .arg(&url)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -179,7 +192,8 @@ impl RemoteRepoManager {
         let url = source.to_clone_url();
 
         let output = Command::new("git")
-            .args(["ls-remote", "--symref", "--", &url, "HEAD"])
+            .args(LS_REMOTE_SYMREF_ARGV)
+            .args([&url, "HEAD"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -238,7 +252,8 @@ impl RemoteRepoManager {
         // `--` ends option parsing: a source string beginning with `-` reaches
         // here from user input, and git would otherwise read it as an option.
         let output = Command::new("git")
-            .args(["clone", "--", &url])
+            .args(CLONE_ARGV)
+            .arg(&url)
             .arg(&cache_path)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
@@ -1263,6 +1278,25 @@ fn classify_git_error(stderr: &str, url: &str) -> RemoteRepoError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Every git invocation that takes the user-supplied URL as a positional
+    /// must end option parsing first.
+    ///
+    /// A shape pin, not a behavioural test. The clone site is driven against
+    /// real git below; the two `ls-remote` sites are exploitable only through
+    /// git's no-repository fallback to `origin`, which needs the process cwd to
+    /// be a repo with a local origin — not something a test can arrange without
+    /// mutating the cwd out from under the parallel suite.
+    #[test]
+    fn every_git_argv_ends_option_parsing_before_the_url() {
+        for argv in [
+            CLONE_ARGV.as_slice(),
+            LS_REMOTE_HEADS_ARGV.as_slice(),
+            LS_REMOTE_SYMREF_ARGV.as_slice(),
+        ] {
+            assert_eq!(argv.last(), Some(&"--"), "{argv:?} must end with `--`");
+        }
+    }
 
     /// A source string beginning with `-` must reach git as a repository, not
     /// as an option.
