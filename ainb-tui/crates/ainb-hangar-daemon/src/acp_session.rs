@@ -1,17 +1,21 @@
 //! One ACP session on the chat bus, from either door.
 //!
-//! `fleet/acp_session_create` and a task caller need the same write: mint the
-//! `fleet_session` + `fleet_acp_session` PAIR for a scope. It is ONE
-//! transaction here and both doors call it, so the RPC and a task cannot drift
-//! into two slightly different rows for the same thing. Nothing is spawned: the
-//! pool starts the adapter lazily on the first prompt, so a session that never
-//! receives a message costs nothing but a row.
+//! `fleet/acp_session_create` and a task caller need the same two writes: mint
+//! the `fleet_session` + `fleet_acp_session` PAIR for a scope, and put a prompt
+//! on the bus with its PENDING delivery leg. Each is ONE transaction here and
+//! both doors call it, so the RPC and a task cannot drift into two slightly
+//! different rows for the same thing. Neither spawns anything: the pool starts
+//! the adapter lazily on the first prompt, so a session that never receives a
+//! message costs nothing but a row.
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
-use ainb_hangar_core::idgen::SystemIdGen;
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
 use ainb_hangar_store::repo::fleet_acp_session::{
     FleetAcpSessionError, FleetAcpSessionRepo, FleetAcpSessionRow, NewFleetAcpSession,
+};
+use ainb_hangar_store::repo::fleet_message::{
+    FleetMessageError, FleetMessageRepo, NewFleetMessage,
 };
 use sqlx::SqlitePool;
 
@@ -161,6 +165,43 @@ pub async fn ensure(
         events.emit_fleet_revision(revision);
     }
     Ok(row)
+}
+
+/// Put `text` on the bus addressed to `session_key`.
+///
+/// One `user` message row in the session's own scope plus its PENDING delivery
+/// leg, in one transaction. Returns the message id the caller hands to
+/// `AcpPool::submit_prompt`.
+///
+/// The leg is what the pool resolves at turn end, so a prompt that skipped
+/// this would have no receipt for anyone to read. `sender` names the door
+/// (`operator`, `task:<id>`); the timeline shows it and nothing routes on it.
+pub async fn enqueue(
+    pool: &SqlitePool,
+    session_key: &str,
+    sender: &str,
+    text: &str,
+) -> Result<String, FleetMessageError> {
+    let scope_key = FleetAcpSessionRepo::get(pool, session_key)
+        .await?
+        .map_or_else(|| format!("session:{session_key}"), |row| row.scope_key);
+    let row = FleetMessageRepo::insert_message_with_deliveries(
+        pool,
+        &NewFleetMessage {
+            id: SystemIdGen.new_ulid(),
+            request_id: None,
+            request_fingerprint: None,
+            scope_key,
+            origin_message_id: None,
+            sender: sender.to_string(),
+            kind: "user".to_string(),
+            body: text.to_string(),
+            created_at: SystemClock.now_ms(),
+        },
+        std::slice::from_ref(&session_key.to_string()),
+    )
+    .await?;
+    Ok(row.id)
 }
 
 /// EXACTLY the actions Phase 5 wires, and nothing else.

@@ -6001,7 +6001,7 @@ async fn execute_acp_action(
             // An operator prompt joins the SAME bus a chat message does, so it
             // gets a message row, a delivery leg, and a threaded reply rather
             // than a turn nothing can correlate afterwards.
-            match acp_operator_message(pool, &session.session_key, text).await {
+            match crate::acp_session::enqueue(pool, &session.session_key, "operator", text).await {
                 Ok(message_id) => {
                     let outcome = acp.submit_prompt(&session.session_key, &message_id, text).await;
                     match outcome {
@@ -6168,42 +6168,6 @@ fn acp_permission_receipt(
             Some("no live ACP session for this key".to_string()),
         ),
     }
-}
-
-/// Persist an operator's direct `SendPrompt` as a chat message plus its leg, so
-/// the ACP turn resolves through exactly one receipt path.
-async fn acp_operator_message(
-    pool: &SqlitePool,
-    session_key: &str,
-    text: &str,
-) -> Result<String, sqlx::Error> {
-    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
-    use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-
-    let scope_key = FleetAcpSessionRepo::get(pool, session_key)
-        .await?
-        .map_or_else(|| format!("session:{session_key}"), |row| row.scope_key);
-    let row = FleetMessageRepo::insert_message_with_deliveries(
-        pool,
-        &NewFleetMessage {
-            id: SystemIdGen.new_ulid(),
-            request_id: None,
-            request_fingerprint: None,
-            scope_key,
-            origin_message_id: None,
-            sender: "operator".to_string(),
-            kind: "user".to_string(),
-            body: text.to_string(),
-            created_at: SystemClock.now_ms(),
-        },
-        std::slice::from_ref(&session_key.to_string()),
-    )
-    .await
-    .map_err(|error| match error {
-        ainb_hangar_store::repo::fleet_message::FleetMessageError::Sql(sql) => sql,
-        other => sqlx::Error::Protocol(other.to_string()),
-    })?;
-    Ok(row.id)
 }
 
 fn action_capability(
