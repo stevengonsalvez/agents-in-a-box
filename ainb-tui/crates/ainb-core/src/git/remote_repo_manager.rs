@@ -111,7 +111,7 @@ impl RemoteRepoManager {
         info!("Listing remote branches for: {}", url);
 
         let output = Command::new("git")
-            .args(["ls-remote", "--heads", "--refs", &url])
+            .args(["ls-remote", "--heads", "--refs", "--", &url])
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -179,7 +179,7 @@ impl RemoteRepoManager {
         let url = source.to_clone_url();
 
         let output = Command::new("git")
-            .args(["ls-remote", "--symref", &url, "HEAD"])
+            .args(["ls-remote", "--symref", "--", &url, "HEAD"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
             .output()
@@ -234,9 +234,11 @@ impl RemoteRepoManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Standard clone (not --bare) for compatibility with worktree discovery
+        // Standard clone (not --bare) for compatibility with worktree discovery.
+        // `--` ends option parsing: a source string beginning with `-` reaches
+        // here from user input, and git would otherwise read it as an option.
         let output = Command::new("git")
-            .args(["clone", &url])
+            .args(["clone", "--", &url])
             .arg(&cache_path)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "echo")
