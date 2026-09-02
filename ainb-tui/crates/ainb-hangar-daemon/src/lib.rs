@@ -19,6 +19,11 @@ use crate::run_loop::{DaemonConfig, run};
 /// ([`acp_pool::converge_dirty_sessions_at_boot`], run from [`boot`]), the
 /// process-exit path and the turn-deadline sweep all fan out to.
 pub mod acp_pool;
+/// One ACP session on the chat bus, from either door: [`acp_session::ensure`]
+/// mints the `fleet_session` + `fleet_acp_session` pair for a scope and
+/// [`acp_session::enqueue`] puts a prompt on the bus with its PENDING leg.
+/// `fleet/acp_session_create` and a task caller share these two transactions.
+pub mod acp_session;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,

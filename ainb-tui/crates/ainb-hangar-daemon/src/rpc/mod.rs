@@ -5901,9 +5901,9 @@ fn normalize_picker_text(value: &str) -> String {
 /// `session_key`, in ONE transaction, with NO process spawn.
 ///
 /// R3's entry point. Without it no ACP recipient can ever exist, and
-/// `message_send` deliberately never auto-provisions one. The pool spawns the
-/// adapter lazily on the first prompt, so a create that never receives a message
-/// costs nothing but a row.
+/// `message_send` deliberately never auto-provisions one. The write itself is
+/// [`crate::acp_session::ensure`], shared with the task executor; this handler
+/// is the capability gate and the parameter check in front of it.
 async fn handle_fleet_acp_session_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -5912,8 +5912,8 @@ async fn handle_fleet_acp_session_create(
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
-    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
-    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
+
+    use crate::acp_session::EnsureError;
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
@@ -5923,134 +5923,24 @@ async fn handle_fleet_acp_session_create(
     if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
         return Err(invalid_params("scope_key must not be empty"));
     }
-    // Validated against the ADAPTER REGISTRY, not the schema: the store only
-    // length-checks `provider` so the next adapter needs no migration, which
-    // makes this the one place an unknown token is refused.
-    let acp = crate::acp_pool::active_handle().await;
-    let known = acp.as_ref().map_or_else(
-        || ainb_acp::config::AdapterConfig::is_known_adapter(&params.provider),
-        |pool| pool.config().knows(&params.provider),
-    );
-    if !known {
-        return Err(invalid_params(&format!(
-            "unknown ACP provider {:?}; known adapters are {} and {}",
-            params.provider,
-            ainb_acp::config::CLAUDE_ADAPTER,
-            ainb_acp::config::CODEX_ADAPTER
-        )));
-    }
-    let permission_mode = acp.as_ref().map_or_else(
-        || "default".to_string(),
-        |pool| pool.config().permission_mode(&params.provider),
-    );
-
-    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
-    let scope_key = params.scope_key.clone().unwrap_or_else(|| format!("session:{session_key}"));
-    let now = SystemClock.now_ms();
-    let event = NewFleetEvent {
-        event_id: format!("acp-session-create:{session_key}"),
-        session_key: session_key.clone(),
-        observed_at: now,
-        authority: ObservationAuthority::Authoritative,
-        event_type: "acp_session_created".to_string(),
-        payload: serde_json::json!({
-            "provider": params.provider,
-            "cwd": params.cwd,
-            "scopeKey": scope_key,
-            "permissionMode": permission_mode,
-        })
-        .to_string(),
-        patch: FleetSessionPatch {
-            // `acp` on the WIRE, with the concrete adapter in
-            // `fleet_acp_session.provider`. The snapshot maps this token to
-            // `FleetProvider::Acp`; anything else would render as Unknown.
-            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
-            cwd: Some(params.cwd.clone()),
-            display_name: crate::fleet::display_name_for_cwd(&params.cwd),
-            management_state: Some("MANAGED".to_string()),
-            capabilities: Some(acp_capabilities()),
-            confidence: Some("HIGH".to_string()),
-            lifecycle_state: Some("IDLE".to_string()),
-            attention_state: Some("NONE".to_string()),
-            transport_health: Some("HEALTHY".to_string()),
-            ..FleetSessionPatch::default()
-        },
-    };
-    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
+    let row = crate::acp_session::ensure(
         pool,
-        &NewFleetAcpSession {
-            session_key: session_key.clone(),
-            scope_key,
-            provider: params.provider.clone(),
-            cwd: params.cwd.clone(),
-            permission_mode,
-            state: "IDLE".to_string(),
-            created_at: now,
-            last_active_at: now,
-        },
-        &event,
+        events,
+        &params.provider,
+        &params.cwd,
+        params.scope_key.as_deref(),
     )
     .await
-    .map_err(|error| internal(&format!("acp session create: {error}")))?;
-    // The scope was ALREADY held by a live session, so this create replayed onto
-    // it instead of minting the key above. Idempotent only while the caller
-    // asked for the same SESSION: answering a `codex-acp` create with a live
-    // `claude-agent-acp` key would silently hand back a session that prompts a
-    // DIFFERENT agent than the caller believes it is driving, and answering a
-    // create for `~/work/api` with a session rooted at `~/work/web` would run
-    // every later prompt against a different repository. Both misroute in
-    // silence for the whole life of the scope. Graft 4 rejects the same class
-    // of replay on `fleet_message`; this is its ACP twin.
-    if row.session_key != session_key {
-        let mismatch = if row.provider == params.provider {
-            (row.cwd != params.cwd).then(|| ("cwd", row.cwd.clone(), params.cwd.clone()))
-        } else {
-            Some(("provider", row.provider.clone(), params.provider.clone()))
-        };
-        if let Some((field, held, asked)) = mismatch {
-            return Err(invalid_params(&format!(
-                "scope_key {:?} is already held by a session whose {field} is {held:?}, \
-                 not {asked:?}; stop it before creating a different one",
-                row.scope_key
-            )));
+    .map_err(|error| match error {
+        EnsureError::UnknownProvider { .. } | EnsureError::ScopeHeld { .. } => {
+            invalid_params(&error.to_string())
         }
-    }
-    if let Some(revision) = revision {
-        events.emit_fleet_revision(revision);
-    }
+        EnsureError::Store(_) => internal(&error.to_string()),
+    })?;
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
         scope_key: row.scope_key,
     })
-}
-
-/// EXACTLY the actions Phase 5 wires, and nothing else.
-///
-/// `action_capability` gates on this JSON before any handler runs, so an unset
-/// flag is a Rejected receipt rather than an action that reaches the pool and
-/// fails somewhere less legible.
-fn acp_capabilities() -> String {
-    serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
-        structured_answer: true,
-        structured_dismiss: false,
-        approvals: true,
-        approval_session: false,
-        send_prompt: true,
-        continue_turn: false,
-        retry: false,
-        interrupt: true,
-        start: false,
-        stop: true,
-        restart: false,
-        kill: true,
-        archive: false,
-        // An ACP session has no pane. Leaving these true would make the tmux
-        // surfaces offer attach/paste for a session that can never honour it.
-        tmux_attach: false,
-        tmux_text: false,
-        verified_picker: false,
-    })
-    .unwrap_or_else(|_| "{}".to_string())
 }
 
 /// One chat delivery to an ACP recipient: persist nothing new, just hand the
