@@ -328,7 +328,7 @@ mod tests {
     /// `proxy_port()` must honor `AINB_HEADROOM_PORT` override.
     #[test]
     fn proxy_port_honors_override() {
-        let _guard = HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Isolate: stash any existing value, set ours, restore after.
         let key = "AINB_HEADROOM_PORT";
         let old = std::env::var_os(key);
