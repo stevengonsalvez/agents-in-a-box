@@ -84,11 +84,16 @@ def main() -> None:
         ("p1-happy-path", "P1 · single-issue happy path", range(1, 7)),
         ("p2-pipeline", "P2 · role-gated pipeline, Triage → Done", range(1, 10)),
         ("p3-human-loop", "P3 · live AskUserQuestion answered from Control Center", range(1, 8)),
+        ("p4-levers", "P4 · levers + observability after real runs", range(1, 13)),
     ):
         gif = ROOT / f"docs/hangar/proofs/fullstack/{slug}.gif"
         if not gif.exists():
             continue
-        pngs = [p for p in sorted((ROOT / "docs/hangar/proofs/fullstack").glob(f"{slug.split('-')[0]}-[0-9]-*.png"))]
+        prefix = slug.split("-")[0]
+        pngs = sorted(
+            (ROOT / "docs/hangar/proofs/fullstack").glob(f"{prefix}-[0-9]*-*.png"),
+            key=lambda q: int(q.name.split("-")[1]),
+        )
         recordings.append((slug, title, pngs))
 
     tpl = TEMPLATE.read_text()
@@ -191,6 +196,22 @@ def main() -> None:
         body.append('<section><h2>Run notes</h2><hr class="rule"><ul class="notes">\n')
         body.extend(f"<li>{inline_md(n)}</li>\n" for n in notes)
         body.append("</ul></section>\n")
+
+    ship = section(md, "Ship phase: review")
+    if ship.strip():
+        body.append('<section><h2>Ship phase: review</h2><hr class="rule">\n')
+        paras = [l for l in ship.splitlines() if l.strip() and not l.startswith("|")]
+        for para in paras:
+            body.append(f"<p>{inline_md(para)}</p>\n")
+        rows = md_table(ship)
+        if rows:
+            body.append('<table class="shipped ledger"><thead><tr><th style="width:150px">area</th>'
+                        '<th>round-1 finding</th><th>fix</th></tr></thead><tbody>\n')
+            for r in rows:
+                area, finding, fix = (r + ["", "", ""])[:3]
+                body.append(f"<tr><td>{inline_md(area)}</td><td>{inline_md(finding)}</td><td>{inline_md(fix)}</td></tr>\n")
+            body.append("</tbody></table>\n")
+        body.append("</section>\n")
 
     body.append(f"""
     <footer>
