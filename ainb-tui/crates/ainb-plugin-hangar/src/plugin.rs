@@ -433,6 +433,9 @@ pub struct HangarPlugin {
     /// quiet subscribed connection after ten minutes, and the plugin then sat
     /// on "daemon offline" until restarted, with the daemon perfectly healthy.
     link_lost_at: Option<std::time::Instant>,
+    /// The attention row whose `attention/answer` is in flight, so the verdict
+    /// is filed against THAT card even if the cursor moved before the reply.
+    answer_in_flight: Option<String>,
     /// Last automatic reconnect attempt, for the backoff.
     link_last_redial: Option<std::time::Instant>,
     /// Consecutive failed automatic reconnects (backoff exponent).
@@ -649,6 +652,7 @@ impl Default for HangarPlugin {
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
             link_lost_at: None,
+            answer_in_flight: None,
             link_last_redial: None,
             link_redial_attempts: 0,
             daemon_start_verdict: None,
@@ -1411,18 +1415,19 @@ impl HangarPlugin {
         let verdict = resp.result.as_ref().and_then(|r| {
             serde_json::from_value::<ainb_hangar_proto::snapshots::AnswerResult>(r.clone()).ok()
         });
+        // The reply carries no attention id; the note is about the card whose
+        // answer was sent, remembered at send time (the cursor may have moved
+        // since). A reply with nothing in flight (a restart mid-answer) falls
+        // back to the selected card.
+        let card = self
+            .answer_in_flight
+            .take()
+            .or_else(|| self.screens.control_center.selected_id().map(str::to_string));
         let Some(note) = answer_verdict_note(verdict.as_ref(), resp.error.as_ref()) else {
             self.screens.control_center.clear_note();
             return;
         };
-        // The reply carries no attention id; the note is about the card whose
-        // answer was in flight, which is the selected one.
-        let card = self
-            .screens
-            .control_center
-            .selected_id()
-            .map_or_else(String::new, str::to_string);
-        self.screens.control_center.set_note(card, note);
+        self.screens.control_center.set_note(card.unwrap_or_default(), note);
     }
 
     /// Populate the issue-list cache from an `hangar/issues_list` result.
@@ -5767,6 +5772,7 @@ impl Plugin for HangarPlugin {
         // raising session; its reply re-fetches the fleet-wide attention list so
         // the answered card drops off the board.
         if let Some(action) = self.screens.take_pending_answer_action() {
+            self.answer_in_flight = Some(action.attention_id.clone());
             self.answer_attention(host, action).await;
         }
         // P5: drain a deferred `profile/get` (selection moved to an un-loaded row
@@ -9086,6 +9092,31 @@ mod answer_verdict_tests {
                 "{result}: stale note survived"
             );
         }
+    }
+
+    /// The note is filed against the card whose answer was SENT, not whichever
+    /// card the cursor sits on when the reply lands: moving to a2 while a1's
+    /// answer is in flight still parks a1's refusal on a1 (and a refresh that
+    /// keeps a1 keeps it).
+    #[test]
+    fn a_verdict_is_filed_against_the_card_that_was_answered() {
+        let mut p = plugin_with_open_card();
+        p.screens.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        p.answer_in_flight = Some("a1".to_string());
+        p.screens.control_center.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        // Cursor moves on before the reply.
+        p.screens.control_center.select_next();
+        assert_eq!(p.screens.control_center.selected_id(), Some("a2"));
+        p.on_daemon_response(&answer_reply(
+            serde_json::json!({ "outcome": "no_target", "reason": "exited" }),
+        ));
+        assert!(p.screens.control_center.note().is_some());
+        p.screens.set_attention(&[ask_row("a2")]);
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "the note belonged to a1: it leaves with a1"
+        );
+        assert!(p.answer_in_flight.is_none(), "consumed by the reply");
     }
 
     #[test]
