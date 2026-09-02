@@ -190,6 +190,12 @@ async fn claim(
 /// already closed (or convergence will close) the ask; reopening our claim
 /// there would leave a row nothing can ever answer, so the claim is kept and
 /// the operator is told the answer did not reach the adapter.
+///
+/// The pool is the process-wide installed one ([`crate::acp_pool::active_handle`],
+/// installed once at daemon boot). A caller that parks permissions on a
+/// private `AcpPool` (a task executor building its own) raises rows this arm
+/// can only answer `NoTarget`: everything that raises must route through the
+/// installed pool.
 async fn answer_acp(
     pool: &SqlitePool,
     events: &EventSink,
