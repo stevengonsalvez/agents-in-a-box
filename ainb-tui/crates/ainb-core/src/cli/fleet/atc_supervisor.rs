@@ -246,31 +246,28 @@ async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconc
                 );
             }
             if daemon_owned_the_ledger(cron, had_local_timer) {
-                // THE LEDGER HANDOFF. While the daemon scheduled the beat it also
-                // OWNED the retry ledger: the beat ran with `--exhausted` and
-                // counted nothing locally, so `continue_counts` is empty while
-                // the real budget sits in the daemon's `atc_retry` table. Lite
-                // cannot read that table — there is no client RPC for it — so
-                // taking `continue_counts` at face value would hand every
-                // currently-broken session a full fresh budget, which is exactly
-                // what the one-ledger rule exists to prevent.
+                // THE LEDGER HANDOFF, armed here and performed by the scanner's
+                // first tick. While the daemon scheduled the beat it also OWNED
+                // the retry ledger, so `continue_counts` is empty while the real
+                // budget sits in its `atc_retry` table, which no client RPC can
+                // read. Taking the empty file at face value would hand every
+                // broken session a fresh budget — the one-ledger rule inverted.
                 //
-                // So we hand over fail-CLOSED: every session erroring RIGHT NOW
-                // is seeded at the cap, and lite escalates it rather than
-                // retrying. The cost is that a session mid-budget loses its
-                // remaining retries across the switch; the alternative is
-                // resurrecting a session the daemon had already given up on.
-                // A genuinely recovered session drops off the ERR roster and
-                // regains its budget through the normal recovery rule.
-                match seal_ledger_for_handoff(meta).await {
-                    Ok(0) => {}
-                    Ok(n) => out.notes.push(format!(
-                        "retry ledger handed over from the daemon: {n} erroring session(s) sealed \
-at the cap, so lite escalates them instead of restarting their budget"
-                    )),
+                // Arming a flag beats sealing here. Sealing here means shelling
+                // `fleet needs` mid-switch to learn who is erroring: latency at
+                // exactly the wrong moment, and a failure that fails OPEN, since
+                // a scan that errors leaves the budgets untouched and the switch
+                // still completes. The scanner has that roster on every tick
+                // anyway, for free, and cannot skip it.
+                match arm_daemon_handoff(&meta.name) {
+                    Ok(()) => out.notes.push(
+                        "retry ledger handed over from the daemon: the first lite scan seals every \
+erroring session at the cap, so none of them restart their budget"
+                            .to_string(),
+                    ),
                     Err(e) => out.notes.push(format!(
-                        "could not seal the retry ledger for handover ({e}); a session the daemon \
-had escalated may get a fresh budget in lite"
+                        "could not arm the retry-ledger handover ({e}); a session the daemon had \
+escalated may get a fresh budget in lite"
                     )),
                 }
             }
@@ -381,29 +378,13 @@ it. `ainb kill {}` then `ainb daemon atc start` to bring up {} instead",
     }
 }
 
-/// Seed the local ledger at the cap for every session currently erroring, and
-/// return how many were sealed.
-///
-/// Called only on a switch away from a DAEMON-owned ledger. See the call site
-/// for why this is fail-closed rather than a read of the daemon's real counts.
-async fn seal_ledger_for_handoff(meta: &AtcMeta) -> Result<usize> {
-    let rows = super::atc::fetch_needs().await?;
-    let paths = AtcPaths::resolve(&meta.name)?;
+/// Record that the daemon owned the retry ledger, so the lite scanner's first
+/// tick seals it. Pure local file write: no RPC, no subprocess, no roster.
+fn arm_daemon_handoff(name: &str) -> Result<()> {
+    let paths = AtcPaths::resolve(name)?;
     let mut state = read_heartbeat_state(&paths);
-    let mut sealed = 0;
-    for row in &rows {
-        if matches!(row.context, NeedsContext::Err(_)) {
-            let count = state.continue_counts.entry(row.session.id.clone()).or_insert(0);
-            if *count < DEFAULT_ERR_RETRY_CAP {
-                *count = DEFAULT_ERR_RETRY_CAP;
-                sealed += 1;
-            }
-        }
-    }
-    if sealed > 0 {
-        write_heartbeat_state(&paths, &state);
-    }
-    Ok(sealed)
+    state.pending_daemon_handoff = true;
+    write_heartbeat_state_checked(&paths, &state)
 }
 
 /// What the daemon said about the cron it may have been scheduling.
@@ -780,12 +761,33 @@ fn hook_evidence() -> HookEvidence {
 async fn tick(paths: &AtcPaths, cap: u32, dry_run: bool) -> Result<LiteReport> {
     let rows = super::atc::fetch_needs().await?;
     let mut state = read_heartbeat_state(paths);
+
+    // Perform a pending ledger handover BEFORE planning, so the seal decides
+    // this tick rather than one tick later. See `HeartbeatState::pending_daemon_handoff`.
+    let sealed = if state.pending_daemon_handoff {
+        let n = seal_erroring_at_cap(&rows, cap, &mut state);
+        // Cleared only on a tick that actually SAW a roster: `tick` returns Err
+        // before here when the scan fails, so a failed scan cannot consume the
+        // handover and let the next tick hand out fresh budgets.
+        state.pending_daemon_handoff = false;
+        n
+    } else {
+        0
+    };
+
     let (report, to_continue) = plan(&rows, cap, &mut state);
 
     if dry_run {
         // Neither send nor persist: a dry run must be observably free of side
-        // effects, or it is not a dry run.
+        // effects, or it is not a dry run. That includes NOT consuming a pending
+        // handover — the mutations above are dropped with `state`.
         return Ok(report);
+    }
+    if sealed > 0 {
+        tracing::info!(
+            sealed,
+            "atc lite: sealed erroring sessions at the cap on the daemon ledger handover"
+        );
     }
 
     for row in to_continue {
@@ -804,6 +806,28 @@ async fn tick(paths: &AtcPaths, cap: u32, dry_run: bool) -> Result<LiteReport> {
     }
     write_heartbeat_state(paths, &state);
     Ok(report)
+}
+
+/// Seal every erroring session at `cap`, returning how many moved.
+///
+/// The fail-closed half of the daemon ledger handover: a session that is erroring
+/// at the moment lite takes over is assumed to have spent its budget, because the
+/// real count lived in a table lite cannot read. Never LOWERS a count, so it can
+/// only ever make lite more conservative, and a genuinely recovered session drops
+/// off the ERR roster and regains its budget through the normal recovery rule.
+fn seal_erroring_at_cap(rows: &[NeedsRow], cap: u32, state: &mut HeartbeatState) -> usize {
+    let cap = cap.max(1);
+    let mut sealed = 0;
+    for row in rows {
+        if matches!(row.context, NeedsContext::Err(_)) {
+            let count = state.continue_counts.entry(row.session.id.clone()).or_insert(0);
+            if *count < cap {
+                *count = cap;
+                sealed += 1;
+            }
+        }
+    }
+    sealed
 }
 
 /// PURE decision half of a lite tick: given the rows and the shared ledger,
@@ -872,15 +896,20 @@ fn read_heartbeat_state(paths: &AtcPaths) -> HeartbeatState {
 }
 
 fn write_heartbeat_state(paths: &AtcPaths, state: &HeartbeatState) {
-    match state.to_json() {
-        Ok(json) => {
-            if let Err(e) = plumbing::atomic::write_atomic(&paths.heartbeat_state, json.as_bytes())
-            {
-                tracing::warn!(error = %e, "atc lite: heartbeat-state write failed");
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "atc lite: heartbeat-state serialize failed"),
+    if let Err(e) = write_heartbeat_state_checked(paths, state) {
+        tracing::warn!(error = %e, "atc lite: heartbeat-state write failed");
     }
+}
+
+/// The same write, but surfacing the error.
+///
+/// Arming the ledger handover MUST NOT fail silently: a swallowed error there
+/// means the fail-closed handover never happens and every session the daemon
+/// escalated quietly gets a fresh budget.
+fn write_heartbeat_state_checked(paths: &AtcPaths, state: &HeartbeatState) -> Result<()> {
+    let json = state.to_json().context("serializing heartbeat-state")?;
+    plumbing::atomic::write_atomic(&paths.heartbeat_state, json.as_bytes())
+        .with_context(|| format!("writing {}", paths.heartbeat_state.display()))
 }
 
 // ── Re-entrant delegation ───────────────────────────────────────────────────
@@ -1124,6 +1153,64 @@ mod tests {
         assert!(
             !daemon_owned_the_ledger(CronOwnership::Unknown, true),
             "a local timer proves the beat counted locally; sealing would burn budget"
+        );
+    }
+
+    #[test]
+    fn the_handover_seal_is_fail_closed_and_never_lowers_a_count() {
+        let mut state = HeartbeatState::default();
+        state.continue_counts.insert("mid".to_string(), 1);
+        state.continue_counts.insert("over".to_string(), 9);
+        let rows = vec![err_row("mid"), err_row("over"), err_row("fresh")];
+
+        let sealed = seal_erroring_at_cap(&rows, DEFAULT_ERR_RETRY_CAP, &mut state);
+        assert_eq!(sealed, 2, "only the two below the cap moved");
+        assert_eq!(state.continue_counts["mid"], DEFAULT_ERR_RETRY_CAP);
+        assert_eq!(state.continue_counts["over"], 9, "never lowered");
+        assert_eq!(
+            state.continue_counts["fresh"], DEFAULT_ERR_RETRY_CAP,
+            "a session lite has never seen must not start with a fresh budget"
+        );
+
+        // And every sealed session is genuinely refused by the planner.
+        let (report, send) = plan(&rows, DEFAULT_ERR_RETRY_CAP, &mut state);
+        assert!(send.is_empty(), "nothing may be continued after a seal");
+        assert_eq!(report.capped, 3);
+    }
+
+    #[test]
+    fn a_seal_only_touches_erroring_rows() {
+        // Ambiguous rows have never consumed budget and must not gain a
+        // counter, or a later genuine ERR would start already exhausted.
+        let mut state = HeartbeatState::default();
+        let rows = vec![row(
+            "idle",
+            NeedsContext::Idle(crate::fleet::read::IdleContext {
+                idle_minutes: 5,
+                last_assistant_text: None,
+            }),
+        )];
+        assert_eq!(seal_erroring_at_cap(&rows, 3, &mut state), 0);
+        assert!(state.continue_counts.is_empty());
+    }
+
+    #[test]
+    fn the_handover_flag_round_trips_and_defaults_off() {
+        // Off by default, so an instance from before the flag existed is not
+        // treated as mid-handover and does not seal budgets on its first tick.
+        let legacy = HeartbeatState::from_json_or_default(
+            r#"{"last_heartbeat_ms":1,"last_active_ms":1,"continue_counts":{}}"#,
+        );
+        assert!(!legacy.pending_daemon_handoff);
+
+        let armed = HeartbeatState {
+            pending_daemon_handoff: true,
+            ..HeartbeatState::default()
+        };
+        let back = HeartbeatState::from_json_or_default(&armed.to_json().unwrap());
+        assert!(
+            back.pending_daemon_handoff,
+            "the flag must survive the file"
         );
     }
 
