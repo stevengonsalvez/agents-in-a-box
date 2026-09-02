@@ -981,8 +981,10 @@ impl HangarPlugin {
     /// again. Only an established link counts: a failed first dial is the
     /// offline empty state's business (`[s]` start), not a reconnect.
     fn note_link_lost(&mut self) {
-        if matches!(self.conn.state(), ConnState::Connected | ConnState::Handshake)
-            && self.link_lost_at.is_none()
+        if matches!(
+            self.conn.state(),
+            ConnState::Connected | ConnState::Handshake
+        ) && self.link_lost_at.is_none()
         {
             self.link_lost_at = Some(std::time::Instant::now());
             self.link_last_redial = None;
@@ -1354,13 +1356,19 @@ impl HangarPlugin {
                 self.screens.control_center.set_note(format!("already answered by {by}"));
             }
             Some(AnswerResult::Ambiguous { reason }) => {
-                self.screens.control_center.set_note(format!("not delivered (ambiguous target): {reason}"));
+                self.screens
+                    .control_center
+                    .set_note(format!("not delivered (ambiguous target): {reason}"));
             }
             Some(AnswerResult::NoTarget { reason }) => {
-                self.screens.control_center.set_note(format!("not delivered (no live session): {reason}"));
+                self.screens
+                    .control_center
+                    .set_note(format!("not delivered (no live session): {reason}"));
             }
             Some(AnswerResult::DeliveryFailed { reason }) => {
-                self.screens.control_center.set_note(format!("delivery failed, row reopened: {reason}"));
+                self.screens
+                    .control_center
+                    .set_note(format!("delivery failed, row reopened: {reason}"));
             }
             None => {
                 let detail = resp
@@ -5190,11 +5198,8 @@ impl HangarPlugin {
                     // actually has. Only an issue with no runs yet falls back to
                     // the synthetic `task-<issue>` id — that screen still folds
                     // transcript events, it just has nothing to retry.
-                    let latest = self
-                        .screens
-                        .kanban
-                        .latest_card_for_issue(issue_id.as_str())
-                        .cloned();
+                    let latest =
+                        self.screens.kanban.latest_card_for_issue(issue_id.as_str()).cloned();
                     let task_id = latest
                         .as_ref()
                         .and_then(|card| {
@@ -6081,8 +6086,14 @@ mod tests {
         assert_eq!(*p.conn.state(), ConnState::Disconnected);
         // ...and arms the automatic reconnect (the daemon idle-closed quiet
         // subscribed links for months; the plugin must dial again by itself).
-        assert!(p.link_lost_at.is_some(), "an established link dropping arms the reconnect");
-        assert!(p.wants_redraw(), "frames keep coming so the reconnect pump runs");
+        assert!(
+            p.link_lost_at.is_some(),
+            "an established link dropping arms the reconnect"
+        );
+        assert!(
+            p.wants_redraw(),
+            "frames keep coming so the reconnect pump runs"
+        );
     }
 
     /// A first dial that never came up is the offline empty state's business
