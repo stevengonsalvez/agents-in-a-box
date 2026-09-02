@@ -364,6 +364,11 @@ SELECT 1 FROM board_card AS bc \
 /// stamps the task with it, so the push path leaves the same stage record the
 /// pull path does and [`PullService::stages_remain`] can see that stage finish.
 ///
+/// `board_id` narrows the lookup to the board the run was launched from, so an
+/// issue carded on two boards is stamped with the stage of the board the
+/// operator acted on (each board's stages are judged separately); `None` (the
+/// board-agnostic auto-run seam) takes the earliest gated stage on any board.
+///
 /// Takes any executor so the run path reads inside its own write transaction
 /// (the stamp is decided in the same unit of work that inserts the task) while
 /// a plain read passes the pool.
@@ -374,6 +379,7 @@ SELECT 1 FROM board_card AS bc \
 pub async fn current_gated_column<'e, E>(
     executor: E,
     workspace: &WorkspaceId,
+    board_id: Option<&str>,
     issue_id: &str,
 ) -> Result<Option<String>, sqlx::Error>
 where
@@ -385,12 +391,14 @@ where
            JOIN board AS bd ON bd.id = bc.board_id \
           WHERE bc.issue_id = ?1 \
             AND bd.workspace_id = ?2 \
+            AND (?3 IS NULL OR bc.board_id = ?3) \
             AND col.services_role IS NOT NULL \
           ORDER BY col.ord, col.id \
           LIMIT 1",
     )
     .bind(issue_id)
     .bind(workspace.as_str())
+    .bind(board_id)
     .fetch_optional(executor)
     .await
 }
