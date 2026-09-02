@@ -37,7 +37,7 @@ use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
 use sqlx::SqlitePool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::events::EventSink;
 
@@ -226,9 +226,19 @@ async fn deliver(
     let picker = picker_from_payload(&row.payload);
     let target = session.tmux_session.as_deref().filter(|_| tmux_delivery_preferred());
     // The pane is read whenever keys would go into one, picker or not: a
-    // free-text answer must not be typed into a picker either.
+    // free-text answer must not be typed into a picker either. A pane the
+    // daemon cannot read while the row says a picker is up is not typed into
+    // blind: the row stays open for a surface that can see the screen.
     let pane = match target {
-        Some(t) => capture_pane(t, 0).await.ok(),
+        Some(t) => match capture_pane(t, 0).await {
+            Ok(pane) => Some(pane),
+            Err(e) if picker.is_some() => {
+                return Ok(SendOutcome::Failed {
+                    reason: format!("could not read the agent's pane to route the pick: {e:#}"),
+                });
+            }
+            Err(_) => None,
+        },
         None => None,
     };
     match route_answer(pane.as_deref(), picker.as_ref(), answer) {
@@ -257,7 +267,11 @@ pub(crate) struct Picker {
 }
 
 /// The picker an ASK payload offers, or `None` for a payload that is not a
-/// single-question option picker (free text, multi-select, not an ASK).
+/// single-question option picker (free text, multi-select, not an ASK). A
+/// multi-select ASK therefore has no routed path: with its picker on screen
+/// the free-text guard refuses, and the operator answers it at the pane
+/// (typing into it used to report Delivered while the picker kept whatever
+/// was highlighted).
 fn picker_from_payload(payload: &str) -> Option<Picker> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("ASK") {
@@ -324,7 +338,6 @@ fn picker_position(labels: &[String], answer: &str) -> Option<usize> {
 async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendOutcome {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_send_picker_key;
-    use std::time::{Duration, Instant};
 
     let digit = (position + 1).to_string();
     if let Err(e) = tmux_send_picker_key(target, &digit).await {
@@ -332,6 +345,9 @@ async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendO
             reason: format!("picker key {digit} failed: {e:#}"),
         };
     }
+    let delivered = SendOutcome::Tmux {
+        tmux_session: target.to_string(),
+    };
     let mut committed = false;
     let mut gone_since: Option<Instant> = None;
     for _ in 0..60 {
@@ -339,13 +355,10 @@ async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendO
         let Ok(pane) = capture_pane(target, 0).await else {
             continue;
         };
-        match picker_step(&pane, picker, position) {
-            PickerStep::Confirmed => {
-                return SendOutcome::Tmux {
-                    tmux_session: target.to_string(),
-                };
-            }
-            PickerStep::Recorded(other) => {
+        let step = picker_step(&pane, picker, position);
+        match settle(step, gone_since, Instant::now(), committed) {
+            Settle::Delivered => return delivered,
+            Settle::Recorded(other) => {
                 return SendOutcome::Failed {
                     reason: format!(
                         "agent recorded option {} ({}) instead of option {digit}",
@@ -354,15 +367,7 @@ async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendO
                     ),
                 };
             }
-            PickerStep::Gone => {
-                let since = *gone_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= PICKER_SETTLE {
-                    return SendOutcome::Tmux {
-                        tmux_session: target.to_string(),
-                    };
-                }
-            }
-            PickerStep::Commit if !committed => {
+            Settle::Commit => {
                 gone_since = None;
                 if let Err(e) = tmux_send_picker_key(target, "Enter").await {
                     return SendOutcome::Failed {
@@ -371,14 +376,54 @@ async fn deliver_picker(target: &str, position: usize, picker: &Picker) -> SendO
                 }
                 committed = true;
             }
-            // A repaint that briefly showed no cursor line is not a close.
-            PickerStep::Commit | PickerStep::Pending => gone_since = None,
+            Settle::Wait(since) => gone_since = since,
         }
+    }
+    // The budget ran out. A picker that closed late (still inside its settle
+    // window) was answered; only a picker that never closed is a failure.
+    if gone_since.is_some() {
+        return delivered;
     }
     SendOutcome::Failed {
         reason: format!(
             "picker still open after key {digit}: the highlight never settled on option {digit} and the picker never closed"
         ),
+    }
+}
+
+/// What the delivery loop does with one classified capture.
+#[derive(Debug, PartialEq, Eq)]
+enum Settle {
+    /// Report the answer delivered.
+    Delivered,
+    /// Report the answer failed: the agent recorded another option.
+    Recorded(usize),
+    /// Press Enter (a build that only moved the highlight on the digit).
+    Commit,
+    /// Keep polling, carrying the moment the picker was first seen gone (or
+    /// `None` while it is still on screen).
+    Wait(Option<Instant>),
+}
+
+/// The settle rule, pure so it can be table-tested: a confirming echo or a
+/// contrary one decides at once; a picker gone with no echo yet is only a
+/// delivery once it has stayed gone for [`PICKER_SETTLE`] (the echo renders a
+/// beat after the close, and a repaint can drop the cursor line for a frame);
+/// a picker still open with our option highlighted gets exactly one Enter.
+fn settle(step: PickerStep, gone_since: Option<Instant>, now: Instant, committed: bool) -> Settle {
+    match step {
+        PickerStep::Confirmed => Settle::Delivered,
+        PickerStep::Recorded(other) => Settle::Recorded(other),
+        PickerStep::Gone => {
+            let since = gone_since.unwrap_or(now);
+            if now.saturating_duration_since(since) >= PICKER_SETTLE {
+                Settle::Delivered
+            } else {
+                Settle::Wait(Some(since))
+            }
+        }
+        PickerStep::Commit if !committed => Settle::Commit,
+        PickerStep::Commit | PickerStep::Pending => Settle::Wait(None),
     }
 }
 
@@ -402,9 +447,12 @@ enum PickerStep {
     Pending,
 }
 
-/// Classify `pane` after the option digit was sent for `position`.
+/// Classify `pane` after the option digit was sent for `position`. Once the
+/// route has been decided, a picker showing our options counts as still open
+/// even when its question line has scrolled off a short pane: "gone" needs the
+/// option block itself to be gone, never a missing question.
 fn picker_step(pane: &str, picker: &Picker, position: usize) -> PickerStep {
-    if !picker_visible(pane, picker) {
+    if !options_visible(pane, picker) {
         return match echoed_option(pane, &picker.labels) {
             Some(echoed) if echoed == position => PickerStep::Confirmed,
             Some(other) => PickerStep::Recorded(other),
@@ -418,32 +466,54 @@ fn picker_step(pane: &str, picker: &Picker, position: usize) -> PickerStep {
     }
 }
 
-/// Is THIS picker on screen? Requires the picker's live cursor line (`❯ N.`
-/// for an N within the option count), the first option's numbered probe, and
-/// the question's probe when the payload carried one, so a transcript that
-/// merely echoes numbered lines after the picker closed, an agent printing
-/// look-alike lines, or a later question that happens to open with the same
-/// first option, does not pass.
+/// Is THIS picker on screen? Requires the picker's option block
+/// ([`options_visible`]) and, when the payload carried a question, that
+/// question's probe INSIDE the block: on a line above the cursor line and
+/// below the last answered echo (`→ `), so our question echoed from an earlier
+/// answer higher up the pane never vouches for a later picker that happens to
+/// open with the same first option.
 fn picker_visible(pane: &str, picker: &Picker) -> bool {
+    if !options_visible(pane, picker) {
+        return false;
+    }
+    if picker.question.is_empty() {
+        return true;
+    }
+    let lines: Vec<&str> = pane.lines().collect();
+    let Some(cursor) = lines.iter().position(|l| cursor_option(l).is_some()) else {
+        return false;
+    };
+    let block_start = lines[..cursor].iter().rposition(|l| l.contains("→ ")).map_or(0, |i| i + 1);
+    let probe = picker_probe(&picker.question);
+    lines[block_start..cursor].iter().any(|l| l.contains(probe))
+}
+
+/// The picker's option block: the live cursor line (`❯ N.` for an N within
+/// the option count) plus the first option's numbered probe, so a transcript
+/// that merely echoes numbered lines after the picker closed, or an agent
+/// printing look-alike lines, does not pass.
+fn options_visible(pane: &str, picker: &Picker) -> bool {
     let Some(first) = picker.labels.first() else {
         return false;
     };
     highlighted_option(pane).is_some_and(|i| i < picker.labels.len())
         && pane.contains(&format!("1. {}", picker_probe(first)))
-        && (picker.question.is_empty() || pane.contains(picker_probe(&picker.question)))
 }
 
 /// The zero-based option the picker cursor `❯ N.` currently sits on, if a
 /// picker cursor line is on screen.
 fn highlighted_option(pane: &str) -> Option<usize> {
-    pane.lines().find_map(|line| {
-        let rest = line.trim_start().strip_prefix('❯')?.trim_start();
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if digits.is_empty() || !rest[digits.len()..].starts_with('.') {
-            return None;
-        }
-        digits.parse::<usize>().ok()?.checked_sub(1)
-    })
+    pane.lines().find_map(cursor_option)
+}
+
+/// The zero-based option a single `❯ N.` cursor line names, if `line` is one.
+fn cursor_option(line: &str) -> Option<usize> {
+    let rest = line.trim_start().strip_prefix('❯')?.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('.') {
+        return None;
+    }
+    digits.parse::<usize>().ok()?.checked_sub(1)
 }
 
 /// The option the pane's "→ <label>" answered echo names, if any. The label
@@ -840,6 +910,87 @@ mod tests {
         assert!(
             picker_visible(&other_question, &bare(&p.labels)),
             "a payload with no question text falls back to the option match"
+        );
+        // The question must sit INSIDE the picker block: our question echoed
+        // from the earlier answer, higher up the pane, does not vouch for a
+        // later picker below it.
+        let follow_up = format!("{ANSWERED_PANE}\n{other_question}");
+        assert!(
+            !picker_visible(&follow_up, &p),
+            "our echoed question above a different picker is not our picker"
+        );
+        assert!(
+            options_visible(&follow_up, &p),
+            "...though its option block still reads as open"
+        );
+    }
+
+    /// Once the route is decided, our picker with its question scrolled off a
+    /// short pane is still OPEN (Pending / Commit), never "gone": a delivery
+    /// is never reported on a picker nobody answered.
+    #[test]
+    fn picker_step_treats_a_scrolled_question_as_still_open() {
+        let p = picker();
+        let scrolled = PICKER_PANE.replacen(
+            "Where should Boxtrack's sqlite file live by default?\n",
+            "",
+            1,
+        );
+        assert!(
+            !picker_visible(&scrolled, &p),
+            "the route would not pick it..."
+        );
+        assert_eq!(picker_step(&scrolled, &p, 1), PickerStep::Pending);
+        let moved = scrolled.replace(" ❯ 1.", "   1.").replace("   2. api", " ❯ 2. api");
+        assert_eq!(picker_step(&moved, &p, 1), PickerStep::Commit);
+    }
+
+    /// The settle rule, one capture at a time: echoes decide at once, a gone
+    /// picker waits out the window (carrying its first-gone instant), a
+    /// repaint that shows the picker again drops the window, Enter goes once.
+    #[test]
+    fn settle_table() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let later = t0 + PICKER_SETTLE + Duration::from_millis(1);
+        assert_eq!(
+            settle(PickerStep::Confirmed, None, t0, false),
+            Settle::Delivered
+        );
+        assert_eq!(
+            settle(PickerStep::Recorded(0), Some(t0), later, true),
+            Settle::Recorded(0)
+        );
+        assert_eq!(
+            settle(PickerStep::Gone, None, t0, false),
+            Settle::Wait(Some(t0))
+        );
+        assert_eq!(
+            settle(
+                PickerStep::Gone,
+                Some(t0),
+                t0 + Duration::from_millis(500),
+                false
+            ),
+            Settle::Wait(Some(t0)),
+            "inside the window: keep the first-gone instant"
+        );
+        assert_eq!(
+            settle(PickerStep::Gone, Some(t0), later, false),
+            Settle::Delivered
+        );
+        assert_eq!(
+            settle(PickerStep::Pending, Some(t0), later, false),
+            Settle::Wait(None)
+        );
+        assert_eq!(
+            settle(PickerStep::Commit, Some(t0), later, false),
+            Settle::Commit
+        );
+        assert_eq!(
+            settle(PickerStep::Commit, None, later, true),
+            Settle::Wait(None),
+            "Enter is pressed once"
         );
     }
 
