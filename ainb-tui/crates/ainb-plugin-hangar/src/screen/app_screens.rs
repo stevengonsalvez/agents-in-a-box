@@ -2697,6 +2697,13 @@ mod help_overlay_tests {
                 || tok.split('/').all(|k| k.chars().count() == 1)
                 || matches!(tok, "enter" | "esc" | "tab" | "1-9" | "^P" | "space")
         };
+        // Section names are the first token of every unindented screen row;
+        // one appearing anywhere else is a stranded heading.
+        let sections: Vec<&str> = HELP_LINES
+            .iter()
+            .filter(|l| !l.starts_with(' ') && !l.starts_with("esc") && !l.starts_with("Hangar"))
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
         let mut in_screens = false;
         for line in HELP_LINES {
             let first = line.split_whitespace().next().unwrap_or_default();
@@ -2712,10 +2719,23 @@ mod help_overlay_tests {
             } else {
                 &tokens[1..]
             };
-            assert!(
-                body.first().is_some_and(|t| is_key(t)),
-                "help row {line:?}: the first hint has no key"
-            );
+            // Every label word follows a key, and no section heading is
+            // stranded mid-row.
+            let mut saw_key = false;
+            for tok in body {
+                assert!(
+                    !sections.contains(tok),
+                    "help row {line:?}: section {tok:?} stranded mid-line"
+                );
+                if is_key(tok) {
+                    saw_key = true;
+                } else {
+                    assert!(
+                        saw_key,
+                        "help row {line:?}: label {tok:?} has no key before it"
+                    );
+                }
+            }
         }
     }
 
