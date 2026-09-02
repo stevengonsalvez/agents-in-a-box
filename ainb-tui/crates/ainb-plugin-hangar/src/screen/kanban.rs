@@ -861,6 +861,29 @@ mod tests {
             .collect()
     }
 
+    /// The issue-list task-detail path binds the issue's NEWEST run: latest
+    /// `created_at` wins across columns, and a tie breaks on task id so two
+    /// cards stamped in the same millisecond still pick deterministically.
+    /// Cards of other issues never win however new they are.
+    #[test]
+    fn latest_card_for_issue_picks_the_newest_run_of_that_issue() {
+        let mut old_done = task("01TASKOLD0000000000000000A", "done");
+        old_done.created_at = NOW - 600_000;
+        let mut tie_a = task("01TASKTIE0000000000000000A", "failed");
+        tie_a.created_at = NOW;
+        let mut tie_b = task("01TASKTIE0000000000000000B", "running");
+        tie_b.created_at = NOW;
+        let mut other = task("01TASKOTHER00000000000000A", "queued");
+        other.issue_id = Some("issue-2".into());
+        other.created_at = NOW + 1_000;
+        let state = KanbanState::from_tasks(&[old_done, tie_a, tie_b, other], NOW);
+
+        let latest = state.latest_card_for_issue("issue-1").expect("issue-1 has runs");
+        assert_eq!(latest.task_id, "01TASKTIE0000000000000000B");
+        assert_eq!(latest.status, "running");
+        assert!(state.latest_card_for_issue("issue-9").is_none());
+    }
+
     /// `board_columns` flattens the four buckets into card-board columns whose
     /// cards carry `#<short_id>`, an agent · age · status title, and the column
     /// glyph + label, so the screen renders THROUGH the shared card-board (63l.6).
