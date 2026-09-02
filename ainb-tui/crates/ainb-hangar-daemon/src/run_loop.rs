@@ -1590,9 +1590,22 @@ async fn run_interactive(
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
     // A live `claude` in a never-seen worktree stops at its trust dialog with
-    // nobody at the pane; pre-trust the cwd the way the host's `ainb run` does.
+    // nobody at the pane; pre-trust the cwd (the bypass-permissions acceptance
+    // rides the argv as `--settings`, see `runner::claude_spec`). Best-effort:
+    // a skipped merge only means the dialog shows, so it is logged, not fatal.
     if matches!(dispatch.backend, Backend::Claude) {
-        crate::interactive::pre_trust_claude_workdir(&child_env, cwd);
+        use crate::interactive::PreTrust;
+        match crate::interactive::pre_trust_claude_workdir(&child_env, cwd) {
+            PreTrust::Written => {
+                tracing::info!(task_id = %task.id, workdir = %cwd.display(), "interactive: pre-trusted workdir in .claude.json");
+            }
+            PreTrust::NoHome => {
+                tracing::warn!(task_id = %task.id, "interactive: no HOME in the child env; cannot pre-trust the workdir");
+            }
+            PreTrust::LeftAlone(why) | PreTrust::WriteFailed(why) => {
+                tracing::warn!(task_id = %task.id, %why, "interactive: .claude.json trust merge skipped; the pane may show the trust dialog");
+            }
+        }
     }
 
     // F5: the attachable tmux session runs in the provisioned worktree / scratch
