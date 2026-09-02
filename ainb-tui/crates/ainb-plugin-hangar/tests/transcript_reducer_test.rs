@@ -221,7 +221,9 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     let retry = reduce_task_detail(&failed, TaskDetailEvent::Key('R'));
     assert_eq!(retry.intent, Some(TaskDetailIntent::RetryTask(task())));
 
-    // Finished success: retry also allowed (re-run).
+    // Finished success: the store refuses to requeue a done task, so instead of
+    // a silent no-op (crisp B1, defect 9) `R` explains itself in the transcript
+    // and raises no intent.
     let done = reduce_task_detail(
         &running,
         TaskDetailEvent::Event(HangarEvent::TaskFinished {
@@ -232,9 +234,12 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     )
     .state;
     assert_eq!(done.lifecycle(), TaskLifecycle::Succeeded);
+    let noted = reduce_task_detail(&done, TaskDetailEvent::Key('R'));
+    assert_eq!(noted.intent, None, "no retry RPC for a finished run");
+    let last = noted.state.transcript().last().map(TranscriptEntry::body);
     assert_eq!(
-        reduce_task_detail(&done, TaskDetailEvent::Key('R')).intent,
-        Some(TaskDetailIntent::RetryTask(task()))
+        last,
+        Some("this run finished; R only retries a failed or cancelled run")
     );
 }
 

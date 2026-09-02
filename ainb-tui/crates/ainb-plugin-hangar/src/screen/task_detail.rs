@@ -631,7 +631,16 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         'k' => scroll_up(state),
         // Open the comment-compose modal (`c`); captures input until Enter/Esc.
         'c' => open_compose(state),
-        // Retry only once terminal; otherwise a no-op.
+        // Retry only a failed / cancelled run. A run that finished cleanly is
+        // refused by the store (`force_requeue` answers DoNotRetry), which used
+        // to make `R` a silent no-op (crisp B1, defect 9): say so instead.
+        'R' if state.lifecycle == TaskLifecycle::Succeeded => {
+            let mut next = state.clone();
+            next.push_system_line(
+                "this run finished; R only retries a failed or cancelled run".to_string(),
+            );
+            no_intent(next)
+        }
         'R' if state.lifecycle.is_terminal() => with_intent(
             state.clone(),
             TaskDetailIntent::RetryTask(state.task_id.clone()),
