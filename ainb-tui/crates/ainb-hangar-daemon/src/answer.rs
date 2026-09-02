@@ -347,10 +347,17 @@ async fn resolve_target(
     // Count raw (pre-merge) sessions sharing the target cwd across BOTH sources,
     // so two distinct sessions in the same dir register as ambiguous even though
     // `merge_sessions` would coalesce them onto one cwd-keyed row.
-    let raw_cwd_count = if cwd.is_empty() {
+    // The hook reports the agent's CURRENT cwd, which drifts below the session
+    // root as soon as the agent `cd`s into a subproject (`<worktree>/api`), while
+    // discovery lists the session at its root. Match a session whose root is
+    // the raise cwd or an ancestor of it, most specific root first, so a nested
+    // scratch dir under another session's root still resolves to the nearest.
+    let root_len = |s: &Session| if session_owns_cwd(&s.cwd, cwd) { s.cwd.len() } else { 0 };
+    let deepest = ainb.iter().chain(peers.iter()).map(root_len).max().unwrap_or(0);
+    let raw_cwd_count = if cwd.is_empty() || deepest == 0 {
         0
     } else {
-        ainb.iter().chain(peers.iter()).filter(|s| s.cwd == cwd).count()
+        ainb.iter().chain(peers.iter()).filter(|s| root_len(s) == deepest).count()
     };
 
     let merged = merge_sessions(vec![ainb, peers]);
@@ -361,7 +368,11 @@ async fn resolve_target(
     }
 
     // 2. No exact match → cwd correlation, guarded by ambiguity.
-    let Some(by_cwd) = merged.iter().find(|s| !cwd.is_empty() && s.cwd == cwd) else {
+    let Some(by_cwd) = merged
+        .iter()
+        .filter(|s| !cwd.is_empty() && session_owns_cwd(&s.cwd, cwd))
+        .max_by_key(|s| s.cwd.len())
+    else {
         return Target::NoTarget("no live session matched (target may have exited)".to_string());
     };
 
@@ -385,7 +396,9 @@ async fn resolve_target(
     // cwd, the occupant changed; refuse rather than answer an agent that never
     // asked. (A row with no captured transcript keeps the prior behaviour.)
     if let Some(raise_tx) = raise_transcript.filter(|t| !t.is_empty()) {
-        if !transcript_still_owns_cwd(cwd, raise_tx) {
+        // Transcripts are keyed by the session's ROOT cwd, not the subdirectory
+        // the agent happened to be in when it asked.
+        if !transcript_still_owns_cwd(&by_cwd.cwd, raise_tx) {
             let label = if is_answer {
                 "cannot safely answer"
             } else {
@@ -398,6 +411,21 @@ async fn resolve_target(
     }
 
     Target::Send(by_cwd.clone())
+}
+
+/// Is `raise_cwd` the session root `root` itself, or a directory below it?
+/// Exact path-component containment, never a bare string prefix, so
+/// `/w/app` does not own `/w/app2`.
+fn session_owns_cwd(root: &str, raise_cwd: &str) -> bool {
+    if root.is_empty() || raise_cwd.is_empty() {
+        return false;
+    }
+    let root = root.trim_end_matches('/');
+    let raise_cwd = raise_cwd.trim_end_matches('/');
+    raise_cwd == root
+        || raise_cwd
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Does the session that raised the request still OWN `cwd`? True when the newest
@@ -420,6 +448,20 @@ mod tests {
     /// The payload shape the hook ingest stores for a real `AskUserQuestion`
     /// (captured live from Claude Code 2.1.257).
     const ASK_PAYLOAD: &str = r#"{"kind":"ASK","context":{"question":"Where should Boxtrack's sqlite file live by default?","header":"DB path","options":[{"label":"data/boxtrack.db (Recommended)","description":"Repo-root data/ dir"},{"label":"api/app.db","description":"Beside the api"}],"multi_select":false}}"#;
+
+    /// The hook's cwd drifts below the session root the moment the agent `cd`s
+    /// into a subproject; the session still owns it. Containment is by path
+    /// component, so a sibling with a shared name prefix never matches.
+    #[test]
+    fn session_owns_cwd_is_component_wise_containment() {
+        assert!(session_owns_cwd("/w/app", "/w/app"));
+        assert!(session_owns_cwd("/w/app", "/w/app/api"));
+        assert!(session_owns_cwd("/w/app/", "/w/app/api/src"));
+        assert!(!session_owns_cwd("/w/app", "/w/app2"));
+        assert!(!session_owns_cwd("/w/app", "/w"));
+        assert!(!session_owns_cwd("", "/w/app"));
+        assert!(!session_owns_cwd("/w/app", ""));
+    }
 
     /// Option answers resolve to their PICKER POSITION by label, digit, or unique
     /// prefix, case-insensitively; anything else is free text (no position).
