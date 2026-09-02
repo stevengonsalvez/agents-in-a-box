@@ -137,7 +137,7 @@ Solid arrows are data/control flow, dashed arrows are writes and feedback, clay 
 ├── worktrees/
 │   ├── by-session/<id>        symlink → real worktree
 │   └── <branch>/              the actual worktree
-├── repo-cache/                cloned remotes
+├── repos/<host>/<owner>/<repo>  cloned remotes (TUI and CLI share this)
 ├── favorites.json             saved repos
 ├── plugins/<name>/            plugin-writable state (gated by capability)
 └── logs/agents-in-a-box-*.jsonl   structured logs (host + plugin stderr)

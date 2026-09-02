@@ -4392,7 +4392,9 @@ fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
 async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
     let tmux_binary = std::ffi::OsString::from("tmux");
     let output = tokio::process::Command::new(tmux_binary)
-        .args(["kill-session", "-t", session_name])
+        // The name says exact, so the target has to be: a bare `-t` resolves
+        // exact, then prefix, then fnmatch.
+        .args(["kill-session", "-t", &format!("={session_name}")])
         .output()
         .await
         .map_err(|error| format!("exact tmux stop failed: {error}"))?;

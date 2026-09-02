@@ -71,7 +71,12 @@ pub fn session_name_for(task_id: &str) -> String {
 /// Best-effort: a session already gone yields a non-zero status that is ignored
 /// (killing an absent session is a harmless no-op).
 pub(crate) async fn kill_session(session_name: &str) {
-    let _ = Command::new("tmux").args(["kill-session", "-t", session_name]).status().await;
+    // `=name` is exact. A bare `-t` resolves exact, then prefix, so a reap of a
+    // dead "ainb-run-abc" could kill a live "ainb-run-abc2".
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &format!("={session_name}")])
+        .status()
+        .await;
 }
 
 /// A spawned interactive tmux session awaiting completion.
@@ -322,7 +327,7 @@ impl TmuxRun {
     /// abort never returns while an orphan pane is still alive.
     async fn kill_and_confirm_reaped(&self) {
         let killed = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session_name])
+            .args(["kill-session", "-t", &format!("={}", self.session_name)])
             .status()
             .await;
         if let Ok(s) = killed {
