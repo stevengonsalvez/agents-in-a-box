@@ -105,6 +105,10 @@ pub struct DaemonsState {
     )>,
     /// What the last hook action reported, shown in the Hooks box.
     hooks_status: Option<String>,
+    /// A tmux session the screen wants attached. Drained by the key handler,
+    /// which owns the app-level pending-action slot; the component itself must
+    /// not reach into `AppState`.
+    attach_request: Option<String>,
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
@@ -113,6 +117,28 @@ struct ActionMenu {
     kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
     cursor: usize,
+    /// The row's state when the menu opened, NOT re-read while it is open: the
+    /// background collector republishes every two seconds, and a menu whose
+    /// entries move under the cursor mid-keystroke acts on the wrong one.
+    row: RowFacts,
+}
+
+/// The parts of a row's status that decide which entries its menu offers.
+#[derive(Debug, Clone, Default)]
+struct RowFacts {
+    /// ATC has no provisioned instance, so every lifecycle verb would bail.
+    unprovisioned: bool,
+    /// ATC has an OS timer installed for an instance that does not exist.
+    orphan: bool,
+}
+
+impl RowFacts {
+    fn of(status: &DaemonStatus) -> Self {
+        Self {
+            unprovisioned: status.reason.contains(crate::fleet::daemons::probe::ATC_UNPROVISIONED),
+            orphan: status.scheduler_orphan.is_some(),
+        }
+    }
 }
 
 /// One entry in the action menu.
@@ -120,6 +146,8 @@ struct ActionMenu {
 enum MenuEntry {
     /// A lifecycle verb.
     Act(Action),
+    /// Attach to the ATC mission-control tmux session.
+    OpenMissionControl,
     /// Show the full error of this row's last failed action.
     ViewError,
 }
@@ -130,12 +158,35 @@ impl ActionMenu {
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
         // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
         // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> =
-            Action::for_kind(self.kind).into_iter().map(MenuEntry::Act).collect();
+        let mut entries: Vec<MenuEntry> = Action::for_kind(self.kind)
+            .into_iter()
+            .filter(|action| self.offers(*action))
+            .map(MenuEntry::Act)
+            .collect();
+        if self.kind == DaemonKind::Atc {
+            entries.push(MenuEntry::OpenMissionControl);
+        }
         if has_error {
             entries.push(MenuEntry::ViewError);
         }
         entries
+    }
+
+    /// Whether this row can act on `action` right now.
+    ///
+    /// An entry that is guaranteed to fail is worse than no entry: it reads as
+    /// the fix and is not one. With no instance provisioned every lifecycle
+    /// verb bails before it looks at the verb, and removing a timer that is
+    /// not orphaned would tear down a live instance's heartbeat.
+    fn offers(&self, action: Action) -> bool {
+        if self.kind != DaemonKind::Atc {
+            return true;
+        }
+        match action {
+            Action::Provision => self.row.unprovisioned,
+            Action::RemoveOrphan => self.row.orphan,
+            _ => !self.row.unprovisioned,
+        }
     }
 }
 
@@ -200,9 +251,14 @@ impl DaemonsState {
 
     /// The daemon the selection is on, if the snapshot has landed.
     fn selected_kind(&mut self) -> Option<DaemonKind> {
+        self.selected_status().map(|status| status.kind)
+    }
+
+    /// The whole selected row, so a caller can read more than its kind.
+    fn selected_status(&mut self) -> Option<DaemonStatus> {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-        guard.rows.get(self.selected).map(|r| r.kind)
+        guard.rows.get(self.selected).cloned()
     }
 
     // ── Action menu ─────────────────────────────────────────────────────────
@@ -217,8 +273,12 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
-        if let Some(kind) = self.selected_kind() {
-            self.menu = Some(ActionMenu { kind, cursor: 0 });
+        if let Some(status) = self.selected_status() {
+            self.menu = Some(ActionMenu {
+                kind: status.kind,
+                cursor: 0,
+                row: RowFacts::of(&status),
+            });
         }
     }
 
@@ -268,6 +328,16 @@ impl DaemonsState {
         };
         match entry {
             MenuEntry::ViewError => self.error_open = Some(kind),
+            MenuEntry::OpenMissionControl => {
+                self.error_open = None;
+                self.menu = None;
+                // Resolving the instance name reads one directory. That is a
+                // keystroke path, not render, so H-D2 does not apply.
+                if let Ok(name) = crate::cli::daemon::atc_target_name() {
+                    self.attach_request =
+                        Some(crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session());
+                }
+            }
             MenuEntry::Act(action) => {
                 // BOTH overlays close. Clearing only `menu` left `error_open`
                 // set with nothing to render it: the screen painted normally but
@@ -330,6 +400,11 @@ impl DaemonsState {
             self.inflight.remove(id);
             self.outcomes.insert(id, outcome);
         }
+    }
+
+    /// Take the pending tmux attach, if the menu asked for one.
+    pub fn take_attach_request(&mut self) -> Option<String> {
+        self.attach_request.take()
     }
 
     /// Install or repair the hooks off the UI thread.
@@ -633,6 +708,7 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     for (i, entry) in entries.iter().enumerate() {
         let label = match entry {
             MenuEntry::Act(a) => a.id(),
+            MenuEntry::OpenMissionControl => "open mission control",
             MenuEntry::ViewError => "view last error",
         };
         let selected = i == menu.cursor;
@@ -1433,6 +1509,65 @@ mod tests {
     /// A failure belongs to the daemon it happened to. The row shows a badge
     /// plus the way to read the rest, and the full text is one Enter away.
     #[test]
+    /// The reported complaint: an ATC with no instance offered start, restart
+    /// and stop, all three of which bail before they read the verb, and the
+    /// only real fix was a CLI command quoted in the error.
+    #[test]
+    fn an_unprovisioned_atc_offers_provisioning_instead_of_dead_verbs() {
+        let mut row = status(DaemonKind::Atc, DaemonState::Stopped, false, None);
+        row.reason = format!(
+            "{}, but a heartbeat timer for 'main' is installed and failing every interval",
+            crate::fleet::daemons::probe::ATC_UNPROVISIONED
+        );
+        row.scheduler_orphan = Some("main".to_string());
+        let mut state = seeded_state(vec![row]);
+
+        state.open_menu();
+        let menu = state.menu.as_ref().expect("menu opened");
+        let entries = menu.entries(false);
+
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::Provision)),
+            "provisioning must be offered: {entries:?}"
+        );
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::RemoveOrphan)),
+            "the orphan timer must be removable: {entries:?}"
+        );
+        assert!(
+            entries.contains(&MenuEntry::OpenMissionControl),
+            "mission control must be reachable: {entries:?}"
+        );
+        for dead in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                !entries.contains(&MenuEntry::Act(dead)),
+                "{} would bail on an unprovisioned ATC: {entries:?}",
+                dead.id()
+            );
+        }
+    }
+
+    /// The mirror image: a provisioned ATC must not be offered a `provision`
+    /// that would reset its meta, nor a teardown of a timer that is doing its
+    /// job.
+    #[test]
+    fn a_provisioned_atc_keeps_the_lifecycle_verbs_and_hides_provisioning() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Running,
+            true,
+            Some("main"),
+        )]);
+
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opened").entries(false);
+
+        assert!(entries.contains(&MenuEntry::Act(Action::Restart)));
+        assert!(!entries.contains(&MenuEntry::Act(Action::Provision)));
+        assert!(!entries.contains(&MenuEntry::Act(Action::RemoveOrphan)));
+    }
+
+    #[test]
     fn a_failed_action_badges_its_own_row_and_its_detail_is_readable() {
         let mut state = seeded_state(vec![status(
             DaemonKind::Atc,
@@ -1460,9 +1595,11 @@ mod tests {
         );
 
         state.open_menu();
-        // start, restart, stop, then `view last error` — the entry only exists
-        // because this row HAS an error.
-        state.move_menu(3);
+        // `view last error` is always last, and it exists only because this row
+        // HAS an error. Saturating to the end rather than counting entries: the
+        // count moves whenever a row gains an action, and this test is about
+        // the error view, not the menu's length.
+        state.move_menu(isize::MAX);
         state.confirm_menu();
         let out = render_to_string(&mut state, 120, 24);
         assert!(

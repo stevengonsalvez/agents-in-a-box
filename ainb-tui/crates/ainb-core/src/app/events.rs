@@ -3115,6 +3115,13 @@ impl EventHandler {
             KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
             KeyCode::Enter if daemons.has_overlay() => {
                 daemons.confirm_menu();
+                // The component cannot reach into AppState, so an entry that
+                // needs to leave the TUI (attaching to the ATC session) parks
+                // the request and the handler, which owns the slot, drains it.
+                if let Some(session) = daemons.take_attach_request() {
+                    state.pending_async_action =
+                        Some(crate::app::state::AsyncAction::AttachToOtherTmux(session));
+                }
                 return None;
             }
             KeyCode::Enter => {
