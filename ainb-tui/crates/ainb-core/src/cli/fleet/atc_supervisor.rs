@@ -250,7 +250,7 @@ async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconc
                 // resurrecting a session the daemon had already given up on.
                 // A genuinely recovered session drops off the ERR roster and
                 // regains its budget through the normal recovery rule.
-                match seal_ledger_for_handoff(&meta).await {
+                match seal_ledger_for_handoff(meta).await {
                     Ok(0) => {}
                     Ok(n) => out.notes.push(format!(
                         "retry ledger handed over from the daemon: {n} erroring session(s) sealed \
@@ -439,7 +439,7 @@ fn live_lite_pid(name: &str) -> Option<u32> {
 ///
 /// Shares [`crate::cli::daemon::stop_by_heartbeat_pid`], which does the
 /// pid-identity check. A recorded pid that merely happens to be ALIVE is not
-/// evidence: the OS recycles pids, so a scanner that was SIGKILLed leaves a
+/// evidence: the OS recycles pids, so a scanner that was `SIGKILL`ed leaves a
 /// tombstone that would otherwise make us signal a stranger's process and report
 /// a successful stop.
 fn stop_lite_supervisor(name: &str) -> Option<u32> {
