@@ -3392,10 +3392,12 @@ ATC
 Usage: ainb daemon atc [OPTIONS] <COMMAND>
 
 Commands:
-  start    Bring it up
-  restart  Take it down and bring it back up
-  stop     Take it down
-  help     Print this message or the help of the given subcommand(s)
+  start          Bring it up
+  restart        Take it down and bring it back up
+  stop           Take it down
+  provision      Provision the instance and bring it up, creating it if absent
+  remove-orphan  Remove a heartbeat timer whose instance does not exist
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3441,6 +3443,36 @@ $ ainb daemon atc stop --help
 Take it down
 
 Usage: ainb daemon atc stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc provision`
+
+Provision the instance and bring it up, creating it if absent
+
+```console
+$ ainb daemon atc provision --help
+Provision the instance and bring it up, creating it if absent
+
+Usage: ainb daemon atc provision [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc remove-orphan`
+
+Remove a heartbeat timer whose instance does not exist
+
+```console
+$ ainb daemon atc remove-orphan --help
+Remove a heartbeat timer whose instance does not exist
+
+Usage: ainb daemon atc remove-orphan [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
