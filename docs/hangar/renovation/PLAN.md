@@ -19,6 +19,32 @@ are NOT ACP: they run as provider CLI subprocesses (headless `claude -p` stream-
 detached tmux session). ACP exists and works, for fleet chat only. Every screen holds the
 data and paints the ULID.
 
+## The execution view (the requirement both tracks serve)
+
+Open a ticket, expand its execution view, watch the run. This is how Multica does it: the
+issue page carries an execution log (runs of this issue, running on top, failed first),
+each run expands into a transcript with the five-kind taxonomy (agent text, thinking, tool
+call, result, error) that fills live over the socket, and a sticky live card above it says
+"agent is working · 7m 17s · 10 tool calls". Hangar gets the same view, and it must look
+identical whether the run came from `claude -p`, `codex exec --json` or an ACP adapter:
+
+```
+ticket ─▶ [execution view]
+            runs of this issue (running on top, failed first)      ◔ impl-1  running 2m     ▶ expand
+                                                                    ✗ rev-1   failed 9m       exit 65
+                                                                    ● impl-1  done 21m        PR #7 ✓
+            expanded run ──▶ transcript, live                        ● text     Registering the route…
+                             same classifier for every executor      ▸ tool     Edit api/src/routes.ts
+                                                                     ✓ result   3 files changed
+                                                                     ⚠ error    npm test exit 1
+```
+
+Acceptance: a run started under each executor shows the same `(kind, body)` sequence live
+in the expanded view as the durable re-read returns after it finishes (track A test T1),
+and the view is reachable from the ticket in one key (track B4). Today neither half exists:
+`HangarEvent::TaskMessage` has consumers but no producer, and task detail never fetches
+the timeline it could already read.
+
 ## Two tracks
 
 ```
@@ -41,7 +67,7 @@ half-builds across them: B3 renders the same attention rows A3 makes answerable 
 ### Move 1: two first-class executors, one live run-event stream (detail: `move1-acp-tasks.md`)
 
 Operator requirements folded in: BOTH `claude -p` (stream-json) and ACP are first-class
-task executors, BOTH stream results back to the task live, selection is
+task executors, BOTH stream results back to the task live into the execution view above, selection is
 `HANGAR_TASK_EXECUTOR=acp|process` (default `process` until ACP is proven) with a per-agent
 override later. Structured human-in-the-loop is ACP-only in move 1; the process path keeps
 the hook route for AskUserQuestion.
@@ -89,7 +115,7 @@ recorded before/after with a vhs tape under `docs/hangar/proofs/crisp/`.
 | B1 | Resolve every id to a name: agent names on task detail, usage, cards; inbox lines as `<agent> <verb> <HGR-n> <title>`; transcript backfill on open; R-on-done note; roster refresh on wizard open; `@` filter cursor; Ctrl+U in rename; branch elide; failed-first ordering (defects 5-9, 12, 21) | M | task detail says `Agent: impl-1`, inbox reads as sentences, detail opens with a transcript |
 | B2 | Cards and hint bars: card footer swaps by state (`◔ impl-1 · running 2m · PR ✓`, `● impl-1 · ASK 40s`, `◇ blocked by MHAJBV`), `◇ None` never prints, hint grammar (5 contextual + 3 globals, verb first), Boards' second hint band deleted, `N working` chip wired, one `vocab.rs` for status words | M | idle, running and asking cards side by side; Boards with one hint bar |
 | B3 | Inbox becomes the one attention surface: `needs you` block (attention rows, inline answer lifted from Control Center) above `recent` (inbox entries recomposed), filters; the board chip and Control tab become views of it | M | the P3 human loop driven entirely from `I` |
-| B4 | Detail screen: sticky live run card (`◔ impl-1 is working · 7m 17s · 10 tools · $0.42`), one meta line, transcript + activity panes, facet panel gone; keeps the `Acceptance: 0/3` / `Props:` / `Meta:` literals four tripwires assert | M | run card ticking while the transcript streams |
+| B4 | Detail screen = the execution view: sticky live run card (`◔ impl-1 is working · 7m 17s · 10 tools · $0.42`), one meta line, execution log (runs of this issue from `run_history`, running on top, failed first, `enter` expands), transcript pane fed by `board_card_timeline` now and by the live `TaskMessage` stream once A2 lands, activity pane, facet panel gone; keeps the `Acceptance: 0/3` / `Props:` / `Meta:` literals four tripwires assert | M | run card ticking while the expanded run streams |
 | B5 | Tab strip 16 to 7 (`1 2 K B I A ,` plus `? q`), nine screens behind `^P Go:` and Settings, `Kanban` relabelled `Runs`, help rewritten; add `palette_reaches_every_demoted_screen` | S | 7 tabs at 80 columns, `^P usage` still lands |
 
 Do not attempt in track B (they belong to the spine): collapsing issue/card/task state, any
