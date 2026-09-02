@@ -208,9 +208,12 @@ fn format_code_block(
     );
 
     // Check if we should use highlighting (only for known languages)
-    let use_highlighting = language.is_some() &&
-        std::env::var("NO_COLOR").is_err() && // Respect NO_COLOR env var
-        std::env::var("AGENTS_BOX_SYNTAX_HIGHLIGHT").unwrap_or_else(|_| "true".to_string()) == "true";
+    let use_highlighting = language.is_some()
+        && std::env::var("NO_COLOR").is_err() // Respect NO_COLOR env var
+        && crate::config::tunables::resolved_bool(
+            "AGENTS_BOX_SYNTAX_HIGHLIGHT",
+            crate::config::tunables::snapshot().general.syntax_highlight,
+        );
 
     // Format code lines with optional syntax highlighting
     let formatted_lines = if use_highlighting {

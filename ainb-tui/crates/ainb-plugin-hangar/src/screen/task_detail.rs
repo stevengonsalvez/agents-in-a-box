@@ -122,6 +122,29 @@ impl TaskLifecycle {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
+
+    /// Map a task wire `status` (the `tasks_list` snapshot vocabulary) onto the
+    /// lifecycle, so a detail screen opened AFTER the task finalized still gates
+    /// retry / cancel correctly. Live task events keep overriding this seed; an
+    /// unknown status maps to `None` and the caller keeps its current value.
+    ///
+    /// Without this seed the reducer's default [`TaskLifecycle::Queued`] sticks
+    /// for any task that reached a terminal state before the screen subscribed
+    /// (e.g. a dispatch that failed in milliseconds), leaving `R` permanently
+    /// dead on a task the screen itself reports as failed.
+    #[must_use]
+    pub fn from_wire_status(status: &str) -> Option<Self> {
+        use ainb_hangar_core::task_status::TaskStatus;
+        // Exhaustive over the store's status enum: a new variant fails to
+        // compile here instead of silently leaving `R` dead on a seeded screen.
+        Some(match TaskStatus::parse(status)? {
+            TaskStatus::Queued | TaskStatus::Dispatched => Self::Queued,
+            TaskStatus::Running => Self::Running,
+            TaskStatus::Done => Self::Succeeded,
+            TaskStatus::Failed => Self::Failed,
+            TaskStatus::Cancelled => Self::Cancelled,
+        })
+    }
 }
 
 /// One line in the transcript: a typed transcript message or an interleaved
@@ -352,6 +375,12 @@ impl TaskDetailState {
     #[must_use]
     pub const fn lifecycle(&self) -> TaskLifecycle {
         self.lifecycle
+    }
+
+    /// Seed the lifecycle from the bound task's snapshot status at open time.
+    /// Live task events folded afterwards keep overriding this value.
+    pub const fn seed_lifecycle(&mut self, lifecycle: TaskLifecycle) {
+        self.lifecycle = lifecycle;
     }
 
     /// Iterate the raw transcript in arrival order.
@@ -2427,5 +2456,50 @@ mod card_tests {
         let capped = wrap_chars("one two three four five six seven eight", 5, 2);
         assert_eq!(capped.len(), 2);
         assert!(capped[1].ends_with('…'), "overflow ellipsised: {capped:?}");
+    }
+
+    /// Every wire status the store can persist maps onto a lifecycle, and the
+    /// terminal ones gate `R` on. An unknown status maps to `None` (caller keeps
+    /// its current value) — a NEW TaskStatus variant must be added here or the
+    /// seeded screen silently regresses to a dead `R` again.
+    #[test]
+    fn lifecycle_seeds_from_every_wire_status() {
+        use ainb_hangar_core::task_status::TaskStatus;
+        // Driven off the enum's own roster so a new variant reaches this loop.
+        for status in TaskStatus::ALL {
+            let got = TaskLifecycle::from_wire_status(status.as_str())
+                .unwrap_or_else(|| panic!("status `{}` unmapped", status.as_str()));
+            assert_eq!(
+                got.is_terminal(),
+                status.is_terminal(),
+                "terminal gate for `{}` must agree with the store",
+                status.as_str()
+            );
+        }
+        assert_eq!(
+            TaskLifecycle::from_wire_status("queued"),
+            Some(TaskLifecycle::Queued)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("dispatched"),
+            Some(TaskLifecycle::Queued)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("running"),
+            Some(TaskLifecycle::Running)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("done"),
+            Some(TaskLifecycle::Succeeded)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("failed"),
+            Some(TaskLifecycle::Failed)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("cancelled"),
+            Some(TaskLifecycle::Cancelled)
+        );
+        assert_eq!(TaskLifecycle::from_wire_status("nonsense"), None);
     }
 }

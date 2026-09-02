@@ -32,6 +32,24 @@ pub enum Action {
     /// screen is where a user already goes to reason about it. Offered only for
     /// [`DaemonKind::HangarDaemon`]; see `Action::for_kind`.
     Pair,
+    /// Switch the ATC supervisor to LITE mode (no LLM).
+    ///
+    /// Also not a lifecycle verb: it neither starts nor stops the daemon, it
+    /// changes which controller *is* the daemon. Offered only on
+    /// [`DaemonKind::Atc`], and only the mode the fleet is not already in —
+    /// see `Action::for_atc_mode`.
+    ModeLite,
+    /// Switch the ATC supervisor to FULL mode (scheduled LLM heartbeat).
+    ModeFull,
+    /// Provision an ATC instance and bring it up, without requiring one to
+    /// already exist.
+    ///
+    /// Every other ATC verb goes through [`atc_instance`], which bails when
+    /// nothing is provisioned, so on a host with no instance the row could
+    /// report the fault and offer nothing that fixed it. ATC only.
+    Provision,
+    /// Tear down an OS heartbeat timer whose instance does not exist. ATC only.
+    RemoveOrphan,
 }
 
 impl Action {
@@ -43,6 +61,10 @@ impl Action {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Pair => "pair",
+            Self::ModeLite => "mode-lite",
+            Self::ModeFull => "mode-full",
+            Self::Provision => "provision",
+            Self::RemoveOrphan => "remove-orphan",
         }
     }
 
@@ -54,6 +76,20 @@ impl Action {
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
             "pair" => Some(Self::Pair),
+            "mode-lite" => Some(Self::ModeLite),
+            "mode-full" => Some(Self::ModeFull),
+            "provision" => Some(Self::Provision),
+            "remove-orphan" => Some(Self::RemoveOrphan),
+            _ => None,
+        }
+    }
+
+    /// The supervisor mode this action switches to, if it is a mode switch.
+    #[must_use]
+    pub const fn target_mode(self) -> Option<crate::fleet::atc::SupervisorMode> {
+        match self {
+            Self::ModeLite => Some(crate::fleet::atc::SupervisorMode::Lite),
+            Self::ModeFull => Some(crate::fleet::atc::SupervisorMode::Full),
             _ => None,
         }
     }
@@ -68,11 +104,67 @@ impl Action {
     /// an action that cannot mean anything there.
     #[must_use]
     pub fn for_kind(kind: DaemonKind) -> Vec<Self> {
+        Self::for_kind_in_mode(kind, None)
+    }
+
+    /// The verbs a daemon offers, given the ATC supervisor mode when known.
+    ///
+    /// ATC gets exactly ONE mode entry: the mode it is not in. Offering both
+    /// would put "switch to the mode you are already in" on the menu, which is
+    /// either a no-op or, worse, reads as a state the fleet might not be in.
+    /// `None` means the mode could not be read (no instance, unreadable meta),
+    /// and then no mode verb is offered at all rather than a guessed one.
+    #[must_use]
+    pub fn for_kind_in_mode(
+        kind: DaemonKind,
+        atc_mode: Option<crate::fleet::atc::SupervisorMode>,
+    ) -> Vec<Self> {
         let mut verbs = Self::ALL.to_vec();
         if matches!(kind, DaemonKind::HangarDaemon) {
             verbs.push(Self::Pair);
         }
+        if matches!(kind, DaemonKind::Atc) {
+            if let Some(mode) = atc_mode {
+                verbs.push(match mode.other() {
+                    crate::fleet::atc::SupervisorMode::Lite => Self::ModeLite,
+                    crate::fleet::atc::SupervisorMode::Full => Self::ModeFull,
+                });
+            }
+            verbs.push(Self::Provision);
+            verbs.push(Self::RemoveOrphan);
+        }
         verbs
+    }
+
+    /// Every verb a daemon accepts on the COMMAND LINE.
+    ///
+    /// Differs from the TUI menu ([`Self::for_kind_in_mode`]) on purpose: the
+    /// menu hides the mode you are already in, but `--help` must document both
+    /// mode verbs, and a script must be able to assert a mode without first
+    /// reading which one is current.
+    #[must_use]
+    pub fn cli_verbs(kind: DaemonKind) -> Vec<Self> {
+        let mut verbs = Self::for_kind(kind);
+        if matches!(kind, DaemonKind::Atc) {
+            verbs.push(Self::ModeLite);
+            verbs.push(Self::ModeFull);
+        }
+        verbs
+    }
+
+    /// Menu label. Mode switches say what they switch TO, not a bare verb.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+            Self::Pair => "pair",
+            Self::ModeLite => "switch to lite mode",
+            Self::ModeFull => "switch to full mode",
+            Self::Provision => "provision",
+            Self::RemoveOrphan => "remove-orphan",
+        }
     }
 }
 
@@ -108,7 +200,7 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
     }
     let kind = kind_from_id(kind_id).with_context(|| format!("unknown daemon: {kind_id}"))?;
     let Some((verb, _)) = sub.subcommand() else {
-        bail!("expected start, stop, or restart — try `ainb daemon {kind_id} --help`")
+        bail!("expected a verb, e.g. start; `ainb daemon {kind_id} --help` lists them all")
     };
     let action = Action::from_id(verb).with_context(|| format!("unknown action: {verb}"))?;
     let report = control(kind, action).await?;
@@ -123,6 +215,16 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
 pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
     // Pairing is not a lifecycle verb and only the Codex transport has one, so
     // it never reaches the per-daemon handlers below.
+    if let Some(mode) = action.target_mode() {
+        return if matches!(kind, DaemonKind::Atc) {
+            atc_set_mode(mode)
+        } else {
+            bail!(
+                "mode switching is an ATC supervisor concept; `{}` has no modes",
+                kind.display_name()
+            )
+        };
+    }
     if action == Action::Pair {
         return if matches!(kind, DaemonKind::HangarDaemon) {
             codex_pair()
@@ -152,7 +254,13 @@ fn release_checker(action: Action) -> Result<String> {
             crate::cli::update::disable_schedule().context("disable daily release checker")?;
             Ok("daily release checker disabled".to_string())
         }
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
@@ -203,7 +311,15 @@ fn mcp_pool(action: Action) -> Result<String> {
             Ok("mcp pool restarted".to_string())
         }
         // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
@@ -232,7 +348,15 @@ async fn headroom(action: Action) -> Result<String> {
             Ok("headroom proxy restarted".to_string())
         }
         // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
@@ -252,7 +376,15 @@ fn notifyd(kind: DaemonKind, action: Action) -> Result<String> {
         Action::Start | Action::Restart => "restart",
         Action::Stop => "stop",
         // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     };
     delegate(&["notifyd", verb]).map(|out| format!("{out}{note}"))
 }
@@ -278,18 +410,261 @@ fn atc_instance() -> Result<String> {
     }
 }
 
-fn atc(action: Action) -> Result<String> {
+/// Respawn a dead ATC session WITHOUT resetting the instance's configuration.
+///
+/// `fleet atc setup` rebuilds meta from `AtcMeta::new` and applies only the
+/// flags it is given, so a bare `setup <name>` silently resets an instance
+/// provisioned at 10m back to the 15m default, and flips a deliberately
+/// disabled heartbeat back on. Pressing Start must not reconfigure anything,
+/// so the current values are read off meta.json and passed straight back.
+fn respawn_atc_session(name: &str) -> Result<String> {
+    let home = crate::fleet::plumbing::paths::ainb_home()?;
+    let paths = crate::fleet::atc::paths::AtcPaths::under_root(&home.join("atc"), name);
+    let meta = std::fs::read_to_string(&paths.meta)
+        .ok()
+        .and_then(|raw| crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok())
+        .with_context(|| {
+            format!(
+                "reading {} to respawn without reconfiguring it",
+                paths.meta.display()
+            )
+        })?;
+    let interval = meta.heartbeat_interval_min.to_string();
+    let idle_pause = meta.idle_pause_min.to_string();
+    let mut argv = vec![
+        "fleet",
+        "atc",
+        "setup",
+        name,
+        "--interval",
+        &interval,
+        "--idle-pause",
+        &idle_pause,
+    ];
+    if !meta.heartbeat_enabled {
+        argv.push("--no-heartbeat");
+    }
+    delegate(&argv)
+}
+
+/// Read the supervisor mode of the single provisioned instance, when there is
+/// exactly one and its meta parses. `None` everywhere else — a guessed mode
+/// would put the wrong switch on the Daemons menu.
+#[must_use]
+pub fn atc_mode() -> Option<crate::fleet::atc::SupervisorMode> {
+    atc_named_mode().map(|(_, mode)| mode)
+}
+
+/// The single provisioned instance's name AND mode, when both are unambiguous.
+///
+/// Callers that report a refusal need the NAME: "ATC 'tower (lite)' is
+/// supervising this fleet" is actionable on a host running many things, and
+/// "ATC 'lite supervisor'" is not.
+#[must_use]
+pub fn atc_named_mode() -> Option<(String, crate::fleet::atc::SupervisorMode)> {
+    let name = atc_instance().ok()?;
+    let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
+    let paths = crate::fleet::atc::paths::AtcPaths::under_root(&root, &name);
+    let raw = std::fs::read_to_string(&paths.meta).ok()?;
+    let mode = crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok()?.mode;
+    Some((name, mode))
+}
+
+/// Switch the supervisor mode by delegating to the verb that owns the
+/// transition. Reimplementing the stop-then-start ordering here is how a fleet
+/// ends up briefly owned by two controllers.
+fn atc_set_mode(mode: crate::fleet::atc::SupervisorMode) -> Result<String> {
     let name = atc_instance()?;
+    delegate(&["fleet", "atc", "mode", &name, "--set", mode.id()])
+}
+
+/// The ATC instance the screen and the provisioning verbs act on.
+///
+/// A leftover instance directory names itself, and reusing that name is what
+/// keeps an existing task-log and state file attached to the instance the
+/// heartbeat was already aimed at. Falls back to `main`, which is what
+/// `fleet atc setup` has always defaulted to in practice.
+pub fn atc_target_name() -> Result<String> {
+    Ok(unprovisioned_atc_names()?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "main".to_string()))
+}
+
+/// Names with something on disk but no `meta.json`: leftovers, not instances.
+///
+/// The only names `provision` and `remove-orphan` may act on. Acting on a
+/// PROVISIONED name would reset a live instance's config or unload a heartbeat
+/// that is doing its job, and on a host with several instances the
+/// alphabetically-first directory is very likely to be one of those.
+///
+/// Leftover DIRECTORIES and installed UNITS both count: deleting an instance
+/// dir does not remove its unit, and that unit keeps firing.
+fn unprovisioned_atc_names() -> Result<Vec<String>> {
+    use crate::fleet::atc::paths::{list_instance_dirs_in, list_instance_names_in};
+    let home = crate::fleet::plumbing::paths::ainb_home()?;
+    let root = home.join("atc");
+    let provisioned = list_instance_names_in(&root);
+    // Units are named for an instance and live in the user's own launchd /
+    // systemd directory, with no idea which ainb home provisioned them. Reading
+    // them while pointed at a DIFFERENT home would classify that home's live
+    // timer as an orphan, and remove-orphan would then delete it.
+    let units = if crate::fleet::atc::paths::ainb_home().map(|d| d == home).unwrap_or(false) {
+        crate::fleet::atc::timer::installed_instance_names()
+    } else {
+        Vec::new()
+    };
+    let mut names: Vec<String> = list_instance_dirs_in(&root)
+        .into_iter()
+        .chain(units)
+        .filter(|name| !provisioned.contains(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn atc(action: Action) -> Result<String> {
+    // Provisioning and orphan removal are the two verbs that must work when
+    // there is NO instance, so they resolve their own name instead of going
+    // through `atc_instance`, which exists to refuse exactly that case.
     match action {
-        // `repair` re-asserts the OS timer and the daemon registration, which is
-        // exactly what starting a stopped ATC means.
-        Action::Start | Action::Restart => delegate(&["fleet", "atc", "repair", &name]),
+        Action::Provision => {
+            // A bare `setup` rebuilds meta from defaults, so running it on an
+            // instance that already exists silently resets a deliberately
+            // tuned interval or a disabled heartbeat. Restart is the verb for
+            // an existing instance; it preserves that config.
+            // NOT `atc_instance()`: that returns Err for two-or-more
+            // instances as well as for none, so it would wave the clobber
+            // through on exactly the host with the most to lose.
+            let provisioned = crate::fleet::atc::paths::list_instance_names_in(
+                &crate::fleet::plumbing::paths::ainb_home()?.join("atc"),
+            );
+            if !provisioned.is_empty() {
+                bail!(
+                    "ATC already provisioned ({}); use restart instead",
+                    provisioned.join(", ")
+                );
+            }
+            let name = atc_target_name()?;
+            return delegate(&["fleet", "atc", "setup", &name]);
+        }
+        Action::RemoveOrphan => {
+            // Only ever an UNPROVISIONED name. Tearing the timer off a live
+            // instance would silently stop its heartbeat, and the leftover
+            // directory the operator meant would survive.
+            let Some(name) = unprovisioned_atc_names()?
+                .into_iter()
+                .find(|name| crate::fleet::atc::timer::is_installed(name))
+            else {
+                return Ok("no orphaned heartbeat timer to remove".to_string());
+            };
+            let removed = crate::fleet::atc::timer::teardown(&name)
+                .with_context(|| format!("removing the heartbeat timer for '{name}'"))?;
+            return Ok(if removed.is_empty() {
+                format!("no heartbeat timer installed for '{name}'")
+            } else {
+                format!(
+                    "removed {} for '{name}'",
+                    removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )
+            });
+        }
+        _ => {}
+    }
+    let name = atc_instance()?;
+    // In LITE mode the controller is the scanner process, not the timer and not
+    // the brain session. Routing Start/Stop at the full-mode machinery would
+    // "start" an ATC by re-asserting a scheduler the mode has no use for, and
+    // "stop" one by tearing down an instance whose scanner kept running.
+    if atc_mode() == Some(crate::fleet::atc::SupervisorMode::Lite) {
+        return match action {
+            Action::Start => {
+                crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
+                Ok(format!("ATC '{name}' lite scanner running"))
+            }
+            Action::Restart => {
+                // Same rule as the fleet daemon: an unverified stop must never be
+                // followed by a start, or the restart button becomes the way two
+                // scanners end up owning one fleet.
+                match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
+                    StopOutcome::Unverified(pid) => {
+                        bail!(unverified_stop_message("lite scanner", pid))
+                    }
+                    stopped => {
+                        // `restart_lite`, not `ensure_lite_running`: the signalled
+                        // process is still alive for a moment, and starting into
+                        // that window early-returns "already running" and then
+                        // leaves the fleet with nothing.
+                        let signalled = match stopped {
+                            StopOutcome::Signalled(pid) => Some(pid),
+                            _ => None,
+                        };
+                        crate::cli::fleet::atc_supervisor::restart_lite(&name, signalled)?;
+                        Ok(signalled.map_or_else(
+                            || format!("ATC '{name}' lite scanner started"),
+                            |pid| {
+                                format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
+                            },
+                        ))
+                    }
+                }
+            }
+            Action::Stop => match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
+                StopOutcome::Signalled(pid) => {
+                    Ok(format!("ATC '{name}' lite scanner stopped (pid {pid})"))
+                }
+                StopOutcome::NotRunning => Ok(format!("ATC '{name}' lite scanner was not running")),
+                StopOutcome::Unverified(pid) => bail!(unverified_stop_message("lite scanner", pid)),
+            },
+            // Unreachable here: provision / remove-orphan are matched ABOVE
+            // this branch, because they must work with no instance at all —
+            // and `control` intercepts pair and the mode switches.
+            Action::Provision
+            | Action::RemoveOrphan
+            | Action::Pair
+            | Action::ModeLite
+            | Action::ModeFull => {
+                bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+            }
+        };
+    }
+    match action {
+        // ATC has two halves and they fail independently. `repair` re-asserts
+        // the SCHEDULER (OS timer + daemon registration); it does nothing about
+        // the Claude session the scheduler beats into. Starting an ATC whose
+        // session has died must respawn the session, and `setup` is the verb
+        // that does it: idempotent, and it preserves state.json / task-log.md.
+        //
+        // Routing everything through `repair` is why "start" failed with
+        // "the daemon did NOT accept the unregister" on a host whose only
+        // actual fault was a dead tmux session: the wrong half was being fixed,
+        // and the scheduler guard then refused a change it did not need.
+        Action::Start | Action::Restart => {
+            let session = crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session();
+            // Only a PROVEN dead session takes the respawn path. `None` means
+            // the check could not run, and guessing "dead" there would rewrite
+            // a healthy instance's config for an environment problem.
+            if crate::tmux::session_alive(&session) == Some(false) {
+                respawn_atc_session(&name)
+            } else {
+                delegate(&["fleet", "atc", "repair", &name])
+            }
+        }
         // No confirmation flag: `fleet atc teardown` takes only <name> and
         // --purge. Passing --yes made clap reject the whole invocation, so
         // `stop` failed every time.
         Action::Stop => delegate(&["fleet", "atc", "teardown", &name]),
         // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
@@ -306,11 +681,29 @@ fn bridge(action: Action) -> Result<String> {
             delegate(&["fleet", "bridge", "install"])
         }
         // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
 // ── Fleet daemon ────────────────────────────────────────────────────────────
+
+/// The refusal shown when a stop cannot prove what it would be signalling.
+fn unverified_stop_message(what: &str, pid: u32) -> String {
+    format!(
+        "cannot stop the {what}: pid {pid} is alive but its start time does not match the \
+heartbeat, so it is probably a recycled pid belonging to another program — and might not be. \
+Refusing to signal it, and refusing to start a second one over it. Check `ps -p {pid}` and \
+either kill it yourself or delete the stale heartbeat."
+    )
+}
 
 fn fleet_daemon(action: Action) -> Result<String> {
     match action {
@@ -318,34 +711,89 @@ fn fleet_daemon(action: Action) -> Result<String> {
             detach(&["fleet", "daemon"])?;
             Ok("fleet daemon started".to_string())
         }
-        Action::Stop => match stop_by_heartbeat_pid("fleet-daemon") {
-            Some(pid) => Ok(format!("fleet daemon stopped (pid {pid})")),
-            None => Ok("fleet daemon was not running".to_string()),
+        Action::Stop => match stop_by_heartbeat_pid_checked("fleet-daemon") {
+            StopOutcome::Signalled(pid) => Ok(format!("fleet daemon stopped (pid {pid})")),
+            StopOutcome::NotRunning => Ok("fleet daemon was not running".to_string()),
+            StopOutcome::Unverified(pid) => bail!(unverified_stop_message("fleet daemon", pid)),
         },
         Action::Restart => {
-            let stopped = stop_by_heartbeat_pid("fleet-daemon");
-            detach(&["fleet", "daemon"])?;
-            Ok(match stopped {
-                Some(pid) => format!("fleet daemon restarted (replaced pid {pid})"),
-                None => "fleet daemon started".to_string(),
-            })
+            // An UNVERIFIED stop must not be followed by a start. Reading it as
+            // "nothing was running" is how you end up with two auto-continue
+            // watchers sending into the same pane — the failure this whole
+            // supervisor exists to prevent, reintroduced by a restart button.
+            match stop_by_heartbeat_pid_checked("fleet-daemon") {
+                StopOutcome::Unverified(pid) => bail!(unverified_stop_message("fleet daemon", pid)),
+                stopped => {
+                    detach(&["fleet", "daemon"])?;
+                    Ok(match stopped {
+                        StopOutcome::Signalled(pid) => {
+                            format!("fleet daemon restarted (replaced pid {pid})")
+                        }
+                        _ => "fleet daemon started".to_string(),
+                    })
+                }
+            }
         }
-        // Unreachable: `control` intercepts Pair before any handler.
-        Action::Pair => bail!("`pair` is not a lifecycle verb for this daemon"),
+        // Unreachable: `control` intercepts pair and the mode switches before
+        // any handler, and provision / remove-orphan are offered by
+        // `Action::for_kind` on ATC only.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
+        }
     }
 }
 
-/// SIGTERM the pid a daemon's own heartbeat recorded, if it is still alive.
+/// What a stop attempt actually established.
 ///
-/// The heartbeat is the daemon's own claim about which process it is, which is
-/// a better answer than matching on a process name — that would happily kill
-/// somebody else's `ainb fleet daemon` in another checkout.
-fn stop_by_heartbeat_pid(name: &str) -> Option<u32> {
-    use crate::fleet::daemons::heartbeat::DaemonHeartbeat;
-    let pid = DaemonHeartbeat::read(name)?.pid;
-    let target = nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?);
-    nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).ok()?;
-    Some(pid)
+/// Three outcomes, not two. The old bool-ish `Option<u32>` could not say
+/// "a process is alive at that pid but I cannot prove it is the daemon", and a
+/// caller that reads that as "nothing was running" will happily start a SECOND
+/// one alongside the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// The recorded process was proven to be the daemon and was signalled.
+    Signalled(u32),
+    /// No heartbeat, or its process is gone. Nothing to stop.
+    NotRunning,
+    /// A live process holds the recorded pid but its start instant does not
+    /// match the heartbeat, so it is very likely a recycled pid — and might not
+    /// be. Signalling it could kill a stranger; assuming it is dead could double
+    /// the daemon. Neither is ours to choose silently.
+    Unverified(u32),
+}
+
+/// SIGTERM the process a daemon's own heartbeat recorded, but only when that
+/// process is provably still the one that wrote the heartbeat.
+///
+/// LIVENESS IS NOT IDENTITY: the OS recycles pids, so a daemon that was
+/// SIGKILLed leaves a tombstone whose pid may now belong to somebody's editor.
+pub(crate) fn stop_by_heartbeat_pid_checked(name: &str) -> StopOutcome {
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+    let Some(hb) = DaemonHeartbeat::read(name) else {
+        return StopOutcome::NotRunning;
+    };
+    match pid_identity(hb.pid, hb.started_at) {
+        PidCheck::Dead => StopOutcome::NotRunning,
+        PidCheck::Recycled => StopOutcome::Unverified(hb.pid),
+        PidCheck::Matched => {
+            let Ok(raw) = i32::try_from(hb.pid) else {
+                return StopOutcome::Unverified(hb.pid);
+            };
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::Signal::SIGTERM,
+            ) {
+                Ok(()) => StopOutcome::Signalled(hb.pid),
+                // It exited between the identity check and the signal.
+                Err(nix::errno::Errno::ESRCH) => StopOutcome::NotRunning,
+                Err(_) => StopOutcome::Unverified(hb.pid),
+            }
+        }
+    }
 }
 
 // ── Delegation plumbing ─────────────────────────────────────────────────────
@@ -399,7 +847,7 @@ fn delegate(args: &[&str]) -> Result<String> {
 /// Spawn `ainb <args>` detached, for the daemons whose only implementation runs
 /// in the foreground. Own process group so a Ctrl-C aimed at the launching
 /// terminal never reaches it; output to the daemon log rather than our stdio.
-fn detach(args: &[&str]) -> Result<()> {
+pub(crate) fn detach(args: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let bin = ainb_bin()?;
     let log = crate::fleet::plumbing::paths::ainb_home()?.join("daemons");
@@ -421,6 +869,56 @@ fn detach(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An UNVERIFIED stop must never be followed by a start.
+    ///
+    /// This is the whole reason `StopOutcome` has three variants instead of
+    /// being an `Option<u32>`. With two, "a live process holds that pid but I
+    /// cannot prove it is the daemon" collapsed into "nothing was running", and
+    /// `restart` then detached a SECOND daemon alongside the first — two
+    /// auto-continue watchers sending into the same pane, which is the exact
+    /// failure the ATC supervisor exists to prevent, reintroduced by a button.
+    #[test]
+    fn an_unverified_stop_is_distinguishable_from_nothing_running() {
+        use super::StopOutcome;
+        // The property the callers branch on: exactly one variant means "safe to
+        // start a replacement", and it is not the ambiguous one.
+        let safe_to_replace = |o: StopOutcome| !matches!(o, StopOutcome::Unverified(_));
+        assert!(safe_to_replace(StopOutcome::Signalled(42)));
+        assert!(safe_to_replace(StopOutcome::NotRunning));
+        assert!(
+            !safe_to_replace(StopOutcome::Unverified(42)),
+            "an unprovable stop must block the replacement start"
+        );
+        // And the refusal has to be actionable: it names the pid to inspect.
+        let msg = super::unverified_stop_message("fleet daemon", 4321);
+        assert!(msg.contains("4321"), "{msg}");
+        assert!(msg.contains("ps -p 4321"), "{msg}");
+        assert!(
+            msg.contains("Refusing to signal it"),
+            "must say what it did NOT do: {msg}"
+        );
+    }
+
+    /// Provisioning and orphan removal only mean something for ATC, and every
+    /// other daemon has to refuse them rather than silently matching a
+    /// lifecycle arm.
+    #[test]
+    fn provisioning_verbs_are_offered_only_by_atc() {
+        for kind in super::CONTROLLABLE {
+            let verbs = super::Action::for_kind(kind);
+            let is_atc = matches!(kind, super::DaemonKind::Atc);
+            for verb in [super::Action::Provision, super::Action::RemoveOrphan] {
+                assert_eq!(
+                    verbs.contains(&verb),
+                    is_atc,
+                    "{} offered {}",
+                    kind.id(),
+                    verb.id()
+                );
+            }
+        }
+    }
 
     /// `pair` is offered only by the daemon that owns the Codex transport.
     ///
@@ -500,6 +998,29 @@ mod tests {
             &["notifyd", "restart"],
             &["notifyd", "stop"],
             &["fleet", "atc", "repair", "main"],
+            // Start on a dead session respawns it, passing the instance's own
+            // settings back so nothing is reconfigured.
+            &[
+                "fleet",
+                "atc",
+                "setup",
+                "main",
+                "--interval",
+                "10",
+                "--idle-pause",
+                "60",
+            ],
+            &[
+                "fleet",
+                "atc",
+                "setup",
+                "main",
+                "--interval",
+                "10",
+                "--idle-pause",
+                "60",
+                "--no-heartbeat",
+            ],
             &["fleet", "atc", "teardown", "main"],
             &["fleet", "bridge", "install"],
             &["fleet", "bridge", "uninstall"],

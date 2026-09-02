@@ -9,7 +9,7 @@
 //! calls [`FleetProviderEventRepo::evict_projected_payloads_before`].
 //!
 //! This REVERSES the never-trim stance this header carried from 0071 until
-//! 0093, and the reversal is measurement-driven. That stance rested on a growth
+//! 0094, and the reversal is measurement-driven. That stance rested on a growth
 //! model of "roughly 21 rows per 2 days at a ~344 byte mean payload, ~1.3 MB
 //! per YEAR", which is falsified: measured on a real profile the table is
 //! **372,031 rows / 2,207 MB**, a ~5.9 KB mean payload and three orders of
@@ -66,7 +66,7 @@
 //! times the daily rate).
 //!
 //! This trigger exists because its absence is what let the previous model rot.
-//! From 0071 to 0093 this header asserted ~1.3 MB per YEAR from a ~344 byte
+//! From 0071 to 0094 this header asserted ~1.3 MB per YEAR from a ~344 byte
 //! mean, with nothing to check it against; the real figures were 372k rows /
 //! 2207 MB at a ~5.9 KB mean, and the gap only surfaced when the writer
 //! saturated and session spawn began failing. An age cutoff alone fixes the
@@ -82,7 +82,7 @@
 //! (`source, provider, projection_revision`), never by a predicate the
 //! planner could not prove for a bound `source = ?` parameter.
 //!
-//! 0093's retention index CAN carry `source <> 'acp'` in its predicate, and
+//! 0094's retention index CAN carry `source <> 'acp'` in its predicate, and
 //! that is not a contradiction: the sweep spells all three of its terms as
 //! LITERALS, so the implication is provable at plan time, whereas the recovery
 //! scan binds `source = ?` and nothing about a parameter is provable.
@@ -472,7 +472,7 @@ impl FleetProviderEventRepo {
     /// Blank the payloads of ALREADY-REDUCED projection-source rows observed
     /// before `before_ms`, keeping the rows themselves. Returns rows evicted.
     ///
-    /// The automatic half of this table's retention (0093), driven by
+    /// The automatic half of this table's retention (0094), driven by
     /// `ainb-hangar-daemon`'s `fleet_provider_retention` sweeper. The header
     /// carries the measurement that overturned the old never-trim stance and
     /// the trade it makes; this is what it does mechanically.
@@ -496,7 +496,7 @@ impl FleetProviderEventRepo {
     ///   cannot re-select it and starve the LIMIT of forward progress.
     ///
     /// `ORDER BY observed_at ASC` is load-bearing, not cosmetic: it is the key
-    /// of `idx_fleet_provider_event_retention` (0093), whose predicate is these
+    /// of `idx_fleet_provider_event_retention` (0094), whose predicate is these
     /// three refusals verbatim so `SQLite` can prove the partial index usable.
     /// Ordering by `ingest_order` instead silently degrades the plan from
     /// `SEARCH ... USING INDEX idx_fleet_provider_event_retention (observed_at<?)`
@@ -837,7 +837,7 @@ mod tests {
 
     /// The digest is the identity that OUTLIVES the payload.
     ///
-    /// Renamed from "every row": since 0093 that is no longer a whole-table
+    /// Renamed from "every row": since 0094 that is no longer a whole-table
     /// invariant, and a test asserting it under the old name would have gone on
     /// passing purely because it seeds one fresh row. This pins what actually
     /// holds after eviction, which is what consumers now depend on.

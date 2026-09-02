@@ -222,6 +222,7 @@ private struct FleetNotchView: View {
                         Button("Claude") { presentation.preferences.filters.provider = .claude }
                         Button("Codex") { presentation.preferences.filters.provider = .codex }
                         Button("Copilot") { presentation.preferences.filters.provider = .copilot }
+                        Button("Antigravity") { presentation.preferences.filters.provider = .antigravity }
                         Button("ACP") { presentation.preferences.filters.provider = .acp }
                         Button("Unknown") { presentation.preferences.filters.provider = .unknown }
                     } label: {
@@ -358,6 +359,7 @@ private struct FleetNotchView: View {
         case .codex: "Codex"
         case .copilot: "Copilot"
         case .acp: "ACP"
+        case .antigravity: "Antigravity"
         case .unknown: "Unknown"
         case nil: "All providers"
         }

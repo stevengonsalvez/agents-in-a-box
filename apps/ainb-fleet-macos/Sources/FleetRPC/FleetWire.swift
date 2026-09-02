@@ -173,7 +173,7 @@ extension TolerantWireEnum {
     }
 }
 
-enum FleetProvider: String, Encodable, Equatable { case claude, codex, copilot, acp, unknown }
+enum FleetProvider: String, Encodable, Equatable { case claude, codex, copilot, acp, antigravity, unknown }
 enum LifecycleState: String, Encodable, Equatable { case starting = "STARTING", running = "RUNNING", turnComplete = "TURN_COMPLETE", idle = "IDLE", exited = "EXITED", unknown = "UNKNOWN" }
 enum AttentionState: String, Encodable, Equatable { case none = "NONE", ask = "ASK", approval = "APPROVAL", waiting = "WAITING", error = "ERROR" }
 enum ManagementState: String, Encodable, Equatable { case managed = "MANAGED", degraded = "DEGRADED" }

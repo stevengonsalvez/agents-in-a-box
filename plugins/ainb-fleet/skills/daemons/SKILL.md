@@ -39,7 +39,7 @@ shows `stopped` with a stale-heartbeat reason here.
 |---|---|---|
 | **phone bridge** | `bridge` | heartbeat file (`~/.agents-in-a-box/daemons/bridge.json`) + pid-identity cross-check |
 | **notifyd** | `notifyd` | PID-file liveness + bound Unix socket + sqlite DB file present |
-| **ATC** | `atc` | most-recently-beating provisioned instance's `heartbeat-state.json` (timer-driven; no resident pid) |
+| **ATC** | `atc` | mode-dependent: in `full`, the most-recently-beating instance's `heartbeat-state.json` (timer-driven; no resident pid); in `lite`, the scan loop's own heartbeat + pid |
 | **fleet daemon** | `fleet-daemon` | heartbeat file + pid-identity cross-check |
 
 Rows are always emitted in this exact order (bridge, notifyd, ATC, fleet
@@ -137,3 +137,12 @@ ainb --format json fleet daemons | jq -r '.[] | select(.reason | test("crash|sta
 - **ATC surfaces as one row.** v1 reports the most-recently-beating provisioned
   instance; the instance name is in the `channel` label. Heartbeat-disabled
   instances are never counted as running, even with a recent leftover beat.
+- **The ATC row's `channel` names the supervisor mode** — `tower · FULL(claude)
+  · every 15m` or `tower · LITE · no LLM`. A lite instance has no scheduler and
+  no brain session, so it is probed by its scan loop instead; one provisioned in
+  lite with no scanner running reads `degraded` (the fleet has a designated
+  owner and that owner is absent), not `stopped`.
+- **The mode is switchable from the row.** Enter on the ATC row offers the mode
+  it is not in, and the screen prints what each mode does inline. It is the same
+  transition `ainb fleet atc mode <name> --set <mode>` performs — the screen
+  shells that verb rather than reimplementing the stop-then-start ordering.

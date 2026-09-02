@@ -1298,7 +1298,7 @@ async fn an_adapter_death_mid_permission_leaves_no_ghost_row() {
         "the fixture process was live"
     );
 
-    // The ask closes on its own, with convergence named as the answerer.
+    // The ask closes on its own, named by whichever path got there first.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let (state, answered_by): (String, Option<String>) =
@@ -1309,7 +1309,19 @@ async fn an_adapter_death_mid_permission_leaves_no_ghost_row() {
                 .expect("attention row");
         if state != "open" {
             assert_eq!(state, "answered", "a ghost ask must be closed, not deleted");
-            assert_eq!(answered_by.as_deref(), Some("hangar-converge"));
+            // Turn end reaches a parked permission before convergence does:
+            // the adapter's death ends the turn, and `finish_turn` retires the
+            // parked set before the receipt commits. Convergence remains the
+            // path for a session with no open turn and for a daemon that died
+            // mid-turn, so accept either author rather than pinning the one
+            // that happens to lose the race.
+            assert!(
+                matches!(
+                    answered_by.as_deref(),
+                    Some("hangar-turn-end" | "hangar-converge")
+                ),
+                "a ghost ask must name the path that closed it, got {answered_by:?}"
+            );
             break;
         }
         assert!(

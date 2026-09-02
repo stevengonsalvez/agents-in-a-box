@@ -8,7 +8,7 @@
 //!
 //! ## Why this exists at all
 //!
-//! `fleet_provider_event` had NO automatic retention from 0071 to 0093, on the
+//! `fleet_provider_event` had NO automatic retention from 0071 to 0094, on the
 //! documented assumption that projection-source rows grow ~1.3 MB per YEAR.
 //! Measured on a real profile: **372,031 rows / 2,207 MB**, a ~5.9 KB mean
 //! payload. At that size the table saturated the single `SQLite` writer and

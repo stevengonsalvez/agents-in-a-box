@@ -105,21 +105,22 @@ fn spawned(marker: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Build a runner whose claude/codex/copilot paths are three DISTINCT fake
+/// Build a runner whose claude/codex/copilot/antigravity paths are four DISTINCT fake
 /// binaries, so a mis-route spawns the wrong one and the identity marker catches
 /// it.
-fn runner_with(claude: PathBuf, codex: PathBuf, copilot: PathBuf) -> Runner {
+fn runner_with(claude: PathBuf, codex: PathBuf, copilot: PathBuf, antigravity: PathBuf) -> Runner {
     Runner::new(RunnerConfig {
         claude_path: claude,
         codex_path: codex,
         copilot_path: copilot,
+        antigravity_path: antigravity,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
     })
 }
 
-/// The three fake providers + a runner wired to them, plus the marker file each
+/// The four fake providers + a runner wired to them, plus the marker file each
 /// fake records its identity in. Every route has a REAL distinct binary, so a
 /// mis-route (right spec, wrong binary) is caught by the marker — not just by the
 /// spec-chosen log file.
@@ -129,6 +130,7 @@ fn runner_with_all(dir: &Path) -> (Runner, PathBuf) {
         fake_provider(dir, "fake-claude.sh", &marker),
         fake_provider(dir, "fake-codex.sh", &marker),
         fake_provider(dir, "fake-copilot.sh", &marker),
+        fake_provider(dir, "fake-antigravity.sh", &marker),
     );
     (runner, marker)
 }
@@ -148,6 +150,10 @@ async fn dispatch(runner: &Runner, backend: Backend, env: &ExecEnv) -> RunOutcom
             .run_copilot(env, std::iter::empty(), &invocation("do the thing"))
             .await
             .expect("run copilot"),
+        Backend::Antigravity => runner
+            .run_antigravity(env, std::iter::empty(), &invocation("do the thing"))
+            .await
+            .expect("run antigravity"),
     }
 }
 
@@ -270,6 +276,52 @@ async fn copilot_backend_takes_copilot_path() {
     );
 }
 
+/// An `antigravity`-backend agent takes the `run_antigravity` exec path: it spawns the
+/// ANTIGRAVITY binary (through the same sandbox + env allowlist) and writes
+/// `antigravity.jsonl`.
+#[tokio::test]
+async fn antigravity_backend_takes_antigravity_path() {
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let (runner, marker) = runner_with_all(tmp.path());
+
+    // An antigravity agent's provider wire name resolves to the antigravity backend.
+    let backend = Backend::from_provider("antigravity");
+    assert_eq!(backend, Backend::Antigravity);
+
+    let outcome = dispatch(&runner, backend, &env).await;
+    assert!(matches!(outcome, RunOutcome::Success(_)));
+
+    assert_eq!(
+        spawned(&marker),
+        vec!["fake-antigravity.sh"],
+        "antigravity backend must spawn the ANTIGRAVITY binary"
+    );
+    let (program, _argv) = runner.provider_command(
+        Backend::Antigravity,
+        &invocation("do the thing"),
+        Mode::Headless,
+    );
+    assert_eq!(
+        program.file_name().unwrap(),
+        "fake-antigravity.sh",
+        "provider_command must name the antigravity binary"
+    );
+
+    assert!(
+        env.logs.join("antigravity.jsonl").exists(),
+        "antigravity backend must take run_antigravity (writes antigravity.jsonl)"
+    );
+    assert!(
+        !env.logs.join("claude.jsonl").exists(),
+        "antigravity backend must NOT fall through to run_claude"
+    );
+    assert!(
+        !env.logs.join("codex.jsonl").exists(),
+        "antigravity backend must NOT take codex path"
+    );
+}
+
 /// The copilot argv carries the flags a REAL non-interactive copilot run needs
 /// (verified against GitHub Copilot CLI 1.0.68): `--allow-all-tools` is
 /// documented "required for non-interactive mode", and `--model` is threaded from
@@ -316,7 +368,7 @@ fn copilot_command_carries_verified_non_interactive_flags() {
 }
 
 /// Each provider's argv must be the shape that ACTUALLY runs headless — verified
-/// against the real CLIs (claude 2.1.210, codex-cli 0.144.0, Copilot CLI 1.0.70):
+/// against the real CLIs (claude 2.1.210, codex-cli 0.144.0, Copilot CLI 1.0.70, agy):
 ///
 /// * claude needs `-p` or it opens a session and exits 1 on the daemon's null stdin,
 ///   AND a permission flag or every tool call is denied while the process still
@@ -329,12 +381,12 @@ fn copilot_command_carries_verified_non_interactive_flags() {
 ///   directory") in the daemon's non-repo in-tree workdir, and takes the prompt as a
 ///   TRAILING positional,
 /// * copilot needs `-p` + `--allow-all-tools` ("required for non-interactive mode").
+/// * antigravity needs `-p` + `--dangerously-skip-permissions` + `--output-format stream-json`.
 ///
-/// claude and codex now fence the brief behind `--`, because their briefs are
+/// claude, codex, and antigravity fence the brief behind `--`, because their briefs are
 /// POSITIONALS and issue text can start with `-` (see
 /// `dash_leading_brief_is_delivered_as_text_to_every_provider`). Copilot's is a
-/// flag VALUE and must NOT be fenced. Verified to compose:
-/// `codex exec --skip-git-repo-check -- "-fix the login bug"` parses and runs.
+/// flag VALUE and must NOT be fenced.
 #[test]
 fn every_provider_argv_is_the_verified_headless_shape() {
     let tmp = TempDir::new().expect("tmp");
@@ -384,6 +436,20 @@ fn every_provider_argv_is_the_verified_headless_shape() {
         copilot,
         vec!["-p", "BRIEF", "--allow-all-tools"],
         "copilot: -p <brief> --allow-all-tools"
+    );
+
+    let (_p, antigravity) = runner.provider_command(Backend::Antigravity, &inv, Mode::Headless);
+    assert_eq!(
+        antigravity,
+        vec![
+            "-p",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
+            "--",
+            "BRIEF"
+        ],
+        "antigravity: -p --dangerously-skip-permissions --output-format stream-json -- <brief>"
     );
 }
 
@@ -444,6 +510,21 @@ fn interactive_argv_seeds_a_real_session_never_print_and_exit() {
         argv.join(" ").contains("-i do the thing"),
         "interactive copilot must seed the session with the brief via -i: {argv:?}"
     );
+
+    // antigravity: `-p` "exits after completion"; `-i` interactive mode.
+    let (_p, argv) = runner.provider_command(Backend::Antigravity, &inv, Mode::Interactive);
+    assert!(
+        !argv.contains(&"-p".to_string()),
+        "interactive antigravity must NOT use print-and-exit flag: {argv:?}"
+    );
+    assert!(
+        argv.contains(&"-i".to_string()),
+        "interactive antigravity must contain -i flag: {argv:?}"
+    );
+    assert!(
+        argv.ends_with(&["--".to_string(), "do the thing".to_string()]),
+        "interactive antigravity must carry the brief: {argv:?}"
+    );
 }
 
 /// A brief is arbitrary issue text, so it can start with `-` (an issue titled
@@ -464,9 +545,9 @@ fn dash_leading_brief_is_delivered_as_text_to_every_provider() {
     let inv = invocation(brief);
 
     for mode in [Mode::Headless, Mode::Interactive] {
-        // claude + codex: the brief is a positional, so it MUST be fenced off by
+        // claude + codex + antigravity: the brief is a positional, so it MUST be fenced off by
         // the end-of-options separator immediately before it.
-        for backend in [Backend::Claude, Backend::Codex] {
+        for backend in [Backend::Claude, Backend::Codex, Backend::Antigravity] {
             let (_p, argv) = runner.provider_command(backend, &inv, mode);
             assert!(
                 argv.ends_with(&["--".to_string(), brief.to_string()]),
@@ -594,10 +675,11 @@ fn value_taking_cli_arg_cannot_swallow_the_brief() {
 
 #[test]
 fn wired_providers_route_and_unknown_defaults_to_claude() {
-    // Every WIRED provider routes to its own exec path — copilot included; it no
-    // longer silently falls back to claude.
+    // Every WIRED provider routes to its own exec path — copilot and antigravity included.
     assert_eq!(Backend::from_provider("codex"), Backend::Codex);
     assert_eq!(Backend::from_provider("copilot"), Backend::Copilot);
+    assert_eq!(Backend::from_provider("antigravity"), Backend::Antigravity);
+    assert_eq!(Backend::from_provider("agy"), Backend::Antigravity);
     assert_eq!(Backend::from_provider("claude"), Backend::Claude);
     // A genuinely not-wired / misconfigured provider must still dispatch (to the
     // safe default) rather than strand the task.
@@ -606,6 +688,8 @@ fn wired_providers_route_and_unknown_defaults_to_claude() {
     // Case-insensitive on the wired names.
     assert_eq!(Backend::from_provider("CODEX"), Backend::Codex);
     assert_eq!(Backend::from_provider("Copilot"), Backend::Copilot);
+    assert_eq!(Backend::from_provider("Antigravity"), Backend::Antigravity);
+    assert_eq!(Backend::from_provider("AGY"), Backend::Antigravity);
 }
 
 #[test]

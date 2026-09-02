@@ -672,7 +672,9 @@ mod tests {
     fn headroom_segment_reflects_base_url_routing() {
         // Shared lock: this test mutates ANTHROPIC_BASE_URL + AINB_HEADROOM_PORT,
         // which other tests read in parallel (cargo runs tests in-process).
-        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = "ANTHROPIC_BASE_URL";
         let old = std::env::var_os(key);
         let port_old = std::env::var_os("AINB_HEADROOM_PORT");

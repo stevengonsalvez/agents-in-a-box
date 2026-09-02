@@ -52,7 +52,13 @@ use serde::{Deserialize, Serialize};
 /// `shell_commands` are tail-chunkable: chunk 0 leaves them empty;
 /// follow-on chunks carry slices that the consumer accumulator
 /// `extend`s into the in-flight `UsageData` just like `calls`.
-pub const WIRE_VERSION: u32 = 4;
+///
+/// v5: added `Provider::Antigravity` variant. Producer-to-consumer messages
+/// from a v5 publisher carrying `"antigravity"`-tagged calls fail to
+/// deserialise on v4 consumers (the externally-tagged enum rejects
+/// unknown variants), so receivers MUST check
+/// `event.version == WIRE_VERSION` before trusting the payload.
+pub const WIRE_VERSION: u32 = 5;
 
 /// Per-file scan progress payload published on the
 /// `sessions.scan_progress` topic.
@@ -175,6 +181,8 @@ pub enum Provider {
     Copilot,
     /// Cursor IDE chat sessions.
     Cursor,
+    /// Google Antigravity sessions (JSONL under `~/.gemini/antigravity-cli/brain/`).
+    Antigravity,
 }
 
 impl Provider {
@@ -187,6 +195,7 @@ impl Provider {
             Self::Gemini => "gemini",
             Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Antigravity => "antigravity",
         }
     }
 }
@@ -513,6 +522,8 @@ mod tests {
             Provider::Codex,
             Provider::Gemini,
             Provider::Copilot,
+            Provider::Cursor,
+            Provider::Antigravity,
         ] {
             let bytes = rmp_serde::to_vec_named(&p).unwrap();
             let back: Provider = rmp_serde::from_slice(&bytes).unwrap();
@@ -703,5 +714,7 @@ mod tests {
         assert_eq!(Provider::Codex.as_str(), "codex");
         assert_eq!(Provider::Gemini.as_str(), "gemini");
         assert_eq!(Provider::Copilot.as_str(), "copilot");
+        assert_eq!(Provider::Cursor.as_str(), "cursor");
+        assert_eq!(Provider::Antigravity.as_str(), "antigravity");
     }
 }

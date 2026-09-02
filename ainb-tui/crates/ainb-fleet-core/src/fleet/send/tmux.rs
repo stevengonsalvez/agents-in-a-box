@@ -1216,7 +1216,7 @@ fn last_prompt_line_pending(pane: &str, base: Option<PasteTally>) -> bool {
 
 pub async fn tmux_session_exists(name: &str) -> bool {
     Command::new("tmux")
-        .args(["has-session", "-t", name])
+        .args(["has-session", "-t", &format!("={name}")])
         .status()
         .await
         .is_ok_and(|s| s.success())

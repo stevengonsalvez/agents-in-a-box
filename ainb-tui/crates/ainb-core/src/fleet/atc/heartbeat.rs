@@ -53,6 +53,23 @@ pub struct HeartbeatState {
     /// presented that session's ERR as continue-eligible. Drives the hard cap.
     #[serde(default)]
     pub continue_counts: HashMap<String, u32>,
+
+    /// Set by a switch to lite mode when the DAEMON had been owning the retry
+    /// ledger, and cleared by the lite scanner's first tick.
+    ///
+    /// While the daemon schedules the beat it counts retries in its own durable
+    /// `atc_retry` table and the beat counts nothing here, so `continue_counts`
+    /// is empty even though budget has been spent. There is no client RPC to
+    /// read that table, so the handover is fail-closed: the first lite tick
+    /// seals every erroring session at the cap.
+    ///
+    /// It is a FLAG rather than the switch doing the sealing itself, because the
+    /// switch would have to shell `fleet needs` to learn who is erroring — extra
+    /// latency at exactly the wrong moment, and a failure mode that fails OPEN
+    /// (a fresh budget for every session the daemon had escalated). The scanner
+    /// already has that roster on every tick, for free, and cannot skip it.
+    #[serde(default)]
+    pub pending_daemon_handoff: bool,
 }
 
 impl HeartbeatState {
@@ -627,6 +644,7 @@ mod tests {
             last_heartbeat_ms: 123,
             last_active_ms: Some(99),
             continue_counts: HashMap::new(),
+            ..HeartbeatState::default()
         };
         state.continue_counts.insert("s1".into(), 2);
         let json = state.to_json().unwrap();

@@ -46,13 +46,13 @@ pub fn is_installed() -> bool {
 
 // ── Port resolution ──────────────────────────────────────────────────────────
 
-/// Effective port for the Headroom proxy.
-/// Reads `AINB_HEADROOM_PORT`; falls back to `HEADROOM_DEFAULT_PORT` (8787).
+/// Effective port for the Headroom proxy: `AINB_HEADROOM_PORT`, else
+/// `usage_client.headroom_port`, else [`HEADROOM_DEFAULT_PORT`] (8787).
 pub fn proxy_port() -> u16 {
-    std::env::var("AINB_HEADROOM_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(HEADROOM_DEFAULT_PORT)
+    crate::config::tunables::resolved(
+        "AINB_HEADROOM_PORT",
+        crate::config::tunables::snapshot().usage_client.headroom_port,
+    )
 }
 
 // ── Liveness probe ───────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ mod tests {
     /// `proxy_port()` must honor `AINB_HEADROOM_PORT` override.
     #[test]
     fn proxy_port_honors_override() {
-        let _guard = HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Isolate: stash any existing value, set ours, restore after.
         let key = "AINB_HEADROOM_PORT";
         let old = std::env::var_os(key);

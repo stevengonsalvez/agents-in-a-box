@@ -844,6 +844,8 @@ pub struct DialogOption {
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
+    BulkDeleteSessions(Vec<Uuid>), // Delete every multi-selected session (removes worktrees)
+    BulkStopSessions(Vec<Uuid>), // Soft-stop every multi-selected session (preserves worktrees)
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
@@ -855,6 +857,127 @@ pub enum ConfirmAction {
     OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
     DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+/// Assemble the shared Stop / Delete / Cancel dialog.
+///
+/// One builder for the single-row and the bulk path, so a future safety change
+/// (a new warning, a different default) lands on both at once. Stop is always
+/// `selected_index: 0`: the safe option is the one an accidental Enter picks.
+fn stop_or_delete_dialog(
+    title: String,
+    message: String,
+    warning: Option<String>,
+    stop: (&str, ConfirmAction),
+    delete: (&str, ConfirmAction),
+) -> ConfirmationDialog {
+    let (stop_label, stop_action) = stop;
+    let (delete_label, delete_action) = delete;
+    ConfirmationDialog {
+        title,
+        message,
+        // confirm_action mirrors the default (Stop) so the legacy binary
+        // ConfirmationConfirm handler still does the safe thing if it ever runs
+        // without options.
+        confirm_action: stop_action.clone(),
+        selected_option: true,
+        warning,
+        options: Some(vec![
+            DialogOption {
+                label: stop_label.to_string(),
+                action: stop_action,
+            },
+            DialogOption {
+                label: delete_label.to_string(),
+                action: delete_action,
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ]),
+        selected_index: 0, // Default = Stop (safe option)
+    }
+}
+
+/// `true` for the sessions Stop actually applies to: interactive agent sessions,
+/// where killing tmux leaves a worktree that resumes later. Boss (Docker) and
+/// Shell sessions have no soft-stop, so they only ever get a delete
+/// confirmation.
+pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::Session) -> bool {
+    use crate::models::{SessionAgentType, SessionMode};
+    matches!(session.mode, SessionMode::Interactive)
+        && matches!(
+            session.agent_type,
+            SessionAgentType::Claude
+                | SessionAgentType::Codex
+                | SessionAgentType::Gemini
+                | SessionAgentType::Copilot
+        )
+}
+
+/// What one selection has to lose, as the bulk dialog reports it.
+#[derive(Debug, Clone)]
+pub(crate) struct BulkWorktreeStatus {
+    /// `(session name, uncommitted file count)` per dirty tree.
+    pub dirty: Vec<(String, usize)>,
+    /// Trees that are there but could not be read. Never folded into "clean".
+    pub unchecked: usize,
+    /// Distinct trees on disk, which is what a delete actually removes.
+    pub with_worktree: usize,
+    /// False when nothing could be resolved, so `with_worktree` is a guess and
+    /// the dialog must not print it as a fact.
+    pub worktree_count_known: bool,
+}
+
+impl Default for BulkWorktreeStatus {
+    fn default() -> Self {
+        Self {
+            dirty: Vec::new(),
+            unchecked: 0,
+            with_worktree: 0,
+            worktree_count_known: true,
+        }
+    }
+}
+
+/// One tree's uncommitted count, with the reason logged when it cannot be read:
+/// "could not check N session(s)" is undiagnosable otherwise.
+fn probe_tree(path: &std::path::Path) -> Result<usize, ()> {
+    crate::git::WorktreeManager::uncommitted_file_count_at(path).map_err(|e| {
+        warn!(
+            "Could not check {} for uncommitted work: {}",
+            path.display(),
+            e
+        );
+    })
+}
+
+/// Shown when a bulk key is pressed with nothing checked.
+pub(crate) const NOTHING_SELECTED_WARNING: &str =
+    "No sessions selected. Use Space to select sessions first.";
+
+/// Render at most three items, then "and N more". Shared by the bulk dialog's
+/// message and its warning so the two cannot truncate at different lengths or
+/// word it differently.
+fn truncate_list(items: impl Iterator<Item = String>) -> String {
+    const MAX_NAMED: usize = 3;
+    let items: Vec<String> = items.collect();
+    let shown = items.len().min(MAX_NAMED);
+    let listed = items[..shown].join(", ");
+    if items.len() > shown {
+        format!("{listed}, and {} more", items.len() - shown)
+    } else {
+        listed
+    }
+}
+
+/// Label for a selected id that no longer resolves to a session. The id is kept
+/// in the bulk action (so nothing silently drops out of a delete) but a full
+/// 36-character uuid would eat three rows of the dialog on its own.
+fn unknown_session_label(id: Uuid) -> String {
+    let id = id.to_string();
+    format!("unknown ({})", &id[..8])
 }
 
 // ============================================================================
@@ -1020,173 +1143,6 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
     let mut result = mcp_fetch_blocking();
     result.action_msg = Some(summary);
     result
-}
-
-// ============================================================================
-// Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions)
-// ============================================================================
-
-/// Fetched snapshot delivered through the daemons overlay channel.
-#[derive(Debug, Clone)]
-pub struct DaemonsFetchResult {
-    pub mcp_alive: bool,
-    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
-    pub headroom: crate::headroom::ProxyStatus,
-    pub headroom_consumers: Vec<String>,
-    /// Every running `notifyd` process, classified live / stale / orphan.
-    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    /// approve.sock liveness: serving? + the probe's health reason (carries the
-    /// pending-waiter count). Sockets are tracked here too, not just daemons.
-    pub approve_running: bool,
-    pub approve_reason: String,
-    pub hangar_running: bool,
-    pub hangar_reason: String,
-    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
-}
-
-/// One restartable daemon in the overlay, in the order the rows are drawn.
-///
-/// The overlay used to expose lifecycle only through per-daemon keys (`S`
-/// hangar, `M` mcp, `P` headroom) which all START, plus `R` hardcoded to
-/// notifyd. That left no way to cycle an already-running daemon — exactly what
-/// a version drift after `brew upgrade` needs, since the old binary keeps
-/// serving until the process is replaced. Selecting a row and pressing `R`
-/// gives every daemon the same lever.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonRow {
-    Mcp,
-    Headroom,
-    Hangar,
-    Notifyd,
-}
-
-impl DaemonRow {
-    /// Draw order, which is also selection order.
-    pub const ORDER: [Self; 4] = [Self::Mcp, Self::Headroom, Self::Hangar, Self::Notifyd];
-
-    /// Label used in the table and in restart status lines.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Mcp => "MCP pool",
-            Self::Headroom => "Headroom",
-            Self::Hangar => "Hangar",
-            Self::Notifyd => "notifyd",
-        }
-    }
-
-    /// Move the selection, saturating at both ends.
-    ///
-    /// Deliberately does NOT wrap: a wrapping list gives no feedback that you
-    /// reached the end, and this list is short enough to see in full.
-    #[must_use]
-    pub fn step(self, delta: isize) -> Self {
-        let at = Self::ORDER.iter().position(|k| *k == self).unwrap_or(0);
-        let next = at.saturating_add_signed(delta).min(Self::ORDER.len().saturating_sub(1));
-        Self::ORDER[next]
-    }
-}
-
-/// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
-/// the overlay is open; dropping it stops all refresh activity.
-#[derive(Debug)]
-pub struct DaemonsOverlayState {
-    /// Row the `R` restart acts on. Starts at the top row.
-    pub selected: DaemonRow,
-    pub mcp_alive: bool,
-    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
-    pub headroom: crate::headroom::ProxyStatus,
-    pub headroom_consumers: Vec<String>,
-    /// Every running `notifyd` process, classified live / stale / orphan.
-    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    /// approve.sock liveness + health reason (see [`DaemonsFetchResult`]).
-    pub approve_running: bool,
-    pub approve_reason: String,
-    pub hangar_running: bool,
-    pub hangar_reason: String,
-    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
-    pub loading: bool,
-    pub last_refreshed: Option<std::time::Instant>,
-    /// Receiver for the in-flight fetch (None = no fetch pending).
-    pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
-    /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
-    /// Carries the one-line outcome to show under the notifyd section.
-    pub restart_rx: Option<mpsc::UnboundedReceiver<String>>,
-    /// Last restart outcome line (transient, shown until the next refresh).
-    pub restart_status: Option<String>,
-    /// Receiver for a targeted hook reinstall. Kept separate from notifyd
-    /// restart: repairing a binary pointer must not imply daemon lifecycle.
-    pub hooks_repair_rx: Option<mpsc::UnboundedReceiver<String>>,
-    /// Last hook repair outcome, rendered in the Hooks section.
-    pub hooks_repair_status: Option<String>,
-    pub hangar_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub hangar_start_status: Option<String>,
-    /// MCP start result, shown in the unified Daemons table.
-    pub mcp_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub mcp_start_status: Option<String>,
-    /// Headroom start result, shown in the unified Daemons table.
-    pub headroom_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub headroom_start_status: Option<String>,
-}
-
-/// How long the whole blocking probe gets before the overlay gives up on it and
-/// unlatches. Every individual probe inside is bounded too; this is the backstop
-/// that guarantees the screen leaves `collecting…` even when one of them wedges.
-pub(crate) const DAEMONS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
-/// + notifyd process scan. These are sync calls (the notifyd scan shells out
-/// to `ps`) so they run on the blocking thread pool.
-pub(crate) fn daemons_sync_probe() -> (
-    bool,
-    crate::mcp_pool::client::DaemonRuntimeStatus,
-    Vec<String>,
-    Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    (bool, String),
-    (bool, String),
-    crate::cli::hangar::DaemonRuntimeStatus,
-) {
-    let mcp_alive = crate::mcp_pool::client::daemon_alive();
-    let mcp_runtime = crate::mcp_pool::client::daemon_runtime_status();
-    let headroom_consumers = crate::interactive::SessionStore::load()
-        .sessions
-        .into_values()
-        .filter(|m| m.headroom_enabled)
-        .map(|m| m.tmux_session_name.clone())
-        .collect::<Vec<_>>();
-    let notifyd = ainb_plugin_notifyd::scan_daemons();
-    // approve.sock — same probe the `ainb fleet daemons` health view uses, so
-    // the two surfaces can't drift. Reason carries the pending-waiter count.
-    let approve = match ainb_plugin_notifyd::Paths::from_home() {
-        Ok(paths) => {
-            let s = crate::fleet::daemons::probe::probe_approve_broker(
-                &paths.base,
-                crate::fleet::daemons::heartbeat::now_ms(),
-            );
-            (s.state.is_healthy(), s.reason)
-        }
-        Err(e) => (false, format!("home unresolved: {e}")),
-    };
-    let hangar = crate::fleet::bridge::daemon::socket_path()
-        .and_then(|socket| {
-            crate::fleet::daemons::probe::connect_bounded(
-                &socket,
-                crate::fleet::daemons::probe::SOCKET_PROBE_TIMEOUT,
-            )
-        })
-        .map_or((false, "not running".to_string()), |_| {
-            (true, "serving".to_string())
-        });
-    let hangar_runtime = crate::cli::hangar::daemon_runtime_status();
-    (
-        mcp_alive,
-        mcp_runtime,
-        headroom_consumers,
-        notifyd,
-        approve,
-        hangar,
-        hangar_runtime,
-    )
 }
 
 // ============================================================================
@@ -1613,6 +1569,10 @@ pub enum ConfigCategory {
     Skills,
     SessionReader,
     Presets,
+    Daemons,
+    Web,
+    Acp,
+    HangarDaemon,
 }
 
 impl ConfigCategory {
@@ -1634,6 +1594,10 @@ impl ConfigCategory {
             ConfigCategory::Skills,
             ConfigCategory::SessionReader,
             ConfigCategory::Presets,
+            ConfigCategory::Daemons,
+            ConfigCategory::Web,
+            ConfigCategory::Acp,
+            ConfigCategory::HangarDaemon,
         ]
     }
 
@@ -1655,6 +1619,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Skills",
             ConfigCategory::SessionReader => "Session Reader",
             ConfigCategory::Presets => "Presets",
+            ConfigCategory::Daemons => "Daemons",
+            ConfigCategory::Web => "Web Dashboard",
+            ConfigCategory::Acp => "ACP Adapters",
+            ConfigCategory::HangarDaemon => "Hangar Daemon",
         }
     }
 
@@ -1676,6 +1644,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "🎓",
             ConfigCategory::SessionReader => "📖",
             ConfigCategory::Presets => "🗂️",
+            ConfigCategory::Daemons => "🛎️",
+            ConfigCategory::Web => "🌐",
+            ConfigCategory::Acp => "🔗",
+            ConfigCategory::HangarDaemon => "🏗️",
         }
     }
 
@@ -1697,6 +1669,10 @@ impl ConfigCategory {
             ConfigCategory::Skills => "Catalog release, API key",
             ConfigCategory::SessionReader => "Incremental scan window",
             ConfigCategory::Presets => "Where presets.toml lives",
+            ConfigCategory::Daemons => "Staleness windows, notification debounce, approvals",
+            ConfigCategory::Web => "`ainb web` bind address and read-only mode",
+            ConfigCategory::Acp => "Per-adapter command and pinned permission mode",
+            ConfigCategory::HangarDaemon => "Auto-standup and lockdown (stored in the daemon DB)",
         }
     }
 }
@@ -1888,6 +1864,12 @@ pub struct AppliedEdits {
     /// then dropped, so a value that can never be written cannot wedge every
     /// subsequent save.
     pub rejected: Vec<(String, String)>,
+    /// `(daemon_config key, raw value)` for the `hangar_daemon.*` rows, whose
+    /// backend is the Hangar SQLite `daemon_config` table rather than
+    /// config.toml. Dispatched through
+    /// `pending_daemon_config_edits`,
+    /// because that store is async and this pass is not.
+    pub daemon: Vec<(String, String)>,
 }
 
 /// The settings screen: a section tree on the left, the rows of the selected
@@ -2276,6 +2258,32 @@ impl ConfigScreenState {
         }
     }
 
+    /// Overwrite the `hangar_daemon.*` rows from the daemon's stored values,
+    /// WITHOUT marking them dirty.
+    ///
+    /// `stored` is `(daemon_config key, value)`; a key absent from it keeps the
+    /// coded default the row was seeded with, which is what the daemon applies
+    /// for a key with no row. Deliberately not `set_row_value`: that marks the
+    /// row dirty, and the next save would write these values straight back into
+    /// a database that already holds them.
+    pub fn seed_hangar_daemon_rows(&mut self, stored: &[(String, String)]) {
+        for (daemon_key, value) in stored {
+            let key = format!("{}{daemon_key}", registry::HANGAR_DAEMON_PREFIX);
+            let Some(row) = registry::row(&key) else {
+                continue;
+            };
+            let seeded = row.to_value(Some(&registry::parse_toml_scalar(value)));
+            for rows in self.settings.values_mut() {
+                if let Some(existing) = rows.iter_mut().find(|r| r.key == key) {
+                    existing.value = seeded;
+                    self.dirty.remove(&key);
+                    break;
+                }
+            }
+        }
+        self.refresh_visible_rows();
+    }
+
     pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
         for rows in self.settings.values_mut() {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
@@ -2353,6 +2361,13 @@ impl ConfigScreenState {
 
         let mut applied = AppliedEdits::default();
         for (key, raw) in self.pending_edits() {
+            if let Some(daemon_key) = registry::hangar_daemon_key(&key) {
+                // Not config.toml at all: `save_external_keys` would happily
+                // write a `[hangar_daemon]` section that nothing ever reads,
+                // which is the silent no-op this category exists to avoid.
+                applied.daemon.push((daemon_key.to_string(), raw));
+                continue;
+            }
             if registry::is_external(&key) {
                 // These go through the key-level writer rather than the struct.
                 // `[skills]` and `[session_reader]` are parsed off this file by
@@ -2643,7 +2658,143 @@ fn seed_value(config: &AppConfig) -> toml::Value {
     if let Some(on_disk) = on_disk {
         merge_external_sections(&mut seed, &toml::Value::Table(on_disk));
     }
+    seed_hangar_daemon_defaults(&mut seed);
+    seed_builtin_acp_adapters(&mut seed);
     seed
+}
+
+/// Plant the built-in ACP adapters into the seed so their rows exist.
+///
+/// `acp.adapters.*` rows are wildcards, and `AcpConfig::adapters` defaults empty
+/// with `skip_serializing_if`, so the key was absent from the seed, `expand_key`
+/// returned nothing, and the whole "ACP Adapters" category was filtered out for
+/// having zero rows. It could never render, and there was no way to reach the
+/// adapters from the screen at all.
+///
+/// The built-ins live in `PoolConfig::default()`, not in config.toml, so they
+/// have to be named here for the same reason the Hangar daemon knobs do: the
+/// row has to exist before a user can be the first person to configure it. Only
+/// planted where the user has not already declared the adapter, so a configured
+/// `command` is never overwritten by a default.
+fn seed_builtin_acp_adapters(seed: &mut toml::Value) {
+    for name in ainb_hangar_daemon::acp_pool::PoolConfig::default().adapters.keys() {
+        let base = format!("acp.adapters.{}", registry::quote_key_segment(name));
+        for (field, value) in [
+            ("command", toml::Value::String(String::new())),
+            (
+                "permission_mode",
+                toml::Value::String("default".to_string()),
+            ),
+        ] {
+            let key = format!("{base}.{field}");
+            if registry::navigate_toml(seed, &key).is_err() {
+                let _ = registry::insert_at(seed, &key, value);
+            }
+        }
+    }
+}
+
+/// Plant every Hangar daemon knob's coded default under `hangar_daemon.` in the
+/// seed.
+///
+/// Without this the rows have no value to render at all and every one of them
+/// would seed as an empty widget, which claims the daemon is unconfigured. The
+/// coded default is the honest placeholder: it IS what the daemon runs when a
+/// key has no stored row. `load_hangar_daemon_config` replaces it with
+/// the stored value shortly after startup.
+/// The Hangar SQLite database, when one exists.
+///
+/// `Store::open_default` CREATES the database and runs migrations, which is the
+/// right behaviour for the daemon and the wrong one for a settings screen
+/// painting itself: opening the TUI must not conjure a hangar.db on a machine
+/// that has never run the daemon. So the file is probed first.
+fn hangar_db_path() -> Option<std::path::PathBuf> {
+    let path = ainb_hangar_core::hangar_home()?.join("hangar.db");
+    path.exists().then_some(path)
+}
+
+/// Every stored `daemon_config` value, or `None` when there is no database yet.
+///
+/// Only the keys the registry knows: an internal-state row (the daemon's own
+/// bookkeeping) is not config and must never reach a settings row.
+async fn read_daemon_config() -> anyhow::Result<Option<Vec<(String, String)>>> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+
+    if hangar_db_path().is_none() {
+        return Ok(None);
+    }
+    // Read-only. `Store::open_default` takes a whole-database backup and
+    // applies pending migrations, and this runs on the first app tick of every
+    // launch — so after an upgrade it migrated a running daemon's live schema
+    // out from under it, and blocked the event loop for the length of the copy.
+    // The existence guard above stops creation, not migration.
+    let Some(rows) = ainb_hangar_store::Store::read_daemon_config_read_only().await? else {
+        return Ok(None);
+    };
+    let known: std::collections::HashMap<&str, String> =
+        rows.into_iter()
+            .fold(std::collections::HashMap::new(), |mut acc, (key, value)| {
+                if let Some(descriptor) = DAEMON_CONFIG_REGISTRY.iter().find(|d| d.key == key) {
+                    acc.insert(descriptor.key, value);
+                }
+                acc
+            });
+    let mut stored: Vec<(String, String)> =
+        known.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    stored.sort();
+    Ok(Some(stored))
+}
+
+/// Validate one `daemon_config` edit and write it.
+///
+/// Validation goes through the descriptor, not the core registry: the daemon's
+/// own registry is the authority on what its table accepts, and it is the gate
+/// the RPC handler and the CLI both use.
+async fn write_daemon_config_batch(edits: &[(String, String)]) -> Vec<(String, anyhow::Error)> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let mut failures = Vec::new();
+    // Validate before opening anything: a batch of only-invalid values should
+    // not open the store at all.
+    let mut valid = Vec::with_capacity(edits.len());
+    for (key, raw) in edits {
+        match ainb_hangar_core::daemon_config::descriptor(key) {
+            Some(descriptor) => match descriptor.validate(raw) {
+                Ok(normalized) => valid.push((key.clone(), normalized)),
+                Err(why) => failures.push((key.clone(), anyhow::anyhow!(why))),
+            },
+            None => failures.push((key.clone(), anyhow::anyhow!("not a daemon config key"))),
+        }
+    }
+    if valid.is_empty() {
+        return failures;
+    }
+
+    // ONE open for the whole batch. `open_default` runs a whole-database
+    // VACUUM INTO backup plus migrations, and this runs on the UI task — doing
+    // it per key meant saving three rows paid that cost three times.
+    let store = match ainb_hangar_store::Store::open_default().await {
+        Ok(store) => store,
+        Err(error) => {
+            let message = error.to_string();
+            failures
+                .extend(valid.into_iter().map(|(key, _)| (key, anyhow::anyhow!(message.clone()))));
+            return failures;
+        }
+    };
+    for (key, normalized) in valid {
+        if let Err(error) = DaemonConfigRepo::set(store.pool(), &key, &normalized).await {
+            failures.push((key, error.into()));
+        }
+    }
+    failures
+}
+
+fn seed_hangar_daemon_defaults(seed: &mut toml::Value) {
+    for descriptor in ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY {
+        let key = format!("{}{}", registry::HANGAR_DAEMON_PREFIX, descriptor.key);
+        let _ = registry::insert_at(seed, &key, registry::parse_toml_scalar(descriptor.default));
+    }
 }
 
 /// Copy each [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES) section from the
@@ -3024,14 +3175,28 @@ pub struct AppState {
     pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
+    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
+    /// written to the daemon's SQLite table.
+    ///
+    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
+    /// one action and is drained once per app tick, so two settings edits
+    /// confirmed inside the same 250 ms tick would silently lose the first
+    /// while toasting success for both. Appended to, drained in
+    /// `process_async_action`.
+    pub pending_daemon_config_edits: Vec<(String, String)>,
+    /// Whether the Hangar daemon's stored `daemon_config` values have been read
+    /// into the settings rows yet.
+    ///
+    /// A one-shot of its own rather than a seeded `pending_async_action`: that
+    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
+    /// first keystroke and makes "no action is pending" untestable.
+    pub hangar_daemon_config_loaded: bool,
     // Flag to track if user cancelled during async operation
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
-    // Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions).
-    pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3430,11 +3595,13 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
 
 /// Fetch Boss-mode (Docker container) workspaces with a strict per-mode
 /// timeout. Returns an empty `Vec` on any failure path — caller proceeds
-/// with Interactive results. The `docker info` probe runs on a blocking
-/// thread so a wedged Docker socket can't pin a tokio runtime thread.
+/// with Interactive results. The Docker probe runs on a blocking thread so a
+/// wedged Docker socket can't pin a tokio runtime thread.
 async fn fetch_boss_mode_workspaces() -> Vec<Workspace> {
     const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    // DISPLAY CLASS: cached. A stale "no" costs this refresh its Boss-mode
+    // rows and nothing else; the next refresh inside 30s shows them.
     let docker_available = tokio::task::spawn_blocking(AppState::is_docker_available_sync)
         .await
         .unwrap_or(false);
@@ -3611,6 +3778,7 @@ pub enum AsyncAction {
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    BulkStopSessions(Vec<Uuid>),           // Soft-stop many sessions (tmux only; keeps worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
     AttachToContainer(Uuid),               // Attach to a container session
@@ -3679,10 +3847,11 @@ impl Default for AppState {
             help_visible: false,
             new_session_state: None,
             pending_async_action: None,
+            pending_daemon_config_edits: Vec::new(),
+            hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
-            daemons_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -4550,6 +4719,10 @@ impl AppState {
                 home.join(".agents-in-a-box").join("auth").join(".credentials.json");
 
             // Only attempt refresh if we have OAuth credentials AND Docker is available
+            // DISPLAY CLASS: cached. A stale "no" defers the refresh to the
+            // next check (this runs on every workspace load, and a periodic
+            // 5-minute check runs behind it). Nothing is left behind by
+            // skipping it.
             if credentials_path.exists() && Self::oauth_token_needs_refresh(&credentials_path) {
                 if self.is_docker_available().await {
                     info!("Docker available - attempting OAuth token refresh");
@@ -4567,6 +4740,9 @@ impl AppState {
         // Capped at 5s — a slow or wedged Docker daemon must not block
         // the workspaces panel from rendering. Interactive mode is
         // tmux-only and runs unconditionally after this returns.
+        //
+        // DISPLAY CLASS: cached. A stale "no" costs this load its Boss-mode
+        // rows; the next load inside 30s picks them up, and nothing leaks.
         const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
         if self.is_docker_available().await {
             info!("Docker available - loading Boss mode sessions");
@@ -4599,7 +4775,11 @@ impl AppState {
                 if let Some(shell) = preserved_shells.get(&workspace.path) {
                     // Only restore if the tmux session still exists
                     let check = tokio::process::Command::new("tmux")
-                        .args(["has-session", "-t", &shell.tmux_session_name])
+                        .args([
+                            "has-session",
+                            "-t",
+                            &format!("={}", shell.tmux_session_name),
+                        ])
                         .output()
                         .await;
 
@@ -5171,391 +5351,6 @@ impl AppState {
                 });
             let _ = tx.send(result);
         });
-    }
-
-    // ── Daemons overlay ──────────────────────────────────────────────────────
-
-    /// Open the Daemons overlay and fire the first fetch; idempotent (toggle).
-    pub fn toggle_daemons_overlay(&mut self) {
-        if self.daemons_overlay.is_some() {
-            self.daemons_overlay = None;
-            return;
-        }
-        self.daemons_overlay = Some(DaemonsOverlayState {
-            selected: DaemonRow::ORDER[0],
-            mcp_alive: false,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: crate::headroom::ProxyStatus {
-                running: false,
-                port: crate::headroom::proxy_port(),
-                pid: None,
-                tokens_saved: None,
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: false,
-            approve_reason: "probing…".to_string(),
-            loading: true,
-            last_refreshed: None,
-            fetch_rx: None,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_running: false,
-            hangar_reason: "probing…".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
-        });
-        self.spawn_daemons_fetch();
-    }
-
-    pub fn close_daemons_overlay(&mut self) {
-        self.daemons_overlay = None;
-    }
-
-    /// Spawn one off-thread fetch of both daemon statuses (one-outstanding guard).
-    /// Runs MCP + SessionStore probes on the blocking pool; headroom::status()
-    /// is async so it runs directly in the spawned task.
-    pub fn spawn_daemons_fetch(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.fetch_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.fetch_rx = Some(rx);
-        o.loading = true;
-        tokio::spawn(async move {
-            // Blocking I/O (control socket + file read + `ps` scan) on the
-            // blocking pool. Bounded by DAEMONS_PROBE_TIMEOUT: a probe that
-            // wedges must degrade to "probe timed out" rows, never to a screen
-            // stuck on `collecting…`. On timeout the blocking task is left to
-            // finish on its own thread — its result is simply discarded.
-            let probe = tokio::time::timeout(
-                DAEMONS_PROBE_TIMEOUT,
-                tokio::task::spawn_blocking(daemons_sync_probe),
-            );
-            let (
-                mcp_alive,
-                mcp_runtime,
-                headroom_consumers,
-                notifyd,
-                approve,
-                hangar,
-                hangar_runtime,
-            ) = match probe.await {
-                Ok(Ok(values)) => values,
-                Ok(Err(_)) | Err(_) => (
-                    false,
-                    crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-                    Vec::new(),
-                    Vec::new(),
-                    (false, "probe timed out".to_string()),
-                    (false, "probe timed out".to_string()),
-                    crate::cli::hangar::DaemonRuntimeStatus::default(),
-                ),
-            };
-            // Async HTTP probe of the Headroom /health + /stats endpoints.
-            let headroom = crate::headroom::status().await;
-            let result = DaemonsFetchResult {
-                mcp_alive,
-                mcp_runtime,
-                headroom,
-                headroom_consumers,
-                notifyd,
-                approve_running: approve.0,
-                approve_reason: approve.1,
-                hangar_running: hangar.0,
-                hangar_reason: hangar.1,
-                hangar_runtime,
-            };
-            let _ = tx.send(result);
-        });
-    }
-
-    /// Restart whichever daemon the overlay has selected.
-    ///
-    /// One in-flight restart at a time, shared across kinds: the outcome line
-    /// has a single slot in the overlay, and cycling two daemons at once would
-    /// race for it. Every arm reuses the same lifecycle the CLI uses rather
-    /// than reimplementing stop/start here, so the TUI and `ainb <d> daemon
-    /// restart` cannot drift apart.
-    pub fn spawn_daemon_restart(&mut self, kind: DaemonRow) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.restart_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.restart_rx = Some(rx);
-        o.restart_status = Some(format!("restarting {}…", kind.label()));
-        match kind {
-            DaemonRow::Notifyd => self.spawn_notifyd_restart(tx),
-            DaemonRow::Hangar => {
-                // Quiet: this runs while the TUI holds the alternate screen, so
-                // the announcing variant's stdout lands on top of the frame.
-                Self::spawn_blocking_restart(tx, kind, || {
-                    crate::cli::hangar::run_daemon_restart_quiet()
-                })
-            }
-            DaemonRow::Mcp => {
-                Self::spawn_blocking_restart(tx, kind, || crate::mcp_pool::client::restart_daemon())
-            }
-            // Headroom has no single restart entry point, so it is composed
-            // from its own stop + start. `stop()` returning false means it was
-            // not running, which is not an error for a restart. Its start is
-            // async, so this cannot use the blocking helper: `stop()` is sync
-            // and runs on the blocking pool, then the proxy is awaited.
-            DaemonRow::Headroom => {
-                tokio::spawn(async move {
-                    let _ = tokio::task::spawn_blocking(crate::headroom::stop).await;
-                    let line = crate::headroom::ensure_proxy_running()
-                        .await
-                        .map(|()| "restarted Headroom".to_string())
-                        .unwrap_or_else(|e| format!("Headroom restart failed: {e:#}"));
-                    let _ = tx.send(line);
-                });
-            }
-        }
-    }
-
-    /// Run one blocking daemon lifecycle call and report a single outcome line.
-    fn spawn_blocking_restart<F>(tx: mpsc::UnboundedSender<String>, kind: DaemonRow, action: F)
-    where
-        F: FnOnce() -> anyhow::Result<()> + Send + 'static,
-    {
-        let label = kind.label();
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(move || match action() {
-                Ok(()) => format!("restarted {label}"),
-                Err(e) => format!("{label} restart failed: {e:#}"),
-            })
-            .await
-            .unwrap_or_else(|e| format!("{label} restart task panicked: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// notifyd's arm of [`Self::spawn_daemon_restart`].
-    ///
-    /// Kept separate from the blocking helper because its outcome line is
-    /// richer than "restarted": the restart SIGTERMs the old owner, reaps
-    /// stragglers, respawns and then polls the approve socket, and whether
-    /// that socket rebound is the part that matters — once it does, every
-    /// still-blocked permission waiter re-dials and resumes on its own.
-    fn spawn_notifyd_restart(&mut self, tx: mpsc::UnboundedSender<String>) {
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
-                    Ok(out) => {
-                        let spawned = out
-                            .spawned
-                            .map(|p| format!("pid {p}"))
-                            .unwrap_or_else(|| "spawn failed".to_string());
-                        if out.socket_bound {
-                            format!("restarted notifyd ({spawned}) — approve socket live, pending prompts resume")
-                        } else {
-                            format!("restarted notifyd ({spawned}) — socket not yet rebound; hooks keep re-dialling")
-                        }
-                    }
-                    Err(e) => format!("restart failed: {e:#}"),
-                }
-            })
-            .await
-            .unwrap_or_else(|e| format!("restart task panicked: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Reinstall installed hooks against this running binary, or perform the
-    /// first install for every agent when no hooks are installed yet.
-    /// This is the repair action for stale package-manager paths and damaged
-    /// wiring; it deliberately does not start/restart any daemon.
-    pub fn spawn_hooks_repair(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.hooks_repair_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.hooks_repair_rx = Some(rx);
-        o.hooks_repair_status = Some("installing hooks…".to_string());
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                let result = ainb_plugin_notifyd::Paths::from_home()
-                    .and_then(|paths| ainb_plugin_notifyd::repair_or_install_hooks(&paths));
-                match result {
-                    Ok(report) => format!(
-                        "hooks installed for {}",
-                        report
-                            .record
-                            .agents
-                            .iter()
-                            .map(|agent| agent.name())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    Err(error) => format!("hook repair failed: {error:#}"),
-                }
-            })
-            .await
-            .unwrap_or_else(|error| format!("hook repair task panicked: {error}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    pub fn spawn_hangar_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.hangar_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.hangar_start_rx = Some(rx);
-        o.hangar_start_status = Some("starting / upgrading Hangar daemon…".to_string());
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::start_or_upgrade_daemon_from_current()
-                    .map(|_| "Hangar running against current Ainb".to_string())
-                    .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
-            })
-            .await
-            .unwrap_or_else(|e| format!("Hangar start failed: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Restart the shared MCP pool from this Ainb binary. If absent, starts it.
-    pub fn spawn_mcp_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.mcp_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.mcp_start_rx = Some(rx);
-        o.mcp_start_status = Some("restarting MCP pool against current Ainb…".to_string());
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::restart_daemon)
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("MCP start task panicked: {e}")));
-            let line = result
-                .map(|()| "MCP pool running against current Ainb".to_string())
-                .unwrap_or_else(|error| format!("MCP pool restart failed: {error:#}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Start the Headroom proxy off the UI thread and report its result in the
-    /// unified Daemons screen. Headroom remains optional.
-    pub fn spawn_headroom_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.headroom_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.headroom_start_rx = Some(rx);
-        o.headroom_start_status = Some("starting Headroom…".to_string());
-        tokio::spawn(async move {
-            let line = crate::headroom::ensure_proxy_running()
-                .await
-                .map(|()| "Headroom started".to_string())
-                .unwrap_or_else(|error| format!("Headroom start failed: {error:#}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Drain a completed daemons fetch. Called from the 250ms app tick.
-    pub fn check_daemons_overlay(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if let Some(rx) = o.fetch_rx.as_mut() {
-            match rx.try_recv() {
-                Ok(result) => {
-                    o.fetch_rx = None;
-                    o.loading = false;
-                    o.mcp_alive = result.mcp_alive;
-                    o.mcp_runtime = result.mcp_runtime;
-                    o.headroom = result.headroom;
-                    o.headroom_consumers = result.headroom_consumers;
-                    o.notifyd = result.notifyd;
-                    o.approve_running = result.approve_running;
-                    o.approve_reason = result.approve_reason;
-                    o.hangar_running = result.hangar_running;
-                    o.hangar_reason = result.hangar_reason;
-                    o.hangar_runtime = result.hangar_runtime;
-                    o.last_refreshed = Some(std::time::Instant::now());
-                }
-                // A dropped sender (the fetch task died before sending) MUST
-                // release the one-outstanding guard too. Leaving `fetch_rx`
-                // armed made every later refresh return early, which is how the
-                // screen used to sit on `collecting…` forever.
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    o.fetch_rx = None;
-                    o.loading = false;
-                    o.approve_reason = "probe did not report".to_string();
-                    o.hangar_reason = "probe did not report".to_string();
-                    o.last_refreshed = Some(std::time::Instant::now());
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {}
-            }
-        }
-        let mut refresh_after_start = false;
-        if let Some(rx) = o.hangar_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.hangar_start_rx = None;
-                o.hangar_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.mcp_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.mcp_start_rx = None;
-                o.mcp_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.headroom_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.headroom_start_rx = None;
-                o.headroom_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        // A finished restart updates the status line and triggers a fresh scan
-        // so the new pid shows up in the notifyd section.
-        if let Some(rx) = o.restart_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.restart_rx = None;
-                o.restart_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.hooks_repair_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.hooks_repair_rx = None;
-                o.hooks_repair_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        drop(o);
-        if refresh_after_start {
-            self.spawn_daemons_fetch();
-        }
     }
 
     /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
@@ -6352,28 +6147,44 @@ impl AppState {
     /// Of the multi-selected managed sessions, return the IDs that can actually
     /// be resumed: interactive agent sessions that are currently Stopped.
     /// Running sessions are excluded so a bulk resume never kills+recreates a
-    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    /// live tmux session. Returned in list order, like the delete path.
     pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
-        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-        self.selected_sessions
-            .iter()
-            .copied()
+        use crate::models::SessionStatus;
+        // List order, like the delete path: the order sessions are resumed in,
+        // and the order they appear in the log and the audit trail, should not
+        // be the per-process randomisation of HashSet iteration.
+        self.selected_session_ids_in_order()
+            .into_iter()
             .filter(|id| {
-                self.find_session(*id)
-                    .map(|s| {
-                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
-                            && matches!(
-                                s.agent_type,
-                                SessionAgentType::Claude
-                                    | SessionAgentType::Codex
-                                    | SessionAgentType::Gemini
-                                    | SessionAgentType::Copilot
-                            );
-                        is_interactive && matches!(s.status, SessionStatus::Stopped)
-                    })
-                    .unwrap_or(false)
+                self.find_session(*id).is_some_and(|s| {
+                    is_stoppable_interactive(s) && matches!(s.status, SessionStatus::Stopped)
+                })
             })
             .collect()
+    }
+
+    /// Multi-selected managed session ids in list order (workspace, then
+    /// session), so a dialog that names them reads the same way the list does
+    /// instead of following `HashSet` iteration order. Ids no longer present in
+    /// any workspace are kept, at the end, so nothing silently drops out of a
+    /// bulk operation.
+    pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let mut ordered: Vec<Uuid> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.sessions.iter())
+            .map(|s| s.id)
+            .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
+            .collect();
+        // Ids that resolve to no session have no list position, so they are
+        // sorted rather than left in HashSet order, which Rust randomises per
+        // process and would make the dialog text differ run to run.
+        let mut orphans: Vec<Uuid> =
+            self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)).collect();
+        orphans.sort();
+        ordered.extend(orphans);
+        ordered
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -7403,7 +7214,7 @@ impl AppState {
             session_id
         );
 
-        // Check for uncommitted changes in worktree (only for non-Shell sessions)
+        // Check for uncommitted changes in the session's worktree
         let warning = self.check_session_uncommitted_warning(session_id);
 
         self.confirmation_dialog = Some(ConfirmationDialog {
@@ -7430,58 +7241,294 @@ impl AppState {
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        let options = vec![
-            DialogOption {
-                label: "Stop".to_string(),
-                action: ConfirmAction::StopSession(session_id),
-            },
-            DialogOption {
-                label: "Delete".to_string(),
-                action: ConfirmAction::DeleteSession(session_id),
-            },
-            DialogOption {
-                label: "Cancel".to_string(),
-                action: ConfirmAction::Cancel,
-            },
-        ];
-
-        self.confirmation_dialog = Some(ConfirmationDialog {
-            title: "Stop or Delete Session".to_string(),
-            message: "Stop keeps the worktree and resumes later. Delete removes the worktree."
-                .to_string(),
-            // confirm_action mirrors the default (Stop) so the legacy ConfirmationConfirm
-            // handler still has something sensible if it ever runs without options.
-            confirm_action: ConfirmAction::StopSession(session_id),
-            selected_option: true,
+        self.confirmation_dialog = Some(stop_or_delete_dialog(
+            "Stop or Delete Session".to_string(),
+            "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
             warning,
-            options: Some(options),
-            selected_index: 0, // Default = Stop (safe option)
+            ("Stop", ConfirmAction::StopSession(session_id)),
+            ("Delete", ConfirmAction::DeleteSession(session_id)),
+        ));
+    }
+
+    /// Uncommitted-work warning for one session, or None when there is nothing
+    /// to say.
+    ///
+    /// Runs the same code as the bulk dialog on a one-element selection, so the
+    /// two cannot apply different skip rules or different wording to the same
+    /// session.
+    fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
+        let name = self
+            .find_session(session_id)
+            .map_or_else(|| unknown_session_label(session_id), |s| s.name.clone());
+        let status = Self::bulk_uncommitted_counts(&[(session_id, name)]);
+        Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, 1)
+    }
+
+    /// Show the tri-option Stop all / Delete all / Cancel dialog for every
+    /// multi-selected session.
+    ///
+    /// The single-row flow has always defaulted to Stop so a stray `d` cannot
+    /// destroy a worktree. The bulk flow used to skip confirmation entirely and
+    /// delete immediately, taking uncommitted work with it; it now gets the same
+    /// dialog, the same Stop default, and an aggregate uncommitted-work warning.
+    pub fn show_bulk_delete_or_stop_confirmation(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
+        if session_ids.is_empty() {
+            self.add_warning_notification(NOTHING_SELECTED_WARNING.to_string());
+            return;
+        }
+        let count = session_ids.len();
+        info!(
+            "Showing bulk Stop/Delete/Cancel dialog for {} session(s)",
+            count
+        );
+
+        // One pass over the selection: every later question (what to name, how
+        // many worktrees, what can be stopped) is answered from this, rather
+        // than walking the workspace list once per question per id.
+        let mut id_names: Vec<(Uuid, String)> = Vec::with_capacity(count);
+        let mut stoppable: Vec<Uuid> = Vec::new();
+        let mut already_stopped = 0;
+        let mut no_stop_path = 0;
+        for id in &session_ids {
+            let session = self.find_session(*id);
+            id_names.push((
+                *id,
+                session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()),
+            ));
+            // Stop only means something for interactive agent sessions: it kills
+            // tmux and the session resumes later. Boss (Docker) and Shell
+            // sessions have no such path, and an already-Stopped session has
+            // nothing to stop. The two exclusions are counted apart because the
+            // dialog has to say which applies: "cannot be stopped" and "already
+            // stopped" are opposite claims about whether it can come back.
+            match session {
+                Some(s) if !is_stoppable_interactive(s) => no_stop_path += 1,
+                Some(s) if matches!(s.status, SessionStatus::Stopped) => already_stopped += 1,
+                Some(_) => stoppable.push(*id),
+                None => no_stop_path += 1,
+            }
+        }
+
+        let status = Self::bulk_uncommitted_counts(&id_names);
+        // What Delete actually removes: distinct trees on disk, not selected
+        // rows. When nothing could be resolved the number is a guess, so the
+        // message says "their worktrees" rather than printing a figure as fact.
+        let removes = if status.worktree_count_known {
+            format!("{} worktree(s)", status.with_worktree)
+        } else {
+            "their worktrees".to_string()
+        };
+        let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, count);
+        let summary = Self::format_bulk_session_summary(&id_names);
+
+        self.confirmation_dialog = Some(if stoppable.len() == count {
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop keeps every worktree and resumes later. \
+                     Delete removes {removes}."
+                ),
+                warning,
+                ("Stop all", ConfirmAction::BulkStopSessions(stoppable)),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
+        } else if stoppable.is_empty() {
+            let reason = if no_stop_path == 0 {
+                "Every one of these is already stopped, so there is nothing to stop"
+            } else if already_stopped == 0 {
+                "None of these sessions can be stopped and resumed"
+            } else {
+                "These sessions are either already stopped or have no stop path"
+            };
+            ConfirmationDialog {
+                title: format!("Delete {count} Session(s)"),
+                message: format!(
+                    "{summary}\n{reason}, so Delete is the only option offered. \
+                     It removes {removes}."
+                ),
+                confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
+                selected_option: false, // Default = No
+                warning,
+                options: None,
+                selected_index: 0,
+            }
+        } else {
+            let stoppable_count = stoppable.len();
+            let rest = count - stoppable_count;
+            let (subject, verb) = if rest == 1 {
+                ("the other one".to_string(), "is")
+            } else {
+                (format!("the other {rest}"), "are")
+            };
+            let excluded = if no_stop_path == 0 {
+                format!("{subject} {verb} already stopped")
+            } else if already_stopped == 0 {
+                format!("{subject} cannot be stopped")
+            } else {
+                format!("{subject} {verb} already stopped or cannot be stopped")
+            };
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop covers {stoppable_count} and keeps their worktrees, \
+                     {excluded}. Delete removes {removes}."
+                ),
+                warning,
+                (
+                    &format!("Stop {stoppable_count}"),
+                    ConfirmAction::BulkStopSessions(stoppable),
+                ),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
         });
     }
 
-    /// Check if a session's worktree has uncommitted changes.
-    /// Returns None for Shell sessions (no dedicated worktree) or if no uncommitted changes.
-    fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
+    /// One-line "which sessions are affected" summary for the bulk dialog.
+    /// Long selections are truncated so the message still fits the dialog.
+    fn format_bulk_session_summary(names: &[(Uuid, String)]) -> String {
+        debug_assert!(
+            !names.is_empty(),
+            "the caller returns early on an empty selection"
+        );
+        format!(
+            "{} session(s): {}",
+            names.len(),
+            truncate_list(names.iter().map(|(_, name)| name.clone()))
+        )
+    }
+
+    /// What the selection has to lose.
+    ///
+    /// Probes each distinct worktree once, not each session: two sessions can
+    /// resolve to the same tree, and reporting its four modified files twice
+    /// would say eight. A tree whose status cannot be read is NOT reported as
+    /// clean, because "unknown" and "nothing to lose" must never look the same
+    /// on a delete confirmation. Every selected id is resolved, Shell sessions
+    /// included: what delete removes is whatever `by-session/<uuid>` points at,
+    /// so anything with a directory is counted and probed.
+    fn bulk_uncommitted_counts(names: &[(Uuid, String)]) -> BulkWorktreeStatus {
         use crate::git::WorktreeManager;
-        use crate::models::SessionAgentType;
 
-        // Find the session to check its type
-        let session = self.find_session(session_id)?;
+        /// Probes in flight at once. Each one forks a `git status`, so the fan
+        /// out is bounded: a 40-row selection must not spawn 40 threads and 40
+        /// child processes off a single keypress.
+        const MAX_CONCURRENT_PROBES: usize = 8;
 
-        // Skip for Shell sessions - they don't have dedicated worktrees
-        if matches!(session.agent_type, SessionAgentType::Shell) {
-            return None;
+        let Ok(worktree_manager) = WorktreeManager::for_reading() else {
+            warn!("Cannot resolve worktrees: uncommitted work is unknown for this selection");
+            return BulkWorktreeStatus {
+                dirty: Vec::new(),
+                unchecked: names.len(),
+                with_worktree: names.len(),
+                worktree_count_known: false,
+            };
+        };
+
+        // Resolve directories first: a stat, not a subprocess, and it collapses
+        // sessions that share a tree into one probe. Every selected id is
+        // resolved, including ones with no session row and Shell sessions: what
+        // delete removes is whatever `by-session/<uuid>` points at, so anything
+        // with a directory gets probed and counted.
+        let mut probes: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let mut seen: HashMap<PathBuf, usize> = HashMap::new();
+        let mut status = BulkWorktreeStatus::default();
+        for (id, name) in names {
+            let dir = match worktree_manager.session_dir(*id) {
+                // Nothing on disk: deleting this session destroys no files.
+                Ok(None) => continue,
+                Ok(Some(dir)) => dir,
+                Err(e) => {
+                    // The link is there and could not be followed, which is
+                    // unknown, not empty.
+                    warn!("Could not resolve the worktree for {id}: {e}");
+                    status.unchecked += 1;
+                    status.with_worktree += 1;
+                    continue;
+                }
+            };
+            // Canonicalise before deduping, or /tmp and /private/tmp count twice
+            // on macOS. Fall back to the raw path when it cannot be resolved.
+            let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            // Sessions sharing a tree are named together: naming only the first
+            // would tell the user the others have nothing to lose.
+            if let Some(&idx) = seen.get(&key) {
+                probes[idx].1.push(name.clone());
+            } else {
+                seen.insert(key, probes.len());
+                status.with_worktree += 1;
+                probes.push((dir, vec![name.clone()]));
+            }
         }
 
-        // Try to check worktree status
-        let worktree_manager = WorktreeManager::new().ok()?;
-        let count = worktree_manager.uncommitted_file_count(session_id).ok()?;
+        // `git status` is a subprocess per tree and this runs inline on a
+        // keypress. Batching does not reduce the number of calls, one per tree
+        // either way; it bounds how many run at once so a large selection cannot
+        // spawn a thread and a child process per tree all at the same time.
+        let mut counts: Vec<Result<usize, ()>> = Vec::with_capacity(probes.len());
+        for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
+            let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
+                // Spawn every probe in the batch before joining any of them,
+                // otherwise they run one at a time.
+                let mut handles = Vec::with_capacity(batch.len());
+                for (path, _) in batch {
+                    handles.push(scope.spawn(move || probe_tree(path)));
+                }
+                handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+            });
+            counts.extend(batch_counts);
+        }
 
-        if count > 0 {
-            Some(format!("⚠️ {} uncommitted file(s) in worktree", count))
+        for ((_, names), count) in probes.into_iter().zip(counts) {
+            match count {
+                Ok(0) => {}
+                Ok(count) => status.dirty.push((names.join(", "), count)),
+                Err(()) => status.unchecked += 1,
+            }
+        }
+        status
+    }
+
+    /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
+    /// the work "Delete all" would destroy, so it names the dirty sessions
+    /// rather than reporting a bare total.
+    /// `selected` is how many rows the dialog is about, which decides the
+    /// wording: on a one-row dialog naming the session and saying "1 session(s)"
+    /// repeats what the user is looking at, but in a bulk selection the name is
+    /// the whole point of the warning.
+    fn format_bulk_uncommitted_warning(
+        dirty: &[(String, usize)],
+        unchecked: usize,
+        selected: usize,
+    ) -> Option<String> {
+        if dirty.is_empty() {
+            if unchecked == 0 {
+                return None;
+            }
+            return Some(if selected == 1 {
+                "⚠️ could not check this worktree for uncommitted work".to_string()
+            } else {
+                format!("⚠️ could not check {unchecked} session(s) for uncommitted work")
+            });
+        }
+        let total: usize = dirty.iter().map(|(_, count)| *count).sum();
+        let listed = truncate_list(dirty.iter().map(|(name, count)| format!("{name} ({count})")));
+        let unknown = if unchecked > 0 {
+            format!("; {unchecked} more could not be checked")
         } else {
-            None
+            String::new()
+        };
+        if selected == 1 && unchecked == 0 {
+            return Some(format!("⚠️ {total} uncommitted file(s) in worktree"));
         }
+        Some(format!(
+            "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
+            total,
+            dirty.len(),
+            listed,
+            unknown
+        ))
     }
 
     /// `true` if ainb should offer to run `abtop --setup` (the Claude
@@ -7560,19 +7607,24 @@ impl AppState {
         });
     }
 
-    /// Show confirmation dialog for killing multiple "other" tmux sessions
+    /// Show confirmation dialog for killing multiple "other" tmux sessions.
+    ///
+    /// Names them, like the managed-session bulk dialog reached by the same key:
+    /// a count alone does not tell the user whether the selection is the one
+    /// they meant.
     pub fn show_kill_other_tmux_sessions_confirmation(&mut self, session_names: Vec<String>) {
         let count = session_names.len();
-        info!(
-            "Showing kill confirmation for {} other tmux sessions",
-            count
-        );
+        info!("Showing kill confirmation for {count} other tmux sessions");
+        let listed = truncate_list(session_names.iter().cloned());
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Sessions".to_string(),
-            message: format!("Are you sure you want to kill {} tmux session(s)?", count),
+            message: format!(
+                "Kill {count} tmux session(s): {listed}?\nThese are not managed by ainb, so \
+                 only the tmux session is killed."
+            ),
             confirm_action: ConfirmAction::KillOtherTmuxSessions(session_names),
-            selected_option: false,
-            warning: Some("This closes all selected external tmux sessions.".to_string()),
+            selected_option: false, // Default to "No"
+            warning: Some("⚠️ This closes all selected external tmux sessions".to_string()),
             options: None,
             selected_index: 0,
         });
@@ -8035,11 +8087,16 @@ impl AppState {
 
         // ONLY check authentication for Boss mode (Docker-based sessions)
         if snapshot.mode == SessionMode::Boss {
-            if !self.is_docker_available().await {
+            // Launching is the retry the message below asks for, so the gate
+            // must ask Docker rather than replay a "no" cached before the user
+            // started it. The gate owns that decision and the message it
+            // carries, which is what makes both of them testable.
+            if let DockerGate::Blocked(message) =
+                boss_mode_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+                    .await
+            {
                 error!("Boss mode requires Docker but Docker is not running");
-                self.add_error_notification(
-                    "Boss mode requires Docker.\n\nPlease start Docker and try again, or use Interactive mode instead.".to_string()
-                );
+                self.add_error_notification(message);
                 return;
             }
 
@@ -9550,7 +9607,13 @@ impl AppState {
 
         for session_name in &orphaned_shells {
             info!("Killing orphaned tmux shell session: {}", session_name);
-            match Command::new("tmux").args(["kill-session", "-t", session_name]).output().await {
+            // `=name` so an orphan named "shell-x" cannot take out a live
+            // "shell-x-2" via tmux's prefix matching.
+            match Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={session_name}")])
+                .output()
+                .await
+            {
                 Ok(output) if output.status.success() => {
                     killed_count += 1;
                     info!("Successfully killed tmux session: {}", session_name);
@@ -9612,8 +9675,13 @@ impl AppState {
                 debug!("Interactive cleanup failed (expected if Boss mode): {}", e);
             }
 
-            // Try Boss cleanup if Docker is available
-            if self.is_docker_available().await {
+            // Try Boss cleanup if Docker is available. CLEANUP CLASS: this
+            // probes Docker rather than reading the 30s cache, because a stale
+            // "no" here leaks the container instead of merely delaying a
+            // display. See `boss_cleanup_docker_gate`.
+            if boss_cleanup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+                .await
+            {
                 if let Err(e) = self.delete_boss_session(session_id).await {
                     debug!("Boss cleanup failed (expected if Interactive mode): {}", e);
                 }
@@ -9702,7 +9770,11 @@ impl AppState {
     ///
     /// The session is rediscovered as `Stopped` on the next workspace reload (and
     /// across TUI restarts) and can be resumed via `resume_interactive_session`.
-    async fn stop_interactive_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+    async fn stop_interactive_session(
+        &mut self,
+        session_id: Uuid,
+        trigger_key: &str,
+    ) -> anyhow::Result<()> {
         use crate::interactive::SessionStore;
         use crate::models::SessionStatus;
 
@@ -9727,29 +9799,39 @@ impl AppState {
         let worktree_path = self.find_session(session_id).map(|s| s.workspace_path.clone());
 
         let result: anyhow::Result<()> = if let Some(ref name) = tmux_name {
-            // Hard constraint: kill only the exact named session. NEVER kill-server.
+            // Hard constraint: kill only the exact named session, never a prefix
+            // match. `-t name` resolves exact, then prefix, then fnmatch, so
+            // killing "feat-auth" would take out a live "feat-auth-2"; `=name`
+            // forces exact. NEVER kill-server.
             let output = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", name])
+                .args(["kill-session", "-t", &format!("={name}")])
                 .output()
-                .await?;
+                .await;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // tmux returns non-zero when the session is already gone — treat as success
-                // since the post-condition (no tmux session) is what we care about.
-                if stderr.contains("can't find session") || stderr.contains("no server running") {
-                    info!("tmux session '{}' already gone — proceeding", name);
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Failed to kill tmux session '{}': {}",
-                        name,
-                        stderr
-                    ));
+            // Every exit path below reaches the audit record: a failed kill
+            // still has to leave a trail. Only a successful one flips the row
+            // to Stopped, see below.
+            match output {
+                Err(e) => Err(anyhow::anyhow!("Failed to run tmux kill-session: {e}")),
+                Ok(output) if output.status.success() => {
+                    info!("Killed tmux session: {name}");
+                    Ok(())
                 }
-            } else {
-                info!("Killed tmux session: {}", name);
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // tmux returns non-zero when the session is already gone, which
+                    // is the post-condition we want, so treat it as success.
+                    if stderr.contains("can't find session") || stderr.contains("no server running")
+                    {
+                        info!("tmux session '{name}' already gone, proceeding");
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Failed to kill tmux session '{name}': {stderr}"
+                        ))
+                    }
+                }
             }
-            Ok(())
         } else {
             warn!(
                 "No tmux_session_name for {} — nothing to kill, just marking Stopped",
@@ -9758,12 +9840,18 @@ impl AppState {
             Ok(())
         };
 
-        // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-        self.tmux_sessions.remove(&session_id);
+        // Only a successful kill flips the row to Stopped. Marking a session
+        // Stopped while its agent is still running is worse than reporting the
+        // failure: the row invites a resume, which would tear down and replace
+        // the live agent.
+        if result.is_ok() {
+            // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
+            self.tmux_sessions.remove(&session_id);
 
-        if let Some(session) = self.find_session_mut(session_id) {
-            session.set_status(SessionStatus::Stopped);
-            session.is_attached = false;
+            if let Some(session) = self.find_session_mut(session_id) {
+                session.set_status(SessionStatus::Stopped);
+                session.is_attached = false;
+            }
         }
 
         let audit_result = match &result {
@@ -9774,15 +9862,70 @@ impl AppState {
             session_id,
             tmux_name,
             worktree_path,
-            AuditTrigger::UserKeypress("D→Stop".to_string()),
+            AuditTrigger::UserKeypress(trigger_key.to_string()),
             audit_result,
         );
 
-        // Mirror delete_session: refresh workspace view so the Stopped indicator is rendered.
-        self.load_real_workspaces().await;
-        self.ui_needs_refresh = true;
-
+        // The caller owns the workspace refresh so a bulk stop repaints once
+        // instead of rescanning every workspace per session.
         result
+    }
+
+    /// Soft-stop every session in `session_ids`.
+    ///
+    /// Each one goes through `stop_interactive_session`, so tmux is killed and
+    /// nothing else is: worktrees, the `sessions.json` entries, and the
+    /// `by-session/<uuid>` symlinks all survive and every session stays
+    /// resumable. The caller refreshes the workspace view once afterwards.
+    async fn bulk_stop_sessions(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
+        let total = session_ids.len();
+        let mut stopped = 0;
+        let mut already_stopped = 0;
+        let mut failed = 0;
+        for id in session_ids {
+            // The dialog already filters these out, so this is normally zero.
+            // It still has to be here: a session can reach Stopped between the
+            // dialog opening and this running, and counting it as a stop would
+            // report "Stopped 10" for what stopped 5.
+            if self
+                .find_session(id)
+                .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
+            {
+                // The dialog excludes these from the action, so their check was
+                // never cleared and there is nothing to restore.
+                already_stopped += 1;
+                continue;
+            }
+            if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
+                error!("Failed to stop session {}: {}", id, e);
+                failed += 1;
+                // The row was unchecked optimistically when the user confirmed.
+                // It is still running, so put the check back rather than making
+                // the user hunt for it.
+                self.selected_sessions.insert(id);
+            } else {
+                stopped += 1;
+            }
+        }
+        if failed > 0 {
+            let attempted = total - already_stopped;
+            let skipped = if already_stopped > 0 {
+                format!(", {already_stopped} already stopped")
+            } else {
+                String::new()
+            };
+            self.add_warning_notification(format!(
+                "Stopped {stopped}/{attempted} sessions ({failed} failed{skipped})"
+            ));
+        } else if already_stopped > 0 {
+            self.add_success_notification(format!(
+                "Stopped {stopped} session(s) ({already_stopped} already stopped)"
+            ));
+        } else {
+            self.add_success_notification(format!("Stopped {stopped} session(s)"));
+        }
     }
 
     /// Resume a previously-stopped interactive session.
@@ -9833,9 +9976,15 @@ impl AppState {
 
             // Recreate the tmux session at the worktree. If something is already
             // listening on this name (shouldn't be, since we set Stopped), kill it
-            // first so we get a clean shell — narrow target, never wildcard.
+            // first so we get a clean shell. `=name` forces an exact target:
+            // bare `-t name` falls through to prefix matching, so resuming
+            // "feat-auth" would kill a live "feat-auth-2".
             let _ = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", &metadata.tmux_session_name])
+                .args([
+                    "kill-session",
+                    "-t",
+                    &format!("={}", metadata.tmux_session_name),
+                ])
                 .output()
                 .await;
 
@@ -9873,18 +10022,19 @@ impl AppState {
                 None
             };
 
+            // `None` covers both "not a Codex session" and "shared remote
+            // control is unavailable on this hangar home" (already warned
+            // about). Both resume the session with plain provider argv.
             let mut codex_remote = if metadata.agent_type == SessionAgentType::Codex {
-                Some(
-                    crate::interactive::session_manager::ensure_codex_remote_thread(
-                        metadata.session_id,
-                        &metadata.worktree_path,
-                        model.as_deref(),
-                        skip_permissions,
-                        metadata.headroom_enabled,
-                        metadata.codex_thread_id.clone(),
-                    )
-                    .await?,
+                crate::interactive::session_manager::ensure_codex_remote_thread(
+                    metadata.session_id,
+                    &metadata.worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    metadata.headroom_enabled,
+                    metadata.codex_thread_id.clone(),
                 )
+                .await?
             } else {
                 None
             };
@@ -9905,17 +10055,15 @@ impl AppState {
                 .await?;
 
             if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
-                codex_remote = Some(
-                    crate::interactive::session_manager::claim_codex_remote_thread(
-                        metadata.session_id,
-                        &metadata.worktree_path,
-                        model.as_deref(),
-                        skip_permissions,
-                        metadata.headroom_enabled,
-                        &metadata.tmux_session_name,
-                    )
-                    .await?,
-                );
+codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
+                    metadata.session_id,
+                    &metadata.worktree_path,
+                    model.as_deref(),
+                    skip_permissions,
+                    metadata.headroom_enabled,
+                    &metadata.tmux_session_name,
+                )
+                .await?;
             }
             if let Some(thread_id) =
                 codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
@@ -10127,7 +10275,79 @@ impl AppState {
         Ok(())
     }
 
+    /// Reseed the `Hangar Daemon` settings rows from the `daemon_config` table.
+    ///
+    /// A missing database is the normal state on a machine that has never run
+    /// the daemon, so it is silent: the rows keep their coded defaults, which is
+    /// what the daemon would apply anyway. A database that exists but cannot be
+    /// read IS reported, because then the rows are showing values that may not
+    /// be what is stored.
+    async fn load_hangar_daemon_config(&mut self) {
+        match read_daemon_config().await {
+            Ok(Some(stored)) => self.config_screen_state.seed_hangar_daemon_rows(&stored),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(%error, "hangar daemon config: could not read stored values");
+                self.add_warning_notification(format!(
+                    "Hangar Daemon settings show defaults: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Write edited `hangar_daemon.*` rows back to the `daemon_config` table.
+    ///
+    /// Every value passes `ConfigDescriptor::validate` first, which is the same
+    /// gate the RPC handler and the `ainb hangar daemon config set` CLI use, so
+    /// the three surfaces cannot disagree about what is legal. Each failure
+    /// raises its own error notification naming the row: a write the user asked
+    /// for that quietly did not happen is worse than one that visibly failed.
+    async fn set_hangar_daemon_config(&mut self, edits: Vec<(String, String)>) {
+        let failures = write_daemon_config_batch(&edits).await;
+        for (key, error) in &failures {
+            warn!(key, %error, "hangar daemon config write failed");
+            self.add_error_notification(format!("hangar_daemon.{key}: {error}"));
+        }
+        // Put a failed row back to the value the database actually holds, and
+        // mark it dirty again so a later `S` retries it. `read_daemon_config`
+        // only returns rows that EXIST, so a first-time write that failed left
+        // the rejected value on screen with `dirty` already cleared: the row
+        // claimed the setting had landed and no later save would ever write it.
+        let failed_rows: Vec<String> =
+            failures.iter().map(|(key, _)| format!("hangar_daemon.{key}")).collect();
+        // Re-read rather than trust the write: the row now shows what the
+        // database holds, including for any write that just failed.
+        self.load_hangar_daemon_config().await;
+        // AFTER the re-seed, not before: `seed_hangar_daemon_rows` clears
+        // `dirty` for every key it finds in the store, so marking the row first
+        // meant the flag was erased on the next line.
+        //
+        // What this does and does not buy: the row now shows the value the
+        // database actually holds, and stays dirty so it is visibly unsaved.
+        // For a key that already had a stored row that means a later `S`
+        // rewrites the STORED value — a no-op — rather than the one the user
+        // typed, because the re-seed has already replaced it. Preserving the
+        // rejected input across a failure needs the row to carry a pending
+        // value distinct from its displayed one, which the widget has no room
+        // for today. The error notification names the row, so the failure is
+        // never silent; re-typing it is the recovery.
+        for row_key in failed_rows {
+            self.config_screen_state.dirty.insert(row_key);
+        }
+    }
+
     pub async fn process_async_action(&mut self) -> anyhow::Result<()> {
+        // Once, on the first app tick: the `Hangar Daemon` settings rows are
+        // seeded with coded defaults synchronously (the store is async and the
+        // screen is not), and this replaces them with what is actually stored.
+        if !self.hangar_daemon_config_loaded {
+            self.hangar_daemon_config_loaded = true;
+            self.load_hangar_daemon_config().await;
+        }
+        if !self.pending_daemon_config_edits.is_empty() {
+            let edits = std::mem::take(&mut self.pending_daemon_config_edits);
+            self.set_hangar_daemon_config(edits).await;
+        }
         if let Some(action) = self.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
@@ -10146,10 +10366,13 @@ impl AppState {
                     }
                 }
                 AsyncAction::StopSession(session_id) => {
-                    if let Err(e) = self.stop_interactive_session(session_id).await {
+                    if let Err(e) = self.stop_interactive_session(session_id, "D→Stop").await {
                         error!("Failed to stop session {}: {}", session_id, e);
                         self.add_error_notification(format!("Stop failed: {}", e));
                     }
+                    // Refresh so the Stopped indicator is rendered.
+                    self.load_real_workspaces().await;
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::ResumeSession(session_id, trigger) => {
                     if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
@@ -10182,6 +10405,11 @@ impl AppState {
                     }
                     self.ui_needs_refresh = true;
                 }
+                AsyncAction::BulkStopSessions(session_ids) => {
+                    self.bulk_stop_sessions(session_ids).await;
+                    self.load_real_workspaces().await;
+                    self.ui_needs_refresh = true;
+                }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
                     let mut deleted = 0;
@@ -10190,6 +10418,9 @@ impl AppState {
                         if let Err(e) = self.delete_session_core(id).await {
                             error!("Failed to delete session {}: {}", id, e);
                             failed += 1;
+                            // Still there, so keep it checked: the row was
+                            // unchecked optimistically on confirmation.
+                            self.selected_sessions.insert(id);
                         } else {
                             deleted += 1;
                         }
@@ -10208,6 +10439,11 @@ impl AppState {
                 }
                 AsyncAction::RefreshWorkspaces => {
                     info!("Manual refresh triggered");
+                    // A manual refresh is the user saying "look again", which
+                    // includes at Docker: without this, starting Docker and
+                    // hitting refresh keeps showing no Boss-mode rows until the
+                    // 30s cache lapses, and the refresh looks broken.
+                    invalidate_docker_probe_cache(&DOCKER_PROBE);
                     // Reload workspace data and force UI refresh
                     self.load_real_workspaces().await;
                     self.ui_needs_refresh = true;
@@ -10482,15 +10718,15 @@ impl AppState {
             auth_state.error_message = Some("Preparing authentication setup...".to_string());
         }
 
-        // First check if Docker is available
-        if !self.is_docker_available().await {
+        // Re-running setup is the retry the message below asks for, so the
+        // gate must ask Docker rather than replay a "no" cached before the
+        // user started it.
+        if let DockerGate::Blocked(message) =
+            auth_setup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async).await
+        {
             warn!("Docker is not available or not running");
             if let Some(ref mut auth_state) = self.auth_setup_state {
-                auth_state.error_message = Some(
-                    "❌ Docker is not available\n\n\
-                     Please start Docker and try again."
-                        .to_string(),
-                );
+                auth_state.error_message = Some(message);
                 auth_state.is_processing = false;
             }
             return Err("Docker not available".into());
@@ -10617,84 +10853,95 @@ impl AppState {
     }
 
     /// Check if Docker is available and running (synchronous, static version)
+    ///
+    /// Answers from `DOCKER_PROBE` whenever a probe ran inside the TTL, so a
+    /// wedged Docker costs one 3s stall per window rather than one per call
+    /// site. Asks `docker version` rather than `docker info` so this and the
+    /// async twin put the same question to Docker, which is what makes a single
+    /// shared cache correct.
+    ///
+    /// DISPLAY CLASS ONLY. A cached answer can be up to `DOCKER_PROBE_TTL` old,
+    /// which is fine where a stale "no" costs a render or defers a retryable
+    /// piece of work, and wrong where it would skip a teardown. Cleanup and
+    /// teardown paths take `boss_cleanup_docker_gate`; a user pressing a key
+    /// after being told to start Docker takes `boss_mode_docker_gate` or
+    /// `auth_setup_docker_gate`. All three invalidate and probe.
     pub fn is_docker_available_sync() -> bool {
+        docker_answer_or_probe(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_sync)
+    }
+
+    /// Ask Docker itself, ignoring the cache. Reached only through
+    /// `is_docker_available_sync`, which owns the caching.
+    fn probe_docker_sync() -> bool {
         use std::process::{Command, Stdio};
 
         // Spawn the process and wait with a timeout to avoid hanging
         // when Docker Desktop is installed but not running
         match Command::new("docker")
-            .arg("info")
+            .args(["version", "--format", "{{.Server.Version}}"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
         {
-            Ok(mut child) => {
-                // Wait up to 3 seconds for docker info to respond
-                let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_secs(3);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => return status.success(),
-                        Ok(None) => {
-                            if start.elapsed() > timeout {
-                                let _ = child.kill();
-                                warn!("docker info timed out after 3s - Docker not available");
-                                return false;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        Err(_) => return false,
-                    }
+            Ok(mut child) => match wait_or_reap(&mut child, std::time::Duration::from_secs(3)) {
+                Some(succeeded) => succeeded,
+                // Timed out, or could not be polled: either way the child has
+                // been killed and reaped, and Docker has not answered.
+                None => {
+                    warn!("docker version did not answer within 3s - Docker not available");
+                    false
                 }
-            }
+            },
             Err(_) => false,
         }
     }
 
     /// Check if Docker is available and running
+    ///
+    /// Shares `DOCKER_PROBE` with the sync twin: both run the same
+    /// `docker version` command, so either one's answer serves the other.
+    ///
+    /// DISPLAY CLASS ONLY, with the same split as `is_docker_available_sync`:
+    /// anything that would leak a container on a stale "no" must go through
+    /// `boss_cleanup_docker_gate` instead.
     async fn is_docker_available(&self) -> bool {
-        // Use spawn + timeout to avoid hanging when Docker daemon isn't responding
-        match std::process::Command::new("docker")
+        docker_answer_or_probe_async(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async)
+            .await
+    }
+
+    /// Ask Docker itself, ignoring the cache. Reached only through
+    /// `is_docker_available`, which owns the caching.
+    async fn probe_docker_async() -> bool {
+        // `tokio::process` rather than `std::process`: on timeout the future is
+        // dropped, and `kill_on_drop` then signals the child and lets tokio's
+        // reaper collect it. A `std::process::Child` dropped here would be left
+        // running against a wedged Docker socket and orphaned to launchd when
+        // the TUI exits, which is how 117 `com.docker.cli` processes piled up.
+        let output = tokio::process::Command::new("docker")
             .args(["version", "--format", "{{.Server.Version}}"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => {
-                // Wrap in tokio timeout
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || child.wait_with_output()),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(output))) => {
-                        if output.status.success() {
-                            let version = String::from_utf8_lossy(&output.stdout);
-                            info!("Docker is available, version: {}", version.trim());
-                            true
-                        } else {
-                            let error = String::from_utf8_lossy(&output.stderr);
-                            warn!("Docker command failed: {}", error);
-                            false
-                        }
-                    }
-                    Ok(Ok(Err(e))) => {
-                        warn!("Docker command error: {}", e);
-                        false
-                    }
-                    Ok(Err(e)) => {
-                        warn!("Docker task join error: {}", e);
-                        false
-                    }
-                    Err(_) => {
-                        warn!("Docker version timed out after 3s - Docker not available");
-                        false
-                    }
+            .kill_on_drop(true)
+            .output();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(3), output).await {
+            Ok(Ok(output)) => {
+                if output.status.success() {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    info!("Docker is available, version: {}", version.trim());
+                    true
+                } else {
+                    let error = String::from_utf8_lossy(&output.stderr);
+                    warn!("Docker command failed: {}", error);
+                    false
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("Docker not found or not accessible: {}", e);
+                false
+            }
+            Err(_) => {
+                warn!("Docker version timed out after 3s - Docker not available");
                 false
             }
         }
@@ -11245,18 +11492,20 @@ impl AppState {
         &self,
         now_ms: i64,
     ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
-        // Only events within this rolling window can mark a session.
-        const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
-        // Bounds query cost; ample for any realistic active fleet.
-        const QUERY_LIMIT: u32 = 500;
+        // Only events within this rolling window can mark a session, and only
+        // this many rows are read per refresh. Both bound query cost on a large
+        // notifications DB; `[ui]` raises them for a very large fleet.
+        let config = crate::config::tunables::snapshot();
+        let lookback_ms = i64::from(config.ui.session_lookback_hours) * 60 * 60 * 1000;
+        let query_limit = config.ui.session_query_limit;
 
         let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
         if !db.exists() {
             return None;
         }
         let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
-        let floor = now_ms - LOOKBACK_MS;
-        match store.recent_since(floor, QUERY_LIMIT) {
+        let floor = now_ms - lookback_ms;
+        match store.recent_since(floor, query_limit) {
             Ok(rows) => Some(rows),
             Err(e) => {
                 debug!("attention: notifications store read failed: {e}");
@@ -11524,6 +11773,7 @@ impl AppState {
             SessionAgentType::Codex => CliProvider::Codex,
             SessionAgentType::Gemini => CliProvider::Gemini,
             SessionAgentType::Copilot => CliProvider::Copilot,
+            SessionAgentType::Antigravity => CliProvider::Antigravity,
             SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
                 anyhow::bail!("Restart unsupported for agent type {:?}", agent_type);
             }
@@ -11551,18 +11801,19 @@ impl AppState {
             None
         };
         let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
+        // `None` covers both "not a Codex session" and "shared remote control
+        // is unavailable on this hangar home" (already warned about). Both
+        // restart the session with plain provider argv.
         let mut codex_remote = if agent_type == SessionAgentType::Codex {
-            Some(
-                crate::interactive::session_manager::ensure_codex_remote_thread(
-                    session_id,
-                    std::path::Path::new(&workspace_path),
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                    metadata.and_then(|m| m.codex_thread_id.clone()),
-                )
-                .await?,
+            crate::interactive::session_manager::ensure_codex_remote_thread(
+                session_id,
+                std::path::Path::new(&workspace_path),
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                metadata.and_then(|m| m.codex_thread_id.clone()),
             )
+            .await?
         } else {
             None
         };
@@ -11589,17 +11840,15 @@ impl AppState {
             .await?;
 
         if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
-            codex_remote = Some(
-                crate::interactive::session_manager::claim_codex_remote_thread(
-                    session_id,
-                    std::path::Path::new(&workspace_path),
-                    model.as_deref(),
-                    skip_permissions,
-                    headroom_enabled,
-                    &tmux_session_name,
-                )
-                .await?,
-            );
+            codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
+                session_id,
+                std::path::Path::new(&workspace_path),
+                model.as_deref(),
+                skip_permissions,
+                headroom_enabled,
+                &tmux_session_name,
+            )
+            .await?;
         }
         if let Some(thread_id) =
             codex_remote.as_ref().and_then(|remote| remote.thread_id.as_deref())
@@ -11867,6 +12116,254 @@ impl AppState {
         );
         self.current_screen = target;
         self.ui_needs_refresh = true;
+    }
+}
+
+/// How long a Docker answer is reused. Long enough that a wedged Docker costs
+/// one 3s probe per window across every call site, short enough that starting
+/// Docker Desktop is noticed without restarting the TUI.
+const DOCKER_PROBE_TTL: Duration = Duration::from_secs(30);
+
+/// The last Docker answer and the instant it was taken, shared by
+/// `AppState::is_docker_available_sync` and `AppState::is_docker_available`.
+/// One entry serves both because both run the same `docker version` probe.
+///
+/// The probe runs outside the lock, so two callers that miss together each
+/// probe once and the later answer wins. That is the deliberate trade: holding
+/// this lock across a 3s wait would stall every other call site behind the one
+/// that is already paying for the wedged Docker.
+static DOCKER_PROBE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+
+/// The cached answer, when one was taken less than `ttl` before `now`.
+///
+/// `None` means "probe anyway": the cache is empty, the entry has aged out, or
+/// the lock is poisoned. A poisoned lock must never take the TUI down over a
+/// cached boolean, and re-probing is always correct, only slower.
+fn cached_docker_answer(
+    now: Instant,
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+) -> Option<bool> {
+    let (taken_at, answer) = (*cache.lock().ok()?)?;
+    (now.saturating_duration_since(taken_at) < ttl).then_some(answer)
+}
+
+/// Record `answer` as the Docker state observed at `now`.
+///
+/// A poisoned lock is dropped silently, for the same reason as above: losing a
+/// cache entry costs one extra probe, panicking costs the session.
+fn store_docker_answer(now: Instant, cache: &Mutex<Option<(Instant, bool)>>, answer: bool) {
+    if let Ok(mut entry) = cache.lock() {
+        *entry = Some((now, answer));
+    }
+}
+
+/// Drop any cached Docker answer, so the next caller asks Docker again.
+///
+/// A poisoned lock needs nothing dropped, since `cached_docker_answer` already
+/// reads it as "probe anyway".
+fn invalidate_docker_probe_cache(cache: &Mutex<Option<(Instant, bool)>>) {
+    if let Ok(mut entry) = cache.lock() {
+        *entry = None;
+    }
+}
+
+/// Whether Docker is available: the cached answer when one was taken inside
+/// `ttl`, otherwise `probe`'s answer, which is then cached.
+///
+/// The lookup lives here rather than at each call site so it is exercised in
+/// one place. A negative answer is cached too: a Docker that is down is
+/// exactly the case that costs 3s a call, and the TTL bounds how long a
+/// restarted Docker stays unnoticed (`invalidate_docker_probe_cache` shortens
+/// that to nothing where the user asked for a retry).
+fn docker_answer_or_probe(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if let Some(cached) = cached_docker_answer(Instant::now(), cache, ttl) {
+        return cached;
+    }
+    let answer = probe();
+    store_docker_answer(Instant::now(), cache, answer);
+    answer
+}
+
+/// `docker_answer_or_probe` for a probe that has to be awaited.
+///
+/// Takes a closure rather than a future because `tokio::process::Command`
+/// spawns the child while building its future, and a cache hit must not spawn
+/// a `docker version` it will then discard.
+async fn docker_answer_or_probe_async<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if let Some(cached) = cached_docker_answer(Instant::now(), cache, ttl) {
+        return cached;
+    }
+    let answer = probe().await;
+    store_docker_answer(Instant::now(), cache, answer);
+    answer
+}
+
+/// `docker_answer_or_probe_async` for a check the user just asked for by
+/// retrying, which must reach Docker rather than answer from the cache.
+///
+/// A "no" is cached like any other answer, so a user who read "start Docker
+/// and try again", started Docker, and pressed the key again would otherwise
+/// be told the same "no" for the rest of the TTL. Dropping the entry first is
+/// what makes the retry a retry; the fresh answer is then cached as usual, so
+/// the retry costs one probe rather than exempting the path from caching.
+async fn docker_answer_for_retry<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    invalidate_docker_probe_cache(cache);
+    docker_answer_or_probe_async(cache, ttl, probe).await
+}
+
+/// What a Docker-gated path does next, and what to tell the user when it can
+/// go no further.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DockerGate {
+    /// Docker answered "yes" just now, so the path continues.
+    Proceed,
+    /// Docker is not there now, not merely when it was last asked, and this is
+    /// the message that says so.
+    Blocked(String),
+}
+
+/// The Docker gate on launching a Boss-mode session.
+///
+/// Takes the cache and the probe rather than an already-computed `bool` so the
+/// retry semantics live inside what a test drives: prime the cache with the
+/// "no" the user was already shown, and the gate must still reach Docker. A
+/// call site that answered the question for itself and handed a `bool` in
+/// could quietly go back to replaying that "no", with nothing to notice it.
+async fn boss_mode_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> DockerGate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if docker_answer_for_retry(cache, ttl, probe).await {
+        DockerGate::Proceed
+    } else {
+        DockerGate::Blocked(
+            "Boss mode requires Docker.\n\nPlease start Docker and try again, or use Interactive mode instead."
+                .to_string(),
+        )
+    }
+}
+
+/// The Docker gate on tearing a Boss-mode session's container down.
+///
+/// CLEANUP CLASS, and the reason that class exists. It reaches Docker through
+/// `docker_answer_for_retry`, the same invalidate-then-probe seam the retry
+/// gates use, instead of through the 30s cache. A "no" cached moments earlier
+/// by a display path (a workspace refresh taken while Docker was still coming
+/// up) would otherwise skip `delete_boss_session` outright, and nothing revisits
+/// it: the session row is being deleted, so the container is leaked for good.
+/// One 3s worst case per deletion is the price of not leaking.
+///
+/// Returns a bare `bool` rather than a `DockerGate`: there is no user to show a
+/// message to and nothing to block. A genuine "Docker is down" here means the
+/// container is already gone with the engine, so the deletion proceeds.
+///
+/// Takes the cache and the probe rather than an already-computed `bool` for the
+/// same reason `boss_mode_docker_gate` does: prime the cache with the stale "no"
+/// and the gate must still reach Docker, which is only checkable at this seam.
+async fn boss_cleanup_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    docker_answer_for_retry(cache, ttl, probe).await
+}
+
+/// The Docker gate on running authentication setup, which needs a container to
+/// run the OAuth flow in. Same seam and same reason as `boss_mode_docker_gate`:
+/// re-running setup is the retry its message asks for.
+async fn auth_setup_docker_gate<F, Fut>(
+    cache: &Mutex<Option<(Instant, bool)>>,
+    ttl: Duration,
+    probe: F,
+) -> DockerGate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if docker_answer_for_retry(cache, ttl, probe).await {
+        DockerGate::Proceed
+    } else {
+        DockerGate::Blocked(
+            "❌ Docker is not available\n\n\
+             Please start Docker and try again."
+                .to_string(),
+        )
+    }
+}
+
+/// Wait up to `timeout` for `child`, returning whether it exited successfully,
+/// or `None` when it had to be killed.
+///
+/// The kill path also `wait()`s. A signalled child that is never waited on stays
+/// a zombie held by this process, and one that outlives the signal (a `docker
+/// info` blocked on an unresponsive Docker socket) reparents to launchd when we
+/// exit: 117 such `com.docker.cli` processes, aged up to four days, were reaped
+/// from one machine. Issue #785.
+fn wait_or_reap(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<bool> {
+    /// Kill the child and reap it. A signalled child that is never waited on
+    /// stays a zombie; one that outlives the signal reparents to launchd when
+    /// we exit.
+    fn kill_and_reap(child: &mut std::process::Child) {
+        if let Err(e) = child.kill() {
+            warn!("could not kill probe (pid {}): {}", child.id(), e);
+        }
+        // SIGKILL cannot be ignored, so this returns as soon as the kernel has
+        // torn the child down.
+        if let Err(e) = child.wait() {
+            warn!("could not reap probe: {}", e);
+        }
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    kill_and_reap(child);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // A failed `try_wait` says nothing about the child, so it is still
+            // running and still ours to clean up. Returning here without the
+            // kill leaves exactly the orphan this function exists to prevent.
+            Err(e) => {
+                warn!("could not poll probe (pid {}): {}", child.id(), e);
+                kill_and_reap(child);
+                return None;
+            }
+        }
     }
 }
 
@@ -12221,6 +12718,9 @@ impl App {
 
         // Only initialize the streaming manager if Docker is available
         // (log streaming requires Docker for Boss mode containers)
+        //
+        // DISPLAY CLASS: cached. Startup, and the cache is empty here anyway,
+        // so this is the probe every other startup call site then reuses.
         if AppState::is_docker_available_sync() {
             info!("Docker available - initializing log streaming manager");
             if let Err(e) = coordinator.init_manager(log_sender.clone()) {
@@ -12244,6 +12744,10 @@ impl App {
 
             // Only attempt refresh if we have OAuth credentials that need refreshing
             // AND Docker is available (token refresh requires Docker for Boss mode)
+            // DISPLAY CLASS: cached, and deliberately the same answer the log
+            // streaming check above just took - two 3s probes in the startup
+            // path is the stall the cache exists to remove. A stale "no" defers
+            // the refresh to the periodic check.
             if credentials_path.exists() && AppState::oauth_token_needs_refresh(&credentials_path) {
                 if AppState::is_docker_available_sync() {
                     info!("Docker available - attempting OAuth token refresh on startup");
@@ -12404,8 +12908,6 @@ impl App {
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
         self.state.check_mcp_overlay();
-        // Drain completed daemons overlay fetch (no-op when closed).
-        self.state.check_daemons_overlay();
         // Re-ensure the Headroom proxy if a Headroom session is live but the
         // proxy died (throttled, async, best-effort).
         self.state.headroom_watchdog();
@@ -12432,7 +12934,11 @@ impl App {
                 {
                     info!("OAuth token needs refresh (periodic check)");
 
-                    // Only attempt refresh if Docker is available
+                    // Only attempt refresh if Docker is available.
+                    //
+                    // DISPLAY CLASS: cached. This check itself repeats every 5
+                    // minutes, which is ten times the cache TTL, so a stale
+                    // "no" can only ever cost one cycle.
                     if self.state.is_docker_available().await {
                         // Refresh tokens inline (this is quick enough not to block UI)
                         match self.state.refresh_oauth_tokens().await {
@@ -12792,75 +13298,6 @@ mod plugin_render_gate_tests {
 }
 
 #[cfg(test)]
-mod daemons_overlay_unlatch_tests {
-    //! The Daemons screen used to sit on `collecting…` forever. Two latches
-    //! caused it: a fetch that never reported, and a `fetch_rx` left armed
-    //! afterwards so the one-outstanding guard rejected every later refresh.
-    //! Both must clear on a fetch that dies without sending.
-
-    use super::{AppState, DaemonsOverlayState};
-
-    /// An overlay in exactly the state `spawn_daemons_fetch` leaves behind:
-    /// `loading` set and the receiver armed, waiting on a sender that is
-    /// already gone (the shape of a fetch task that died mid-probe).
-    fn overlay_awaiting_a_dead_sender() -> DaemonsOverlayState {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(tx);
-        DaemonsOverlayState {
-            mcp_alive: false,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: crate::headroom::ProxyStatus {
-                running: false,
-                port: crate::headroom::proxy_port(),
-                pid: None,
-                tokens_saved: None,
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: false,
-            approve_reason: "probing…".to_string(),
-            hangar_running: false,
-            hangar_reason: "probing…".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            loading: true,
-            last_refreshed: None,
-            fetch_rx: Some(rx),
-            selected: super::DaemonRow::Notifyd,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
-        }
-    }
-
-    #[test]
-    fn a_fetch_that_never_reports_clears_loading_and_rearms_refresh() {
-        let mut state = AppState::default();
-        state.daemons_overlay = Some(overlay_awaiting_a_dead_sender());
-
-        state.check_daemons_overlay();
-
-        let overlay = state.daemons_overlay.as_ref().expect("overlay still open");
-        assert!(!overlay.loading, "screen must leave `collecting…`");
-        assert!(
-            overlay.fetch_rx.is_none(),
-            "one-outstanding guard must release so `r` can refetch"
-        );
-        assert!(
-            overlay.last_refreshed.is_some(),
-            "a failed probe still counts as a completed attempt"
-        );
-        assert_eq!(overlay.hangar_reason, "probe did not report");
-    }
-}
-
-#[cfg(test)]
 mod panel_close_tests {
     use super::panel_close_matches;
     use crate::app::screens::ids;
@@ -12928,5 +13365,674 @@ mod panel_close_tests {
     #[test]
     fn rejects_malformed_payload() {
         assert!(!panel_close_matches(ids::ANALYTICS, b"not-json", BURNDOWN));
+    }
+}
+
+#[cfg(test)]
+mod seeded_category_tests {
+    use super::*;
+
+    /// Categories that describe something already IN FORCE, and so must render
+    /// on a machine that has configured nothing.
+    ///
+    /// `McpServers` is deliberately absent: its rows describe user-created
+    /// servers, and having none until you add one is the honest state. The
+    /// three below are not like that. The ACP built-ins are spawning sessions
+    /// right now and the Hangar daemon knobs are governing it, but neither
+    /// lives in config.toml, so unless the seed plants them `expand_key`
+    /// returns nothing and the category is dropped for having zero rows.
+    const ALWAYS_REACHABLE: &[ConfigCategory] = &[
+        ConfigCategory::Acp,
+        ConfigCategory::HangarDaemon,
+        ConfigCategory::ContainerTemplates,
+    ];
+
+    /// A category whose subject already exists must be openable out of the box.
+    ///
+    /// `every_category_has_at_least_one_row` in the registry proves each
+    /// category has an ENTRY; it cannot prove the entry expands. Before
+    /// `seed_builtin_acp_adapters` this fails with
+    /// `these categories seed no rows and can never be opened: ["ACP Adapters"]`.
+    #[test]
+    fn categories_describing_live_things_seed_rows_out_of_the_box() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let empty: Vec<&str> = ALWAYS_REACHABLE
+            .iter()
+            .filter(|category| rows.get(category).is_none_or(|r| r.is_empty()))
+            .map(|category| category.label())
+            .collect();
+        assert!(
+            empty.is_empty(),
+            "these categories seed no rows and can never be opened: {empty:?}"
+        );
+    }
+
+    /// The built-in ACP adapters are reachable by name, not just as a count.
+    #[test]
+    fn the_builtin_acp_adapters_get_rows() {
+        let seed = seed_value(&AppConfig::default());
+        let rows = crate::config::screen_model::build_rows(&seed);
+        let keys: Vec<&str> = rows
+            .get(&ConfigCategory::Acp)
+            .expect("the ACP category has rows")
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect();
+        for adapter in ["claude-agent-acp", "codex-acp"] {
+            assert!(
+                keys.iter().any(|key| key.contains(adapter)),
+                "no row for the built-in adapter {adapter}: {keys:?}"
+            );
+        }
+    }
+
+    /// A user-declared adapter's own values survive the seeding, which only
+    /// fills in built-ins the config has not already described.
+    #[test]
+    fn a_configured_adapter_is_not_overwritten_by_the_builtin_seed() {
+        let mut config = AppConfig::default();
+        config.acp.adapters.insert(
+            "claude-agent-acp".to_string(),
+            crate::config::AcpAdapterConfig {
+                command: Some("/opt/mine".to_string()),
+                permission_mode: "plan".to_string(),
+            },
+        );
+        let seed = seed_value(&config);
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "acp.adapters.claude-agent-acp.command")
+                .unwrap()
+                .as_str(),
+            Some("/opt/mine")
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_reap_tests {
+    //! Issue #785: the probe's timeout path killed its child without reaping
+    //! it, leaving a zombie, and a child that outlived the signal orphaned to
+    //! launchd. Repeated probes against a Docker that never answers must leave
+    //! nothing behind.
+
+    use std::time::Duration;
+
+    use super::wait_or_reap;
+
+    /// The `ps` state letter for `pid`, or `None` when no such process exists.
+    /// A survivor reads `S`/`R`; a killed-but-unreaped child reads `Z`.
+    fn process_state(pid: u32) -> Option<String> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!state.is_empty()).then_some(state)
+    }
+
+    /// Stands in for `docker info` against a wedged socket: a child that will
+    /// not answer inside the probe's budget. Every pid asserted on below is one
+    /// this test spawned itself.
+    fn unresponsive_probe() -> std::process::Child {
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn probe stand-in")
+    }
+
+    #[test]
+    fn repeated_timed_out_probes_leave_no_child_and_no_zombie() {
+        let mut pids = Vec::new();
+        for _ in 0..5 {
+            let mut child = unresponsive_probe();
+            pids.push(child.id());
+            assert_eq!(
+                wait_or_reap(&mut child, Duration::from_millis(100)),
+                None,
+                "an unresponsive probe must report a timeout"
+            );
+        }
+
+        for pid in pids {
+            let state = process_state(pid);
+            assert!(
+                state.is_none(),
+                "pid {pid} outlived the probe (ps state {state:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_that_answers_in_time_reports_its_status() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn probe");
+        assert_eq!(wait_or_reap(&mut child, Duration::from_secs(5)), Some(true));
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn probe");
+        assert_eq!(
+            wait_or_reap(&mut child, Duration::from_secs(5)),
+            Some(false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_cache_tests {
+    //! The TTL cache both Docker probes consult, and the seam they consult it
+    //! through. Nothing here shells out to docker: the boundary cases run
+    //! against explicit `Instant`s so the TTL is exact and the tests cost no
+    //! wall-clock time, and the seam runs against a counting stand-in probe so
+    //! a lost cache lookup shows up as an extra call rather than as nothing.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        DOCKER_PROBE_TTL, DockerGate, auth_setup_docker_gate, boss_cleanup_docker_gate,
+        boss_mode_docker_gate, cached_docker_answer, docker_answer_for_retry,
+        docker_answer_or_probe, docker_answer_or_probe_async, invalidate_docker_probe_cache,
+        store_docker_answer,
+    };
+
+    const TTL: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn an_empty_cache_asks_the_caller_to_probe() {
+        let cache = Mutex::new(None);
+        assert_eq!(cached_docker_answer(Instant::now(), &cache, TTL), None);
+    }
+
+    #[test]
+    fn an_entry_inside_the_ttl_is_reused() {
+        for answer in [true, false] {
+            let taken_at = Instant::now();
+            let cache = Mutex::new(Some((taken_at, answer)));
+            assert_eq!(
+                cached_docker_answer(taken_at, &cache, TTL),
+                Some(answer),
+                "an entry taken this instant must be reused"
+            );
+            assert_eq!(
+                cached_docker_answer(taken_at + TTL - Duration::from_millis(1), &cache, TTL),
+                Some(answer),
+                "an entry one millisecond short of the TTL must be reused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_at_or_past_the_ttl_is_not_reused() {
+        let taken_at = Instant::now();
+        let cache = Mutex::new(Some((taken_at, true)));
+        assert_eq!(
+            cached_docker_answer(taken_at + TTL, &cache, TTL),
+            None,
+            "the TTL is exclusive: an entry exactly that old has expired"
+        );
+        assert_eq!(
+            cached_docker_answer(taken_at + TTL + Duration::from_secs(1), &cache, TTL),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stored_answer_is_what_the_next_reader_sees() {
+        let cache = Mutex::new(None);
+        let taken_at = Instant::now();
+
+        store_docker_answer(taken_at, &cache, true);
+        assert_eq!(cached_docker_answer(taken_at, &cache, TTL), Some(true));
+
+        // A later probe replaces the entry rather than ageing alongside it.
+        let later = taken_at + TTL + Duration::from_secs(1);
+        store_docker_answer(later, &cache, false);
+        assert_eq!(cached_docker_answer(later, &cache, TTL), Some(false));
+    }
+
+    #[test]
+    fn a_poisoned_lock_degrades_to_probing_instead_of_panicking() {
+        let cache = Arc::new(Mutex::new(Some((Instant::now(), true))));
+
+        let poisoner = Arc::clone(&cache);
+        let panicked = std::thread::spawn(move || {
+            let _held = poisoner.lock().expect("lock is healthy until we panic");
+            panic!("poison the docker probe cache");
+        })
+        .join();
+        assert!(panicked.is_err(), "the poisoning thread must have panicked");
+        assert!(cache.is_poisoned(), "the lock must now be poisoned");
+
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            None,
+            "a poisoned lock must read as 'probe anyway', not panic"
+        );
+        // And the write side must survive it too.
+        store_docker_answer(Instant::now(), &cache, false);
+    }
+
+    #[test]
+    fn the_shipped_ttl_is_the_window_an_answer_is_reused_for() {
+        // Driven with the shipped constant rather than the local one, so this
+        // pins what `DOCKER_PROBE_TTL` does rather than what it equals.
+        let taken_at = Instant::now();
+        let cache = Mutex::new(Some((taken_at, true)));
+
+        assert_eq!(
+            cached_docker_answer(
+                taken_at + DOCKER_PROBE_TTL - Duration::from_millis(1),
+                &cache,
+                DOCKER_PROBE_TTL,
+            ),
+            Some(true),
+            "an answer taken inside the shipped window must be reused"
+        );
+        assert_eq!(
+            cached_docker_answer(taken_at + DOCKER_PROBE_TTL, &cache, DOCKER_PROBE_TTL),
+            None,
+            "an answer as old as the shipped window must be re-probed"
+        );
+
+        // And the window is short enough that a user who starts Docker Desktop
+        // is not stuck with a stale "no" for the rest of the session.
+        assert!(
+            DOCKER_PROBE_TTL <= Duration::from_secs(60),
+            "a longer window would strand a user who just started Docker"
+        );
+    }
+
+    /// A probe stand-in that records how many times it was asked and answers
+    /// differently each time, so a reused answer is distinguishable from a
+    /// fresh one.
+    fn counted_probe(calls: &AtomicUsize) -> bool {
+        calls.fetch_add(1, Ordering::SeqCst) == 0
+    }
+
+    #[test]
+    fn a_second_call_inside_the_ttl_never_reaches_docker() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a cold cache must probe");
+
+        assert!(
+            docker_answer_or_probe(&cache, TTL, || counted_probe(&calls)),
+            "the second call must return the first probe's answer"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a call inside the TTL must not probe again"
+        );
+    }
+
+    #[test]
+    fn a_call_past_the_ttl_probes_again() {
+        // A zero TTL ages an entry out the instant it is stored, which is the
+        // expired branch without a test that waits out the shipped 30s.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, Duration::ZERO, || {
+            counted_probe(&calls)
+        }));
+        assert!(
+            !docker_answer_or_probe(&cache, Duration::ZERO, || counted_probe(&calls)),
+            "an expired entry must be replaced by the fresh answer, not reused"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_async_probe_follows_the_same_policy() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await
+        );
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await,
+            "the async twin must answer from the cache the sync twin filled"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a cache hit must not spawn a probe"
+        );
+
+        assert!(
+            !docker_answer_or_probe_async(&cache, Duration::ZERO, || async {
+                counted_probe(&calls)
+            })
+            .await
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_the_sync_path_serves_the_async_path() {
+        // The claim that makes one static correct for both probes: they ask
+        // Docker the same question, so either one's answer is the other's.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await,
+            "the async path must reuse the answer the sync path stored"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the async path must not re-probe what the sync path just answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_the_async_path_serves_the_sync_path() {
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, || async { counted_probe(&calls) }).await
+        );
+        assert!(
+            docker_answer_or_probe(&cache, TTL, || counted_probe(&calls)),
+            "the sync path must reuse the answer the async path stored"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the sync path must not re-probe what the async path just answered"
+        );
+    }
+
+    #[test]
+    fn invalidation_drops_a_stored_answer() {
+        let cache = Mutex::new(None);
+        store_docker_answer(Instant::now(), &cache, false);
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(false),
+            "the answer must be cached before invalidation can drop it"
+        );
+
+        invalidate_docker_probe_cache(&cache);
+
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            None,
+            "after invalidation the next caller must probe Docker again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_asks_docker_instead_of_replaying_a_cached_no() {
+        // The user-visible bug this guards: told to start Docker, the user
+        // starts it and retries, and the fresh "yes" must win over the "no"
+        // cached moments earlier.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+
+        let probed = AtomicUsize::new(0);
+        let answer = docker_answer_for_retry(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert!(answer, "a retry must report what Docker says now");
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "a retry must reach Docker even with an answer cached inside the TTL"
+        );
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(true),
+            "the retry's answer must replace the stale one for later callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_asks_docker_instead_of_replaying_a_cached_no() {
+        // The container-leak this guards: a display path caches "no" while
+        // Docker is still coming up, the user deletes the session seconds
+        // later, and the Boss-mode teardown reads that cached "no" and skips
+        // container removal. Unlike a display path there is no next time - the
+        // session row is gone, so the container is orphaned for good.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+
+        let probed = AtomicUsize::new(0);
+        let available = boss_cleanup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert!(
+            available,
+            "cleanup must act on the Docker that is there now, not the one cached moments ago"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "cleanup must reach Docker even with an answer cached inside the TTL"
+        );
+        assert_eq!(
+            cached_docker_answer(Instant::now(), &cache, TTL),
+            Some(true),
+            "the cleanup's answer must replace the stale one for later callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_that_finds_no_docker_still_reports_it() {
+        // The gate is not a veto: a genuine "Docker is down" means the
+        // container went down with the engine, and the deletion proceeds
+        // without a Boss-mode teardown. What must never happen is reporting
+        // that from the cache instead of from Docker.
+        let cache = Mutex::new(Some((Instant::now(), true)));
+
+        let probed = AtomicUsize::new(0);
+        let available = boss_cleanup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            false
+        })
+        .await;
+
+        assert!(!available, "a cleanup must report what Docker says now");
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "a cached yes must not stand in for the probe either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_after_a_retry_answers_from_the_retry() {
+        // The retry drops the cache once, it does not exempt the path from
+        // caching: the next ordinary check inside the TTL still costs nothing.
+        let cache = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+
+        assert!(docker_answer_for_retry(&cache, TTL, || async { counted_probe(&calls) }).await);
+        assert!(docker_answer_or_probe(&cache, TTL, || counted_probe(
+            &calls
+        )));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the retry itself may probe"
+        );
+    }
+
+    /// A probe that must not be reached, so a gate answering from the cache
+    /// fails loudly instead of quietly.
+    async fn never_probed() -> bool {
+        panic!("the gate answered from the cache instead of asking Docker");
+    }
+
+    #[tokio::test]
+    async fn the_boss_mode_gate_asks_docker_rather_than_replaying_the_no_the_user_saw() {
+        // The user read "start Docker and try again", started Docker, and
+        // pressed launch. The cached "no" is exactly the answer the gate must
+        // not give back.
+        let cache = Mutex::new(Some((Instant::now(), false)));
+        let probed = AtomicUsize::new(0);
+
+        let gate = boss_mode_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert_eq!(
+            gate,
+            DockerGate::Proceed,
+            "an explicit retry must report what Docker says now"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "the gate must reach Docker even with an answer cached inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_boss_mode_gate_blocks_with_the_message_that_asks_for_the_retry() {
+        let cache = Mutex::new(None);
+
+        let DockerGate::Blocked(message) =
+            boss_mode_docker_gate(&cache, TTL, || async { false }).await
+        else {
+            panic!("a gate with no Docker behind it must block");
+        };
+
+        assert!(
+            message.contains("Boss mode requires Docker"),
+            "the message must name what needs Docker: {message}"
+        );
+        assert!(
+            message.contains("start Docker and try again"),
+            "the message must ask for the retry the gate then honours: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_auth_setup_gate_asks_docker_rather_than_replaying_the_no_the_user_saw() {
+        let cache = Mutex::new(Some((Instant::now(), false)));
+        let probed = AtomicUsize::new(0);
+
+        let gate = auth_setup_docker_gate(&cache, TTL, || async {
+            probed.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .await;
+
+        assert_eq!(
+            gate,
+            DockerGate::Proceed,
+            "re-running setup is a retry, so it must report what Docker says now"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            1,
+            "the gate must reach Docker even with an answer cached inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_auth_setup_gate_blocks_with_the_message_that_asks_for_the_retry() {
+        let cache = Mutex::new(None);
+
+        let DockerGate::Blocked(message) =
+            auth_setup_docker_gate(&cache, TTL, || async { false }).await
+        else {
+            panic!("a gate with no Docker behind it must block");
+        };
+
+        assert!(
+            message.contains("Docker is not available"),
+            "the message must say what is missing: {message}"
+        );
+        assert!(
+            message.contains("start Docker and try again"),
+            "the message must ask for the retry the gate then honours: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_passes_leaves_its_answer_for_the_next_ordinary_check() {
+        // The gate drops the cache once, it does not exempt the path from
+        // caching: the ordinary check that follows costs nothing.
+        let cache = Mutex::new(None);
+
+        assert_eq!(
+            boss_mode_docker_gate(&cache, TTL, || async { true }).await,
+            DockerGate::Proceed
+        );
+        assert!(
+            docker_answer_or_probe_async(&cache, TTL, never_probed).await,
+            "the check after the gate must answer from the gate's probe"
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_probe_shared_static_test {
+    //! One test, deliberately alone in this module, run against the shipped
+    //! `DOCKER_PROBE` static rather than a locally built cache.
+    //!
+    //! Every other cache test drives a local `Mutex` precisely so it cannot
+    //! collide with the rest of this multi-threaded binary, which leaves one
+    //! claim unpinned: that `is_docker_available_sync` really consults the
+    //! static the async twin consults, and not a cache of its own. That can
+    //! only be checked against the static itself, so it is checked once, here,
+    //! by the only test that touches it, and the static is emptied on both
+    //! sides of the check so nothing else in the binary inherits an answer.
+    //!
+    //! The check primes the static instead of letting a real probe fill it.
+    //! Running `docker version` for real against a wedged Docker is the 3s
+    //! stall and the orphaned `com.docker.cli` that issue #785 is about: the
+    //! CLI re-spawns itself, so killing the direct child still leaves copies
+    //! reparented to launchd. A unit test must not add those to a developer's
+    //! machine. What the sync probe writes on a miss is `docker_answer_or_probe`'s
+    //! half, pinned on a local cache in `docker_probe_cache_tests`.
+
+    use std::time::Instant;
+
+    use super::{AppState, DOCKER_PROBE, invalidate_docker_probe_cache, store_docker_answer};
+
+    #[test]
+    fn the_sync_probe_answers_from_the_shared_static() {
+        invalidate_docker_probe_cache(&DOCKER_PROBE);
+
+        // Both answers, so a probe wired to a cache of its own cannot pass by
+        // coincidentally agreeing with whatever this machine's Docker says.
+        for primed in [true, false] {
+            store_docker_answer(Instant::now(), &DOCKER_PROBE, primed);
+            assert_eq!(
+                AppState::is_docker_available_sync(),
+                primed,
+                "the sync probe must answer from DOCKER_PROBE, the static the async twin reads"
+            );
+        }
+
+        invalidate_docker_probe_cache(&DOCKER_PROBE);
     }
 }

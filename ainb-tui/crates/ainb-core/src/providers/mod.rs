@@ -25,6 +25,7 @@
 //! `Arc<dyn Provider>` so call sites that need shared access (CLI dispatch,
 //! TUI render path) can clone cheaply.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -33,10 +34,63 @@ pub mod gemini;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use antigravity::AntigravityProvider;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
 pub use gemini::GeminiProvider;
+
+/// What ainb can actually do when driving a provider as the ATC **full-mode**
+/// supervisor brain.
+///
+/// Full mode is not "run any CLI": ATC needs a resident session it can spawn and
+/// keep alive, and it needs to inject a `[HEARTBEAT …]` turn into that session
+/// and have the session act on it. A provider that ainb cannot do both for has
+/// no honest full mode, and the supervisor must say so rather than provision an
+/// instance whose heartbeat lands nowhere.
+///
+/// This is the extension seam: a provider that gains real control later
+/// overrides [`Provider::atc_control`] and becomes selectable with no change to
+/// the supervisor, the mode toggle, or the Daemons screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtcControl {
+    /// ainb can spawn this provider as a long-lived supervisor session and
+    /// prove whether it is still alive.
+    pub resident_session: bool,
+    /// ainb can inject a heartbeat turn into that session's input and have it
+    /// submitted (the tmux send path).
+    pub heartbeat_injection: bool,
+    /// The policy filename this provider actually reads out of its cwd. ATC
+    /// renders its playbook there, so a wrong name is a silently unread brain.
+    pub policy_file: &'static str,
+}
+
+impl AtcControl {
+    /// The honest default for a provider ainb cannot drive as a supervisor.
+    pub const UNSUPPORTED: Self = Self {
+        resident_session: false,
+        heartbeat_injection: false,
+        policy_file: "",
+    };
+
+    /// A provider ainb can spawn AND nudge, reading `policy_file` for its policy.
+    #[must_use]
+    pub const fn supported(policy_file: &'static str) -> Self {
+        Self {
+            resident_session: true,
+            heartbeat_injection: true,
+            policy_file,
+        }
+    }
+
+    /// Can this provider be the full-mode brain? Both halves are required: a
+    /// session ainb can start but never nudge is a brain that never wakes, and
+    /// a nudge with no session to receive it lands nowhere.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        self.resident_session && self.heartbeat_injection
+    }
+}
 
 /// One CLI agent provider (claude, codex, gemini, copilot, …).
 ///
@@ -61,6 +115,16 @@ pub trait Provider: Send + Sync {
 
     /// URL pointing at the provider's install / setup docs.
     fn install_docs_url(&self) -> &'static str;
+
+    /// What ainb can drive when this provider is the ATC full-mode brain.
+    ///
+    /// Defaults to [`AtcControl::UNSUPPORTED`] deliberately: a provider that has
+    /// not proven it can host a resident, nudgeable supervisor session must not
+    /// be offered as one. Overriding this is the whole cost of adding a provider
+    /// to full mode.
+    fn atc_control(&self) -> AtcControl {
+        AtcControl::UNSUPPORTED
+    }
 }
 
 /// In-process registry of `Provider` impls keyed by `id()`.
@@ -86,6 +150,7 @@ impl ProviderRegistry {
         r.register(Arc::new(CodexProvider));
         r.register(Arc::new(GeminiProvider));
         r.register(Arc::new(CopilotProvider));
+        r.register(Arc::new(AntigravityProvider));
         r
     }
 
@@ -127,13 +192,14 @@ impl ProviderRegistry {
     }
 
     /// Permissive lookup that mirrors the old `CliProvider::from_str` aliases
-    /// ("openai" → codex, "google" → gemini, "github" → copilot). Used by CLI
+    /// ("openai" -> codex, "google" -> gemini, "github" -> copilot, "agy" -> antigravity). Used by CLI
     /// flag parsing where users may have learned the legacy aliases.
     pub fn get_with_aliases(&self, s: &str) -> Option<Arc<dyn Provider>> {
         let normalised = match s.to_lowercase().as_str() {
             "openai" => "codex".to_string(),
             "google" => "gemini".to_string(),
             "github" => "copilot".to_string(),
+            "agy" | "antigravity" => "antigravity".to_string(),
             other => other.to_string(),
         };
         self.get(&normalised)
@@ -150,8 +216,8 @@ mod tests {
     #[test]
     fn provider_registry_resolves_all_built_ins() {
         let r = ProviderRegistry::built_ins();
-        assert_eq!(r.len(), 4);
-        for id in ["claude", "codex", "gemini", "copilot"] {
+        assert_eq!(r.len(), 5);
+        for id in ["claude", "codex", "gemini", "copilot", "antigravity"] {
             let p = r.get(id).unwrap_or_else(|| panic!("missing {id}"));
             assert_eq!(p.id(), id);
         }
@@ -161,7 +227,10 @@ mod tests {
     fn registry_iter_preserves_registration_order() {
         let r = ProviderRegistry::built_ins();
         let ids: Vec<_> = r.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["claude", "codex", "gemini", "copilot"]);
+        assert_eq!(
+            ids,
+            vec!["claude", "codex", "gemini", "copilot", "antigravity"]
+        );
     }
 
     #[test]
@@ -170,6 +239,11 @@ mod tests {
         assert_eq!(r.get_with_aliases("OpenAI").unwrap().id(), "codex");
         assert_eq!(r.get_with_aliases("google").unwrap().id(), "gemini");
         assert_eq!(r.get_with_aliases("GITHUB").unwrap().id(), "copilot");
+        assert_eq!(r.get_with_aliases("agy").unwrap().id(), "antigravity");
+        assert_eq!(
+            r.get_with_aliases("Antigravity").unwrap().id(),
+            "antigravity"
+        );
         assert_eq!(r.get_with_aliases("claude").unwrap().id(), "claude");
         assert!(r.get_with_aliases("unknown").is_none());
     }
@@ -198,6 +272,15 @@ mod tests {
 
         let copilot = r.get("copilot").unwrap();
         assert_eq!(copilot.skip_permissions_flag(), Some("--yolo"));
+
+        let antigravity = r.get("antigravity").unwrap();
+        assert_eq!(antigravity.command(), "agy");
+        assert_eq!(antigravity.api_key_env_var(), Some("GEMINI_API_KEY"));
+        assert_eq!(
+            antigravity.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
+        assert_eq!(antigravity.display_name(), "Google Antigravity");
     }
 
     #[test]

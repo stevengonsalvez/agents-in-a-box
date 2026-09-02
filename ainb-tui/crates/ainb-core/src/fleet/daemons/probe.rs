@@ -32,6 +32,15 @@ use super::heartbeat::{DaemonHeartbeat, PidCheck, is_pid_alive, pid_identity, pr
 /// 30s long-poll cycle and the fleet daemon's 5s tick with headroom.
 pub const STALE_AFTER_MS: i64 = 90_000;
 
+/// [`STALE_AFTER_MS`] with `daemons.stale_after_ms` applied.
+///
+/// A function, not a const, because the value now comes from config; the const
+/// stays as the coded default and as the value the unit tests reason against.
+#[must_use]
+pub fn stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.stale_after_ms
+}
+
 /// The outbound-push staleness window for the bridge.
 ///
 /// How long the bridge may go without a SUCCESSFUL poll of the attention source
@@ -45,6 +54,12 @@ pub const STALE_AFTER_MS: i64 = 90_000;
 /// bridge answered yes to the first and (silently) no to the second for its
 /// entire life, which is the blind spot this closes.
 pub const ATTENTION_STALE_AFTER_MS: i64 = 45_000;
+
+/// [`ATTENTION_STALE_AFTER_MS`] with `daemons.attention_stale_after_ms` applied.
+#[must_use]
+pub fn attention_stale_after_ms() -> i64 {
+    crate::config::tunables::snapshot().daemons.attention_stale_after_ms
+}
 
 /// Which daemon a [`DaemonStatus`] describes. Stable wire strings for the JSON
 /// surface and stable display names for the text/TUI surfaces.
@@ -202,6 +217,106 @@ pub struct DaemonStatus {
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
     pub reason: String,
+    /// The instance whose OS scheduler is installed while the instance itself
+    /// is NOT provisioned (ATC only). A timer firing into nothing produces an
+    /// error every interval forever and is invisible from the row's own state,
+    /// so it is carried as its own fact rather than buried in [`Self::reason`]:
+    /// the screen needs it in order to offer the teardown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_orphan: Option<String>,
+    /// The provisioned ATC instance this row describes, when there is one.
+    ///
+    /// Also carried rather than parsed back out of [`Self::reason`]: the screen
+    /// decides from it both whether to offer provisioning and which tmux
+    /// session `open mission control` attaches, and a reworded sentence must
+    /// not be able to change either answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atc_instance: Option<String>,
+}
+
+/// Probe a LITE instance: its controller is the resident scan loop, so liveness
+/// is that process's own heartbeat, not a timer's stamp and not a tmux session.
+///
+/// Reports `Degraded` rather than `Stopped` when the instance is provisioned in
+/// lite mode with no scanner running: the fleet HAS a designated owner and that
+/// owner is absent, which is a different problem from an unconfigured ATC and
+/// takes a different fix (`ainb daemon atc start`, not `fleet atc setup`).
+fn probe_atc_lite(
+    paths: &crate::fleet::atc::paths::AtcPaths,
+    meta: &crate::fleet::atc::meta::AtcMeta,
+    now_ms: i64,
+) -> DaemonStatus {
+    use crate::fleet::atc::heartbeat::HeartbeatState;
+    use crate::fleet::atc::supervisor::{SupervisorMode, lite_heartbeat_id};
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+
+    let kind = DaemonKind::Atc;
+    let name = meta.name.clone();
+    let channel = Some(format!(
+        "{name} · {} · no LLM",
+        SupervisorMode::Lite.label()
+    ));
+    let last_active = std::fs::read_to_string(&paths.heartbeat_state)
+        .ok()
+        .map(|s| HeartbeatState::from_json_or_default(&s))
+        .and_then(|s| s.last_active_ms);
+
+    let Some(hb) = DaemonHeartbeat::read(&lite_heartbeat_id(&name)) else {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            channel,
+            last_activity_at: last_active,
+            reason: format!(
+                "lite mode is the owner of this fleet but no scanner is running; \
+`ainb daemon atc start` starts it"
+            ),
+            ..DaemonStatus::running(kind)
+        };
+    };
+    // Identity, not bare liveness: a recycled pid would report a crashed scanner
+    // as running, which is the one state an unattended lite fleet must not fake.
+    if pid_identity(hb.pid, hb.started_at) != PidCheck::Matched {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Stopped,
+            pid: Some(hb.pid),
+            channel,
+            last_activity_at: last_active,
+            ..DaemonStatus::stopped(
+                kind,
+                format!("lite scanner pid {} is gone (crashed?)", hb.pid),
+            )
+        };
+    }
+    let age = now_ms.saturating_sub(hb.last_heartbeat_at);
+    if age > stale_after_ms() {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            pid: Some(hb.pid),
+            channel,
+            last_activity_at: last_active,
+            reason: format!(
+                "lite scanner alive (pid {}) but its last scan was {}s ago — wedged?",
+                hb.pid,
+                age / 1000
+            ),
+            ..DaemonStatus::running(kind)
+        };
+    }
+    DaemonStatus {
+        kind,
+        state: DaemonState::Running,
+        pid: Some(hb.pid),
+        connected: true,
+        channel,
+        last_activity_at: last_active,
+        error_count: hb.error_count,
+        last_error: hb.last_error.clone(),
+        reason: format!("lite scanner alive — last scan {}s ago", age / 1000),
+        ..DaemonStatus::running(kind)
+    }
 }
 
 impl DaemonStatus {
@@ -224,6 +339,8 @@ impl DaemonStatus {
             inbound_live: 0,
             last_inbound_error: None,
             reason: reason.into(),
+            scheduler_orphan: None,
+            atc_instance: None,
         }
     }
 
@@ -467,7 +584,7 @@ fn classify_outbound(
     match hb.last_attention_poll_at {
         Some(last) => {
             let age = now_ms.saturating_sub(last);
-            if age <= ATTENTION_STALE_AFTER_MS {
+            if age <= attention_stale_after_ms() {
                 OutboundVerdict::Healthy
             } else {
                 OutboundVerdict::Unreachable(format!(
@@ -478,7 +595,7 @@ fn classify_outbound(
         }
         // Never polled. Give the worker one window to complete its first poll
         // before calling it broken, then say so in the operator's words.
-        None if uptime_ms <= ATTENTION_STALE_AFTER_MS => OutboundVerdict::Starting,
+        None if uptime_ms <= attention_stale_after_ms() => OutboundVerdict::Starting,
         None => OutboundVerdict::Unreachable(format!(
             "no successful attention/list poll in {}s of uptime ({cause})",
             uptime_ms / 1000
@@ -542,13 +659,15 @@ pub fn classify_heartbeat(
             inbound_live: hb.inbound_live,
             last_inbound_error: hb.last_inbound_error,
             reason,
+            scheduler_orphan: None,
+            atc_instance: None,
         };
     }
 
     // The pid is alive but the heartbeat went quiet past the window: the process
     // exists but its loop is wedged or paused. Report stopped+stale so we don't
     // claim a healthy daemon.
-    if age > STALE_AFTER_MS {
+    if age > stale_after_ms() {
         return DaemonStatus {
             kind,
             state: DaemonState::Stopped,
@@ -567,6 +686,8 @@ pub fn classify_heartbeat(
             inbound_live: hb.inbound_live,
             last_inbound_error: hb.last_inbound_error,
             reason: format!("stale heartbeat — last beat {}s ago (wedged?)", age / 1000),
+            scheduler_orphan: None,
+            atc_instance: None,
         };
     }
 
@@ -603,6 +724,8 @@ pub fn classify_heartbeat(
         inbound_live: hb.inbound_live,
         last_inbound_error: hb.last_inbound_error,
         reason,
+        scheduler_orphan: None,
+        atc_instance: None,
     }
 }
 
@@ -685,6 +808,8 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         inbound_live: 0,
         last_inbound_error: None,
         reason,
+        scheduler_orphan: None,
+        atc_instance: None,
     }
     .with_now(now_ms)
 }
@@ -743,6 +868,8 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
         inbound_live: 0,
         last_inbound_error: None,
         reason,
+        scheduler_orphan: None,
+        atc_instance: None,
     }
     .with_now(now_ms)
 }
@@ -752,16 +879,142 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
 /// provisioned instance with `heartbeat_enabled` whose last heartbeat is within
 /// the cadence window. Reads, never re-emits.
 #[must_use]
+/// Count of `hangar daemon run` processes visible on this host.
+///
+/// CONTEXT ONLY, never on its own an error. The single-instance guard is
+/// PER-HOME: a machine running N ainb homes (worktrees, temp homes in tests)
+/// legitimately has N daemons, and treating that as a fault was the exact
+/// false positive an earlier orphan hunt had to unpick. The authoritative
+/// signal for THIS home stays `running_daemon_pid()`.
+///
+/// Matched on argv shape rather than a substring: `ps` output also carries
+/// shell wrappers and greps whose command line merely mentions the phrase, and
+/// a count shown to an operator mid-diagnosis has to be the real one.
+fn hangar_daemon_census() -> usize {
+    std::process::Command::new("ps")
+        .args(["-axo", "args="])
+        .output()
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| crate::cli::hangar::argv_credits_a_daemon(line))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Is a lite scanner provably running for `name`?
+///
+/// Identity, not bare liveness: a recycled pid is a tombstone from a crashed
+/// scanner, and counting it as running would let a dead lite instance claim the
+/// row from a healthy full one.
+fn lite_scanner_is_live(name: &str) -> bool {
+    use crate::fleet::atc::supervisor::lite_heartbeat_id;
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+    DaemonHeartbeat::read(&lite_heartbeat_id(name))
+        .is_some_and(|hb| pid_identity(hb.pid, hb.started_at) == PidCheck::Matched)
+}
+
+/// What the ATC row says when no instance exists.
+///
+/// A constant because the Daemons screen decides which menu entries to offer
+/// from it: a paraphrase in either place would silently stop offering the one
+/// action that fixes the state it describes.
+pub const ATC_UNPROVISIONED: &str = "no ATC instance provisioned";
+
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
+    // Units are named for an instance, not for an ainb home, and they always
+    // live in the user's own launchd/systemd directory. Comparing them against
+    // some OTHER home's instances would report that home's live timer as an
+    // orphan and offer to tear it down, so they are only consulted when this
+    // IS the home they belong to.
+    let units = crate::fleet::plumbing::paths::ainb_home()
+        .map(|default| default == home)
+        .unwrap_or(false)
+        .then(crate::fleet::atc::timer::installed_instance_names)
+        .unwrap_or_default();
+    probe_atc_with(home, now_ms, &crate::tmux::session_alive, &units)
+}
+
+/// [`probe_atc`] with the session check injected.
+///
+/// Split out so the liveness branch is testable: a temp-home fixture has no
+/// tmux session, so a hard-wired `tmux has-session` would report every test
+/// instance as degraded and the healthy path could never be asserted.
+pub(crate) fn probe_atc_with(
+    home: &Path,
+    now_ms: i64,
+    session_alive: &dyn Fn(&str) -> Option<bool>,
+    installed_timers: &[String],
+) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
     use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    use crate::fleet::atc::supervisor::SupervisorMode;
 
     let kind = DaemonKind::Atc;
     let atc_root = home.join("atc");
     let names = list_instance_names_in(&atc_root);
+
+    // An OS timer for an instance that does not exist fires forever and logs a
+    // failure every interval. Computed for EVERY row, not only the empty one: a
+    // host with a live instance and a stale unit beside it is the case most
+    // likely to go unnoticed, because the row otherwise reads healthy.
+    //
+    // Asked of the installed UNITS, not of the leftover directories: a unit
+    // whose instance dir was deleted outright still fires, and that is exactly
+    // what a directory scan cannot see.
+    let orphan = installed_timers.iter().find(|name| !names.contains(name)).cloned();
+
     if names.is_empty() {
-        return DaemonStatus::stopped(kind, "no ATC instance provisioned");
+        if let Some(orphan) = orphan {
+            return DaemonStatus {
+                reason: format!(
+                    "{ATC_UNPROVISIONED}, but a heartbeat timer for '{orphan}' is installed \
+                     and failing every interval"
+                ),
+                scheduler_orphan: Some(orphan),
+                ..DaemonStatus::stopped(kind, String::new())
+            };
+        }
+        return DaemonStatus::stopped(kind, ATC_UNPROVISIONED);
+    }
+
+    // A LITE instance is a different daemon wearing the same row: no scheduler,
+    // no brain session, a resident scan loop instead. Probing it with the
+    // full-mode signals (heartbeat_enabled, tmux session liveness) would report
+    // a perfectly healthy lite fleet as stopped-or-degraded forever.
+    //
+    // Selection matters as much as the probe. Returning the FIRST lite instance
+    // in directory order let a months-dead `alpha` permanently hide a healthy,
+    // actively-beating `tower` — the row would sit on "no scanner is running"
+    // while the real supervisor was fine. So a lite instance only wins the row
+    // when it is genuinely the liveliest thing here: a RUNNING scanner beats
+    // everything, and a merely-provisioned one is the fallback taken only when
+    // no full instance has a usable heartbeat either.
+    let mut lite_running: Option<(AtcPaths, AtcMeta)> = None;
+    let mut lite_idle: Option<(AtcPaths, AtcMeta)> = None;
+    for name in &names {
+        let p = AtcPaths::under_root(&atc_root, name);
+        let Some(meta) =
+            std::fs::read_to_string(&p.meta).ok().and_then(|s| AtcMeta::from_json(&s).ok())
+        else {
+            continue;
+        };
+        if meta.mode != SupervisorMode::Lite {
+            continue;
+        }
+        if lite_scanner_is_live(&meta.name) {
+            lite_running = Some((p, meta));
+            break;
+        }
+        if lite_idle.is_none() {
+            lite_idle = Some((p, meta));
+        }
+    }
+    if let Some((p, meta)) = lite_running {
+        return probe_atc_lite(&p, &meta, now_ms);
     }
 
     // Pick the most-recently-beating instance as the representative row, and
@@ -773,7 +1026,7 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     // its last (pre-disable) heartbeat looks — counting it was the M2 false
     // "running". Track how many enabled instances we saw so we can distinguish
     // "all disabled" from "none have beaten yet".
-    let mut best: Option<(String, HeartbeatState, u32)> = None;
+    let mut best: Option<(String, HeartbeatState, u32, String)> = None;
     let mut enabled_count = 0_usize;
     for name in &names {
         let p = AtcPaths::under_root(&atc_root, name);
@@ -783,7 +1036,24 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         // possibly-running instance. `AtcMeta::new` defaults `heartbeat_enabled`
         // to true, matching this.
         let heartbeat_enabled = meta.as_ref().map_or(true, |m| m.heartbeat_enabled);
-        let interval_min = meta.map_or(15, |m| m.heartbeat_interval_min.max(1));
+        let interval_min = meta.as_ref().map_or(15, |m| m.heartbeat_interval_min.max(1));
+        let provider = meta.as_ref().map_or_else(|| "claude".to_string(), |m| m.provider.clone());
+        // A LITE instance can only ever be described by `probe_atc_lite`, which
+        // already had its chance above. It must not compete here, because on
+        // every signal this loop reads it looks like a full instance and wins:
+        // `setup --mode lite` leaves `heartbeat_enabled` true (that flag is about
+        // the OS timer, which lite simply does not use), and the lite scanner
+        // stamps `last_heartbeat_ms` into the SAME heartbeat-state.json on every
+        // tick. A lite instance whose scanner had died therefore reached the
+        // full-mode branch below and was reported as
+        // "tower · FULL(claude) · every 15m — session ainb-atc-tower is GONE",
+        // naming a tmux session lite never creates and sending the operator to
+        // respawn a brain the fleet does not have. Wrong mode, wrong diagnosis,
+        // wrong fix. No test caught it because every fixture passes
+        // `--no-heartbeat`, which is the one setting that keeps lite out of here.
+        if meta.as_ref().is_some_and(|m| m.mode == SupervisorMode::Lite) {
+            continue;
+        }
         if !heartbeat_enabled {
             // Disabled instances are never a running-source. Skip before reading
             // the heartbeat state so a stale beat can't promote it.
@@ -797,59 +1067,105 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
             continue;
         };
         let take = match &best {
-            Some((_, prev, _)) => hbs.last_heartbeat_ms > prev.last_heartbeat_ms,
+            Some((_, prev, _, _)) => hbs.last_heartbeat_ms > prev.last_heartbeat_ms,
             None => true,
         };
         if take {
-            best = Some((name.clone(), hbs, interval_min));
+            best = Some((name.clone(), hbs, interval_min, provider.clone()));
         }
     }
 
-    let Some((name, hbs, interval_min)) = best else {
+    let fall_back_to_idle_lite = |reason_if_none: DaemonStatus| -> DaemonStatus {
+        match &lite_idle {
+            Some((p, meta)) => probe_atc_lite(p, meta, now_ms),
+            None => reason_if_none,
+        }
+    };
+
+    let Some((name, hbs, interval_min, provider)) = best else {
         // No enabled instance produced a usable heartbeat. If NONE of the
         // provisioned instances are even enabled, the daemon is configured off.
-        if enabled_count == 0 {
-            return DaemonStatus::stopped(
-                kind,
-                format!(
-                    "{} instance(s) provisioned, all heartbeat-disabled",
-                    names.len()
-                ),
-            );
-        }
-        return DaemonStatus::stopped(
-            kind,
+        let reason = if enabled_count == 0 {
             format!(
-                "{} enabled instance(s), none have beaten yet",
-                enabled_count
-            ),
-        );
+                "{} instance(s) provisioned, all heartbeat-disabled",
+                names.len()
+            )
+        } else {
+            format!("{enabled_count} enabled instance(s), none have beaten yet")
+        };
+        // Through the lite fallback: a provisioned lite instance has no
+        // full-mode heartbeat by design, so "none have beaten yet" is the wrong
+        // story to tell about it.
+        return fall_back_to_idle_lite(DaemonStatus {
+            atc_instance: names.first().cloned(),
+            scheduler_orphan: orphan,
+            ..DaemonStatus::stopped(kind, reason)
+        });
     };
 
     if hbs.last_heartbeat_ms == 0 {
         return DaemonStatus {
             kind,
-            channel: Some(name),
+            channel: Some(name.clone()),
+            atc_instance: Some(name),
+            scheduler_orphan: orphan,
             ..DaemonStatus::stopped(kind, "instance provisioned but no heartbeat yet")
         };
     }
 
     // The OS timer fires every `interval_min`; allow 2x the cadence + a 90s grace
     // before we call it stale (timers are not punctual to the second).
-    let window_ms = (interval_min as i64) * 60_000 * 2 + STALE_AFTER_MS;
+    let window_ms = (interval_min as i64) * 60_000 * 2 + stale_after_ms();
     let age = now_ms.saturating_sub(hbs.last_heartbeat_ms);
     if age > window_ms {
         return DaemonStatus {
             kind,
-            channel: Some(name),
+            channel: Some(name.clone()),
+            atc_instance: Some(name),
+            scheduler_orphan: orphan,
             last_activity_at: hbs.last_active_ms,
             ..DaemonStatus::stopped(
                 kind,
                 format!(
-                    "stale — last heartbeat {}m ago (timer stopped?)",
+                    "stale: last heartbeat {}m ago (timer stopped?)",
                     age / 60_000
                 ),
             )
+        };
+    }
+
+    // ATC has TWO halves and the heartbeat file only evidences one of them.
+    // The OS timer writes that file whether or not the Claude session it beats
+    // into still exists, so a dead `tmux_<name>` reports Running forever: the
+    // timer fires, finds nothing, exits 0, and task-log.md silently stops
+    // growing. Probing the session is the only way to tell the halves apart,
+    // the same split the bridge already models with inbound vs outbound.
+    let session = AtcMeta::new(&name).tmux_session();
+    // The advice names `daemon atc start`, not `fleet atc setup`: bare setup
+    // rebuilds meta from defaults, so it would silently reset a 10m instance to
+    // 15m while "fixing" it. `daemon atc start` reads the current settings and
+    // passes them back.
+    //
+    // Only a PROVEN dead session degrades the row. `None` means the check
+    // itself could not run (tmux off PATH, a wedged server), and reporting an
+    // environment problem as an ATC fault would send the operator to a repair
+    // that rewrites a healthy instance.
+    if session_alive(&session) == Some(false) {
+        return DaemonStatus {
+            kind,
+            state: DaemonState::Degraded,
+            connected: false,
+            channel: Some(format!(
+                "{name} · {}({provider}) · every {interval_min}m",
+                SupervisorMode::Full.label()
+            )),
+            atc_instance: Some(name.clone()),
+            scheduler_orphan: orphan,
+            last_activity_at: hbs.last_active_ms,
+            reason: format!(
+                "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; start respawns it"
+            ),
+            ..DaemonStatus::running(kind)
         };
     }
 
@@ -861,7 +1177,10 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         version: None,
         version_current: None,
         connected: true,
-        channel: Some(format!("{name} (every {interval_min}m)")),
+        channel: Some(format!(
+            "{name} · {}({provider}) · every {interval_min}m",
+            SupervisorMode::Full.label()
+        )),
         last_activity_at: hbs.last_active_ms,
         error_count: 0,
         last_error: None,
@@ -870,7 +1189,18 @@ pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
         inbound_expected: 0,
         inbound_live: 0,
         last_inbound_error: None,
-        reason: format!("heartbeat alive — last beat {}m ago", age / 60_000),
+        reason: match &orphan {
+            // A healthy row with a stale unit beside it is the case that goes
+            // unnoticed: nothing else on screen says the unit exists.
+            Some(orphan) => format!(
+                "heartbeat alive, last beat {}m ago; a stale timer for '{orphan}' is also \
+                 installed and failing",
+                age / 60_000
+            ),
+            None => format!("heartbeat alive, last beat {}m ago", age / 60_000),
+        },
+        scheduler_orphan: orphan,
+        atc_instance: Some(name),
     }
 }
 
@@ -947,11 +1277,24 @@ pub fn probe_mcp_pool() -> DaemonStatus {
     // Probe the socket with a bounded connect BEFORE asking the client: its
     // `query` sets read/write timeouts only after an unbounded connect, so a
     // wedged listener would hang the collector there.
-    let listening = crate::mcp_pool::paths::control_socket().ok().is_some_and(|path| {
-        path.exists() && connect_bounded(&path, SOCKET_PROBE_TIMEOUT).is_some()
+    let socket = crate::mcp_pool::paths::control_socket().ok();
+    let socket_present = socket.as_ref().is_some_and(|path| path.exists());
+    let listening = socket.as_ref().is_some_and(|path| {
+        socket_present && connect_bounded(path, SOCKET_PROBE_TIMEOUT).is_some()
     });
     if !listening || !crate::mcp_pool::client::daemon_alive() {
-        return DaemonStatus::stopped(kind, "control socket not answering".to_string());
+        // "not answering" reads as a wedged daemon. With no socket file at all
+        // nothing was ever listening, which is a different thing to go looking
+        // for, so say which one it is.
+        return DaemonStatus::stopped(
+            kind,
+            if socket_present {
+                "control socket present but not answering (stale?)"
+            } else {
+                "not running (no control socket)"
+            }
+            .to_string(),
+        );
     }
     let runtime = crate::mcp_pool::client::daemon_runtime_status();
     let reason = if runtime.old {
@@ -977,29 +1320,66 @@ pub fn probe_mcp_pool() -> DaemonStatus {
 /// socket connect answers the separate question of whether it is still serving.
 #[must_use]
 pub fn probe_hangar_daemon() -> DaemonStatus {
-    let kind = DaemonKind::HangarDaemon;
     let runtime = crate::cli::hangar::daemon_runtime_status();
     let serving = crate::fleet::bridge::daemon::socket_path()
         .is_some_and(|socket| socket_is_listening(&socket));
-    match (runtime.pid, serving) {
+    hangar_status_for(
+        runtime.pid,
+        runtime.version,
+        runtime.old,
+        serving,
+        hangar_daemon_census,
+    )
+}
+
+/// [`probe_hangar_daemon`]'s decision, with every input passed in.
+///
+/// Split out so the ownership cases are testable: the interesting one is a
+/// socket that answers while this home records no owner, which cannot be
+/// staged against a real daemon without racing the host's own.
+pub(crate) fn hangar_status_for(
+    pid: Option<u32>,
+    version: Option<String>,
+    old: bool,
+    serving: bool,
+    census: impl Fn() -> usize,
+) -> DaemonStatus {
+    let kind = DaemonKind::HangarDaemon;
+    match (pid, serving) {
         (None, false) => DaemonStatus::stopped(kind, "not running".to_string()),
         // A recorded owner with a dead socket is the half-alive case the
         // Daemons screen exists to make visible.
         (Some(pid), false) => DaemonStatus {
             state: DaemonState::Degraded,
             pid: Some(pid),
-            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
-            version: runtime.version,
+            version_current: version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version,
             reason: format!("pid {pid} owns this home but the socket is not accepting"),
+            ..DaemonStatus::running(kind)
+        },
+        // Socket answering while this home records NO owner: something else is
+        // serving our socket. That is the split-brain that makes
+        // `ainb fleet atc repair` bail with "the daemon did NOT accept the
+        // unregister": the verb dials the socket, a daemon this home does not
+        // own answers, and the registration lives somewhere else entirely.
+        (None, true) => DaemonStatus {
+            state: DaemonState::Degraded,
+            connected: true,
+            channel: Some("unix socket".to_string()),
+            reason: format!(
+                "socket is served by a daemon this home does not own ({} running \
+host-wide); restart re-takes ownership",
+                census()
+            ),
             ..DaemonStatus::running(kind)
         },
         (pid, true) => DaemonStatus {
             pid,
-            version_current: runtime.version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
-            version: runtime.version,
+            version_current: version.as_deref().map(|v| v == env!("CARGO_PKG_VERSION")),
+            version,
             connected: true,
             channel: Some("unix socket".to_string()),
-            reason: if runtime.old {
+            reason: if old {
                 "serving — older than this ainb, restart to upgrade".to_string()
             } else {
                 "socket serving".to_string()
@@ -1160,6 +1540,24 @@ pub fn collect() -> anyhow::Result<Vec<DaemonStatus>> {
 
 #[cfg(test)]
 mod tests {
+    /// Pin the tunables snapshot to defaults for this module.
+    ///
+    /// `stale_after_ms()` and `attention_stale_after_ms()` read the snapshot,
+    /// which lazily loads the developer's real
+    /// `~/.agents-in-a-box/config/config.toml` — so anyone who had set
+    /// `daemons.stale_after_ms` failed these tests locally while CI, with no
+    /// config file, passed. The fixtures below are built from the consts, so
+    /// the snapshot has to agree with them.
+    fn pin_default_snapshot() -> std::sync::MutexGuard<'static, ()> {
+        // The shared lock, held by the CALLER for the length of its test: the
+        // snapshot is process-global, so installing it without the lock races
+        // every other test that installs or reads one.
+        let guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::config::tunables::install_snapshot(crate::config::AppConfig::default());
+        guard
+    }
+
     use super::*;
     use tempfile::TempDir;
 
@@ -1573,6 +1971,7 @@ mod tests {
 
     #[test]
     fn bridge_whose_last_attention_poll_went_stale_is_degraded() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let last_poll = now - (ATTENTION_STALE_AFTER_MS + 60_000);
         let mut h = bridge_hb(now - 3_600_000, now - 1_000, true, Some(last_poll));
@@ -1597,6 +1996,7 @@ mod tests {
 
     #[test]
     fn bridge_poll_exactly_at_the_window_edge_is_still_running() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::Bridge,
@@ -1618,6 +2018,7 @@ mod tests {
 
     #[test]
     fn freshly_started_bridge_gets_one_window_before_degrading() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // Up for 10s: the worker has not had its first poll yet. Degrading here
         // would make every bridge restart look broken for a minute.
@@ -1767,6 +2168,7 @@ mod tests {
 
     #[test]
     fn wedged_daemon_live_pid_but_old_beat_is_stale() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         let s = classify_heartbeat(
             DaemonKind::FleetDaemon,
@@ -1781,6 +2183,7 @@ mod tests {
 
     #[test]
     fn beat_exactly_at_window_edge_is_still_running() {
+        let _snapshot_guard = pin_default_snapshot();
         let now = 1_000_000;
         // age == STALE_AFTER_MS is NOT > the window, so still running. The
         // outbound poll is fresh so this isolates the liveness edge.
@@ -2046,9 +2449,190 @@ mod tests {
     #[test]
     fn probe_atc_no_instance_is_stopped() {
         let home = TempDir::new().unwrap();
-        let s = probe_atc(home.path(), 0);
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
+    }
+
+    /// Write a lite instance the way `setup --mode lite` really writes one:
+    /// `heartbeat_enabled` stays TRUE (that flag is about the OS timer, which
+    /// lite does not use) and the scanner stamps the SAME heartbeat-state.json.
+    ///
+    /// Every earlier fixture passed `--no-heartbeat`, which is precisely the one
+    /// setting that keeps a lite instance out of the full-mode selection loop —
+    /// which is why a whole class of mis-reporting went unnoticed.
+    fn write_lite_instance(home: &std::path::Path, name: &str, beat_ms: i64) {
+        let dir = home.join("atc").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            format!(
+                r#"{{"name":"{name}","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60,"mode":"lite","provider":"claude"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("heartbeat-state.json"),
+            format!(r#"{{"last_heartbeat_ms":{beat_ms},"last_active_ms":{beat_ms},"continue_counts":{{}}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_lite_instance_is_never_reported_as_a_full_one() {
+        // The regression: a lite instance whose scanner has died looks like a
+        // healthy full instance on every signal this loop reads, so it was
+        // reported as "FULL(claude) · every 15m — session ainb-atc-tower is
+        // GONE" — a tmux session lite never creates, and a remediation that
+        // respawns a brain the fleet does not have.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        write_lite_instance(home.path(), "tower", now - 1000);
+
+        // `Some(true)` for session liveness: even with a session present, a lite
+        // instance must not borrow the full-mode vocabulary.
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
+        let channel = s.channel.clone().unwrap_or_default();
+        assert!(
+            channel.contains("LITE"),
+            "a lite instance must report as lite, got {channel:?} / {}",
+            s.reason
+        );
+        assert!(
+            !channel.contains("FULL"),
+            "lite must never be labelled full: {channel:?}"
+        );
+        assert!(
+            !s.reason.contains("respawns it"),
+            "must not send the operator to respawn a brain lite has no use for: {}",
+            s.reason
+        );
+    }
+
+    /// The reported failure: `atc/main/` held nothing but a heartbeat.log while
+    /// a loaded launchd unit fired into it every interval, and the row said
+    /// only "no ATC instance provisioned", with no mention of the timer that was
+    /// still running, and nothing to act on.
+    #[test]
+    fn probe_atc_names_a_timer_firing_into_an_unprovisioned_instance() {
+        let home = TempDir::new().unwrap();
+        let ghost = home.path().join("atc").join("main");
+        std::fs::create_dir_all(&ghost).unwrap();
+        std::fs::write(ghost.join("heartbeat.log"), "Error: no ATC instance\n").unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &["main".to_string()]);
+
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
+        assert!(
+            s.reason.contains("heartbeat timer for 'main'"),
+            "the orphan timer must be named: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn a_dead_lite_instance_does_not_hide_a_healthy_full_one() {
+        // The other half: selection. A stale lite instance sorting first must not
+        // claim the row from an actively-beating full instance.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        // "alpha" sorts before "tower" — the directory order that used to decide.
+        write_lite_instance(home.path(), "alpha", now - 90 * 86_400_000);
+
+        let full = home.path().join("atc").join("tower");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(
+            full.join("meta.json"),
+            r#"{"name":"tower","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60,"mode":"full","provider":"claude"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            full.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 1000
+            ),
+        )
+        .unwrap();
+
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
+        assert_eq!(s.state, DaemonState::Running, "reason: {}", s.reason);
+        let channel = s.channel.clone().unwrap_or_default();
+        assert!(
+            channel.contains("tower"),
+            "the healthy full instance must own the row, got {channel:?}"
+        );
+    }
+
+    /// The harder case a directory scan cannot see: the instance dir was
+    /// deleted outright, so there is no leftover to iterate, but the unit is
+    /// still on disk and still fires on the next login.
+    #[test]
+    fn probe_atc_names_a_timer_whose_instance_directory_is_gone() {
+        let home = TempDir::new().unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &["main".to_string()]);
+
+        assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
+    }
+
+    /// The case the first version missed: orphan detection was nested inside
+    /// the no-instance branch, so a host with a live instance AND a stale unit
+    /// beside it reported a healthy row and never offered the teardown. That
+    /// is the state most likely to go unnoticed, because nothing else on the
+    /// screen mentions the unit.
+    #[test]
+    fn a_live_instance_does_not_hide_a_stale_timer_beside_it() {
+        let home = TempDir::new().unwrap();
+        let live = home.path().join("atc").join("primary");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(
+            live.join("meta.json"),
+            r#"{"name":"primary","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60}"#,
+        )
+        .unwrap();
+        let now = super::super::heartbeat::now_ms();
+        std::fs::write(
+            live.join("heartbeat-state.json"),
+            format!(r#"{{"last_heartbeat_ms":{now},"last_active_ms":{now}}}"#),
+        )
+        .unwrap();
+
+        let s = probe_atc_with(
+            home.path(),
+            now,
+            &|_| Some(true),
+            &["primary".to_string(), "gone".to_string()],
+        );
+
+        assert_eq!(s.state, DaemonState::Running, "the live instance is fine");
+        assert_eq!(
+            s.atc_instance.as_deref(),
+            Some("primary"),
+            "the row must name the instance it is reporting"
+        );
+        assert_eq!(
+            s.scheduler_orphan.as_deref(),
+            Some("gone"),
+            "the stale unit must still be named"
+        );
+    }
+
+    /// The same ghost directory with no timer installed is just leftover state,
+    /// not an orphan. Reporting one would send the operator to tear down a unit
+    /// that does not exist.
+    #[test]
+    fn probe_atc_reports_no_orphan_when_no_timer_is_installed() {
+        let home = TempDir::new().unwrap();
+        let ghost = home.path().join("atc").join("main");
+        std::fs::create_dir_all(&ghost).unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &[]);
+
+        assert_eq!(s.scheduler_orphan, None);
+        assert!(s.reason.contains("no ATC instance provisioned"));
     }
 
     #[test]
@@ -2071,10 +2655,128 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
+    }
+
+    /// The regression this split exists for: the OS timer writes the heartbeat
+    /// file whether or not the session it beats into is alive, so a fresh beat
+    /// is NOT evidence ATC is working. Observed in the wild as a green row over
+    /// a session that had been gone three days.
+    #[test]
+    fn probe_atc_fresh_heartbeat_with_dead_session_is_degraded() {
+        let home = TempDir::new().unwrap();
+        let atc_dir = home.path().join("atc").join("primary");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(
+            atc_dir.join("meta.json"),
+            r#"{"name":"primary","heartbeat_enabled":true,"heartbeat_interval_min":10,"idle_pause_min":60}"#,
+        )
+        .unwrap();
+        let now = super::super::heartbeat::now_ms();
+        std::fs::write(
+            atc_dir.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 2000
+            ),
+        )
+        .unwrap();
+        let s = probe_atc_with(home.path(), now, &|_| Some(false), &[]);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "dead session must not read as Running"
+        );
+        assert!(!s.connected);
+        assert!(
+            s.reason.contains("tmux_primary") && s.reason.contains("GONE"),
+            "reason must name the missing session: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("start respawns it"),
+            "reason must name the fix: {}",
+            s.reason
+        );
+    }
+
+    /// The split-brain that makes `ainb fleet atc repair` bail with "the daemon
+    /// did NOT accept the unregister": a socket answers, but this home records
+    /// no owner, so the verb dials a daemon whose registration lives elsewhere.
+    #[test]
+    fn hangar_socket_served_without_a_recorded_owner_is_degraded() {
+        let s = super::hangar_status_for(None, None, false, true, || 3);
+        assert_eq!(
+            s.state,
+            DaemonState::Degraded,
+            "unowned socket must not read as Running"
+        );
+        assert!(s.connected, "the socket IS answering; that half is fine");
+        assert!(
+            s.reason.contains("does not own") && s.reason.contains('3'),
+            "reason must say it is unowned and how many are host-wide: {}",
+            s.reason
+        );
+        assert!(
+            s.reason.contains("restart re-takes ownership"),
+            "reason must name the fix: {}",
+            s.reason
+        );
+    }
+
+    /// The census is CONTEXT, never the fault: one ainb home per worktree is
+    /// normal, and counting host-wide daemons as strays was the false positive
+    /// this branch had to avoid.
+    #[test]
+    fn hangar_owned_socket_stays_running_however_many_homes_exist() {
+        let s = super::hangar_status_for(Some(42), None, false, true, || 9);
+        assert_eq!(s.state, DaemonState::Running);
+        assert_eq!(s.pid, Some(42));
+        assert!(
+            !s.reason.contains('9'),
+            "census must not leak into a healthy row: {}",
+            s.reason
+        );
+    }
+
+    /// A recorded owner with a dead socket is the other half-alive case.
+    #[test]
+    fn hangar_recorded_owner_with_dead_socket_is_degraded() {
+        let s = super::hangar_status_for(Some(7), None, false, false, || 1);
+        assert_eq!(s.state, DaemonState::Degraded);
+        assert!(s.reason.contains("not accepting"), "{}", s.reason);
+    }
+
+    /// The check has to be able to say BOTH things, and it has to compare
+    /// exactly: bare `has-session -t foo` resolves by prefix, so it exits 0 for
+    /// a live `foo-fix` while `foo` itself is long gone. That is precisely the
+    /// false green this module exists to stop, so the prefix case is asserted.
+    #[test]
+    fn session_alive_is_exact_and_answers_both_ways() {
+        let name = "ainb_probe_selftest_alpha";
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+        let spawned = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", name])
+            .output();
+        if !spawned.is_ok_and(|o| o.status.success()) {
+            return; // no usable tmux on this host; nothing to assert
+        }
+        assert_eq!(crate::tmux::session_alive(name), Some(true), "live session");
+        assert_eq!(
+            crate::tmux::session_alive("ainb_probe_selftest_alph"),
+            Some(false),
+            "a prefix of a live session must NOT count as that session"
+        );
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+        assert_eq!(crate::tmux::session_alive(name), Some(false), "after kill");
     }
 
     #[test]
@@ -2100,7 +2802,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(
             s.state,
             DaemonState::Stopped,
@@ -2140,7 +2842,7 @@ mod tests {
             )
             .unwrap();
         }
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Running);
         assert!(
             s.channel.as_deref().unwrap().contains("on"),
@@ -2169,7 +2871,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc(home.path(), now);
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale"));
     }

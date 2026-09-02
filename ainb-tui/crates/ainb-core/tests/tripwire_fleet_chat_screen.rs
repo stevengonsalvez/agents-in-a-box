@@ -147,12 +147,28 @@ fn open_chat_surface(session: &str) -> bool {
     if !wait_for(session, "Enter select | Tab content", 60) {
         return false;
     }
-    send_key(session, "f");
-    if !wait_for(session, "Fleet ·", 30) {
+    thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        send_key(session, "f");
+        if wait_for(session, "Fleet ·", 2) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    if !wait_for(session, "Fleet ·", 5) {
         return false;
     }
-    send_key(session, "m");
-    wait_for(session, "Fleet chat · #copilot", 30)
+    thread::sleep(Duration::from_millis(500));
+    let deadline_m = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline_m {
+        send_key(session, "m");
+        if wait_for(session, "Fleet chat · #copilot", 2) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    wait_for(session, "Fleet chat · #copilot", 5)
 }
 
 /// Everything a chat journey needs: an isolated home, a real daemon, a real

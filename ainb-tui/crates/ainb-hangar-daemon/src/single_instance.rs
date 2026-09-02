@@ -262,15 +262,23 @@ pub fn process_binary(pid: i32) -> Option<String> {
 /// Overridable with `AINB_HANGAR_OWNERSHIP_WATCH_MS` so a tripwire can drive
 /// several ticks inside a test budget, mirroring `HANGAR_DAEMON_POLL_MS`.
 fn watchdog_interval() -> std::time::Duration {
+    interval_from(std::env::var("AINB_HANGAR_OWNERSHIP_WATCH_MS").ok())
+}
+
+/// Turn a raw `AINB_HANGAR_OWNERSHIP_WATCH_MS` value into a tick width.
+///
+/// Split from the env read so the knob's rules are provable without writing to
+/// the process environment. That environment is shared by every test in a
+/// binary, and a value set around an `await` is read by whatever else happens to
+/// run beside it.
+fn interval_from(raw: Option<String>) -> std::time::Duration {
     /// The tick is the WIDTH of the window in which two daemons can be live on
     /// one home: the newcomer unlinks the incumbent's socket the moment it
     /// binds, while the incumbent keeps claiming and sweeping until its next
     /// sample. 5s bounds that, at the cost of one file read per tick.
     const DEFAULT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    std::env::var("AINB_HANGAR_OWNERSHIP_WATCH_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
+    raw.and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map_or(DEFAULT, std::time::Duration::from_millis)
 }
@@ -312,8 +320,220 @@ where
     }
 }
 
-/// Watch that this daemon still owns `dir`, resolving with the new owner's pid
-/// if it ever stops owning it.
+/// How many CONSECUTIVE [`Held::Unknown`] samples the watchdog tolerates before
+/// it does anything about them.
+///
+/// Three ticks of agreement, 15s at the default interval. One unreadable sample
+/// is what a steal mid-flight, a snapshotting filesystem or a momentarily busy
+/// disk looks like, and standing a HEALTHY daemon down on one of those would be
+/// a worse bug than the orphan this escalation exists to stop. Three in a row,
+/// with the run reset by any readable sample, is evidence rather than noise.
+const UNKNOWN_ESCALATE_AFTER: u32 = 3;
+
+/// How many CONSECUTIVE failed republishes the watchdog tolerates before it
+/// reads them as a home that is no longer there.
+///
+/// A failed write is an ESCALATION STEP, not a verdict. `republish` returns
+/// [`Republish::Failed`] for a deleted home, but equally for a full disk, an
+/// I/O error, an `EPERM` while a directory is momentarily unwritable, or an
+/// `ENFILE` under load. Standing a healthy daemon down on the first of those
+/// contradicts the rule the [`Held::Unknown`] ladder above is built on: one
+/// transient failure must never stand a healthy daemon down.
+///
+/// So a failure keeps the daemon serving and leaves the miss run intact, which
+/// makes the NEXT tick retry the write. Only a full run of consecutive
+/// failures, with the counter reset by any republish that lands or finds the
+/// path occupied and by any readable sample, is evidence rather than noise.
+///
+/// Separate from [`UNKNOWN_ESCALATE_AFTER`] because the two count different
+/// things (samples that could not be READ versus writes that could not LAND),
+/// and a future tuning of one must not silently move the other.
+const REPUBLISH_ESCALATE_AFTER: u32 = 3;
+
+/// Why the ownership watchdog stopped watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Another live daemon owns this home now, named by pid.
+    Lost(i32),
+    /// The lock could not be restored, because the home itself is gone: deleted
+    /// underneath a daemon that was serving it, which is what an ephemeral
+    /// `$HOME` does the moment its harness exits.
+    ///
+    /// A distinct outcome rather than a sentinel pid: the two say opposite
+    /// things about the sessions this daemon supervises. A successor adopts
+    /// them; a deleted home leaves nobody to.
+    HomeGone,
+}
+
+/// What happened when the watchdog tried to put its own pid back on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Republish {
+    /// The lock names us again.
+    Published,
+    /// Some other file already occupies the path, so we published nothing.
+    Occupied,
+    /// The pid could not be written into the home at all.
+    Failed,
+}
+
+/// Put `pid` back into `lock`, but only while nothing else occupies the path.
+///
+/// Publication is the same shape as [`BdLock`]'s: the pid is written into a
+/// private temp file in the same directory and then `hard_link`ed into place.
+/// The link is atomic and answers `EEXIST` while ANY file is there, so a
+/// successor that published between our sample and this call is never
+/// clobbered. It keeps the home, and our next sample reads [`Held::Lost`] and
+/// stands us down. A blind overwrite here would put two daemons on one home,
+/// which is the failure this module exists to prevent.
+///
+/// The parent directory is deliberately NOT created. A `create_dir_all` would
+/// resurrect a deleted home one empty directory at a time and the watchdog
+/// would never learn the home was gone, which is the only question this call is
+/// asked to answer.
+fn republish(lock: &Path, pid: i32) -> Republish {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(dir) = lock.parent() else {
+        return Republish::Failed;
+    };
+    let tmp = dir.join(format!(".daemon.lock.republish.{pid}"));
+    // `create_new`, never create+truncate: the staging path is predictable, and
+    // a symlink planted there by another local user would otherwise be followed
+    // and its target truncated by a daemon that may be more privileged. A
+    // leftover from a killed republish fails the create, which reads as one
+    // failed attempt. Unlink first so a leftover from a killed republish cannot
+    // wedge every future attempt: removing a symlink removes the link, never
+    // its target, so this is safe against the same planted link.
+    let _ = std::fs::remove_file(&tmp);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(pid.to_string().as_bytes()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Republish::Failed;
+    }
+    let linked = std::fs::hard_link(&tmp, lock);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Republish::Published,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Republish::Occupied,
+        Err(_) => Republish::Failed,
+    }
+}
+
+/// What the watchdog should do after folding in one sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Keep serving.
+    Serve,
+    /// The run of misses is long enough to act on: try to put our pid back.
+    Republish,
+    /// Stop serving this home.
+    StandDown(Outcome),
+}
+
+/// The run of consecutive [`Held::Unknown`] samples behind the current decision.
+///
+/// A struct rather than a bare counter, because "we already tried to repair this
+/// outage" is the second half of the escalation: the first full run of misses
+/// buys a republish, and only a SECOND full run after that republish reported
+/// success is read as a home that is no longer there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Misses {
+    /// How many samples in a row have been [`Held::Unknown`].
+    run: u32,
+    /// Did a republish during this outage report that it published?
+    republished: bool,
+    /// How many republishes in a row have failed to write at all.
+    ///
+    /// The second escalation ladder, counted separately from `run` because a
+    /// failed write is not a failed read. Reset by any republish that lands or
+    /// finds the path occupied, and by any readable sample (which resets the
+    /// whole struct).
+    failed_republishes: u32,
+}
+
+impl Misses {
+    /// Fold one sample in and say what to do about it.
+    ///
+    /// Pure, so the whole escalation is testable without a clock, a filesystem
+    /// or a second daemon.
+    fn observe(&mut self, sample: Held) -> Step {
+        match sample {
+            // Any readable answer ends the outage, a stale holder included: the
+            // file was there to read, so the home is too.
+            Held::Ours | Held::Stale(_) => {
+                *self = Self::default();
+                Step::Serve
+            }
+            Held::Lost(pid) => {
+                *self = Self::default();
+                Step::StandDown(Outcome::Lost(pid))
+            }
+            Held::Unknown => {
+                self.run += 1;
+                if self.run < UNKNOWN_ESCALATE_AFTER {
+                    Step::Serve
+                } else if self.republished {
+                    // A whole second run of misses after a republish that
+                    // reported success: our pid is not staying on disk, so the
+                    // directory we wrote it into is not really there any more.
+                    Step::StandDown(Outcome::HomeGone)
+                } else {
+                    Step::Republish
+                }
+            }
+        }
+    }
+
+    /// Fold in the result of the republish [`Step::Republish`] asked for,
+    /// answering with the outcome to stand down on, if any.
+    const fn after_republish(&mut self, outcome: Republish) -> Option<Outcome> {
+        match outcome {
+            Republish::Published => {
+                self.run = 0;
+                self.republished = true;
+                self.failed_republishes = 0;
+                None
+            }
+            // Something else holds the path. That is not a missing home: the
+            // next sample names the holder and the ordinary `Lost` / `Stale`
+            // arms take it from there. Debris that stays unparseable keeps
+            // landing here, one harmless write attempt per run of misses, which
+            // is the right price for never standing down a daemon whose home is
+            // demonstrably still on disk.
+            Republish::Occupied => {
+                self.run = 0;
+                self.failed_republishes = 0;
+                None
+            }
+            // We could not write into the home's own directory. That is the
+            // shape a deleted home takes, but it is ALSO the shape of a full
+            // disk, an I/O error and a directory that is momentarily
+            // unwritable, so it escalates rather than deciding.
+            //
+            // The miss run is deliberately left alone: it is already at or past
+            // `UNKNOWN_ESCALATE_AFTER`, so the next [`Held::Unknown`] sample
+            // asks for another republish and the retries land one tick apart.
+            // Only a full run of them stands the daemon down.
+            Republish::Failed => {
+                self.failed_republishes += 1;
+                if self.failed_republishes >= REPUBLISH_ESCALATE_AFTER {
+                    Some(Outcome::HomeGone)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Watch that this daemon still owns `dir`, resolving with the reason it stopped
+/// owning it.
 ///
 /// The layer that does not depend on any exit path running. A daemon can only
 /// lose a lock it holds by something outside its control — an operator deleting
@@ -321,30 +541,109 @@ where
 /// daemons on one home is the failure this whole module exists to prevent, so
 /// the right response is to stand down rather than race.
 ///
-/// Scoped to THIS home by construction: it reads one file and signals no one.
-/// That is the difference between this and an argv-matching reaper, which cannot
-/// tell which home a process serves and would kill daemons belonging to others.
-pub async fn watch_ownership(dir: &Path) -> i32 {
+/// [`Held::Unknown`] is the sample that used to be logged forever. A home
+/// deleted underneath a running daemon (an ephemeral `$HOME`, a cleaned-up
+/// scratch directory) reads that way on EVERY tick, and the daemon served an
+/// address nothing could reach until something killed it. It now escalates:
+/// after [`UNKNOWN_ESCALATE_AFTER`] consecutive misses the daemon republishes
+/// its own pid, and stands down with [`Outcome::HomeGone`] if the lock is still
+/// missing a full run of misses after a republish that landed, or if
+/// [`REPUBLISH_ESCALATE_AFTER`] consecutive republishes cannot be written at
+/// all.
+///
+/// Both counters are reset by any readable sample, and the write counter also
+/// by any republish that lands or finds the path occupied. So neither one
+/// transient read failure nor one transient write failure can ever stand a
+/// healthy daemon down — a full disk, an I/O blip or a momentarily unwritable
+/// directory is logged and retried on the next tick.
+///
+/// Scoped to THIS home by construction: it reads one file, writes one file, and
+/// signals no one. That is the difference between this and an argv-matching
+/// reaper, which cannot tell which home a process serves and would kill daemons
+/// belonging to others.
+pub async fn watch_ownership(dir: &Path) -> Outcome {
+    watch_ownership_with(dir, watchdog_interval()).await
+}
+
+/// [`watch_ownership`] with the tick width passed in rather than read from the
+/// environment.
+///
+/// The env knob is resolved ONCE, by the caller above, so this loop owns no
+/// process-global state. A test drives a whole escalation ladder in
+/// milliseconds by argument; a test that instead set
+/// `AINB_HANGAR_OWNERSHIP_WATCH_MS` around its `await` would be mutating an
+/// environment its sibling tests read concurrently, which is a data race that
+/// shows up as flakiness somewhere else entirely.
+async fn watch_ownership_with(dir: &Path, interval: std::time::Duration) -> Outcome {
     let lock = lock_path_in(dir);
     let mine = i32::try_from(std::process::id()).unwrap_or(-1);
-    let interval = watchdog_interval();
+    let mut misses = Misses::default();
     loop {
         tokio::time::sleep(interval).await;
-        match sample(&lock, mine, holder_is_live_daemon) {
-            Held::Ours => {}
-            Held::Lost(pid) => return pid,
-            // Neither is proof of loss. If the home really is free, the next
-            // daemon to take it turns this into `Lost` on a later tick — one
-            // tick of overlap, versus an exit on a transient read.
-            Held::Unknown => tracing::warn!(
-                lock = %lock.display(),
-                "hangar ownership lock is missing; continuing to serve"
-            ),
-            Held::Stale(pid) => tracing::warn!(
+        let seen = sample(&lock, mine, holder_is_live_daemon);
+        if let Held::Stale(pid) = seen {
+            tracing::warn!(
                 lock = %lock.display(),
                 holder = pid,
                 "hangar ownership lock names a stale pid; continuing to serve"
-            ),
+            );
+        }
+        match misses.observe(seen) {
+            Step::Serve => {
+                // Not proof of loss. If the home really is free, the next daemon
+                // to take it turns this into `Lost` on a later tick — one tick of
+                // overlap, versus an exit on a transient read.
+                if seen == Held::Unknown {
+                    tracing::warn!(
+                        lock = %lock.display(),
+                        misses = misses.run,
+                        "hangar ownership lock is missing; continuing to serve"
+                    );
+                }
+            }
+            Step::Republish => {
+                let outcome = republish(&lock, mine);
+                let run = misses.run;
+                let stand_down = misses.after_republish(outcome);
+                if outcome == Republish::Failed {
+                    // Every failed write is logged with its attempt count, so a
+                    // sustained outage is visible in the log BEFORE the run is
+                    // long enough to stand the daemon down.
+                    tracing::warn!(
+                        lock = %lock.display(),
+                        misses = run,
+                        attempt = misses.failed_republishes,
+                        limit = REPUBLISH_ESCALATE_AFTER,
+                        "hangar ownership lock could not be republished; \
+                         continuing to serve and retrying on the next tick"
+                    );
+                } else {
+                    tracing::warn!(
+                        lock = %lock.display(),
+                        misses = run,
+                        outcome = ?outcome,
+                        "hangar ownership lock has been missing for several ticks; \
+                         republished this daemon's pid"
+                    );
+                }
+                if let Some(stand_down) = stand_down {
+                    tracing::error!(
+                        lock = %lock.display(),
+                        attempts = misses.failed_republishes,
+                        "hangar home refused this daemon's ownership lock on every attempt \
+                         in a row; standing down"
+                    );
+                    return stand_down;
+                }
+            }
+            Step::StandDown(Outcome::HomeGone) => {
+                tracing::error!(
+                    lock = %lock.display(),
+                    "hangar ownership lock stayed missing after a republish; standing down"
+                );
+                return Outcome::HomeGone;
+            }
+            Step::StandDown(outcome) => return outcome,
         }
     }
 }
@@ -372,6 +671,14 @@ pub fn is_hangar_daemon_args(args: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tick the loop-driving tests run at, reached only by ARGUMENT.
+    ///
+    /// Short enough that a whole escalation ladder fits in a test, and set
+    /// without touching `AINB_HANGAR_OWNERSHIP_WATCH_MS`: that variable is
+    /// process-global, so holding a value in it across an `await` races every
+    /// sibling test in this binary that reads the environment.
+    const TEST_TICK: std::time::Duration = std::time::Duration::from_millis(20);
 
     #[test]
     fn process_binary_reports_current_executable_path() {
@@ -546,6 +853,361 @@ mod tests {
         std::fs::write(&lock, "9001").expect("write");
         assert_eq!(sample(&lock, mine, |_| true), Held::Lost(9001));
         assert_eq!(sample(&lock, mine, |_| false), Held::Stale(9001));
+    }
+
+    /// The non-negotiable half of the escalation: a run of misses that is broken
+    /// by ANY readable sample starts again from zero, so one transient read
+    /// failure can never stand a healthy daemon down.
+    #[test]
+    fn a_broken_run_of_misses_never_escalates() {
+        let mut misses = Misses::default();
+
+        assert_eq!(misses.observe(Held::Unknown), Step::Serve, "first miss");
+        assert_eq!(misses.observe(Held::Unknown), Step::Serve, "second miss");
+        assert_eq!(misses.observe(Held::Ours), Step::Serve, "the lock is back");
+        // The two misses before it must count for nothing now.
+        assert_eq!(misses.observe(Held::Unknown), Step::Serve);
+        assert_eq!(misses.observe(Held::Unknown), Step::Serve);
+        assert_eq!(
+            misses,
+            Misses {
+                run: 2,
+                republished: false,
+                failed_republishes: 0,
+            }
+        );
+
+        // A stale holder is a READ that succeeded, so it resets the run too.
+        assert_eq!(misses.observe(Held::Stale(9001)), Step::Serve);
+        assert_eq!(misses, Misses::default());
+    }
+
+    /// The escalation itself: the Nth consecutive miss asks for a republish, and
+    /// nothing before it does.
+    #[test]
+    fn a_full_run_of_misses_asks_for_a_republish() {
+        let mut misses = Misses::default();
+        for tick in 1..UNKNOWN_ESCALATE_AFTER {
+            assert_eq!(misses.observe(Held::Unknown), Step::Serve, "miss {tick}");
+        }
+        assert_eq!(misses.observe(Held::Unknown), Step::Republish);
+    }
+
+    /// A live successor still wins immediately, whatever the miss counter says:
+    /// the `Lost` arm is untouched by the escalation.
+    #[test]
+    fn a_live_successor_still_stands_us_down_at_once() {
+        let mut misses = Misses::default();
+        assert_eq!(misses.observe(Held::Unknown), Step::Serve);
+        assert_eq!(
+            misses.observe(Held::Lost(9001)),
+            Step::StandDown(Outcome::Lost(9001))
+        );
+    }
+
+    /// A republish that lands buys the home another run of misses, and only the
+    /// SECOND full run stands the daemon down.
+    #[test]
+    fn only_a_second_run_of_misses_after_a_republish_stands_us_down() {
+        let mut misses = Misses::default();
+        for _ in 0..UNKNOWN_ESCALATE_AFTER {
+            misses.observe(Held::Unknown);
+        }
+        assert_eq!(misses.after_republish(Republish::Published), None);
+
+        for tick in 1..UNKNOWN_ESCALATE_AFTER {
+            assert_eq!(misses.observe(Held::Unknown), Step::Serve, "miss {tick}");
+        }
+        assert_eq!(
+            misses.observe(Held::Unknown),
+            Step::StandDown(Outcome::HomeGone)
+        );
+    }
+
+    /// The half of the write ladder that must never regress: ONE failed
+    /// republish is an I/O outage, a full disk or a momentarily unwritable
+    /// directory, and standing a healthy daemon down on it contradicts the rule
+    /// the whole escalation is built on.
+    ///
+    /// Every attempt before the last answers `None`, and the miss run is left
+    /// intact so the next tick retries the write rather than waiting out
+    /// another full run of misses first.
+    #[test]
+    fn a_single_failed_republish_never_stands_us_down() {
+        let mut misses = Misses::default();
+        for _ in 0..UNKNOWN_ESCALATE_AFTER {
+            misses.observe(Held::Unknown);
+        }
+
+        for attempt in 1..REPUBLISH_ESCALATE_AFTER {
+            assert_eq!(
+                misses.after_republish(Republish::Failed),
+                None,
+                "failed republish {attempt} of {REPUBLISH_ESCALATE_AFTER} stood us down"
+            );
+            assert_eq!(misses.failed_republishes, attempt);
+            // The run stays past the threshold, so the very next miss retries
+            // the write instead of restarting the read ladder.
+            assert_eq!(
+                misses.observe(Held::Unknown),
+                Step::Republish,
+                "a failed write must be retried on the next tick"
+            );
+        }
+    }
+
+    /// A write that lands, or finds the path occupied, ends the outage: the
+    /// failure counter starts again from zero, so a run of failures has to be
+    /// consecutive to mean anything.
+    #[test]
+    fn a_republish_that_lands_resets_the_failure_run() {
+        for recovery in [Republish::Published, Republish::Occupied] {
+            let mut misses = Misses::default();
+            for _ in 0..UNKNOWN_ESCALATE_AFTER {
+                misses.observe(Held::Unknown);
+            }
+            for _ in 1..REPUBLISH_ESCALATE_AFTER {
+                assert_eq!(misses.after_republish(Republish::Failed), None);
+                misses.observe(Held::Unknown);
+            }
+
+            assert_eq!(misses.after_republish(recovery), None, "{recovery:?}");
+            assert_eq!(misses.failed_republishes, 0, "{recovery:?}");
+        }
+    }
+
+    /// A readable sample resets the failure run too, since the whole struct is
+    /// cleared: the home answered, so nothing before it counts.
+    #[test]
+    fn a_readable_sample_resets_the_failure_run() {
+        let mut misses = Misses::default();
+        for _ in 0..UNKNOWN_ESCALATE_AFTER {
+            misses.observe(Held::Unknown);
+        }
+        assert_eq!(misses.after_republish(Republish::Failed), None);
+
+        assert_eq!(misses.observe(Held::Ours), Step::Serve);
+        assert_eq!(misses, Misses::default());
+    }
+
+    /// ...and the stand-down is still REACHABLE: a home that refuses every
+    /// write in a row is gone, and the daemon must stop serving it.
+    #[test]
+    fn a_full_run_of_failed_republishes_is_a_missing_home() {
+        let mut misses = Misses::default();
+        for _ in 0..UNKNOWN_ESCALATE_AFTER {
+            misses.observe(Held::Unknown);
+        }
+        for _ in 1..REPUBLISH_ESCALATE_AFTER {
+            assert_eq!(misses.after_republish(Republish::Failed), None);
+            misses.observe(Held::Unknown);
+        }
+        assert_eq!(
+            misses.after_republish(Republish::Failed),
+            Some(Outcome::HomeGone)
+        );
+    }
+
+    /// The invariant the whole ladder rests on, stated directly: while the lock
+    /// file is present and parses as a pid, NO number of ticks can produce
+    /// [`Outcome::HomeGone`]. Every readable sample either keeps us serving or
+    /// hands the home to a named live successor, and none of them ever reaches
+    /// a republish.
+    #[test]
+    fn a_readable_lock_can_never_produce_a_missing_home() {
+        for sample in [Held::Ours, Held::Stale(9001), Held::Lost(9001)] {
+            let mut misses = Misses::default();
+            for tick in 0..UNKNOWN_ESCALATE_AFTER * 4 {
+                match misses.observe(sample) {
+                    Step::Serve => {}
+                    Step::StandDown(Outcome::Lost(pid)) => assert_eq!(pid, 9001),
+                    other => panic!("tick {tick} on {sample:?} produced {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// An occupied path is a home that is very much still there, so it resets
+    /// the run rather than standing anything down.
+    #[test]
+    fn an_occupied_lock_path_is_not_a_missing_home() {
+        let mut misses = Misses::default();
+        for _ in 0..UNKNOWN_ESCALATE_AFTER {
+            misses.observe(Held::Unknown);
+        }
+        assert_eq!(misses.after_republish(Republish::Occupied), None);
+        assert_eq!(misses, Misses::default());
+    }
+
+    /// The repair itself, against a real directory: our pid goes back on disk
+    /// and the very next sample reads it as ours.
+    #[test]
+    fn a_republish_into_a_live_home_restores_our_pid() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
+
+        assert_eq!(republish(&lock, 4242), Republish::Published);
+        assert_eq!(std::fs::read_to_string(&lock).expect("read"), "4242");
+        assert_eq!(sample(&lock, 4242, |_| true), Held::Ours);
+    }
+
+    /// The clobber guard: a successor that published while we were counting
+    /// misses keeps the home. Overwriting it here would put two daemons on one
+    /// home, which is the failure this whole module exists to prevent.
+    #[test]
+    fn a_republish_never_overwrites_another_holder() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&lock, "9001").expect("seed lock");
+
+        assert_eq!(republish(&lock, 4242), Republish::Occupied);
+        assert_eq!(
+            std::fs::read_to_string(&lock).expect("read"),
+            "9001",
+            "the incumbent's pid must survive"
+        );
+    }
+
+    /// The deleted home, at the filesystem level: with no directory to write
+    /// into there is nothing left to serve.
+    #[test]
+    fn a_republish_into_a_deleted_home_fails() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
+        std::fs::remove_dir_all(dir.path()).expect("delete the home");
+
+        assert_eq!(republish(&lock, 4242), Republish::Failed);
+    }
+
+    /// The production knob, without touching the process environment: a
+    /// missing, unparseable or zero value falls back to the default rather than
+    /// spinning the watchdog at no interval at all.
+    #[test]
+    fn the_watch_interval_knob_falls_back_to_the_default() {
+        let default = interval_from(None);
+        assert!(
+            default >= std::time::Duration::from_secs(1),
+            "the default must be a real production tick, got {default:?}"
+        );
+        assert_eq!(
+            interval_from(Some("20".to_string())),
+            std::time::Duration::from_millis(20)
+        );
+        assert_eq!(interval_from(Some("0".to_string())), default, "zero");
+        assert_eq!(interval_from(Some("nonsense".to_string())), default);
+        assert_eq!(interval_from(Some(String::new())), default, "empty");
+    }
+
+    /// The whole loop: a home deleted underneath a serving daemon stands it
+    /// down instead of logging forever.
+    ///
+    /// The clock is paused, so the ticks are counted rather than waited for and
+    /// the elapsed VIRTUAL time is exact. That pins two things at once: the
+    /// stand-down lands on the full run of misses and no sooner, and the loop
+    /// ticks at the interval it was GIVEN — a loop that reached for the env knob
+    /// instead would take 15 seconds to get here.
+    #[tokio::test(start_paused = true)]
+    async fn a_deleted_home_stands_the_watchdog_down() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&lock, std::process::id().to_string()).expect("seed lock");
+        std::fs::remove_dir_all(dir.path()).expect("delete the home");
+
+        let started = tokio::time::Instant::now();
+        let outcome = watch_ownership_with(dir.path(), TEST_TICK).await;
+
+        assert_eq!(outcome, Outcome::HomeGone);
+        assert_eq!(
+            started.elapsed(),
+            TEST_TICK * (UNKNOWN_ESCALATE_AFTER + REPUBLISH_ESCALATE_AFTER - 1),
+            "the stand-down must cost a full run of misses plus a full run of \
+             failed republishes, at the given tick"
+        );
+    }
+
+    /// The write-side transient guarantee at the LOOP level: a home that cannot
+    /// be written into for a tick or two, and then can be, keeps its daemon.
+    ///
+    /// The outage is modelled by the lock's parent directory being absent —
+    /// `republish` deliberately never creates it — which is exactly what a
+    /// momentarily unwritable directory, a full disk or an I/O error look like
+    /// from here: [`Republish::Failed`]. The directory then reappears with our
+    /// pid in it, the way an outage ends.
+    ///
+    /// Before the failure ladder existed this stood the daemon down on the very
+    /// first failed write, at tick [`UNKNOWN_ESCALATE_AFTER`].
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_write_outage_never_stands_the_watchdog_down() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        // The home exists; the `hangar` directory inside it does not, so every
+        // sample is `Unknown` and every republish is `Failed`.
+        assert!(!lock.exists());
+
+        let restored = lock.clone();
+        tokio::spawn(async move {
+            // Half a tick after the FIRST republish attempt, so exactly one
+            // write has failed when the home comes back.
+            tokio::time::sleep(TEST_TICK * UNKNOWN_ESCALATE_AFTER + TEST_TICK / 2).await;
+            std::fs::create_dir_all(restored.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&restored, std::process::id().to_string()).expect("restore lock");
+        });
+
+        // Long enough for several more full ladders after the outage ends.
+        let budget = TEST_TICK * (UNKNOWN_ESCALATE_AFTER + REPUBLISH_ESCALATE_AFTER) * 4;
+        let outcome =
+            tokio::time::timeout(budget, watch_ownership_with(dir.path(), TEST_TICK)).await;
+
+        assert!(
+            outcome.is_err(),
+            "one failed republish stood a healthy daemon down: {outcome:?}"
+        );
+    }
+
+    /// ...and the other direction, which is the one that must never regress: a
+    /// daemon whose lock is intact keeps serving through more ticks than the
+    /// whole escalation ladder needs.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_home_never_stands_the_watchdog_down() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let lock = lock_path_in(dir.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&lock, std::process::id().to_string()).expect("seed lock");
+
+        // Half a tick past two full ladders, so the budget can never expire on
+        // the same virtual instant as a tick and hide one.
+        let budget = TEST_TICK * (UNKNOWN_ESCALATE_AFTER * 2 + 2) + TEST_TICK / 2;
+        let outcome =
+            tokio::time::timeout(budget, watch_ownership_with(dir.path(), TEST_TICK)).await;
+
+        assert!(outcome.is_err(), "a healthy daemon stood down: {outcome:?}");
+    }
+
+    /// The transient-miss guarantee at the LOOP level, not just in
+    /// [`Misses::observe`]: samples that never become readable still cannot
+    /// stand a daemon down while the home is demonstrably on disk.
+    ///
+    /// A directory at the lock path is unreadable as a pid, so every sample is
+    /// [`Held::Unknown`], and unlinkable-into, so every republish is
+    /// [`Republish::Occupied`] — which resets the run and keeps
+    /// [`Outcome::HomeGone`] unreachable however many ladders pass.
+    #[tokio::test(start_paused = true)]
+    async fn misses_over_a_home_that_is_still_there_never_stand_us_down() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        std::fs::create_dir_all(lock_path_in(dir.path())).expect("mkdir");
+
+        let budget = TEST_TICK * (UNKNOWN_ESCALATE_AFTER * 4) + TEST_TICK / 2;
+        let outcome =
+            tokio::time::timeout(budget, watch_ownership_with(dir.path(), TEST_TICK)).await;
+
+        assert!(
+            outcome.is_err(),
+            "a home still on disk stood the daemon down: {outcome:?}"
+        );
     }
 
     /// The fail-safe direction: an unreadable process table must NOT be read as

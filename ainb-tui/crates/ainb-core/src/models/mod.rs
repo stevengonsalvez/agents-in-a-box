@@ -13,8 +13,8 @@ pub mod workspace;
 pub use other_tmux::OtherTmuxSession;
 pub(crate) use session::is_default_model;
 pub use session::{
-    ClaudeModel, CodexModel, GitChanges, Session, SessionAgentType, SessionMode, SessionStatus,
-    ShellSession, ShellSessionStatus, SshTarget,
+    AntigravityModel, ClaudeModel, CodexModel, GitChanges, Session, SessionAgentType, SessionMode,
+    SessionStatus, ShellSession, ShellSessionStatus, SshTarget,
 };
 pub use skills::{AgentDef, Skill, SkillsData};
 // Phase 6d: trimmed re-exports. The host purge removed every external

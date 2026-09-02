@@ -54,6 +54,7 @@ pub enum UsagePlanProvider {
     Claude,
     Codex,
     Cursor,
+    Antigravity,
 }
 
 impl Default for UsagePlanProvider {

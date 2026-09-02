@@ -178,6 +178,8 @@ mod tests {
             inbound_expected: 0,
             inbound_live: 0,
             last_inbound_error: None,
+            scheduler_orphan: None,
+            atc_instance: None,
             reason: "running + connected".to_string(),
         }
     }

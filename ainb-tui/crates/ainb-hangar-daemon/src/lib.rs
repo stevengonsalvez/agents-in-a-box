@@ -647,13 +647,37 @@ impl Drop for PidFile {
     }
 }
 
-/// Test-only parent-death backstop. The tripwire harness gives every daemon its
-/// own parent PID. When the harness is SIGKILLed or OOM-reaped, macOS reparents
-/// the daemon to launchd, so normal Rust drop cleanup cannot run. Signal this
-/// process through its existing Ctrl-C shutdown path instead.
-fn spawn_test_parent_watchdog() {
-    let Some(parent_pid) = std::env::var("HANGAR_TEST_PARENT_PID")
+/// Env var naming the process whose death this daemon must not outlive.
+///
+/// Set by the tripwire harness, and by `start_daemon_if_stopped` whenever the
+/// resolved hangar home is ephemeral (issue #784).
+pub const PARENT_PID_ENV: &str = "AINB_HANGAR_PARENT_PID";
+
+/// Former name of [`PARENT_PID_ENV`], still honoured so a spawner and a daemon
+/// binary from different versions agree (the installed daemon can be older than
+/// the `ainb` that launches it).
+///
+/// Compatibility shim: remove once no released `ainb` older than the rename is
+/// still spawning daemons, and update the tripwire harnesses that set it.
+pub const LEGACY_PARENT_PID_ENV: &str = "HANGAR_TEST_PARENT_PID";
+
+/// Parent-death backstop. The caller gives this daemon its own parent PID: the
+/// tripwire harness always, and the TUI autostart when the hangar home is
+/// ephemeral, because every other guard (`single_instance`, `daemon stop`, the
+/// pid file) is scoped to a home that dies with its creator.
+///
+/// When the parent is SIGKILLed or OOM-reaped, macOS reparents the daemon to
+/// launchd, so normal Rust drop cleanup cannot run. Signal this process through
+/// its existing Ctrl-C shutdown path instead.
+fn spawn_parent_watchdog() {
+    // `filter` before the fallback: a set-but-EMPTY new name would otherwise
+    // read as a declaration, hide the legacy name, and arm nothing. The spawner
+    // treats empty as undeclared too.
+    let Some(parent_pid) = std::env::var(PARENT_PID_ENV)
         .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var(LEGACY_PARENT_PID_ENV).ok())
+        .filter(|value| !value.is_empty())
         .and_then(|value| value.parse::<i32>().ok())
         .filter(|pid| *pid > 1)
     else {
@@ -667,7 +691,7 @@ fn spawn_test_parent_watchdog() {
             match nix::sys::signal::kill(nix::unistd::Pid::from_raw(parent_pid), None) {
                 Ok(()) | Err(nix::errno::Errno::EPERM) => {}
                 Err(nix::errno::Errno::ESRCH) => {
-                    tracing::warn!(parent_pid, "tripwire parent exited, stopping daemon");
+                    tracing::warn!(parent_pid, "watched parent exited, stopping daemon");
                     let _ = nix::sys::signal::kill(
                         nix::unistd::Pid::from_raw(std::process::id() as i32),
                         nix::sys::signal::Signal::SIGINT,
@@ -675,7 +699,7 @@ fn spawn_test_parent_watchdog() {
                     return;
                 }
                 Err(error) => {
-                    tracing::warn!(parent_pid, %error, "could not check tripwire parent");
+                    tracing::warn!(parent_pid, %error, "could not check watched parent");
                 }
             }
         }
@@ -699,7 +723,7 @@ fn spawn_test_parent_watchdog() {
 /// Returns an error if the store cannot be opened (directory not writable, a
 /// migration fails) or if the run loop's shutdown handler fails.
 pub async fn boot(once: bool) -> anyhow::Result<()> {
-    spawn_test_parent_watchdog();
+    spawn_parent_watchdog();
     let dir = hangar_dir()?;
 
     // FIRST, before the store, the broker, the sweepers and `rpc::bind`. Every
@@ -747,15 +771,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     // The ownership watchdog: the one layer that survives every exit path not
     // running. If this daemon ever stops owning its home — an operator deleting
-    // the lock, a home restored from a backup — it stands down instead of racing
-    // the daemon that owns it now. Home-scoped by construction: it reads one file
-    // and signals nobody, so unlike an argv-matching reaper it can never touch a
-    // daemon serving a different home.
+    // the lock, a home restored from a backup, or the home itself being deleted
+    // underneath a running daemon — it stands down instead of racing the daemon
+    // that owns it now, or serving a store and socket that no longer exist.
+    // Home-scoped by construction: it reads and writes one file and signals
+    // nobody, so unlike an argv-matching reaper it can never touch a daemon
+    // serving a different home.
     let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
     let watchdog_dir = dir.clone();
     tokio::spawn(async move {
-        let owner = crate::single_instance::watch_ownership(&watchdog_dir).await;
-        let _ = lost_tx.send(owner);
+        let outcome = crate::single_instance::watch_ownership(&watchdog_dir).await;
+        let _ = lost_tx.send(outcome);
     });
 
     // Signal handlers are installed HERE, not at the end of boot. Everything

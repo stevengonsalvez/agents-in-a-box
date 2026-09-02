@@ -1164,7 +1164,13 @@ async fn an_adapter_death_closes_every_parked_permission() {
             row_state, "answered",
             "{attention_id} survived its dead adapter as a ghost row"
         );
-        assert_eq!(answered_by.as_deref(), Some("hangar-converge"));
+        // `hangar-turn-end`, NOT `hangar-converge`: the adapter dying ends the
+        // turn, and `finish_turn` retires the parked set before the receipt
+        // commits. This assertion read `hangar-converge` while the turn-end
+        // path was doing the work under a shared constant, so it claimed to
+        // cover a branch it never reached. Pinning the real author keeps it
+        // honest, and keeps convergence's own coverage distinguishable.
+        assert_eq!(answered_by.as_deref(), Some("hangar-turn-end"));
     }
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM attention WHERE session_id = ? AND state = 'open'",

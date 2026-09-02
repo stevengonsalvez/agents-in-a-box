@@ -111,6 +111,7 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
+    "ANTIGRAVITY_HOME",
     // ccc / D11: the parent-session linkage the daemon stamps onto every task it
     // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
     // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
@@ -277,6 +278,20 @@ const CLAUDE_MODEL_FLAG: &str = "--model";
 ///
 /// See [`Runner::claude_spec`] for the trust posture this implies.
 const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// `--settings <json>`: per-launch settings claude merges over the operator's
+/// `~/.claude/settings.json` for THIS process only (verified against Claude
+/// Code 2.1.257, whose usage lists `--settings <file-or-json>`).
+const CLAUDE_SETTINGS_FLAG: &str = "--settings";
+/// The per-launch settings an INTERACTIVE claude carries: Claude gates
+/// `--dangerously-skip-permissions` behind a one-time "Bypass Permissions"
+/// acceptance it records as `skipDangerousModePermissionPrompt` in user or
+/// local settings; without it the pane parks on that dialog with nobody there
+/// to accept (the daemon spawns the session detached). Passing the acceptance
+/// as flag settings scopes it to the one launch the operator explicitly chose as
+/// YOLO from `Run ▾` after the TUI's danger-full-access acknowledgement,
+/// instead of writing a machine-wide acceptance into the operator's config.
+/// Headless `-p` runs never show the dialog and do not carry it.
+const CLAUDE_INTERACTIVE_SETTINGS_JSON: &str = r#"{"skipDangerousModePermissionPrompt":true}"#;
 /// The claude flag selecting the machine-readable event stream (bead 48c). Under
 /// `--print`, `--output-format stream-json` makes claude emit one JSON event per
 /// line — a `system` line carrying `session_id`, per-turn `assistant` lines, and
@@ -343,6 +358,21 @@ const COPILOT_ALLOW_ALL_TOOLS_FLAG: &str = "--allow-all-tools";
 /// The copilot model flag (`copilot --model <model>`), verified against Copilot
 /// CLI 1.0.68 (`$ copilot --model gpt-5.6-terra`).
 const COPILOT_MODEL_FLAG: &str = "--model";
+/// The provider-log file written under [`ExecEnv::logs`] for the `antigravity`
+/// provider. Its own log keeps an antigravity transcript separate from claude/codex/copilot.
+const ANTIGRAVITY_LOG_FILE: &str = "antigravity.jsonl";
+/// The antigravity flag that makes a run non-interactive.
+const ANTIGRAVITY_PRINT_FLAG: &str = "-p";
+/// The antigravity flag that starts interactive mode.
+const ANTIGRAVITY_INTERACTIVE_FLAG: &str = "-i";
+/// The antigravity flag selecting the output format.
+const ANTIGRAVITY_OUTPUT_FORMAT_FLAG: &str = "--output-format";
+/// The `--output-format` value for the per-line JSON event stream.
+const ANTIGRAVITY_STREAM_JSON_FORMAT: &str = "stream-json";
+/// The antigravity flag that auto-approves tool calls.
+const ANTIGRAVITY_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// The antigravity model flag (`agy --model <model>`).
+const ANTIGRAVITY_MODEL_FLAG: &str = "--model";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
@@ -357,6 +387,10 @@ pub struct RunnerConfig {
     /// [`Runner::run_copilot`]; a daemon that never dispatches a copilot task
     /// simply never spawns it.
     pub copilot_path: PathBuf,
+    /// Absolute path to the `antigravity` binary (or a test stand-in script). Used by
+    /// [`Runner::run_antigravity`]; a daemon that never dispatches an antigravity task
+    /// simply never spawns it.
+    pub antigravity_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
     /// ([`FailureReason::Timeout`]). Reference default: 2.5h.
     pub max_runtime: Duration,
@@ -584,8 +618,8 @@ struct StreamCapture {
 /// Which provider exec path the daemon routes a task to (e38.16).
 ///
 /// Resolved from the task's AGENT `provider` when set (migration 0041), else its
-/// runtime's advertised `provider`. Every wired provider — `claude`, `codex`,
-/// `copilot` — has its own exec path; only a genuinely unrecognised name falls
+/// runtime's advertised `provider`. Every wired provider: `claude`, `codex`,
+/// `copilot`, `antigravity`: has its own exec path; only a genuinely unrecognised name falls
 /// back to [`Self::Claude`] so a misconfigured agent still dispatches (rather than
 /// stranding the task).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -598,10 +632,12 @@ pub enum Backend {
     Codex,
     /// The `copilot` provider (GitHub Copilot CLI) — [`Runner::run_copilot`].
     Copilot,
+    /// The `antigravity` provider (Google Antigravity) — [`Runner::run_antigravity`].
+    Antigravity,
 }
 
 impl Backend {
-    /// Resolve a provider wire name (`"claude"`, `"codex"`, `"copilot"`) to a
+    /// Resolve a provider wire name (`"claude"`, `"codex"`, `"copilot"`, `"antigravity"`) to a
     /// backend.
     ///
     /// Matching is case-insensitive. Only a genuinely UNKNOWN name falls back to
@@ -612,6 +648,7 @@ impl Backend {
         match provider.to_ascii_lowercase().as_str() {
             "codex" => Self::Codex,
             "copilot" => Self::Copilot,
+            "antigravity" | "agy" => Self::Antigravity,
             _ => Self::Claude,
         }
     }
@@ -623,6 +660,7 @@ impl Backend {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
         }
     }
 }
@@ -1082,6 +1120,85 @@ impl Runner {
         .await
     }
 
+    /// Run the `antigravity` provider (Google Antigravity) for one task.
+    ///
+    /// The antigravity counterpart of [`Self::run_claude`]: same orchestration
+    /// ([`Self::run_provider`]), same env allowlist + sandbox confinement, its own
+    /// program path, argv, and log file.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.run_antigravity_with_env(env, source_env, std::iter::empty(), invocation)
+            .await
+    }
+
+    /// [`Self::run_antigravity`], plus per-agent `extra_env` overrides layered onto the
+    /// child env *after* the allowlist filter.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        self.run_antigravity_in(
+            env,
+            source_env,
+            extra_env,
+            invocation,
+            &RunLocation::in_task_tree(env),
+        )
+        .await
+    }
+
+    /// [`Self::run_antigravity_with_env`], but executing in an explicit [`RunLocation`]
+    /// (F5).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity_in<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let spec = Self::antigravity_spec(invocation, Mode::Headless);
+        self.run_provider(
+            &self.cfg.antigravity_path,
+            env,
+            source_env,
+            extra_env,
+            spec,
+            location,
+        )
+        .await
+    }
+
     /// The program path + argv for a provider run in `mode`, WITHOUT spawning it
     /// (ccc / D6).
     ///
@@ -1111,11 +1228,15 @@ impl Runner {
                 self.cfg.copilot_path.clone(),
                 Self::copilot_spec(invocation, mode).argv,
             ),
+            Backend::Antigravity => (
+                self.cfg.antigravity_path.clone(),
+                Self::antigravity_spec(invocation, mode).argv,
+            ),
         }
     }
 
     /// The `claude` provider spec: claude log file + `[-p]
-    /// --dangerously-skip-permissions [--model <model>] [<cli_args>…] -- <prompt>`.
+    /// --dangerously-skip-permissions [--settings <json>] [--model <model>] [<cli_args>…] -- <prompt>`.
     ///
     /// Verified against Claude Code 2.1.210, whose usage is
     /// `claude [options] [command] [prompt]`:
@@ -1125,7 +1246,9 @@ impl Runner {
     ///   nothing.
     /// * [`Mode::Interactive`] OMITS it: the brief is still delivered (as the same
     ///   trailing positional), but claude starts the real session the operator
-    ///   attaches to. `-p` here would print and exit into an empty pane.
+    ///   attaches to. `-p` here would print and exit into an empty pane. It
+    ///   carries [`CLAUDE_INTERACTIVE_SETTINGS_JSON`] instead, so the detached
+    ///   pane does not park on the bypass-permissions acceptance dialog.
     ///
     /// The prompt is a POSITIONAL either way — `-p` is a boolean and never takes
     /// it — and rides last, after [`ARG_SEPARATOR`], so a `-`-leading brief cannot
@@ -1175,6 +1298,10 @@ impl Runner {
             argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
         argv.push(CLAUDE_SKIP_PERMISSIONS_FLAG.to_string());
+        if mode == Mode::Interactive {
+            argv.push(CLAUDE_SETTINGS_FLAG.to_string());
+            argv.push(CLAUDE_INTERACTIVE_SETTINGS_JSON.to_string());
+        }
         if mode == Mode::Headless {
             // bead 48c: emit the structured event stream so the runner can pin
             // session_id + usage and finalize on claude's OWN reported outcome,
@@ -1357,6 +1484,40 @@ impl Runner {
             // Copilot emits no structured terminal stream, so a missing terminal
             // stays a generic agent error (never contract drift).
             structured: false,
+        }
+    }
+
+    /// The `antigravity` provider spec: antigravity log file + `[-p]
+    /// --dangerously-skip-permissions [--output-format stream-json] [-i] [--model <model>] [<cli_args>…] -- <prompt>`.
+    ///
+    /// Headless (`Mode::Headless`): `agy -p --dangerously-skip-permissions --output-format stream-json [--model <model>] [<cli_args>…] -- <prompt>`.
+    /// Interactive (`Mode::Interactive`): `agy --dangerously-skip-permissions -i [--model <model>] [<cli_args>…] -- <prompt>`.
+    fn antigravity_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
+        let mut argv = Vec::new();
+        match mode {
+            Mode::Headless => {
+                argv.push(ANTIGRAVITY_PRINT_FLAG.to_string());
+                argv.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG.to_string());
+                argv.push(ANTIGRAVITY_OUTPUT_FORMAT_FLAG.to_string());
+                argv.push(ANTIGRAVITY_STREAM_JSON_FORMAT.to_string());
+            }
+            Mode::Interactive => {
+                argv.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG.to_string());
+                argv.push(ANTIGRAVITY_INTERACTIVE_FLAG.to_string());
+            }
+        }
+        if let Some(model) = &invocation.model {
+            argv.push(ANTIGRAVITY_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
+        argv.push(ARG_SEPARATOR.to_string());
+        argv.push(invocation.prompt.clone());
+        ProviderSpec {
+            backend: Backend::Antigravity,
+            log_file: ANTIGRAVITY_LOG_FILE,
+            argv,
+            structured: mode == Mode::Headless,
         }
     }
 
@@ -1880,6 +2041,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: true,
@@ -2202,5 +2364,58 @@ mod tests {
             vec!["hangar-daemon"],
             "the daemon parent stamp must be the ONLY AINB_PARENT_SESSION in the child env"
         );
+    }
+
+    #[test]
+    fn antigravity_spec_headless_and_interactive() {
+        let inv = ProviderInvocation {
+            prompt: "fix the bug".to_string(),
+            model: Some("gemini-2.5-pro".to_string()),
+            cli_args: vec!["--flag".to_string()],
+        };
+
+        let headless = Runner::antigravity_spec(&inv, Mode::Headless);
+        assert_eq!(headless.backend, Backend::Antigravity);
+        assert_eq!(headless.log_file, "antigravity.jsonl");
+        assert!(headless.structured);
+        assert_eq!(
+            headless.argv,
+            vec![
+                "-p",
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "stream-json",
+                "--model",
+                "gemini-2.5-pro",
+                "--flag",
+                "--",
+                "fix the bug"
+            ]
+        );
+
+        let interactive = Runner::antigravity_spec(&inv, Mode::Interactive);
+        assert_eq!(interactive.backend, Backend::Antigravity);
+        assert_eq!(interactive.log_file, "antigravity.jsonl");
+        assert!(!interactive.structured);
+        assert_eq!(
+            interactive.argv,
+            vec![
+                "--dangerously-skip-permissions",
+                "-i",
+                "--model",
+                "gemini-2.5-pro",
+                "--flag",
+                "--",
+                "fix the bug"
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_from_provider_resolves_antigravity() {
+        assert_eq!(Backend::from_provider("antigravity"), Backend::Antigravity);
+        assert_eq!(Backend::from_provider("agy"), Backend::Antigravity);
+        assert_eq!(Backend::from_provider("Antigravity"), Backend::Antigravity);
+        assert_eq!(Backend::Antigravity.name(), "antigravity");
     }
 }

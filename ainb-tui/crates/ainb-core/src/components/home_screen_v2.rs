@@ -29,7 +29,12 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const DISPLAY_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const SIDEBAR_EDGE_HIT_SLOP: u16 = 1;
-pub const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+/// Window in which two sidebar clicks count as a double-click, from
+/// `ui.double_click_ms`. A function rather than a const because the value is a
+/// preference now, for the same reason a slow-hands accessibility setting exists.
+pub fn sidebar_double_click_window() -> Duration {
+    Duration::from_millis(crate::config::tunables::snapshot().ui.double_click_ms)
+}
 
 /// Focus area on the home screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +194,7 @@ impl HomeScreenV2State {
             .last_sidebar_click
             .map(|(last_index, last_at)| {
                 last_index == item_index
-                    && now.saturating_duration_since(last_at) <= SIDEBAR_DOUBLE_CLICK_WINDOW
+                    && now.saturating_duration_since(last_at) <= sidebar_double_click_window()
             })
             .unwrap_or(false);
         self.last_sidebar_click = Some((item_index, now));
@@ -782,7 +787,8 @@ mod tests {
         assert!(!first.double_click);
         assert_eq!(state.sidebar.selected_item(), SidebarItem::Setup);
 
-        let second = state.click_sidebar_item_at(3, 9, now + SIDEBAR_DOUBLE_CLICK_WINDOW).unwrap();
+        let second =
+            state.click_sidebar_item_at(3, 9, now + sidebar_double_click_window()).unwrap();
         assert_eq!(second.item, SidebarItem::Setup);
         assert!(second.double_click);
     }
@@ -799,7 +805,7 @@ mod tests {
                 .click_sidebar_item_at(
                     3,
                     10,
-                    now + SIDEBAR_DOUBLE_CLICK_WINDOW + Duration::from_millis(1)
+                    now + sidebar_double_click_window() + Duration::from_millis(1)
                 )
                 .unwrap()
                 .double_click

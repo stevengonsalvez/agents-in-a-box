@@ -66,6 +66,12 @@ final class FleetWireForwardCompatibilityTests: XCTestCase {
         XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "\"codex\"")
     }
 
+    func testAntigravityProviderDecodesAndRoundTrips() throws {
+        XCTAssertEqual(try decode(FleetProvider.self, "antigravity"), .antigravity)
+        let encoded = try JSONEncoder().encode(FleetProvider.antigravity)
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "\"antigravity\"")
+    }
+
     /// The regression that matters: one unknown value inside a session row must
     /// not take down the whole snapshot.
     func testAnUnknownProviderDoesNotFailTheWholeSnapshot() throws {

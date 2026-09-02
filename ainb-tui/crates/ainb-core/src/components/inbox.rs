@@ -49,16 +49,19 @@ pub enum AgentFilter {
     Codex,
     /// Only Copilot rows.
     Copilot,
+    /// Only Antigravity rows.
+    Antigravity,
 }
 
 impl AgentFilter {
-    /// Cycle to the next filter (All → Claude → Codex → Copilot → All).
+    /// Cycle to the next filter (All -> Claude -> Codex -> Copilot -> Antigravity -> All).
     pub fn next(self) -> Self {
         match self {
             AgentFilter::All => AgentFilter::Claude,
             AgentFilter::Claude => AgentFilter::Codex,
             AgentFilter::Codex => AgentFilter::Copilot,
-            AgentFilter::Copilot => AgentFilter::All,
+            AgentFilter::Copilot => AgentFilter::Antigravity,
+            AgentFilter::Antigravity => AgentFilter::All,
         }
     }
 
@@ -69,6 +72,7 @@ impl AgentFilter {
             AgentFilter::Claude => "claude",
             AgentFilter::Codex => "codex",
             AgentFilter::Copilot => "copilot",
+            AgentFilter::Antigravity => "antigravity",
         }
     }
 
@@ -79,6 +83,7 @@ impl AgentFilter {
             AgentFilter::Claude => Some("claude"),
             AgentFilter::Codex => Some("codex"),
             AgentFilter::Copilot => Some("copilot"),
+            AgentFilter::Antigravity => Some("antigravity"),
         }
     }
 }
@@ -157,8 +162,14 @@ impl std::fmt::Debug for InboxState {
     }
 }
 
-const POLL_TICKS: u64 = 1; // every render — cheap with WAL + LIMIT 200
-const LIST_LIMIT: u32 = 200;
+const POLL_TICKS: u64 = 1; // every render, cheap with WAL + a bounded LIMIT
+
+/// Rows the list query asks for, from `ui.inbox_list_limit`. Read per refresh
+/// rather than baked in as a const, because the query runs every render and the
+/// right bound depends on the size of the fleet in front of it.
+fn list_limit() -> u32 {
+    crate::config::tunables::snapshot().ui.inbox_list_limit
+}
 
 impl InboxState {
     /// Open the SQLite store lazily and refresh the visible rows.
@@ -183,7 +194,7 @@ impl InboxState {
                 self.show_archived,
                 self.agent_filter.as_sql(),
                 None,
-                LIST_LIMIT,
+                list_limit(),
             ) {
                 Ok(rows) => {
                     self.rows = rows;
@@ -541,6 +552,8 @@ mod tests {
         assert_eq!(f, AgentFilter::Codex);
         f = f.next();
         assert_eq!(f, AgentFilter::Copilot);
+        f = f.next();
+        assert_eq!(f, AgentFilter::Antigravity);
         f = f.next();
         assert_eq!(f, AgentFilter::All);
     }

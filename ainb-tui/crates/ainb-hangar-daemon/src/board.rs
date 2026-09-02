@@ -265,35 +265,17 @@ pub async fn advance_issue_lifecycle_after_terminal(pool: &SqlitePool, task: &Ta
     }
 }
 
-/// Whether `issue_id`'s card still has a ROLE-GATED column to its RIGHT, i.e.
-/// the pipeline has stages left to run.
-///
-/// `false` for an issue on no board, an issue on a board with no role-gated
-/// columns (every board predating migration 0074), and a card that has reached
-/// the terminal column of its pipeline. Those are exactly the cases where the
-/// task's terminal outcome IS the issue's outcome.
+/// Whether `issue_id`'s card still has a ROLE-GATED stage left to run; the
+/// predicate itself lives beside the pull SQL it mirrors
+/// ([`PullService::stages_remain`]), see there for why the card's CURRENT column
+/// counts until its stage has produced a `done` task.
 ///
 /// Best-effort like every hook in this module: a store fault answers `false`, so
 /// a fault degrades to the pre-existing behaviour (advance the issue) rather
 /// than stranding an issue at `in_progress` forever.
 async fn pipeline_stages_remain(pool: &SqlitePool, issue_id: &str) -> bool {
-    let found: Result<Option<i64>, _> = sqlx::query_scalar(
-        "SELECT 1 FROM board_card AS bc \
-           JOIN board_column AS cur ON cur.id = bc.column_id \
-          WHERE bc.issue_id = ?1 \
-            AND EXISTS ( \
-                 SELECT 1 FROM board_column AS n \
-                  WHERE n.board_id = bc.board_id \
-                    AND n.services_role IS NOT NULL \
-                    AND n.ord > cur.ord \
-                ) \
-          LIMIT 1",
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await;
-    match found {
-        Ok(row) => row.is_some(),
+    match ainb_hangar_store::service::pull::PullService::stages_remain(pool, issue_id).await {
+        Ok(remain) => remain,
         Err(e) => {
             tracing::warn!(error = %e, issue_id = %issue_id, "issue lifecycle: reading remaining stages failed; treating the issue as complete");
             false

@@ -28,10 +28,33 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// The instance name is reported because a bare refusal is unactionable on a
 /// host running many sessions.
 fn atc_holding_the_fleet() -> Option<String> {
+    // A fleet in LITE mode is already running this exact loop, inside the ATC
+    // retry cap. The probe below reads liveness, which is the right question for
+    // full mode but the wrong one here: a lite scanner that has not started yet
+    // still OWNS the fleet, and letting an uncapped daemon take the gap is how
+    // you get two controllers a minute apart.
+    if let Some((name, _)) = crate::cli::daemon::atc_named_mode()
+        .filter(|(_, mode)| *mode == crate::fleet::atc::SupervisorMode::Lite)
+    {
+        // The NAME, like every other branch here: the doc-comment above promises
+        // it because a bare refusal is unactionable on a busy host.
+        return Some(format!("{name} (lite)"));
+    }
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
     let status =
         crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
-    if status.state != crate::fleet::daemons::probe::DaemonState::Running {
+    // Degraded counts as HOLDING. This guard was written when the ATC probe had
+    // two outcomes, so "not Running" meant "not supervising". A degraded ATC is
+    // one whose scheduler is still registered and still firing, so starting the
+    // fleet daemon alongside it is exactly the double-supervision this refuses:
+    // both watchers auto-continue into the same panes and ATC's per-session
+    // retry cap is defeated by an uncapped daemon. Only a stopped or unknown
+    // instance is safe to ignore.
+    if !matches!(
+        status.state,
+        crate::fleet::daemons::probe::DaemonState::Running
+            | crate::fleet::daemons::probe::DaemonState::Degraded
+    ) {
         return None;
     }
     // `probe_atc` puts the winning instance name in the channel label.
@@ -46,6 +69,8 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
             anyhow::bail!(
                 "ATC '{owner}' is supervising this fleet; running the daemon alongside it \
                  sends every auto-continue twice and defeats ATC's per-session retry cap.\n\
+                 This watcher is superseded by the ATC supervisor: `ainb fleet atc mode <name>` \
+                 shows which mode owns the fleet, and lite mode IS this loop, capped.\n\
                  Use ATC, or pass --force-race to run both deliberately."
             );
         }

@@ -117,7 +117,63 @@ pub struct SessionMetadata {
     pub codex_thread_id: Option<String>,
 }
 
+/// Whether shared Codex remote control can work in this process's hangar home.
+///
+/// `ensure_hangar_daemon` never spawns a daemon into an ephemeral home, and
+/// reports that rather than failing, because its other caller (the TUI) is right
+/// to ignore it. Here the daemon is connected to in the very next statement, so
+/// the skip has to be acted on: ignored, it arrives as a socket-level connect
+/// error with nothing in it about the home.
+///
+/// Acting on it means DEGRADING, not failing. An ephemeral home costs the
+/// session exactly one feature, the shared remote thread; a plain `codex` in
+/// the pane is what a session with the feature switched off already runs.
+/// Failing instead turned `ainb run --tool codex` under an isolated `$HOME`
+/// from a working launch into a hard error, and the error path then deleted the
+/// worktree the run had just created. That is worse than the leak it prevents.
+///
+/// [`crate::cli::hangar::DaemonAutostart::Failed`] deliberately passes through.
+/// A failed spawn is already logged and may still have left a usable daemon
+/// (another process's, on a durable home); only the ephemeral-home skip is a
+/// promise that no daemon will EVER appear for this home.
+///
+/// `home` is a closure so the path is resolved only on the degrading path.
+fn shared_remote_control_available(
+    outcome: crate::cli::hangar::DaemonAutostart,
+    home: impl FnOnce() -> String,
+) -> bool {
+    if outcome == crate::cli::hangar::DaemonAutostart::SkippedEphemeralHome {
+        warn!("{}", ephemeral_hangar_home_warning(&home()));
+        return false;
+    }
+    true
+}
+
+/// What the user is told when an ephemeral home costs them shared remote
+/// control, built here rather than inline in the `warn!` so the sentence that
+/// names the remedy is a value a test can read.
+fn ephemeral_hangar_home_warning(home: &str) -> String {
+    format!(
+        "hangar home {home} is ephemeral; set AINB_HANGAR_HOME to a durable path to use \
+         Codex shared remote control - launching this session without it"
+    )
+}
+
+/// The hangar home this process resolved, for the message above.
+fn resolved_hangar_home() -> String {
+    ainb_hangar_daemon::hangar_dir().map_or_else(
+        |_| "<unresolved>".to_string(),
+        |home| home.display().to_string(),
+    )
+}
+
 /// Create or resume one exact shared Codex app-server thread for Interactive.
+///
+/// `Ok(None)` is a successful launch WITHOUT shared remote control: the reason
+/// has already been warned about, and the session runs the provider CLI
+/// directly, which is the same path a non-Codex session and a Codex session
+/// with the feature disabled take. Callers must not treat it as a failure, and
+/// in particular must not roll back a worktree over it.
 pub(crate) async fn ensure_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
@@ -125,29 +181,55 @@ pub(crate) async fn ensure_codex_remote_thread(
     skip_permissions: bool,
     headroom_enabled: bool,
     existing_thread_id: Option<String>,
-) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
     if headroom_enabled {
         anyhow::bail!(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
-    crate::cli::hangar::ensure_hangar_daemon();
-    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
-    client
-        .codex_session_ensure(ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+    ensure_codex_remote_thread_with(
+        // Ephemeral: `ainb run` prints its summary and exits, while the daemon
+        // has to keep serving the tmux session it just created.
+        || {
+            crate::cli::hangar::ensure_hangar_daemon(
+                crate::cli::hangar::LauncherLifetime::Ephemeral,
+            )
+        },
+        resolved_hangar_home,
+        ainb_hangar_proto::fleet::CodexSessionEnsureParams {
             session_id: session_id.to_string(),
             cwd: cwd.display().to_string(),
             model: model.map(str::to_owned),
             thread_id: existing_thread_id,
             skip_permissions,
-        })
-        .await
-        .map_err(|error| {
-            let message = format_codex_remote_control_failure(&error.to_string());
-            warn!(error = %error, "{message}");
-            anyhow::Error::msg(error.to_string()).context(message)
-        })
+        },
+    )
+    .await
+}
+
+/// [`ensure_codex_remote_thread`] with its two impure inputs passed in: the
+/// autostart outcome and the home to name when that outcome is a skip.
+///
+/// The seam is what makes the degrade testable at all. The ephemeral branch
+/// returns BEFORE the daemon connect, and that ordering is the whole claim:
+/// checking [`shared_remote_control_available`] on its own would leave "and
+/// then the launch still succeeds" untested, which is how a degrade that is
+/// computed and then ignored still passes its suite.
+async fn ensure_codex_remote_thread_with(
+    autostart: impl FnOnce() -> crate::cli::hangar::DaemonAutostart,
+    home: impl FnOnce() -> String,
+    params: ainb_hangar_proto::fleet::CodexSessionEnsureParams,
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
+    if !shared_remote_control_available(autostart(), home) {
+        return Ok(None);
+    }
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
+    client.codex_session_ensure(params).await.map(Some).map_err(|error| {
+        let message = format_codex_remote_control_failure(&error.to_string());
+        warn!(error = %error, "{message}");
+        anyhow::Error::msg(error.to_string()).context(message)
+    })
 }
 
 /// Short actionable TUI message for a shared Codex bridge failure.
@@ -171,6 +253,9 @@ fn format_codex_remote_control_failure(cause: &str) -> &'static str {
 
 /// Wait briefly for the freshly started remote terminal to publish its exact
 /// thread identity through the daemon's app-server event stream.
+///
+/// `Ok(None)` carries the same meaning as in [`ensure_codex_remote_thread`]:
+/// shared remote control is unavailable and the session runs without it.
 pub(crate) async fn claim_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
@@ -178,11 +263,11 @@ pub(crate) async fn claim_codex_remote_thread(
     skip_permissions: bool,
     headroom_enabled: bool,
     tmux_session: &str,
-) -> anyhow::Result<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
     let exact_target = format!("={tmux_session}");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let remote = ensure_codex_remote_thread(
+        let Some(remote) = ensure_codex_remote_thread(
             session_id,
             cwd,
             model,
@@ -190,9 +275,15 @@ pub(crate) async fn claim_codex_remote_thread(
             headroom_enabled,
             None,
         )
-        .await?;
+        .await?
+        else {
+            // Shared remote control is unavailable, so there is no thread to
+            // wait for. Report that once rather than spending the 10s deadline
+            // re-asking a question whose answer cannot change.
+            return Ok(None);
+        };
         if remote.thread_id.is_some() {
-            return Ok(remote);
+            return Ok(Some(remote));
         }
         // Checked BEFORE the deadline, because the common failure is not slow,
         // it is instant: Codex prints one line and exits inside a second. It
@@ -849,13 +940,11 @@ impl SessionStore {
 /// Default port for the ainb-managed Headroom compression proxy.
 pub const HEADROOM_DEFAULT_PORT: u16 = 8787;
 
-/// Base URL of the local Headroom proxy. Port overridable via `AINB_HEADROOM_PORT`.
+/// Base URL of the local Headroom proxy. One resolver with
+/// [`crate::headroom::proxy_port`], so the URL a session is pointed at and the
+/// port the proxy is spawned on cannot disagree.
 pub fn headroom_base_url() -> String {
-    let port = std::env::var("AINB_HEADROOM_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(HEADROOM_DEFAULT_PORT);
-    format!("http://127.0.0.1:{port}")
+    format!("http://127.0.0.1:{}", crate::headroom::proxy_port())
 }
 
 /// Shell `export … && ` prefix that routes a session's CLI through the local
@@ -970,7 +1059,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1008,7 +1097,8 @@ impl InteractiveSessionManager {
             SessionAgentType::Claude
             | SessionAgentType::Codex
             | SessionAgentType::Gemini
-            | SessionAgentType::Copilot => {
+            | SessionAgentType::Copilot
+            | SessionAgentType::Antigravity => {
                 info!(
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
@@ -1052,7 +1142,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1215,7 +1305,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1255,7 +1345,8 @@ impl InteractiveSessionManager {
             SessionAgentType::Claude
             | SessionAgentType::Codex
             | SessionAgentType::Gemini
-            | SessionAgentType::Copilot => {
+            | SessionAgentType::Copilot
+            | SessionAgentType::Antigravity => {
                 info!(
                     "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
                     agent_type, model, skip_permissions
@@ -1299,7 +1390,7 @@ impl InteractiveSessionManager {
             )
             .await
             {
-                Ok(remote) => Some(remote),
+                Ok(remote) => remote,
                 Err(error) => {
                     rollback_failed_interactive_launch(
                         session_id,
@@ -1569,6 +1660,8 @@ impl InteractiveSessionManager {
                 return Some(SessionAgentType::Claude);
             } else if cmd.contains("codex") {
                 return Some(SessionAgentType::Codex);
+            } else if cmd.contains("agy") || cmd.contains("antigravity") {
+                return Some(SessionAgentType::Antigravity);
             } else if cmd.contains("gemini") {
                 return Some(SessionAgentType::Gemini);
             } else if cmd.contains("copilot") {
@@ -1849,9 +1942,13 @@ impl InteractiveSessionManager {
                     let tmux_name =
                         Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
                     let legacy_name = Self::generate_tmux_name_legacy(&worktree.branch_name);
-                    // Check if new format session exists, otherwise try legacy
+                    // Check if new format session exists, otherwise try legacy.
+                    // `=name` is exact: a bare `-t` prefix-matches, so a live
+                    // "feat-auth-2" would answer for "feat-auth" and we would
+                    // then kill the exact "feat-auth", which matches nothing,
+                    // leaving the real session running with its worktree gone.
                     let check_new = std::process::Command::new("tmux")
-                        .args(["has-session", "-t", &tmux_name])
+                        .args(["has-session", "-t", &format!("={tmux_name}")])
                         .output();
                     let final_name = if check_new.map(|o| o.status.success()).unwrap_or(false) {
                         info!("Found tmux session with new format: {}", tmux_name);
@@ -1892,7 +1989,13 @@ impl InteractiveSessionManager {
 
         if let Some(ref name) = tmux_session_name {
             info!("Attempting to kill tmux session: {}", name);
-            let output = Command::new("tmux").args(["kill-session", "-t", name]).output().await?;
+            // `=name` forces an exact target: bare `-t name` resolves exact, then
+            // prefix, then fnmatch, so deleting "feat-auth" would kill a live
+            // "feat-auth-2".
+            let output = Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={name}")])
+                .output()
+                .await?;
 
             if output.status.success() {
                 info!("Successfully killed tmux session: {}", name);
@@ -1992,7 +2095,11 @@ impl InteractiveSessionManager {
             .ok_or(InteractiveSessionError::SessionNotFound(session_id))?;
 
         let output = Command::new("tmux")
-            .args(["has-session", "-t", &session.tmux_session_name])
+            .args([
+                "has-session",
+                "-t",
+                &format!("={}", session.tmux_session_name),
+            ])
             .output()
             .await?;
 
@@ -2051,14 +2158,22 @@ impl InteractiveSessionManager {
         work_dir: &Path,
     ) -> Result<(), InteractiveSessionError> {
         // Check if session already exists
-        let check = Command::new("tmux").args(["has-session", "-t", session_name]).output().await?;
+        // Both targets are exact. `has-session -t name` prefix-matches, so a live
+        // "feat-auth-2" would answer for "feat-auth" and the kill below would
+        // then destroy it.
+        let exact_target = format!("={session_name}");
+        let check =
+            Command::new("tmux").args(["has-session", "-t", &exact_target]).output().await?;
 
         if check.status.success() {
             warn!(
                 "Tmux session '{}' already exists, killing it first",
                 session_name
             );
-            Command::new("tmux").args(["kill-session", "-t", session_name]).output().await?;
+            Command::new("tmux")
+                .args(["kill-session", "-t", &exact_target])
+                .output()
+                .await?;
         }
 
         // Create new detached tmux session
@@ -2255,7 +2370,7 @@ impl InteractiveSessionManager {
         // provider's blocking migration modal and never start.
         if matches!(
             agent_type,
-            SessionAgentType::Claude | SessionAgentType::Codex
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Antigravity
         ) {
             if let Some(model) = model.map(str::trim).filter(|model| !is_default_model(model)) {
                 let model = if agent_type == SessionAgentType::Codex {
@@ -2275,19 +2390,19 @@ impl InteractiveSessionManager {
         }
 
         // Claude resume: `--continue` re-opens the most recent conversation in
-        // the cwd (worktrees are 1-session-per-dir → "the last session"). Only
+        // the cwd (worktrees are 1-session-per-dir -> "the last session"). Only
         // add it when the caller found prior history, as `claude --continue`
         // with no history errors and leaves a dead pane. NOTE: the current
         // claude CLI `--resume` takes a *session id*, not a path, so the old
         // `--resume <jsonl path>` silently fell through to the interactive
-        // picker instead of resuming — `--continue` is the correct "resume
+        // picker instead of resuming - `--continue` is the correct "resume
         // latest" for a cwd-scoped session.
         if agent_type == SessionAgentType::Claude && resume_requested && has_history {
             cmd_parts.push("--continue".to_string());
         }
 
         // Copilot resume: `--continue` re-opens the most recent copilot session.
-        // Unguarded (no cheap cwd-history probe exists yet) — mirrors codex's
+        // Unguarded (no cheap cwd-history probe exists yet) - mirrors codex's
         // tradeoff. NOTE: copilot's "most recent session" is not strictly
         // cwd-scoped the way claude's is, so with several copilot worktrees this
         // can resume the globally-newest session; acceptable for the first pass.
@@ -2295,25 +2410,31 @@ impl InteractiveSessionManager {
             cmd_parts.push("--continue".to_string());
         }
 
+        // Antigravity resume: `--continue` re-opens the most recent session.
+        if agent_type == SessionAgentType::Antigravity && resume_requested {
+            cmd_parts.push("--continue".to_string());
+        }
+
         cmd_parts
     }
 
-    /// Start AI CLI in the tmux session (Claude, Codex, or Gemini)
+    /// Start AI CLI in the tmux session (Claude, Codex, Antigravity, or Gemini)
     ///
     /// **Resume** (`resume_requested == true`): re-open the most recent
     /// conversation in the session's cwd instead of starting fresh. Worktrees
     /// are 1-session-per-dir, so "most recent in cwd" == "the last session".
     ///   * Claude: emits `--continue`, but only when `resume_transcript.is_some()`
-    ///     (the caller found prior history) — `claude --continue` with no
+    ///     (the caller found prior history) - `claude --continue` with no
     ///     history errors and leaves a dead pane. `resume_transcript`'s *path*
     ///     is no longer used as an argument (the current claude CLI `--resume`
     ///     wants a session id, not a path); its presence is the history guard.
     ///   * Codex: emits the `resume --last` subcommand form.
     ///   * Copilot: emits `--continue` (most recent copilot session; unguarded).
-    ///   * Gemini: no resume flag wired — always starts fresh.
+    ///   * Antigravity: emits `--continue`.
+    ///   * Gemini: no resume flag wired - always starts fresh.
     ///
     /// **Model flag emission:**
-    ///   * Claude / Codex: pass the raw persisted value through unchanged.
+    ///   * Claude / Codex / Antigravity: pass the raw persisted value through unchanged.
     ///     `None`, empty, or `default` omits the flag.
     ///   * Gemini / Copilot: never emit `--model`.
     pub async fn start_cli_in_tmux(
@@ -2331,7 +2452,7 @@ impl InteractiveSessionManager {
         use crate::config::CliProvider;
 
         // No more send-keys + wait_for_shell_ready dance. Heavy `.zshrc`
-        // setups (Powerlevel10k instant-prompt + conda + nvm + …) can stream
+        // setups (Powerlevel10k instant-prompt + conda + nvm + ...) can stream
         // content for 15+s, racing keystrokes that get eaten mid-startup.
         // Stevie 2026-05-27 hit this twice. Cure: `tmux respawn-pane -k`
         // REPLACES the pane's shell process with the CLI command directly.
@@ -2344,6 +2465,7 @@ impl InteractiveSessionManager {
             SessionAgentType::Codex => CliProvider::Codex,
             SessionAgentType::Gemini => CliProvider::Gemini,
             SessionAgentType::Copilot => CliProvider::Copilot,
+            SessionAgentType::Antigravity => CliProvider::Antigravity,
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
@@ -2574,9 +2696,9 @@ impl InteractiveSessionManager {
                     String::new()
                 }
             }
-            SessionAgentType::Gemini => {
+            SessionAgentType::Gemini | SessionAgentType::Antigravity => {
                 if let Ok(Some(api_key)) = credentials::get_gemini_api_key() {
-                    info!("Injecting GEMINI_API_KEY for Gemini CLI");
+                    info!("Injecting GEMINI_API_KEY for {:?} CLI", agent_type);
                     format!("export GEMINI_API_KEY='{}' && ", api_key)
                 } else {
                     String::new()
@@ -3077,6 +3199,9 @@ trust_level = "trusted"
 
     #[cfg(unix)]
     #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
     async fn failed_launch_rollback_removes_only_exact_owned_resources() {
         if !Command::new("tmux")
             .arg("-V")
@@ -3088,7 +3213,9 @@ trust_level = "trusted"
             return;
         }
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("temp home");
         let prior_home = std::env::var_os("AINB_HOME");
         std::env::set_var("AINB_HOME", home.path());
@@ -3255,7 +3382,9 @@ trust_level = "trusted"
 
         // Hold the shared env lock + force the default port so the base URL is
         // deterministic regardless of other tests mutating AINB_HEADROOM_PORT.
-        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let old = std::env::var_os("AINB_HEADROOM_PORT");
         std::env::remove_var("AINB_HEADROOM_PORT");
 
@@ -3285,7 +3414,9 @@ trust_level = "trusted"
 
     #[test]
     fn headroom_base_url_honors_port_override() {
-        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = "AINB_HEADROOM_PORT";
         let old = std::env::var_os(key);
 
@@ -3387,7 +3518,9 @@ trust_level = "trusted"
     fn atc_control_dir_renders_as_an_atc_instance() {
         // AINB_HOME is process-global; serialise with every other env-mutating
         // test in the crate via the shared lock.
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let home = tempfile::tempdir().expect("tempdir");
         // Save and restore rather than blindly removing: a runner that sets
@@ -3882,7 +4015,9 @@ trust_level = "trusted"
         // AINB_HOME is process-global; serialise with every other env-mutating
         // test in the crate (including `concurrent_mutate_does_not_lose_updates`)
         // via the shared lock so parallel runs don't clobber each other's home.
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         // Point AINB_HOME at our temp dir so SessionStore::storage_path() uses it.
@@ -3930,12 +4065,17 @@ trust_level = "trusted"
     }
 
     #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
     async fn persisted_launch_settings_survive_live_session_discovery() {
         use crate::models::session::SessionAgentType;
         use chrono::Utc;
         use tempfile::TempDir;
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         std::env::set_var("AINB_HOME", dir.path());
@@ -4042,7 +4182,9 @@ trust_level = "trusted"
         use std::sync::{Arc, Barrier};
         use tempfile::TempDir;
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         std::env::set_var("AINB_HOME", dir.path());
@@ -4369,5 +4511,151 @@ trust_level = "trusted"
             false,
         );
         assert_eq!(p, vec!["copilot", "--yolo"]);
+    }
+
+    #[test]
+    fn antigravity_fresh_launch_has_no_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(p, vec!["agy", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn antigravity_resume_appends_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            None,
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec!["agy", "--dangerously-skip-permissions", "--continue"]
+        );
+    }
+
+    #[test]
+    fn antigravity_launch_with_model() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            Some("gemini-3.7-flash"),
+            false,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "agy",
+                "--model",
+                "gemini-3.7-flash",
+                "--dangerously-skip-permissions",
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_resume_with_model_and_continue() {
+        let p = parts(
+            CliProvider::Antigravity,
+            SessionAgentType::Antigravity,
+            true,
+            Some("gemini-2.5-pro"),
+            true,
+            false,
+        );
+        assert_eq!(
+            p,
+            vec![
+                "agy",
+                "--model",
+                "gemini-2.5-pro",
+                "--dangerously-skip-permissions",
+                "--continue",
+            ]
+        );
+    }
+
+    /// A skipped autostart must be read as "shared remote control is off for
+    /// this session", and the warning must name the remedy.
+    ///
+    /// The gate reports the skip instead of failing, since the TUI is right to
+    /// ignore it. Discarding it here turned "no daemon will ever run on this
+    /// home" into a socket connect error a line later, with nothing in the
+    /// message about `$AINB_HANGAR_HOME`.
+    #[test]
+    fn an_ephemeral_hangar_home_turns_codex_remote_control_off_with_the_remedy() {
+        use crate::cli::hangar::DaemonAutostart;
+
+        assert!(
+            !super::shared_remote_control_available(DaemonAutostart::SkippedEphemeralHome, || {
+                "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string()
+            }),
+            "an ephemeral home has no daemon to connect to, now or ever"
+        );
+
+        let message = super::ephemeral_hangar_home_warning("/tmp/bj.Q9x7fk/.agents-in-a-box");
+        assert!(
+            message.contains("/tmp/bj.Q9x7fk/.agents-in-a-box"),
+            "the warning must name the home: {message}"
+        );
+        assert!(
+            message.contains("AINB_HANGAR_HOME"),
+            "the warning must name the remedy: {message}"
+        );
+
+        // A daemon that is expected, and a spawn that merely failed, both fall
+        // through: only the ephemeral-home skip promises no daemon will appear.
+        for outcome in [DaemonAutostart::Started, DaemonAutostart::Failed] {
+            assert!(
+                super::shared_remote_control_available(outcome, || panic!(
+                    "{outcome:?} must not resolve the home"
+                )),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// The degrade itself, which the classifier above cannot show: an ephemeral
+    /// home yields NO remote thread and NO error, so the caller launches the
+    /// session (plain `codex` in the pane) instead of failing and rolling back
+    /// the worktree it just created.
+    ///
+    /// Driving the seam rather than `ensure_codex_remote_thread` keeps the test
+    /// off the daemon socket, and still pins the ordering that matters: the
+    /// ephemeral answer returns before the connect, so no daemon is needed for
+    /// this launch to succeed.
+    #[tokio::test]
+    async fn an_ephemeral_hangar_home_launches_codex_without_a_remote_thread() {
+        use crate::cli::hangar::DaemonAutostart;
+
+        let remote = super::ensure_codex_remote_thread_with(
+            || DaemonAutostart::SkippedEphemeralHome,
+            || "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string(),
+            ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                cwd: "/worktree".to_string(),
+                model: None,
+                thread_id: None,
+                skip_permissions: false,
+            },
+        )
+        .await
+        .expect("an ephemeral home must not fail the launch");
+
+        assert!(
+            remote.is_none(),
+            "the session must launch with no shared remote thread, exactly as one with the \
+             feature disabled does"
+        );
     }
 }

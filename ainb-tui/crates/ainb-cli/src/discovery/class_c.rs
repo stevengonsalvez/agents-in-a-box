@@ -69,6 +69,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "claude",
     "codex",
     "copilot",
+    "antigravity",
     "gemini",
     "cursor",
     "amazonq",
@@ -110,6 +111,10 @@ fn tool_subdirs(tool: &str) -> &'static [(UnitKind, Layout, &'static str)] {
             (UnitKind::Command, Layout::FlatMd, "commands"),
         ],
         "copilot" => &[
+            (UnitKind::Skill, Layout::Dir, "skills"),
+            (UnitKind::Agent, Layout::FlatMd, "agents"),
+        ],
+        "antigravity" => &[
             (UnitKind::Skill, Layout::Dir, "skills"),
             (UnitKind::Agent, Layout::FlatMd, "agents"),
         ],
@@ -596,6 +601,24 @@ mod tests {
             !names.contains(&"h1"),
             "hooks must not be discovered for codex"
         );
+    }
+
+    #[test]
+    fn walks_antigravity_skills_and_agents() {
+        let tmp = TempDir::new().unwrap();
+        write_dir_unit(tmp.path(), "skills", "commit", None);
+        write_flat_md(tmp.path(), "agents", "helper", "");
+        // Decoys
+        write_dir_unit(tmp.path(), "plugins", "p1", None);
+        write_dir_unit(tmp.path(), "mcp-servers", "m1", None);
+        let mut out = Vec::new();
+        walk_one_tool("antigravity", tmp.path(), &mut out);
+        assert_eq!(out.len(), 2);
+        let names: Vec<&str> = out.iter().map(|u| u.name.as_str()).collect();
+        assert!(names.contains(&"commit"));
+        assert!(names.contains(&"helper"));
+        assert_eq!(find(&out, "antigravity", "commit").kind, UnitKind::Skill);
+        assert_eq!(find(&out, "antigravity", "helper").kind, UnitKind::Agent);
     }
 
     #[test]

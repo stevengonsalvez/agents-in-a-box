@@ -42,6 +42,22 @@ pub struct WorktreeManager {
 }
 
 impl WorktreeManager {
+    /// Like `new`, but without creating anything.
+    ///
+    /// `new` does three `create_dir_all` calls, which is wrong for a read-only
+    /// question like "what would deleting these lose": merely opening a
+    /// confirmation dialog should not write to `~/.agents-in-a-box`, and on an
+    /// unwritable home it would fail for a reason unrelated to the sessions.
+    pub fn for_reading() -> Result<Self> {
+        let home_dir = match std::env::var_os("AINB_HOME") {
+            Some(h) => PathBuf::from(h),
+            None => dirs::home_dir().context("Failed to get home directory")?,
+        };
+        Ok(Self {
+            base_worktree_dir: home_dir.join(".agents-in-a-box").join("worktrees"),
+        })
+    }
+
     pub fn new() -> Result<Self> {
         // Honor `AINB_HOME` as a base-dir override (matches SessionStore), keeping
         // production at `~/.agents-in-a-box/worktrees` while letting tests isolate.
@@ -198,18 +214,12 @@ impl WorktreeManager {
     pub fn remove_worktree(&self, session_id: Uuid) -> Result<(), WorktreeError> {
         info!("Removing worktree for session {}", session_id);
 
-        // Find the actual worktree path (it might be in by-name directory)
+        // The same resolver the dialog uses to say what this removes, so the
+        // estimate and the destruction cannot describe different directories.
         let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
-        let worktree_path = if session_path.exists() && session_path.is_symlink() {
-            std::fs::read_link(&session_path)?
-        } else {
-            // Fallback to old location for backward compatibility
-            self.base_worktree_dir.join(session_id.to_string())
-        };
-
-        if !worktree_path.exists() {
-            return Err(WorktreeError::NotFound(worktree_path.display().to_string()));
-        }
+        let worktree_path = self.session_dir(session_id)?.ok_or_else(|| {
+            WorktreeError::NotFound(format!("Session {session_id} worktree not found"))
+        })?;
 
         // Get the original repository path to remove worktree properly
         if let Ok(repo) = Repository::open(&worktree_path) {
@@ -304,47 +314,100 @@ impl WorktreeManager {
         Ok(worktrees)
     }
 
-    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
-        // Find the actual worktree path (might be in by-name directory)
+    /// The directory a session's tree lives in.
+    ///
+    /// Resolution only: no `.git` check, no branch, no commit. Callers that need
+    /// to know what a delete would remove use this, because a directory with no
+    /// `.git` is still a directory full of files.
+    ///
+    /// `Ok(None)` means nothing is there. An unreadable symlink is `Err`, never
+    /// `Ok(None)`: a caller warning about what would be lost must not report a
+    /// tree it could not resolve as "nothing to lose".
+    pub fn session_dir(&self, session_id: Uuid) -> Result<Option<PathBuf>, WorktreeError> {
         let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
-        tracing::debug!("Looking for session path: {:?}", session_path);
         tracing::debug!(
-            "Session path exists: {}, is_symlink: {}",
+            "Looking for session path: {:?} (exists: {}, is_symlink: {})",
+            session_path,
             session_path.exists(),
             session_path.is_symlink()
         );
 
         let worktree_path = if session_path.exists() && session_path.is_symlink() {
-            let resolved_path = std::fs::read_link(&session_path)?;
-            tracing::debug!("Resolved symlink to: {:?}", resolved_path);
-            resolved_path
+            match std::fs::read_link(&session_path) {
+                Ok(resolved) => {
+                    tracing::debug!("Resolved symlink to: {:?}", resolved);
+                    resolved
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to read symlink {:?}: {}", session_path, e);
+                    // The link is there and we cannot follow it, which is
+                    // unknown, not empty.
+                    return Err(WorktreeError::Io(e));
+                }
+            }
         } else {
             // Fallback to old location for backward compatibility
             let old_path = self.base_worktree_dir.join(session_id.to_string());
             tracing::debug!("Using fallback path: {:?}", old_path);
-            if old_path.exists() {
-                old_path
-            } else {
-                return Err(WorktreeError::NotFound(format!(
-                    "Session {} worktree not found",
-                    session_id
-                )));
-            }
+            old_path
         };
 
-        tracing::debug!("Final worktree path: {:?}", worktree_path);
+        Ok(worktree_path.exists().then_some(worktree_path))
+    }
 
-        // Check if the symlink target exists
-        if !worktree_path.exists() {
-            return Err(WorktreeError::NotFound(format!(
-                "Symlink target does not exist: {}",
-                worktree_path.display()
+    /// How many files `git status --porcelain` reports in `path`.
+    ///
+    /// `path` must be the root of a checkout; a directory that is not one is an
+    /// error here, which callers report as "could not check", never as clean.
+    ///
+    /// Ignored files are not counted, so a tree holding only ignored files reads
+    /// as clean. Counting them would mean counting `target/` and
+    /// `node_modules/` on every session, which buries the signal this exists to
+    /// give.
+    pub fn uncommitted_file_count_at(path: &Path) -> Result<usize, WorktreeError> {
+        // Without this, `git` walks up to the nearest ancestor repository and
+        // answers for THAT tree, so a plain directory nested under any repo
+        // reports hundreds of files the session does not own.
+        if !path.join(".git").exists() {
+            return Err(WorktreeError::CommandFailed(format!(
+                "Not a git worktree (no .git): {}",
+                path.display()
             )));
         }
 
-        // Check if it's a valid git worktree (has .git file or directory)
-        let git_path = worktree_path.join(".git");
-        if !git_path.exists() {
+        // `--no-optional-locks` keeps the probe read-only. A plain `git status`
+        // refreshes and rewrites the index, taking `.git/index.lock`, and this
+        // runs against trees with live agents committing in them.
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(["--no-optional-locks", "status", "--porcelain"])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(WorktreeError::CommandFailed(format!(
+                "git status failed in {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count())
+    }
+
+    pub fn get_worktree_info(&self, session_id: Uuid) -> Result<WorktreeInfo, WorktreeError> {
+        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
+        let worktree_path = self.session_dir(session_id)?.ok_or_else(|| {
+            WorktreeError::NotFound(format!("Session {session_id} worktree not found"))
+        })?;
+
+        tracing::debug!("Final worktree path: {:?}", worktree_path);
+
+        // Check if it's a valid git worktree (has .git file or directory).
+        // NotFound here, as it always has been: callers match on it.
+        if !worktree_path.join(".git").exists() {
             return Err(WorktreeError::NotFound(format!(
                 "Not a git worktree (no .git): {}",
                 worktree_path.display()
@@ -804,32 +867,6 @@ impl WorktreeManager {
         }
 
         Ok(())
-    }
-
-    /// Get count of uncommitted files (staged, unstaged, or untracked) in a worktree
-    ///
-    /// Used to warn users before deleting a session with uncommitted changes.
-    pub fn uncommitted_file_count(&self, session_id: Uuid) -> Result<usize, WorktreeError> {
-        let worktree_info = self.get_worktree_info(session_id)?;
-
-        let output = Command::new("git")
-            .current_dir(&worktree_info.path)
-            .args(["status", "--porcelain"])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(WorktreeError::CommandFailed(format!(
-                "Failed to get git status: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        let count = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
-
-        Ok(count)
     }
 }
 

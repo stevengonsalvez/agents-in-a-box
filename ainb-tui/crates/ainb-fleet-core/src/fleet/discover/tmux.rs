@@ -22,7 +22,24 @@ const LIST_FORMAT: &str = concat!(
 /// Sized above a slow tool call (a build, a full test suite) so a quiet-but-busy
 /// agent is not mislabelled idle, and well under the multi-hour gap that
 /// separates a working session from an abandoned one.
+///
+/// The coded default for [`idle_after_secs`].
 const IDLE_AFTER_SECS: i64 = 120;
+
+/// The effective idle threshold.
+///
+/// `fleet.tmux_idle_after_secs` reaches this crate as
+/// `AINB_FLEET_TMUX_IDLE_AFTER_SECS`, published by the host at startup
+/// (`ainb::config::tunables::export_env_bridge`). This crate cannot read
+/// config.toml itself: it does not depend on `ainb`, and giving it its own
+/// parser would make a fifth parser of one file.
+fn idle_after_secs() -> i64 {
+    std::env::var("AINB_FLEET_TMUX_IDLE_AFTER_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(IDLE_AFTER_SECS)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TmuxPaneRow {
@@ -62,12 +79,12 @@ impl TmuxPaneRow {
     /// This is an INFERRED observation, so a provider hook always outranks it
     /// (see `should_replace` in the fleet repo) — it only has to be right for
     /// sessions that emit no hooks at all, which is most of them.
-    const fn lifecycle(&self, now_secs: i64) -> LifecycleState {
+    fn lifecycle(&self, now_secs: i64) -> LifecycleState {
         if self.pane_dead {
             return LifecycleState::Exited;
         }
         match self.window_activity {
-            Some(activity) if now_secs.saturating_sub(activity) > IDLE_AFTER_SECS => {
+            Some(activity) if now_secs.saturating_sub(activity) > idle_after_secs() => {
                 LifecycleState::Idle
             }
             Some(_) => LifecycleState::Running,

@@ -577,6 +577,9 @@ fn matches_shipped_legacy_signature(stem: &str, p: &RepositoryPreset) -> bool {
         // Mid-2026-05 shipped defaults (now bundled in the array file).
         "claude-interactive-yolo" => p.agent_provider == "claude" && p.permissions.skip_all,
         "codex-interactive-yolo" => p.agent_provider == "codex" && p.permissions.skip_all,
+        "antigravity-interactive-yolo" => {
+            p.agent_provider == "antigravity" && p.permissions.skip_all
+        }
         _ => false,
     }
 }
@@ -734,13 +737,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_defaults_include_four_in_order() {
+    fn bundled_defaults_include_five_in_order() {
         let names: Vec<String> = create_default_presets().into_iter().map(|p| p.name).collect();
         assert_eq!(
             names,
             vec![
                 "claude-interactive-yolo".to_string(),
                 "codex-interactive-yolo".to_string(),
+                "antigravity-interactive-yolo".to_string(),
                 "opusplan".to_string(),
                 "shell".to_string(),
             ]
@@ -757,6 +761,7 @@ mod tests {
         for expected in [
             "claude-interactive-yolo",
             "codex-interactive-yolo",
+            "antigravity-interactive-yolo",
             "opusplan",
             "shell",
         ] {
@@ -800,6 +805,7 @@ mod tests {
             vec![
                 "claude-interactive-yolo",
                 "codex-interactive-yolo",
+                "antigravity-interactive-yolo",
                 "opusplan",
                 "shell",
             ]
@@ -817,14 +823,15 @@ mod tests {
         // Re-read fresh.
         let mgr2 = PresetManager::with_file(file).unwrap();
         let names = mgr2.list_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"my-haiku"));
-        // Original four still present and ordered.
+        // Original five still present and ordered.
         assert_eq!(
-            names[..4],
+            names[..5],
             [
                 "claude-interactive-yolo",
                 "codex-interactive-yolo",
+                "antigravity-interactive-yolo",
                 "opusplan",
                 "shell",
             ]
@@ -841,7 +848,7 @@ mod tests {
         p.description = "edited by user".to_string();
         mgr.save_preset(&p).unwrap();
         let mgr2 = PresetManager::with_file(file).unwrap();
-        assert_eq!(mgr2.list_names().len(), 4, "should not duplicate");
+        assert_eq!(mgr2.list_names().len(), 5, "should not duplicate");
         let loaded = mgr2.get("claude-interactive-yolo").unwrap();
         assert_eq!(loaded.description, "edited by user");
     }
@@ -855,7 +862,7 @@ mod tests {
         mgr.delete("opusplan").unwrap();
         let mgr2 = PresetManager::with_file(file).unwrap();
         let names = mgr2.list_names();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
         assert!(!names.contains(&"opusplan"));
     }
 
@@ -894,7 +901,7 @@ skip_all = true
         assert!(file.exists(), "single-file presets.toml should be created");
         let mgr = PresetManager::with_file(file).unwrap();
         let names = mgr.list_names();
-        assert_eq!(names.len(), 4, "only shipped defaults should remain");
+        assert_eq!(names.len(), 5, "only shipped defaults should remain");
     }
 
     #[test]

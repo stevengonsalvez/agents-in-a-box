@@ -71,7 +71,12 @@ pub fn session_name_for(task_id: &str) -> String {
 /// Best-effort: a session already gone yields a non-zero status that is ignored
 /// (killing an absent session is a harmless no-op).
 pub(crate) async fn kill_session(session_name: &str) {
-    let _ = Command::new("tmux").args(["kill-session", "-t", session_name]).status().await;
+    // `=name` is exact. A bare `-t` resolves exact, then prefix, so a reap of a
+    // dead "ainb-run-abc" could kill a live "ainb-run-abc2".
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &format!("={session_name}")])
+        .status()
+        .await;
 }
 
 /// A spawned interactive tmux session awaiting completion.
@@ -84,6 +89,131 @@ pub struct TmuxRun {
     /// forever at 0700 (see [`TmuxRun::purge_wrapper`]).
     wrapper: PathBuf,
     max_runtime: Duration,
+}
+
+/// What [`pre_trust_claude_workdir`] did, so the caller can log it and a test
+/// can pin the no-HOME and unreadable-file branches without touching a real
+/// config.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PreTrust {
+    /// `projects[<workdir>]` now carries the trust keys.
+    Written,
+    /// The child env carries no `HOME`; nothing to write and nowhere to write.
+    NoHome,
+    /// The config exists but could not be read or parsed as an object; it was
+    /// left byte-identical (never overwritten with a stub).
+    LeftAlone(String),
+    /// The merged config could not be written.
+    WriteFailed(String),
+}
+
+/// Serialises every trust merge in this daemon: two interactive launches on one
+/// HOME (the normal fleet case) used to race the same read-modify-write and one
+/// lost its entry. Live `claude` processes rewrite the file on their own
+/// schedule too; that window is narrowed to one read+rename under this lock.
+static CLAUDE_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Pre-trust `workdir` in the Claude config the child will read, so an
+/// interactive `claude` launched in a freshly provisioned worktree does not park
+/// forever at the "Is this a project you trust?" dialog (no human is at the pane
+/// when the daemon spawns it; the run then dies on the deadline as `timeout`).
+///
+/// Merges `projects[<workdir>].hasTrustDialogAccepted = true` (the one key the
+/// dialog reads; Claude Code 2.1.258 carries no hooks-trust key) into
+/// `<HOME>/.claude.json`, where `HOME` is the one in `child_env` (the
+/// deny-by-default env the child actually inherits). The write is scoped to
+/// that ONE project key; the machine-wide bypass-permissions acceptance is
+/// passed per launch as `--settings` instead (see `runner::claude_spec`), so
+/// nothing here widens trust beyond the worktree. Every other key survives, a
+/// missing file is created, and an unreadable or malformed one is left alone
+/// (the launch then surfaces the dialog exactly as before). The temp file is
+/// unique per call and takes the original file's mode (a fresh file gets 0600,
+/// the mode Claude Code writes), so an atomic rename never widens permissions.
+///
+/// Note: the host's `ainb run` path (`worktree_manager::add_claude_trust`)
+/// targets `~/.claude/claude.json`, a path Claude Code does not read; this is
+/// the writer that hits the real file.
+pub(crate) fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) -> PreTrust {
+    let Some(home) = child_env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| PathBuf::from(v))
+    else {
+        return PreTrust::NoHome;
+    };
+    let path = home.join(".claude.json");
+    let _guard = CLAUDE_CONFIG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let (mut config, mode): (serde_json::Value, u32) = match std::fs::read(&path) {
+        Ok(raw) => match serde_json::from_slice::<serde_json::Value>(&raw) {
+            Ok(v) if v.is_object() => (v, file_mode(&path).unwrap_or(0o600)),
+            Ok(_) => return PreTrust::LeftAlone("not a JSON object".to_string()),
+            Err(e) => return PreTrust::LeftAlone(format!("unparseable: {e}")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (serde_json::json!({}), 0o600),
+        Err(e) => return PreTrust::LeftAlone(format!("unreadable: {e}")),
+    };
+    let Some(root) = config.as_object_mut() else {
+        return PreTrust::LeftAlone("not a JSON object".to_string());
+    };
+    let projects = root.entry("projects").or_insert_with(|| serde_json::json!({}));
+    if !projects.is_object() {
+        *projects = serde_json::json!({});
+    }
+    let Some(projects) = projects.as_object_mut() else {
+        return PreTrust::LeftAlone("projects is not an object".to_string());
+    };
+    let entry = projects
+        .entry(workdir.to_string_lossy().to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        // A hand-edited or corrupted project entry: replace it rather than
+        // silently keeping a value the trust keys cannot be merged into.
+        *entry = serde_json::json!({});
+    }
+    let Some(obj) = entry.as_object_mut() else {
+        return PreTrust::LeftAlone("project entry is not an object".to_string());
+    };
+    obj.insert(
+        "hasTrustDialogAccepted".into(),
+        serde_json::Value::Bool(true),
+    );
+
+    let bytes = match serde_json::to_vec_pretty(&config) {
+        Ok(b) => b,
+        Err(e) => return PreTrust::WriteFailed(format!("serialize: {e}")),
+    };
+    match write_atomic_with_mode(&path, &bytes, mode) {
+        Ok(()) => PreTrust::Written,
+        Err(e) => PreTrust::WriteFailed(e.to_string()),
+    }
+}
+
+/// The unix mode bits of `path`, or `None` when it cannot be read.
+fn file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+}
+
+/// Write `bytes` to a unique sibling temp file created with `mode`, then rename
+/// it over `path`. The temp name carries the pid and a counter so two writers
+/// in one process never share it, and a stale temp from a crashed writer is
+/// never picked up.
+fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.hangar-{}-{seq}.tmp", std::process::id()));
+    let result = (|| {
+        let mut f =
+            std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Spawn `program` (with `argv`) inside a detached tmux session named
@@ -243,7 +373,7 @@ impl TmuxRun {
     /// abort never returns while an orphan pane is still alive.
     async fn kill_and_confirm_reaped(&self) {
         let killed = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session_name])
+            .args(["kill-session", "-t", &format!("={}", self.session_name)])
             .status()
             .await;
         if let Ok(s) = killed {
@@ -494,6 +624,188 @@ mod tests {
         assert!(
             script.contains(r#"printf '%s' "$?" > '/tmp/x.exit'"#),
             "exit code is recorded after the provider returns: {script}"
+        );
+    }
+
+    /// The trust merge targets the HOME the CHILD sees (from the deny-by-default
+    /// env, not the daemon's), creates the file when absent, preserves every
+    /// unrelated key and project on a second call, and writes ONLY the two
+    /// per-project trust keys (never a machine-wide acceptance).
+    #[test]
+    fn pre_trust_merges_the_workdir_into_the_child_homes_claude_json() {
+        let home = tempfile::tempdir().unwrap();
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        let wd = Path::new("/srv/worktrees/task-1");
+
+        assert_eq!(pre_trust_claude_workdir(&env, wd), PreTrust::Written);
+        let path = home.path().join(".claude.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"].as_object().map(serde_json::Map::len),
+            Some(1),
+            "exactly the one key the dialog reads, nothing speculative"
+        );
+        assert!(
+            v.get("bypassPermissionsModeAccepted").is_none(),
+            "no machine-wide acceptance is written; that rides the launch argv"
+        );
+        assert_eq!(file_mode(&path), Some(0o600), "a fresh config is private");
+
+        // Seed unrelated state and a second project, then re-trust: nothing lost.
+        let seeded = serde_json::json!({
+            "oauthAccount": {"emailAddress": "x@y"},
+            "projects": {
+                "/other": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": false},
+                "/srv/worktrees/task-1": {"allowedTools": ["Read"]}
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&seeded).unwrap()).unwrap();
+        assert_eq!(pre_trust_claude_workdir(&env, wd), PreTrust::Written);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["oauthAccount"]["emailAddress"], "x@y",
+            "unrelated keys survive"
+        );
+        assert_eq!(
+            v["projects"]["/other"]["hasTrustDialogAccepted"], false,
+            "other projects untouched"
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["allowedTools"][0], "Read",
+            "existing project keys kept"
+        );
+        assert_eq!(
+            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"],
+            true
+        );
+    }
+
+    /// The rename never widens the file: a 0600 config stays 0600, and the
+    /// caller's temp file is gone afterwards.
+    #[test]
+    fn pre_trust_preserves_the_configs_mode_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
+        assert_eq!(file_mode(&path), Some(0o600));
+        let leftovers: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("hangar-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file cleaned up: {leftovers:?}");
+    }
+
+    /// No HOME in the child env means nothing to write: the launch proceeds and
+    /// the dialog surfaces as before rather than a stray file appearing.
+    #[test]
+    fn pre_trust_without_home_is_a_no_op() {
+        assert_eq!(
+            pre_trust_claude_workdir(&[], Path::new("/srv/x")),
+            PreTrust::NoHome
+        );
+    }
+
+    /// An unparseable or non-object config is left byte-identical: the old
+    /// `unwrap_or({})` fallback would have replaced the operator's whole config
+    /// with a three-key stub on a transient read or parse failure.
+    #[test]
+    fn pre_trust_leaves_a_broken_config_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        for broken in ["{not json", "[1,2,3]"] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(matches!(
+                pre_trust_claude_workdir(&env, Path::new("/w/x")),
+                PreTrust::LeftAlone(_)
+            ));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "byte-identical"
+            );
+        }
+    }
+
+    /// A corrupted (non-object) project entry is replaced so the trust keys land
+    /// instead of being silently dropped while the log claims success.
+    #[test]
+    fn pre_trust_replaces_a_non_object_project_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(&path, r#"{"projects":{"/w/x":"garbage"}}"#).unwrap();
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/w/x"]["hasTrustDialogAccepted"], true);
+    }
+
+    /// The merge keeps the operator's key order: `serde_json` runs with
+    /// `preserve_order` in this binary (pulled in by `agent-client-protocol`),
+    /// so a re-serialised `~/.claude.json` diffs only where the trust keys
+    /// landed. Goes red if that feature ever drops out of the graph, which
+    /// would silently re-sort the operator's config on every launch.
+    #[test]
+    fn pre_trust_keeps_the_configs_key_order() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"zeta":1,"projects":{"/w/other":{"allowedTools":[]}},"alpha":2}"#,
+        )
+        .unwrap();
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let order: Vec<usize> = [
+            "\"zeta\"",
+            "\"projects\"",
+            "\"/w/other\"",
+            "\"/w/x\"",
+            "\"alpha\"",
+        ]
+        .iter()
+        .map(|k| text.find(k).unwrap_or_else(|| panic!("{k} missing")))
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "key order changed: {text}"
         );
     }
 }

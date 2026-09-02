@@ -304,7 +304,7 @@ impl TmuxSession {
     /// * `bool` - True if the session exists, false otherwise
     pub async fn does_session_exist(&self) -> bool {
         let output = Command::new("tmux")
-            .args(["has-session", "-t", &self.sanitized_name])
+            .args(["has-session", "-t", &format!("={}", self.sanitized_name)])
             .output()
             .await;
 
@@ -323,7 +323,9 @@ impl TmuxSession {
 
         // Kill the tmux session
         let output = Command::new("tmux")
-            .args(["kill-session", "-t", &self.sanitized_name])
+            // Exact target: a bare `-t` prefix-matches, so cleaning up
+            // "ainb-repo-feat-auth" could kill a live "ainb-repo-feat-auth-2".
+            .args(["kill-session", "-t", &format!("={}", self.sanitized_name)])
             .output()
             .await?;
 
