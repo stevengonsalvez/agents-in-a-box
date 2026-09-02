@@ -779,7 +779,10 @@ impl Default for SkillManagerState {
 impl ScreenStates {
     /// Replace the issue-list rows from an `hangar/issues_list` snapshot.
     pub fn set_issues(&mut self, issues: Vec<IssueRow>) {
-        self.issue_list = IssueListState::with_rows(issues);
+        // Replace the row cache ONLY: a snapshot can land at any instant (every
+        // daemon push arms a refetch), and rebuilding the whole state here wiped
+        // an open create wizard mid-typing along with filters and selection.
+        self.issue_list.replace_rows(issues);
         // Re-label any Kanban card already on the board with its parent issue's
         // title: the tasks snapshot may have landed before this one did.
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
