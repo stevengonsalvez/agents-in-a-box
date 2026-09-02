@@ -43,7 +43,10 @@ impl Client {
         }
     }
 
-    async fn send(&mut self, method: &str, params: serde_json::Value) {
+    /// Write one request frame. `Err` when the daemon already closed the
+    /// socket (EPIPE / reset): a legitimate outcome the callers assert on, not
+    /// a harness fault.
+    async fn send(&mut self, method: &str, params: serde_json::Value) -> std::io::Result<()> {
         let req = RpcRequest {
             jsonrpc: ainb_hangar_proto::jsonrpc_version(),
             id: RpcId::Number(7),
@@ -53,8 +56,8 @@ impl Client {
         let body = serde_json::to_vec(&req).unwrap();
         let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
         out.extend_from_slice(&body);
-        self.writer.write_all(&out).await.unwrap();
-        self.writer.flush().await.unwrap();
+        self.writer.write_all(&out).await?;
+        self.writer.flush().await
     }
 
     /// The next frame, `Ok(None)` when the daemon closed the connection.
@@ -81,9 +84,10 @@ impl Client {
         }
     }
 
-    /// Send `method` and read frames until its response (a frame with an `id`).
+    /// Send `method` and read frames until its response (a frame with an `id`);
+    /// `None` when the daemon closed the connection before or instead of it.
     async fn call(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
-        self.send(method, params).await;
+        self.send(method, params).await.ok()?;
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(5), self.read_frame())
                 .await
@@ -157,7 +161,21 @@ async fn a_subscribed_connection_outlives_the_idle_window_an_unsubscribed_one_do
     let mut plain = Client::connect(&socket_path).await;
     plain.auth(dir.path()).await;
 
+    // A peer that connects and never sends its `auth/hello`: closed within the
+    // first-frame window (the idle window here, being the shorter), so an
+    // unauthenticated connection cannot camp on a task and an fd.
+    let mut silent = Client::connect(&socket_path).await;
+
     tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let silent_closed = matches!(
+        tokio::time::timeout(Duration::from_secs(2), silent.read_frame()).await,
+        Ok(Ok(None) | Err(_))
+    );
+    assert!(
+        silent_closed,
+        "a never-authenticated connection must be closed after the first-frame window"
+    );
 
     // The plain connection was reclaimed: the daemon closed it (EOF), or the
     // next write is refused.
