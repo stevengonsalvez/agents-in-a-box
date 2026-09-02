@@ -92,6 +92,7 @@ ansi-to-tui = { workspace = true }
 # Code Review diff surface
 similar = { workspace = true }
 two-face = { workspace = true }
+unicode-width = { workspace = true }
 # Version cap only (no code uses it directly) — pins the TRANSITIVE time
 # crate below the broken 0.3.48 release. See the workspace manifest comment
 # for the E0119 story + removal condition.

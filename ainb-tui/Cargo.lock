@@ -199,6 +199,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-term",
  "two-face",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "vt100",

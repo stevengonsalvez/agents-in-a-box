@@ -1831,9 +1831,13 @@ impl InteractiveSessionManager {
                     let tmux_name =
                         Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
                     let legacy_name = Self::generate_tmux_name_legacy(&worktree.branch_name);
-                    // Check if new format session exists, otherwise try legacy
+                    // Check if new format session exists, otherwise try legacy.
+                    // `=name` is exact: a bare `-t` prefix-matches, so a live
+                    // "feat-auth-2" would answer for "feat-auth" and we would
+                    // then kill the exact "feat-auth", which matches nothing,
+                    // leaving the real session running with its worktree gone.
                     let check_new = std::process::Command::new("tmux")
-                        .args(["has-session", "-t", &tmux_name])
+                        .args(["has-session", "-t", &format!("={tmux_name}")])
                         .output();
                     let final_name = if check_new.map(|o| o.status.success()).unwrap_or(false) {
                         info!("Found tmux session with new format: {}", tmux_name);
@@ -1874,7 +1878,13 @@ impl InteractiveSessionManager {
 
         if let Some(ref name) = tmux_session_name {
             info!("Attempting to kill tmux session: {}", name);
-            let output = Command::new("tmux").args(["kill-session", "-t", name]).output().await?;
+            // `=name` forces an exact target: bare `-t name` resolves exact, then
+            // prefix, then fnmatch, so deleting "feat-auth" would kill a live
+            // "feat-auth-2".
+            let output = Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={name}")])
+                .output()
+                .await?;
 
             if output.status.success() {
                 info!("Successfully killed tmux session: {}", name);
@@ -1974,7 +1984,11 @@ impl InteractiveSessionManager {
             .ok_or(InteractiveSessionError::SessionNotFound(session_id))?;
 
         let output = Command::new("tmux")
-            .args(["has-session", "-t", &session.tmux_session_name])
+            .args([
+                "has-session",
+                "-t",
+                &format!("={}", session.tmux_session_name),
+            ])
             .output()
             .await?;
 
@@ -2033,14 +2047,22 @@ impl InteractiveSessionManager {
         work_dir: &Path,
     ) -> Result<(), InteractiveSessionError> {
         // Check if session already exists
-        let check = Command::new("tmux").args(["has-session", "-t", session_name]).output().await?;
+        // Both targets are exact. `has-session -t name` prefix-matches, so a live
+        // "feat-auth-2" would answer for "feat-auth" and the kill below would
+        // then destroy it.
+        let exact_target = format!("={session_name}");
+        let check =
+            Command::new("tmux").args(["has-session", "-t", &exact_target]).output().await?;
 
         if check.status.success() {
             warn!(
                 "Tmux session '{}' already exists, killing it first",
                 session_name
             );
-            Command::new("tmux").args(["kill-session", "-t", session_name]).output().await?;
+            Command::new("tmux")
+                .args(["kill-session", "-t", &exact_target])
+                .output()
+                .await?;
         }
 
         // Create new detached tmux session
@@ -2974,6 +2996,9 @@ trust_level = "trusted"
 
     #[cfg(unix)]
     #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
     async fn failed_launch_rollback_removes_only_exact_owned_resources() {
         if !Command::new("tmux")
             .arg("-V")
@@ -2985,7 +3010,9 @@ trust_level = "trusted"
             return;
         }
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("temp home");
         let prior_home = std::env::var_os("AINB_HOME");
         std::env::set_var("AINB_HOME", home.path());
@@ -3152,7 +3179,9 @@ trust_level = "trusted"
 
         // Hold the shared env lock + force the default port so the base URL is
         // deterministic regardless of other tests mutating AINB_HEADROOM_PORT.
-        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let old = std::env::var_os("AINB_HEADROOM_PORT");
         std::env::remove_var("AINB_HEADROOM_PORT");
 
@@ -3182,7 +3211,9 @@ trust_level = "trusted"
 
     #[test]
     fn headroom_base_url_honors_port_override() {
-        let _guard = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _guard = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = "AINB_HEADROOM_PORT";
         let old = std::env::var_os(key);
 
@@ -3284,7 +3315,9 @@ trust_level = "trusted"
     fn atc_control_dir_renders_as_an_atc_instance() {
         // AINB_HOME is process-global; serialise with every other env-mutating
         // test in the crate via the shared lock.
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let home = tempfile::tempdir().expect("tempdir");
         // Save and restore rather than blindly removing: a runner that sets
@@ -3779,7 +3812,9 @@ trust_level = "trusted"
         // AINB_HOME is process-global; serialise with every other env-mutating
         // test in the crate (including `concurrent_mutate_does_not_lose_updates`)
         // via the shared lock so parallel runs don't clobber each other's home.
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         // Point AINB_HOME at our temp dir so SessionStore::storage_path() uses it.
@@ -3827,12 +3862,17 @@ trust_level = "trusted"
     }
 
     #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
     async fn persisted_launch_settings_survive_live_session_discovery() {
         use crate::models::session::SessionAgentType;
         use chrono::Utc;
         use tempfile::TempDir;
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         std::env::set_var("AINB_HOME", dir.path());
@@ -3939,7 +3979,9 @@ trust_level = "trusted"
         use std::sync::{Arc, Barrier};
         use tempfile::TempDir;
 
-        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let dir = TempDir::new().expect("tempdir");
         std::env::set_var("AINB_HOME", dir.path());
