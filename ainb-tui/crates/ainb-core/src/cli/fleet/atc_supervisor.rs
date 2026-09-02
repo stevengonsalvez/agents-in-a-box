@@ -145,16 +145,7 @@ its next action, but neither controller was started or stopped"
     if let Some(why) = reconcile.failed.clone() {
         meta.mode = previous;
         meta.provider.clone_from(&previous_provider);
-        match write_meta(&paths, &meta) {
-            Ok(()) => bail!("{why}. The instance was left in {} mode.", previous.id()),
-            Err(e) => bail!(
-                "{why}. WORSE: the rollback to {} mode also failed ({e}), so {} now records {} \
-with its safety handover unarmed. Fix that file before starting either controller.",
-                previous.id(),
-                paths.meta.display(),
-                target.id()
-            ),
-        }
+        return Err(rollback_error(&why, &paths, &meta, previous, target));
     }
 
     let summary = json!({
@@ -198,6 +189,31 @@ with its safety handover unarmed. Fix that file before starting either controlle
         println!("{}", serde_json::to_string_pretty(&summary)?);
     }
     Ok(())
+}
+
+/// Roll the persisted mode back after a failed reconcile, and build the error.
+///
+/// Split out only to keep `mode` under the line cap; the interesting part is the
+/// second branch. A rollback that ITSELF fails is the one case where an operator
+/// has to intervene by hand, so the message names the file and both modes rather
+/// than reporting a generic write failure.
+fn rollback_error(
+    why: &str,
+    paths: &AtcPaths,
+    reverted: &AtcMeta,
+    previous: SupervisorMode,
+    attempted: SupervisorMode,
+) -> anyhow::Error {
+    match write_meta(paths, reverted) {
+        Ok(()) => anyhow::anyhow!("{why}. The instance was left in {} mode.", previous.id()),
+        Err(e) => anyhow::anyhow!(
+            "{why}. WORSE: the rollback to {} mode also failed ({e}), so {} now records {} with \
+its safety handover unarmed. Fix that file before starting either controller.",
+            previous.id(),
+            paths.meta.display(),
+            attempted.id()
+        ),
+    }
 }
 
 /// Print the current mode without touching anything.
