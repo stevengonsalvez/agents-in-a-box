@@ -544,12 +544,20 @@ fn fleet_daemon(action: Action) -> Result<String> {
 /// The heartbeat is the daemon's own claim about which process it is, which is
 /// a better answer than matching on a process name — that would happily kill
 /// somebody else's `ainb fleet daemon` in another checkout.
-fn stop_by_heartbeat_pid(name: &str) -> Option<u32> {
-    use crate::fleet::daemons::heartbeat::DaemonHeartbeat;
-    let pid = DaemonHeartbeat::read(name)?.pid;
-    let target = nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?);
+pub(crate) fn stop_by_heartbeat_pid(name: &str) -> Option<u32> {
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+    let hb = DaemonHeartbeat::read(name)?;
+    // LIVENESS IS NOT IDENTITY. A daemon that was SIGKILLed (or died with the
+    // box) leaves its heartbeat behind, and the OS recycles pids — so a live
+    // process at that pid may be somebody's editor. Signalling it would kill an
+    // unrelated program and report a successful stop. Only the ORIGINAL process,
+    // proven by its start instant, may be signalled.
+    if pid_identity(hb.pid, hb.started_at) != PidCheck::Matched {
+        return None;
+    }
+    let target = nix::unistd::Pid::from_raw(i32::try_from(hb.pid).ok()?);
     nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).ok()?;
-    Some(pid)
+    Some(hb.pid)
 }
 
 // ── Delegation plumbing ─────────────────────────────────────────────────────
@@ -603,7 +611,7 @@ fn delegate(args: &[&str]) -> Result<String> {
 /// Spawn `ainb <args>` detached, for the daemons whose only implementation runs
 /// in the foreground. Own process group so a Ctrl-C aimed at the launching
 /// terminal never reaches it; output to the daemon log rather than our stdio.
-fn detach(args: &[&str]) -> Result<()> {
+pub(crate) fn detach(args: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let bin = ainb_bin()?;
     let log = crate::fleet::plumbing::paths::ainb_home()?.join("daemons");
