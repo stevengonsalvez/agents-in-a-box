@@ -68,10 +68,23 @@ def main() -> None:
     defects = md_table(section(md, "Defects on the driven path"))
     notes = [l[2:] for l in section(md, "Run notes").splitlines() if l.startswith("- ")]
     env = md_table(section(md, "Environment disclosure"))
-    commits = subprocess.run(
-        ["git", "log", "--format=%h%x09%s", "origin/main..HEAD"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.splitlines()
+    def git_log(range_spec: str) -> list[str]:
+        return subprocess.run(
+            ["git", "log", "--format=%h%x09%s", range_spec],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+
+    commits = git_log("origin/main..HEAD")
+    if not commits:
+        # Merged: the branch is an ancestor of main. Read the merge commit's
+        # second-parent range so the index keeps showing the run's commits.
+        merge = subprocess.run(
+            ["git", "log", "--merges", "--first-parent", "-1", "--format=%H",
+             "--grep", "f/prove-hangar", "origin/main"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if merge:
+            commits = git_log(f"{merge}^1..{merge}^2")
     fixes = [c.split("\t", 1) for c in commits if re.match(r"^[0-9a-f]+\t(fix|feat|test)\(", c)]
     total_commits = len(commits)
 
