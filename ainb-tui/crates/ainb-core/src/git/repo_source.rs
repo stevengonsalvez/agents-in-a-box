@@ -92,7 +92,11 @@ impl RepoSource {
             return Ok(RepoSource::LocalPath(expanded));
         }
 
-        // GitHub shorthand: owner/repo (no spaces, exactly one slash, no protocol)
+        // GitHub shorthand: owner/repo (no spaces, exactly one slash, no protocol).
+        // Stricter than [`github_shorthand`], which callers that already KNOW
+        // their value is a remote use instead: this branch rejects a `.`
+        // anywhere, so a dotted repo NAME (`mrdoob/three.js`) falls through to
+        // the no-protocol-URL heuristic below. Keep the two in step.
         if !input.contains(' ')
             && input.matches('/').count() == 1
             && !input.contains(':')
@@ -115,6 +119,36 @@ impl RepoSource {
 
         // Fallback: treat as local path
         Ok(RepoSource::LocalPath(PathBuf::from(input)))
+    }
+
+    /// Read `owner/repo` as a GitHub shorthand, for callers whose input is a
+    /// remote by declaration (`ainb run --remote-repo`, and anything else that
+    /// has already ruled out a local path).
+    ///
+    /// Looser than [`RepoSource::from_input`]'s own shorthand branch in exactly
+    /// one way: a dot is allowed in the repo NAME, so `mrdoob/three.js` and
+    /// `socketio/socket.io` classify as shorthands instead of falling through
+    /// to the no-protocol-URL heuristic and parsing as `https://mrdoob/three.js`.
+    /// A dot in the OWNER still disqualifies the value, which is what keeps a
+    /// host-shaped `gitlab.com/repo` out: it belongs to that heuristic, and
+    /// answering it with a GitHub clone turns a parse error into a misleading
+    /// "check your git credentials".
+    ///
+    /// `None` for anything carrying a scheme, host, path, or leading `-`;
+    /// those are left to `from_input` to classify.
+    pub(crate) fn github_shorthand(input: &str) -> Option<Self> {
+        let (owner, repo) = input.trim().split_once('/')?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        let bare = |segment: &str| {
+            !segment.is_empty()
+                && !segment.contains(['/', '\\', ':', '@'])
+                && !segment.contains(char::is_whitespace)
+                && !segment.starts_with(['-', '.', '~'])
+        };
+        (bare(owner) && !owner.contains('.') && bare(repo)).then(|| Self::GithubShorthand {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        })
     }
 
     /// Convert to canonical git URL for cloning.
@@ -182,19 +216,20 @@ impl RepoSource {
             RepoSource::GithubShorthand { owner, repo } => Ok(ParsedRepo {
                 source: self.clone(),
                 host: "github.com".to_string(),
-                owner: owner.clone(),
-                repo_name: repo.clone(),
+                owner: safe_segment("owner", owner)?,
+                repo_name: safe_segment("repo", repo)?,
             }),
-            RepoSource::LocalPath(path) => {
-                let repo_name =
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
-                Ok(ParsedRepo {
-                    source: self.clone(),
-                    host: "local".to_string(),
-                    owner: String::new(),
-                    repo_name,
-                })
-            }
+            // A local checkout has no host/owner to key a clone cache on. This
+            // used to answer host="local", owner="" and the path basename,
+            // which `get_cache_path` joined into `<cache>/local//<basename>` —
+            // a path two unrelated checkouts of the same basename share. No
+            // caller wants that: every clone path is gated on a remote variant
+            // already, and the one consumer that reached here built a
+            // meaningless `/<basename>` shorthand out of it.
+            RepoSource::LocalPath(path) => Err(RepoSourceError::ParseError(format!(
+                "local checkout has no remote components: {}",
+                path.display()
+            ))),
             // SshSession is an interactive session, not a clone — no components
             // to extract. Filter is unparseable text and likewise has no
             // owner/repo to expose.
@@ -397,6 +432,22 @@ fn ensure_git_suffix(url: &str) -> String {
     }
 }
 
+/// Reject a host/owner/repo segment that would escape the clone-cache root.
+///
+/// `RemoteRepoManager::get_cache_path` joins these three segments straight onto
+/// `~/.agents-in-a-box/repos`, so `https://github.com/../..` would otherwise
+/// resolve to the AINB state dir itself. The CLI used to carry its own
+/// `.replace("..", "")` sanitiser; the guard belongs here, where every caller
+/// that builds a cache path goes through it.
+fn safe_segment(kind: &str, value: &str) -> Result<String, RepoSourceError> {
+    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\\']) {
+        return Err(RepoSourceError::ParseError(format!(
+            "Unsafe {kind} segment: {value:?}"
+        )));
+    }
+    Ok(value.to_string())
+}
+
 /// Parse HTTPS URL into components
 fn parse_https_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSourceError> {
     // https://github.com/owner/repo.git or https://github.com/owner/repo
@@ -411,9 +462,9 @@ fn parse_https_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSour
     let parts: Vec<&str> = without_protocol.split('/').collect();
 
     if parts.len() >= 3 {
-        let host = parts[0].to_string();
-        let owner = parts[1].to_string();
-        let repo_name = parts[2].to_string();
+        let host = safe_segment("host", parts[0])?;
+        let owner = safe_segment("owner", parts[1])?;
+        let repo_name = safe_segment("repo", parts[2])?;
 
         Ok(ParsedRepo {
             source,
@@ -467,9 +518,9 @@ fn parse_ssh_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSource
         if path_parts.len() >= 2 {
             return Ok(ParsedRepo {
                 source,
-                host,
-                owner: path_parts[0].to_string(),
-                repo_name: path_parts[1].to_string(),
+                host: safe_segment("host", &host)?,
+                owner: safe_segment("owner", path_parts[0])?,
+                repo_name: safe_segment("repo", path_parts[1])?,
             });
         }
     }
@@ -484,6 +535,20 @@ fn parse_ssh_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSource
 #[allow(deprecated)] // existing legacy `from_input` tests pre-date finding #14
 mod tests {
     use super::*;
+
+    /// A local checkout must not produce cache components.
+    ///
+    /// `get_cache_path` joins host/owner/repo onto the clone cache, and the
+    /// old `Ok` answer had an empty owner, so `~/a/api` and `~/b/api` collapsed
+    /// onto one `<cache>/local/api` clone.
+    #[test]
+    fn local_path_has_no_remote_components() {
+        let source = RepoSource::LocalPath("/home/foo/api".into());
+        assert!(
+            source.parse_components().is_err(),
+            "a local checkout is not a clone source"
+        );
+    }
 
     #[test]
     fn test_https_url_detection() {

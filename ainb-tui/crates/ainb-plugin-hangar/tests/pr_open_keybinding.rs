@@ -71,7 +71,7 @@ fn on_task_detail(pr_url: Option<&str>) -> (AppState, ScreenStates) {
     let mut app = AppState::new(WorkspaceId::from_str("default").unwrap());
     app.screen = Screen::TaskDetail(task.clone());
     let mut states = ScreenStates::default();
-    states.open_task_detail(task, issue(pr_url), None);
+    states.open_task_detail(task, issue(pr_url), None, None);
     (app, states)
 }
 

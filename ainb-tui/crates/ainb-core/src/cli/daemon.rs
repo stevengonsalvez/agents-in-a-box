@@ -41,6 +41,15 @@ pub enum Action {
     ModeLite,
     /// Switch the ATC supervisor to FULL mode (scheduled LLM heartbeat).
     ModeFull,
+    /// Provision an ATC instance and bring it up, without requiring one to
+    /// already exist.
+    ///
+    /// Every other ATC verb goes through [`atc_instance`], which bails when
+    /// nothing is provisioned, so on a host with no instance the row could
+    /// report the fault and offer nothing that fixed it. ATC only.
+    Provision,
+    /// Tear down an OS heartbeat timer whose instance does not exist. ATC only.
+    RemoveOrphan,
 }
 
 impl Action {
@@ -54,6 +63,8 @@ impl Action {
             Self::Pair => "pair",
             Self::ModeLite => "mode-lite",
             Self::ModeFull => "mode-full",
+            Self::Provision => "provision",
+            Self::RemoveOrphan => "remove-orphan",
         }
     }
 
@@ -67,6 +78,8 @@ impl Action {
             "pair" => Some(Self::Pair),
             "mode-lite" => Some(Self::ModeLite),
             "mode-full" => Some(Self::ModeFull),
+            "provision" => Some(Self::Provision),
+            "remove-orphan" => Some(Self::RemoveOrphan),
             _ => None,
         }
     }
@@ -117,6 +130,8 @@ impl Action {
                     crate::fleet::atc::SupervisorMode::Full => Self::ModeFull,
                 });
             }
+            verbs.push(Self::Provision);
+            verbs.push(Self::RemoveOrphan);
         }
         verbs
     }
@@ -147,6 +162,8 @@ impl Action {
             Self::Pair => "pair",
             Self::ModeLite => "switch to lite mode",
             Self::ModeFull => "switch to full mode",
+            Self::Provision => "provision",
+            Self::RemoveOrphan => "remove-orphan",
         }
     }
 }
@@ -183,7 +200,7 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
     }
     let kind = kind_from_id(kind_id).with_context(|| format!("unknown daemon: {kind_id}"))?;
     let Some((verb, _)) = sub.subcommand() else {
-        bail!("expected start, stop, or restart — try `ainb daemon {kind_id} --help`")
+        bail!("expected a verb, e.g. start; `ainb daemon {kind_id} --help` lists them all")
     };
     let action = Action::from_id(verb).with_context(|| format!("unknown action: {verb}"))?;
     let report = control(kind, action).await?;
@@ -237,8 +254,12 @@ fn release_checker(action: Action) -> Result<String> {
             crate::cli::update::disable_schedule().context("disable daily release checker")?;
             Ok("daily release checker disabled".to_string())
         }
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -289,9 +310,15 @@ fn mcp_pool(action: Action) -> Result<String> {
             client::restart_daemon().context("restart the MCP pool")?;
             Ok("mcp pool restarted".to_string())
         }
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -320,9 +347,15 @@ async fn headroom(action: Action) -> Result<String> {
                 .context("restart the Headroom proxy")?;
             Ok("headroom proxy restarted".to_string())
         }
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -342,9 +375,15 @@ fn notifyd(kind: DaemonKind, action: Action) -> Result<String> {
         // resume/repair command, and a correct bring-up from stopped.
         Action::Start | Action::Restart => "restart",
         Action::Stop => "stop",
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     };
     delegate(&["notifyd", verb]).map(|out| format!("{out}{note}"))
@@ -439,7 +478,100 @@ fn atc_set_mode(mode: crate::fleet::atc::SupervisorMode) -> Result<String> {
     delegate(&["fleet", "atc", "mode", &name, "--set", mode.id()])
 }
 
+/// The ATC instance the screen and the provisioning verbs act on.
+///
+/// A leftover instance directory names itself, and reusing that name is what
+/// keeps an existing task-log and state file attached to the instance the
+/// heartbeat was already aimed at. Falls back to `main`, which is what
+/// `fleet atc setup` has always defaulted to in practice.
+pub fn atc_target_name() -> Result<String> {
+    Ok(unprovisioned_atc_names()?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "main".to_string()))
+}
+
+/// Names with something on disk but no `meta.json`: leftovers, not instances.
+///
+/// The only names `provision` and `remove-orphan` may act on. Acting on a
+/// PROVISIONED name would reset a live instance's config or unload a heartbeat
+/// that is doing its job, and on a host with several instances the
+/// alphabetically-first directory is very likely to be one of those.
+///
+/// Leftover DIRECTORIES and installed UNITS both count: deleting an instance
+/// dir does not remove its unit, and that unit keeps firing.
+fn unprovisioned_atc_names() -> Result<Vec<String>> {
+    use crate::fleet::atc::paths::{list_instance_dirs_in, list_instance_names_in};
+    let home = crate::fleet::plumbing::paths::ainb_home()?;
+    let root = home.join("atc");
+    let provisioned = list_instance_names_in(&root);
+    // Units are named for an instance and live in the user's own launchd /
+    // systemd directory, with no idea which ainb home provisioned them. Reading
+    // them while pointed at a DIFFERENT home would classify that home's live
+    // timer as an orphan, and remove-orphan would then delete it.
+    let units = if crate::fleet::atc::paths::ainb_home().map(|d| d == home).unwrap_or(false) {
+        crate::fleet::atc::timer::installed_instance_names()
+    } else {
+        Vec::new()
+    };
+    let mut names: Vec<String> = list_instance_dirs_in(&root)
+        .into_iter()
+        .chain(units)
+        .filter(|name| !provisioned.contains(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 fn atc(action: Action) -> Result<String> {
+    // Provisioning and orphan removal are the two verbs that must work when
+    // there is NO instance, so they resolve their own name instead of going
+    // through `atc_instance`, which exists to refuse exactly that case.
+    match action {
+        Action::Provision => {
+            // A bare `setup` rebuilds meta from defaults, so running it on an
+            // instance that already exists silently resets a deliberately
+            // tuned interval or a disabled heartbeat. Restart is the verb for
+            // an existing instance; it preserves that config.
+            // NOT `atc_instance()`: that returns Err for two-or-more
+            // instances as well as for none, so it would wave the clobber
+            // through on exactly the host with the most to lose.
+            let provisioned = crate::fleet::atc::paths::list_instance_names_in(
+                &crate::fleet::plumbing::paths::ainb_home()?.join("atc"),
+            );
+            if !provisioned.is_empty() {
+                bail!(
+                    "ATC already provisioned ({}); use restart instead",
+                    provisioned.join(", ")
+                );
+            }
+            let name = atc_target_name()?;
+            return delegate(&["fleet", "atc", "setup", &name]);
+        }
+        Action::RemoveOrphan => {
+            // Only ever an UNPROVISIONED name. Tearing the timer off a live
+            // instance would silently stop its heartbeat, and the leftover
+            // directory the operator meant would survive.
+            let Some(name) = unprovisioned_atc_names()?
+                .into_iter()
+                .find(|name| crate::fleet::atc::timer::is_installed(name))
+            else {
+                return Ok("no orphaned heartbeat timer to remove".to_string());
+            };
+            let removed = crate::fleet::atc::timer::teardown(&name)
+                .with_context(|| format!("removing the heartbeat timer for '{name}'"))?;
+            return Ok(if removed.is_empty() {
+                format!("no heartbeat timer installed for '{name}'")
+            } else {
+                format!(
+                    "removed {} for '{name}'",
+                    removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )
+            });
+        }
+        _ => {}
+    }
     let name = atc_instance()?;
     // In LITE mode the controller is the scanner process, not the timer and not
     // the brain session. Routing Start/Stop at the full-mode machinery would
@@ -485,9 +617,15 @@ fn atc(action: Action) -> Result<String> {
                 StopOutcome::NotRunning => Ok(format!("ATC '{name}' lite scanner was not running")),
                 StopOutcome::Unverified(pid) => bail!(unverified_stop_message("lite scanner", pid)),
             },
-            // Unreachable: `control` intercepts these before any handler.
-            Action::Pair | Action::ModeLite | Action::ModeFull => {
-                bail!("not a lifecycle verb for this daemon")
+            // Unreachable here: provision / remove-orphan are matched ABOVE
+            // this branch, because they must work with no instance at all —
+            // and `control` intercepts pair and the mode switches.
+            Action::Provision
+            | Action::RemoveOrphan
+            | Action::Pair
+            | Action::ModeLite
+            | Action::ModeFull => {
+                bail!("`{}` is not a lifecycle verb for this daemon", action.id())
             }
         };
     }
@@ -517,9 +655,15 @@ fn atc(action: Action) -> Result<String> {
         // --purge. Passing --yes made clap reject the whole invocation, so
         // `stop` failed every time.
         Action::Stop => delegate(&["fleet", "atc", "teardown", &name]),
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -536,9 +680,15 @@ fn bridge(action: Action) -> Result<String> {
             delegate(&["fleet", "bridge", "uninstall"])?;
             delegate(&["fleet", "bridge", "install"])
         }
-        // Unreachable: `control` intercepts these before any handler.
-        Action::Pair | Action::ModeLite | Action::ModeFull => {
-            bail!("not a lifecycle verb for this daemon")
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair
+        | Action::Provision
+        | Action::RemoveOrphan
+        | Action::ModeLite
+        | Action::ModeFull => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -587,6 +737,12 @@ fn fleet_daemon(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts these before any handler.
         Action::Pair | Action::ModeLite | Action::ModeFull => {
             bail!("not a lifecycle verb for this daemon")
+        }
+        // Unreachable: `control` intercepts Pair before any handler.
+        // Provision / remove-orphan are ATC-only for the same reason: they are
+        // offered by `Action::for_kind` only there.
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
+            bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
 }
@@ -742,6 +898,26 @@ mod tests {
             msg.contains("Refusing to signal it"),
             "must say what it did NOT do: {msg}"
         );
+    }
+
+    /// Provisioning and orphan removal only mean something for ATC, and every
+    /// other daemon has to refuse them rather than silently matching a
+    /// lifecycle arm.
+    #[test]
+    fn provisioning_verbs_are_offered_only_by_atc() {
+        for kind in super::CONTROLLABLE {
+            let verbs = super::Action::for_kind(kind);
+            let is_atc = matches!(kind, super::DaemonKind::Atc);
+            for verb in [super::Action::Provision, super::Action::RemoveOrphan] {
+                assert_eq!(
+                    verbs.contains(&verb),
+                    is_atc,
+                    "{} offered {}",
+                    kind.id(),
+                    verb.id()
+                );
+            }
+        }
     }
 
     /// `pair` is offered only by the daemon that owns the Codex transport.

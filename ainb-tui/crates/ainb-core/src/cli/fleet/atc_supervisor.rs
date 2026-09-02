@@ -1292,7 +1292,14 @@ mod tests {
         // tests without adding any, leaving the single-instance guard with no
         // coverage at all. This exercises the primitive the guard now rests on.
         use fs2::FileExt;
-        let dir = std::env::temp_dir().join(format!("atc-flock-{}", std::process::id()));
+        // A path unique to this invocation. Keying only on the pid shared the
+        // file with every other run in this binary, so a leftover from an
+        // earlier one made the test flaky — and a flaky guard test is worse
+        // than none, because it trains you to ignore it.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("atc-flock-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scanner.lock");
 

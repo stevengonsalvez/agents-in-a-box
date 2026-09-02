@@ -273,6 +273,22 @@ impl KanbanState {
         }
     }
 
+    /// The NEWEST card (by `created_at`, id as the stable tiebreak) whose parent
+    /// issue is `issue_id`, across every column — i.e. the issue's latest run.
+    ///
+    /// The issue-list open path binds task detail through this lookup so the
+    /// screen carries the REAL task id + status: a synthetic `task-<issue>` id
+    /// can render a transcript but can never retry or cancel anything, because
+    /// the daemon has no such task row.
+    #[must_use]
+    pub fn latest_card_for_issue(&self, issue_id: &str) -> Option<&CardSummary> {
+        self.columns
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .filter(|card| card.issue_id.as_deref() == Some(issue_id))
+            .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
+    }
+
     /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
     /// `issue_id -> title` map the `hangar/issues_list` snapshot carries, so N
     /// dispatch runs of ONE issue read as N runs of that issue rather than N
@@ -843,6 +859,29 @@ mod tests {
             .iter()
             .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
             .collect()
+    }
+
+    /// The issue-list task-detail path binds the issue's NEWEST run: latest
+    /// `created_at` wins across columns, and a tie breaks on task id so two
+    /// cards stamped in the same millisecond still pick deterministically.
+    /// Cards of other issues never win however new they are.
+    #[test]
+    fn latest_card_for_issue_picks_the_newest_run_of_that_issue() {
+        let mut old_done = task("01TASKOLD0000000000000000A", "done");
+        old_done.created_at = NOW - 600_000;
+        let mut tie_a = task("01TASKTIE0000000000000000A", "failed");
+        tie_a.created_at = NOW;
+        let mut tie_b = task("01TASKTIE0000000000000000B", "running");
+        tie_b.created_at = NOW;
+        let mut other = task("01TASKOTHER00000000000000A", "queued");
+        other.issue_id = Some("issue-2".into());
+        other.created_at = NOW + 1_000;
+        let state = KanbanState::from_tasks(&[old_done, tie_a, tie_b, other], NOW);
+
+        let latest = state.latest_card_for_issue("issue-1").expect("issue-1 has runs");
+        assert_eq!(latest.task_id, "01TASKTIE0000000000000000B");
+        assert_eq!(latest.status, "running");
+        assert!(state.latest_card_for_issue("issue-9").is_none());
     }
 
     /// `board_columns` flattens the four buckets into card-board columns whose

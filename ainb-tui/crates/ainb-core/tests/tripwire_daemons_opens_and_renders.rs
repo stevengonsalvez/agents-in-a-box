@@ -199,6 +199,19 @@ fn daemons_opens_and_renders_four_rows() {
         assert!(post.contains(row), "daemon row missing: {row}\n{post}");
     }
 
+    // The Hooks panel names BOTH executables. A pointer left aimed at a deleted
+    // worktree while a perfectly good ainb is running was invisible until this
+    // rendered two lines, and repair was a CLI command quoted in an error.
+    // Substrings that exist ONLY on those two lines: a bare "hooks " matches
+    // the panel title and a bare "running " matches the table's STATE column,
+    // so either would pass with both lines deleted.
+    for hook_line in [") → ", "running →", "B pin running", "I install / repair"] {
+        assert!(
+            post.contains(hook_line),
+            "hooks panel missing {hook_line:?}\n{post}"
+        );
+    }
+
     // Back home on Escape.
     send_key(&session, "Escape");
     let back_home = poll_capture_resending(

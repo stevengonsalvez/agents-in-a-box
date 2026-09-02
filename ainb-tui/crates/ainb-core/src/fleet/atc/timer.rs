@@ -311,6 +311,49 @@ pub fn teardown(name: &str) -> Result<Vec<PathBuf>> {
     }
 }
 
+/// Every instance that has a heartbeat unit installed, orphaned or not.
+///
+/// Asked of the UNIT directory, not of the instance directories: a unit whose
+/// instance dir was deleted outright still fires on the next login, and asking
+/// "does this leftover directory have a unit" cannot see it.
+#[must_use]
+pub fn installed_instance_names() -> Vec<String> {
+    let (dir, suffix) = if cfg!(target_os = "macos") {
+        (
+            dirs::home_dir().map(|h| h.join("Library/LaunchAgents")),
+            ".plist",
+        )
+    } else {
+        (systemd_user_dir().ok(), ".timer")
+    };
+    dir.map(|dir| instance_names_in(&dir, suffix)).unwrap_or_default()
+}
+
+/// The instance names named by unit files directly in `dir`.
+///
+/// The suffix match is EXACT. Renaming a unit out of the way (`.plist.bak`,
+/// `.plist.atc-restored-in-error-20260808`) is how these get retired, and
+/// launchd ignores them; a `starts_with` test would resurrect every one of them
+/// as a phantom orphan.
+#[must_use]
+fn instance_names_in(dir: &Path, suffix: &str) -> Vec<String> {
+    const PREFIX: &str = "com.agentsinabox.atc.";
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
+        .filter_map(|file| {
+            let stem = file.strip_suffix(suffix)?;
+            let name = stem.strip_prefix(PREFIX)?;
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Whether a heartbeat timer is currently installed for `name`.
 pub fn is_installed(name: &str) -> bool {
     if cfg!(target_os = "macos") {
@@ -436,6 +479,30 @@ fn xml_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Retiring a unit is done by renaming it out of the way, and launchd only
+    /// loads an exact `.plist`. A prefix match would resurrect every retired
+    /// sibling as a phantom orphan, and the machine that reported this bug has
+    /// two of them next to the live one.
+    #[test]
+    fn only_exactly_suffixed_units_name_an_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [
+            "com.agentsinabox.atc.main.plist",
+            "com.agentsinabox.atc.main.plist.bak-20260807",
+            "com.agentsinabox.atc.main.plist.atc-restored-in-error-20260808",
+            "com.agentsinabox.atc.other.plist",
+            "com.agentsinabox.bridge.plist",
+            "unrelated.plist",
+        ] {
+            std::fs::write(dir.path().join(file), "").unwrap();
+        }
+
+        assert_eq!(
+            super::instance_names_in(dir.path(), ".plist"),
+            vec!["main".to_string(), "other".to_string()]
+        );
+    }
+
     use super::*;
 
     /// Build units from an explicit binary and PATH so the assertions never
