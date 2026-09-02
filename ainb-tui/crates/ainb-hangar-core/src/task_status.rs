@@ -33,6 +33,23 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// Every status, in lifecycle order. Drives exhaustive display-mapping tests
+    /// (a new variant that is not added here fails to compile in `as_str`).
+    pub const ALL: [Self; 6] = [
+        Self::Queued,
+        Self::Dispatched,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    /// The status a wire / store token names, `None` for an unknown token.
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.as_str() == token)
+    }
+
     /// The lowercase wire token stored in the `status` column.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
