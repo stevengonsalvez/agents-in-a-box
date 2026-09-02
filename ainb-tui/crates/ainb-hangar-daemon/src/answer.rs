@@ -166,9 +166,11 @@ async fn deliver(
         picker_position(&row.payload, answer),
         picker_labels(&row.payload),
     ) {
-        if let Some(outcome) = deliver_picker(target, position, &labels).await {
-            return Ok(outcome);
-        }
+        // An option answer to an option picker is NEVER typed as text: if the
+        // picker is not on screen the keys would land in the composer (or, worse,
+        // Enter would accept the highlighted default), so the row reopens with
+        // the reason instead.
+        return Ok(deliver_picker(target, position, &labels).await);
     }
     send(session, answer).await
 }
@@ -222,55 +224,73 @@ fn picker_position(payload: &str, answer: &str) -> Option<usize> {
     }
 }
 
-/// Route a picker answer by position into `target`. `None` when the pane does
-/// not currently show the picker (caller falls back to the text send).
-async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Option<SendOutcome> {
+/// Route a picker answer by position into `target`. A `Failed` outcome (picker
+/// not on screen, a key that did not land, a picker that stayed open) reopens
+/// the row through the caller's compensation path.
+async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> SendOutcome {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_send_picker_key;
     use std::time::Duration;
 
-    let pane = capture_pane(target, 0).await.ok()?;
-    let visible = labels.iter().all(|l| pane.contains(picker_probe(l)));
-    if !visible {
-        return None;
+    let pane = match capture_pane(target, 0).await {
+        Ok(pane) => pane,
+        Err(e) => {
+            return SendOutcome::Failed {
+                reason: format!("cannot read the target pane: {e:#}"),
+            };
+        }
+    };
+    if !picker_visible(&pane, labels) {
+        return SendOutcome::Failed {
+            reason: "the option picker is not on the agent's screen (answer not typed)".to_string(),
+        };
     }
     for _ in 0..position {
         if let Err(e) = tmux_send_picker_key(target, "Down").await {
-            return Some(SendOutcome::Failed {
+            return SendOutcome::Failed {
                 reason: format!("picker Down key failed: {e:#}"),
-            });
+            };
         }
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
     if let Err(e) = tmux_send_picker_key(target, "Enter").await {
-        return Some(SendOutcome::Failed {
+        return SendOutcome::Failed {
             reason: format!("picker Enter key failed: {e:#}"),
-        });
+        };
     }
-    // Confirm the picker actually closed; a pane still showing every option
-    // means the keys did not land, and the row must reopen rather than read as
-    // answered while the agent stays blocked.
+    // Confirm the picker actually closed; a pane still showing it means the
+    // keys did not land, and the row must reopen rather than read as answered
+    // while the agent stays blocked.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(150)).await;
         if let Ok(after) = capture_pane(target, 0).await {
-            let still_open = labels.iter().all(|l| after.contains(picker_probe(l)));
-            if !still_open {
-                return Some(SendOutcome::Tmux {
+            if !picker_visible(&after, labels) {
+                return SendOutcome::Tmux {
                     tmux_session: target.to_string(),
-                });
+                };
             }
         }
     }
-    Some(SendOutcome::Failed {
+    SendOutcome::Failed {
         reason: "picker still open after routing the answer by position".to_string(),
-    })
+    }
 }
 
-/// The part of an option label a pane render must contain to count as
-/// "this option is on screen": the picker wraps and truncates long labels, so
-/// probe the first 24 characters rather than the whole string.
+/// Is the option picker for `labels` on screen? The picker paints each option
+/// as `N. <label>` in a column narrow enough to wrap long labels onto a second
+/// line, so probe every option's numbered prefix plus the first 12 characters
+/// of its label (a whole `(Recommended)` suffix is regularly wrapped away).
+fn picker_visible(pane: &str, labels: &[String]) -> bool {
+    labels
+        .iter()
+        .enumerate()
+        .all(|(i, l)| pane.contains(&format!("{}. {}", i + 1, picker_probe(l))))
+}
+
+/// The leading slice of an option label a wrapped pane render still shows
+/// contiguously: 12 characters, cut on a char boundary.
 fn picker_probe(label: &str) -> &str {
-    let mut end = label.len().min(24);
+    let mut end = label.len().min(12);
     while !label.is_char_boundary(end) {
         end -= 1;
     }
@@ -491,13 +511,33 @@ mod tests {
         );
     }
 
-    /// Probes are the first 24 chars, cut on a char boundary, so a wrapped or
+    /// Probes are the first 12 chars, cut on a char boundary, so a wrapped or
     /// truncated pane render of a long label still matches.
     #[test]
     fn picker_probe_is_a_bounded_prefix() {
         assert_eq!(picker_probe("api/app.db"), "api/app.db");
-        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrack.db (Recomm");
-        assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééééééééé");
+        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrac");
+        assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééé");
+    }
+
+    /// A real Claude Code 2.1 picker render wraps `(Recommended)` onto its own
+    /// line; the visibility probe must still see both numbered options, and must
+    /// NOT see a picker in a pane that only echoes the prompt text.
+    #[test]
+    fn picker_visible_matches_the_wrapped_pane_render() {
+        let labels = vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()];
+        let pane = "\
+ Where should Boxtrack's sqlite file live by default?
+ ❯ 1. data/boxtrack.db             ┌──────┐
+     (Recommended)                 │ repo/│
+   2. api/app.db                   │      │
+ Enter to select · ↑/↓ to navigate · Esc to cancel";
+        assert!(picker_visible(pane, &labels));
+        let closed = "\
+● User answered Claude's questions:
+  ⎿  · Where should Boxtrack's sqlite file live by default? → api/app.db
+❯ ";
+        assert!(!picker_visible(closed, &labels));
     }
     use ainb_hangar_store::Store;
     use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
