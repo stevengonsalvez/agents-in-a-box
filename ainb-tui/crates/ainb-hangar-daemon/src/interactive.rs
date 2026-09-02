@@ -771,4 +771,43 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["projects"]["/w/x"]["hasTrustDialogAccepted"], true);
     }
+
+    /// The merge keeps the operator's key order: `serde_json` runs with
+    /// `preserve_order` in this binary (pulled in by `agent-client-protocol`),
+    /// so a re-serialised `~/.claude.json` diffs only where the trust keys
+    /// landed. Goes red if that feature ever drops out of the graph, which
+    /// would silently re-sort the operator's config on every launch.
+    #[test]
+    fn pre_trust_keeps_the_configs_key_order() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"zeta":1,"projects":{"/w/other":{"allowedTools":[]}},"alpha":2}"#,
+        )
+        .unwrap();
+        let env = vec![(
+            "HOME".to_string(),
+            home.path().to_string_lossy().to_string(),
+        )];
+        assert_eq!(
+            pre_trust_claude_workdir(&env, Path::new("/w/x")),
+            PreTrust::Written
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let order: Vec<usize> = [
+            "\"zeta\"",
+            "\"projects\"",
+            "\"/w/other\"",
+            "\"/w/x\"",
+            "\"alpha\"",
+        ]
+        .iter()
+        .map(|k| text.find(k).unwrap_or_else(|| panic!("{k} missing")))
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "key order changed: {text}"
+        );
+    }
 }
