@@ -43,11 +43,19 @@ pub struct RemoteBranch {
 /// Argv prefixes that end option parsing with `--` before the remote URL.
 ///
 /// The URL is user-supplied and reaches git as a positional, so a value
-/// beginning with `-` would otherwise be read as an option. `git clone
-/// --upload-pack=<cmd> <dest>` executes `<cmd>` with the destination as the
-/// repository; `git ls-remote --upload-pack=<cmd>` with no repository left
-/// falls back to `origin` and executes `<cmd>` against it. Both verified
-/// against real git. Keep the `--` last in each of these.
+/// beginning with `-` would otherwise be read as an option, and whatever
+/// positional survives becomes the repository. All three verified against real
+/// git:
+///
+/// - `git clone --upload-pack=<cmd> <dest>` executes `<cmd>` with the
+///   destination as the repository.
+/// - `git ls-remote --symref --upload-pack=<cmd> HEAD` executes `<cmd>` with
+///   the ref pattern as the repository, from ANY cwd — no repo required.
+/// - `git ls-remote --heads --refs --upload-pack=<cmd>` has no positional left,
+///   so it fires only through the fallback to `origin`, i.e. when the process
+///   cwd is a repo with a local origin.
+///
+/// Keep the `--` last in each of these.
 const CLONE_ARGV: [&str; 2] = ["clone", "--"];
 const LS_REMOTE_HEADS_ARGV: [&str; 4] = ["ls-remote", "--heads", "--refs", "--"];
 const LS_REMOTE_SYMREF_ARGV: [&str; 3] = ["ls-remote", "--symref", "--"];
@@ -1282,11 +1290,11 @@ mod tests {
     /// Every git invocation that takes the user-supplied URL as a positional
     /// must end option parsing first.
     ///
-    /// A shape pin, not a behavioural test. The clone site is driven against
-    /// real git below; the two `ls-remote` sites are exploitable only through
-    /// git's no-repository fallback to `origin`, which needs the process cwd to
-    /// be a repo with a local origin — not something a test can arrange without
-    /// mutating the cwd out from under the parallel suite.
+    /// A shape pin. The clone and symref sites are each driven against real
+    /// git below; the heads site fires only through git's no-repository
+    /// fallback to `origin`, which needs the process cwd to be a repo with a
+    /// local origin — not something a test can arrange without mutating the cwd
+    /// out from under the parallel suite, so this pin is its only guard.
     #[test]
     fn every_git_argv_ends_option_parsing_before_the_url() {
         for argv in [
@@ -1363,6 +1371,27 @@ mod tests {
         assert!(
             !leaked_exists,
             "git treated the destination as the clone source"
+        );
+    }
+
+    /// The symref probe passes TWO positionals (`<url>` then `HEAD`), so
+    /// without `--` git consumes the url as an option and reads `HEAD` as the
+    /// repository — executing the payload from any cwd, with no repo and no
+    /// network. Same family as the clone site, and unlike the heads site it
+    /// needs no `origin` to fire, so it can be driven directly.
+    #[test]
+    fn a_default_branch_probe_cannot_run_the_source_string_as_an_option() {
+        let temp_dir = TempDir::new().unwrap();
+        let probe = temp_dir.path().join("symref-ran");
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+
+        // `Filter` passes its string through `to_clone_url` untouched.
+        let source = RepoSource::Filter(format!("--upload-pack=touch {}", probe.display()));
+
+        assert_eq!(manager.get_default_branch_name(&source), None);
+        assert!(
+            !probe.exists(),
+            "git executed the source string as --upload-pack"
         );
     }
 
