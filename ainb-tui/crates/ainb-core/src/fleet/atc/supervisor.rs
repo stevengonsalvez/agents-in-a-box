@@ -24,10 +24,19 @@
 // is already mid-tick. Neither controller is trusted to remember which mode it
 // started in.
 //
-// Both modes share ONE safety ledger — the code-owned `continue_counts` in
+// Both modes spend ONE safety ledger — the code-owned `continue_counts` in
 // `heartbeat-state.json` ([`super::HeartbeatState`]) — so the ERR retry cap is
-// spent from the same budget whichever controller is holding the fleet. Switching
-// modes does not hand a broken session a fresh set of retries.
+// spent from the same budget whichever controller is holding the fleet.
+//
+// ONE EXCEPTION, handled explicitly rather than papered over: while the hangar
+// daemon schedules the beat it also owns the ledger, in its durable `atc_retry`
+// table, and the beat is told to count nothing locally. `continue_counts` is
+// then empty even though real budget has been spent. There is no client RPC to
+// read that table, so a switch away from a daemon-owned ledger cannot copy the
+// real counts. It instead hands over FAIL-CLOSED — every currently-erroring
+// session is sealed at the cap — so the switch can cost a session its remaining
+// retries but can never resurrect one the daemon had already escalated. See
+// `cli::fleet::atc_supervisor::seal_ledger_for_handoff`.
 
 use serde::{Deserialize, Serialize};
 

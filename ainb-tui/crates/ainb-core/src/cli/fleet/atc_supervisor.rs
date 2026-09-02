@@ -231,8 +231,36 @@ async fn reconcile_controllers(meta: &AtcMeta) -> Reconcile {
                 Ok(_) => out.scheduler_removed = true,
                 Err(e) => out.notes.push(format!("local heartbeat timer not removed: {e}")),
             }
-            if unregister_daemon_cron(&meta.name).await {
+            let daemon_owned = unregister_daemon_cron(&meta.name).await;
+            if daemon_owned {
                 out.scheduler_removed = true;
+                // THE LEDGER HANDOFF. While the daemon scheduled the beat it also
+                // OWNED the retry ledger: the beat ran with `--exhausted` and
+                // counted nothing locally, so `continue_counts` is empty while
+                // the real budget sits in the daemon's `atc_retry` table. Lite
+                // cannot read that table — there is no client RPC for it — so
+                // taking `continue_counts` at face value would hand every
+                // currently-broken session a full fresh budget, which is exactly
+                // what the one-ledger rule exists to prevent.
+                //
+                // So we hand over fail-CLOSED: every session erroring RIGHT NOW
+                // is seeded at the cap, and lite escalates it rather than
+                // retrying. The cost is that a session mid-budget loses its
+                // remaining retries across the switch; the alternative is
+                // resurrecting a session the daemon had already given up on.
+                // A genuinely recovered session drops off the ERR roster and
+                // regains its budget through the normal recovery rule.
+                match seal_ledger_for_handoff(&meta).await {
+                    Ok(0) => {}
+                    Ok(n) => out.notes.push(format!(
+                        "retry ledger handed over from the daemon: {n} erroring session(s) sealed \
+at the cap, so lite escalates them instead of restarting their budget"
+                    )),
+                    Err(e) => out.notes.push(format!(
+                        "could not seal the retry ledger for handover ({e}); a session the daemon \
+had escalated may get a fresh budget in lite"
+                    )),
+                }
             } else {
                 out.notes.push(
                     "daemon heartbeat cron not unregistered (daemon down?); the beat stands down on its own"
@@ -288,6 +316,31 @@ fn brain_session_note(meta: &AtcMeta) -> Option<String> {
 `ainb daemon atc start` spawns it without reconfiguring the instance"
         )
     })
+}
+
+/// Seed the local ledger at the cap for every session currently erroring, and
+/// return how many were sealed.
+///
+/// Called only on a switch away from a DAEMON-owned ledger. See the call site
+/// for why this is fail-closed rather than a read of the daemon's real counts.
+async fn seal_ledger_for_handoff(meta: &AtcMeta) -> Result<usize> {
+    let rows = super::atc::fetch_needs().await?;
+    let paths = AtcPaths::resolve(&meta.name)?;
+    let mut state = read_heartbeat_state(&paths);
+    let mut sealed = 0;
+    for row in &rows {
+        if matches!(row.context, NeedsContext::Err(_)) {
+            let count = state.continue_counts.entry(row.session.id.clone()).or_insert(0);
+            if *count < DEFAULT_ERR_RETRY_CAP {
+                *count = DEFAULT_ERR_RETRY_CAP;
+                sealed += 1;
+            }
+        }
+    }
+    if sealed > 0 {
+        write_heartbeat_state(&paths, &state);
+    }
+    Ok(sealed)
 }
 
 async fn unregister_daemon_cron(name: &str) -> bool {
@@ -843,6 +896,41 @@ mod tests {
         assert_eq!(report.reported, 3);
         assert_eq!(report.err, 0);
         assert!(state.continue_counts.is_empty(), "no budget is spent");
+    }
+
+    #[test]
+    fn sealing_the_ledger_never_lowers_a_count_and_never_resurrects_a_session() {
+        // The handoff rule, as a pure property: sealing may only push a count UP
+        // to the cap. A switch away from a daemon-owned ledger must never hand a
+        // session more budget than it had, and must never leave an erroring one
+        // below the cap where lite would auto-continue it afresh.
+        let mut state = HeartbeatState::default();
+        state.continue_counts.insert("mid".to_string(), 1);
+        state.continue_counts.insert("over".to_string(), 9);
+
+        // What `seal_ledger_for_handoff` does to each erroring session id.
+        for id in ["mid", "over", "unseen"] {
+            let count = state.continue_counts.entry(id.to_string()).or_insert(0);
+            if *count < DEFAULT_ERR_RETRY_CAP {
+                *count = DEFAULT_ERR_RETRY_CAP;
+            }
+        }
+
+        assert_eq!(
+            state.continue_counts["mid"], DEFAULT_ERR_RETRY_CAP,
+            "sealed up"
+        );
+        assert_eq!(state.continue_counts["over"], 9, "never lowered");
+        assert_eq!(
+            state.continue_counts["unseen"], DEFAULT_ERR_RETRY_CAP,
+            "no fresh budget"
+        );
+
+        // And a sealed session is genuinely refused by the planner.
+        let rows = vec![err_row("mid")];
+        let (report, send) = plan(&rows, DEFAULT_ERR_RETRY_CAP, &mut state);
+        assert!(send.is_empty(), "a sealed session must not be continued");
+        assert_eq!(report.capped, 1);
     }
 
     #[test]
