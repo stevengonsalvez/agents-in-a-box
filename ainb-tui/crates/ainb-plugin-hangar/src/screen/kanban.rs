@@ -286,11 +286,7 @@ impl KanbanState {
             .iter()
             .flat_map(|col| col.cards.iter())
             .filter(|card| card.issue_id.as_deref() == Some(issue_id))
-            .max_by(|a, b| {
-                a.created_at
-                    .cmp(&b.created_at)
-                    .then_with(|| a.task_id.cmp(&b.task_id))
-            })
+            .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
     }
 
     /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
