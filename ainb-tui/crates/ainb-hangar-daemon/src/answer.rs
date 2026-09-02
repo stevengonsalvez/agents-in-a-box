@@ -28,6 +28,11 @@
 //! may exit, or the ambiguity may resolve). Only once a unique target is known
 //! does the router claim the row (win-or-lose) and deliver via the one verified
 //! send path ([`send`], the multi-line-submit-verified tmux path).
+//!
+//! An ACP `session/request_permission` row is the one exception to the pane
+//! path: it carries its own pool session key and the adapter's option set, so
+//! it is answered through [`crate::acp_pool::AcpPool::answer_permission`]
+//! (`answer_acp`) with the same first-answer-wins claim and no tmux at all.
 
 use ainb_fleet_core::discover::{discover_from_ainb, discover_from_peers, merge_sessions};
 use ainb_fleet_core::read::jsonl_tail::latest_transcript_for_cwd;
@@ -81,6 +86,12 @@ pub async fn answer(
         });
     }
 
+    // An ACP permission has no pane: it is routed by the row's OWN session key
+    // to the responder the pool parked, so neither the C1 guard nor tmux applies.
+    if let Some(permission) = acp_permission_from_payload(&row.payload) {
+        return answer_acp(pool, events, params, now_ms, &row, &permission).await;
+    }
+
     // C1: resolve the delivery target BEFORE claiming, so an ambiguous / dead
     // target leaves the row open and answerable later.
     match resolve_target(
@@ -96,20 +107,8 @@ pub async fn answer(
         Target::Send(session) => {
             // Claim the answer. A second surface that also resolved a target loses
             // this flip (0 rows) and delivers nothing.
-            let flipped = AttentionRepo::mark_answered_if_open(
-                pool,
-                &params.attention_id,
-                &params.answered_by,
-                &params.answer,
-                now_ms,
-            )
-            .await?;
-            if flipped == 0 {
-                let by = AttentionRepo::get(pool, &params.attention_id)
-                    .await?
-                    .and_then(|r| r.answered_by)
-                    .unwrap_or_else(|| "unknown".to_string());
-                return Ok(AnswerResult::AlreadyAnswered { by });
+            if let Some(lost) = claim(pool, params, now_ms).await? {
+                return Ok(lost);
             }
 
             // We won: deliver via the one verified send path. Only a CONFIRMED
@@ -145,6 +144,157 @@ pub async fn answer(
             }
         }
     }
+}
+
+/// Claim the row for this answer (first-answer-wins). `Some` is the loser's
+/// result: a second surface already flipped it and this one delivers nothing.
+async fn claim(
+    pool: &SqlitePool,
+    params: &AnswerParams,
+    now_ms: i64,
+) -> Result<Option<AnswerResult>, sqlx::Error> {
+    let flipped = AttentionRepo::mark_answered_if_open(
+        pool,
+        &params.attention_id,
+        &params.answered_by,
+        &params.answer,
+        now_ms,
+    )
+    .await?;
+    if flipped > 0 {
+        return Ok(None);
+    }
+    let by = AttentionRepo::get(pool, &params.attention_id)
+        .await?
+        .and_then(|r| r.answered_by)
+        .unwrap_or_else(|| "unknown".to_string());
+    Ok(Some(AnswerResult::AlreadyAnswered { by }))
+}
+
+/// Answer a parked ACP `session/request_permission`: claim the row, then hand
+/// the chosen option to the pool's parked responder.
+///
+/// The option is matched BEFORE the claim (the options live in the payload,
+/// not on a screen), so a text the adapter never offered refuses with the row
+/// still open, and a missing pool is a `NoTarget` with nothing claimed. Once
+/// claimed, the pool's answer is a HAND-OFF to the adapter's pending JSON-RPC
+/// id, never an acknowledgement (ACP defines none), and any refusal from the
+/// pool reopens the row like a failed tmux send would. The actor's own
+/// `retire_attention` runs the same conditional flip after the hand-off and
+/// finds the row already ours: benign, and what keeps `answered_by` naming the
+/// surface that answered rather than a generic "operator".
+async fn answer_acp(
+    pool: &SqlitePool,
+    events: &EventSink,
+    params: &AnswerParams,
+    now_ms: i64,
+    row: &AttentionRow,
+    permission: &AcpPermission,
+) -> Result<AnswerResult, sqlx::Error> {
+    use crate::acp_pool::{PermissionAnswer, PermissionDecision};
+
+    let Some(option_id) = permission.option_id(&params.answer) else {
+        let offered: Vec<&str> = permission.options.iter().map(|o| o.name.as_str()).collect();
+        return Ok(AnswerResult::DeliveryFailed {
+            reason: format!(
+                "the adapter expects one of its {} options ({}), by label, id or number; free text is not sent",
+                offered.len(),
+                offered.join(", ")
+            ),
+        });
+    };
+    let Some(acp) = crate::acp_pool::active_handle().await else {
+        return Ok(AnswerResult::NoTarget {
+            reason: "no ACP pool is running in this daemon".to_string(),
+        });
+    };
+    if let Some(lost) = claim(pool, params, now_ms).await? {
+        return Ok(lost);
+    }
+
+    let outcome = acp
+        .answer_permission(
+            &permission.session_key,
+            &permission.fingerprint,
+            PermissionDecision::Option(option_id.clone()),
+        )
+        .await;
+    let reason = match outcome {
+        PermissionAnswer::Delivered(option) => {
+            emit_answered(events, params);
+            return Ok(AnswerResult::Delivered {
+                via: format!("acp ({}, option {option})", permission.session_key),
+            });
+        }
+        PermissionAnswer::NotWaiting => {
+            "the ACP permission is no longer waiting (answered elsewhere, or the adapter moved on)"
+                .to_string()
+        }
+        PermissionAnswer::UnknownOption => format!("the adapter never offered option {option_id}"),
+        PermissionAnswer::NoSession => {
+            format!("no live ACP session for {}", permission.session_key)
+        }
+    };
+    reopen_on_failed_delivery(pool, events, row, params, now_ms).await?;
+    Ok(AnswerResult::DeliveryFailed { reason })
+}
+
+/// The parked ACP permission an attention row describes: the payload
+/// `SessionActor::raise_permission` writes, `kind = "acp_permission"` with the
+/// pool session key, the request fingerprint and the adapter's own options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcpPermission {
+    session_key: String,
+    fingerprint: String,
+    options: Vec<AcpOption>,
+}
+
+/// One option the adapter offered, as `options_wire` serialises it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcpOption {
+    option_id: String,
+    name: String,
+}
+
+impl AcpPermission {
+    /// The id of the option `answer` names: an option id verbatim, else the
+    /// label verbatim, case-insensitively, or a 1-based digit (the same rules
+    /// as [`picker_position`]). Anything else is refused by the caller.
+    fn option_id(&self, answer: &str) -> Option<String> {
+        let wanted = answer.trim();
+        if let Some(option) = self.options.iter().find(|o| o.option_id == wanted) {
+            return Some(option.option_id.clone());
+        }
+        let names: Vec<String> = self.options.iter().map(|o| o.name.clone()).collect();
+        picker_position(&names, wanted).map(|i| self.options[i].option_id.clone())
+    }
+}
+
+/// The ACP permission a row's payload carries, or `None` for any other payload
+/// (a hook ASK, an ERR, an escalation). A payload claiming the kind without a
+/// session key, a fingerprint or any option is not routable and is `None` too.
+fn acp_permission_from_payload(payload: &str) -> Option<AcpPermission> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if v.get("kind").and_then(|k| k.as_str()) != Some("acp_permission") {
+        return None;
+    }
+    let text = |key: &str| v.get(key)?.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    let options: Vec<AcpOption> = v
+        .get("options")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| {
+            Some(AcpOption {
+                option_id: o.get("optionId")?.as_str()?.to_string(),
+                name: o.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    (!options.is_empty()).then_some(AcpPermission {
+        session_key: text("sessionKey")?,
+        fingerprint: text("requestFingerprint")?,
+        options,
+    })
 }
 
 /// How an answer reaches the agent, decided by [`route_answer`] from the row's
@@ -827,6 +977,69 @@ mod tests {
         assert_eq!(picker_position(&ambiguous, "deploy"), None);
     }
 
+    /// The payload shape `SessionActor::raise_permission` writes for an ACP
+    /// `session/request_permission` (the fixture adapter's two options).
+    const ACP_PAYLOAD: &str = r#"{"kind":"acp_permission","sessionKey":"acp:claude:01J","acpSessionId":"fake-session-1","requestFingerprint":"f00d","rpcId":9000,"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}],"toolCall":{"toolCallId":"tool-1","title":"rm -rf /tmp/fixture"}}"#;
+
+    /// Only the `acp_permission` kind routes to the pool, and only when it
+    /// carries what the pool needs to find the parked responder.
+    #[test]
+    fn acp_permission_from_payload_reads_the_raise_shape_only() {
+        let permission = acp_permission_from_payload(ACP_PAYLOAD).expect("acp payload");
+        assert_eq!(permission.session_key, "acp:claude:01J");
+        assert_eq!(permission.fingerprint, "f00d");
+        assert_eq!(
+            permission.options,
+            vec![
+                AcpOption {
+                    option_id: "allow-once".into(),
+                    name: "Allow once".into()
+                },
+                AcpOption {
+                    option_id: "reject-once".into(),
+                    name: "Reject".into()
+                },
+            ]
+        );
+        assert_eq!(acp_permission_from_payload(ASK_PAYLOAD), None);
+        assert_eq!(acp_permission_from_payload("{}"), None);
+        assert_eq!(acp_permission_from_payload("not json"), None);
+        assert_eq!(
+            acp_permission_from_payload(
+                &ACP_PAYLOAD.replace("\"requestFingerprint\":\"f00d\",", "")
+            ),
+            None,
+            "no fingerprint, nothing to answer"
+        );
+        assert_eq!(
+            acp_permission_from_payload(
+                r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[]}"#
+            ),
+            None,
+            "no options, nothing to choose"
+        );
+    }
+
+    /// An ACP answer resolves to the adapter's OPTION ID: by id, by label
+    /// (verbatim or case-insensitive) or by 1-based digit, mirroring the tmux
+    /// picker rules; anything else, prefixes and blanks included, is refused.
+    #[test]
+    fn acp_option_id_resolves_id_label_and_digit_only() {
+        let p = acp_permission_from_payload(ACP_PAYLOAD).unwrap();
+        assert_eq!(p.option_id("reject-once").as_deref(), Some("reject-once"));
+        assert_eq!(p.option_id("Reject").as_deref(), Some("reject-once"));
+        assert_eq!(p.option_id("REJECT").as_deref(), Some("reject-once"));
+        assert_eq!(p.option_id(" Allow once ").as_deref(), Some("allow-once"));
+        assert_eq!(p.option_id("1").as_deref(), Some("allow-once"));
+        assert_eq!(p.option_id("2").as_deref(), Some("reject-once"));
+        assert_eq!(p.option_id("3"), None, "out of range digit");
+        assert_eq!(p.option_id("Allow"), None, "a prefix is never a pick");
+        assert_eq!(p.option_id("allow"), None);
+        assert_eq!(p.option_id(""), None);
+        assert_eq!(p.option_id("   "), None);
+        assert_eq!(p.option_id("yes"), None);
+    }
+
     /// A multi-select or non-ASK payload never routes by position (the caller
     /// keeps the text send), and a free-text ASK has no labels at all.
     #[test]
@@ -1457,5 +1670,80 @@ mod tests {
             row.state, "open",
             "an unresolved answer leaves the row open"
         );
+    }
+
+    /// The row `SessionActor::raise_permission` inserts: an Approval with no
+    /// workspace, its payload the ACP permission.
+    async fn seed_acp_row(pool: &SqlitePool, id: &str) {
+        AttentionRepo::insert(
+            pool,
+            &NewAttention {
+                id: id.to_string(),
+                session_id: "acp:claude:01J".to_string(),
+                cwd: "/work/x".to_string(),
+                workspace_id: None,
+                kind: AttentionKind::Approval,
+                payload: ACP_PAYLOAD.to_string(),
+                degraded: false,
+                created_at: 1_000,
+                raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An ACP row never reaches tmux target resolution: an answer naming none
+    /// of the adapter's options is refused from the payload alone, before any
+    /// claim, and the row stays open for a surface that sends a real option.
+    #[tokio::test]
+    async fn an_acp_row_refuses_free_text_before_claiming() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_acp_row(store.pool(), "p1").await;
+        let (_b, sink) = broker_sink();
+        let params = AnswerParams {
+            attention_id: "p1".into(),
+            answer: "sure, go ahead".into(),
+            answered_by: "tui".into(),
+            is_answer: true,
+        };
+        let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
+        match res {
+            AnswerResult::DeliveryFailed { reason } => {
+                assert!(reason.contains("Allow once, Reject"), "{reason}");
+            }
+            other => panic!("expected DeliveryFailed, got {other:?}"),
+        }
+        let row = AttentionRepo::get(store.pool(), "p1").await.unwrap().unwrap();
+        assert_eq!(row.state, "open");
+        assert!(row.answered_by.is_none());
+    }
+
+    /// With no pool installed in this process there is nothing to hand the
+    /// option to: `NoTarget`, and the row is NOT claimed (it is answerable once
+    /// a daemon with a pool is up, or convergence closes it).
+    #[tokio::test]
+    async fn an_acp_row_without_a_pool_is_no_target_and_stays_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_acp_row(store.pool(), "p1").await;
+        let (_b, sink) = broker_sink();
+        let params = AnswerParams {
+            attention_id: "p1".into(),
+            answer: "Reject".into(),
+            answered_by: "tui".into(),
+            is_answer: true,
+        };
+        let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
+        match res {
+            AnswerResult::NoTarget { reason } => {
+                assert!(reason.contains("no ACP pool"), "{reason}");
+            }
+            other => panic!("expected NoTarget, got {other:?}"),
+        }
+        let row = AttentionRepo::get(store.pool(), "p1").await.unwrap().unwrap();
+        assert_eq!(row.state, "open");
     }
 }
