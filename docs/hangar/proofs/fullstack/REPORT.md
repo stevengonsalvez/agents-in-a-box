@@ -70,3 +70,17 @@ Docs drift found: wizard rows Accept / Context / Priority / Due / Labels missing
 - Session paused ~8h overnight on an expired Claude login (cron heartbeats queued, resumed 08:36 after `/login`).
 - P3 first attempt: store said `answered|tui|api/app.db` and the board flipped to `0 need you`, but the agent pane read `→ data/boxtrack.db (Recommended)`. The converged harness's CC01/CC18 legs deliver into a plain-shell tmux target, so this mismatch was invisible to every existing test; only a live agent picker exposes it.
 - Lifecycle hooks for the agents were installed into the ISO home only (`ainb fleet atc setup p3hooks --no-heartbeat --no-spawn` under the iso env): `$ISO/.claude/settings.json`, hook script + `ainb-bin` pointer under `$ISO/.agents-in-a-box/hooks/`. No host-global unit or settings file was touched (verified by mtime).
+
+## Ship phase: review
+
+Heavy review on the whole branch diff at `a6dcba43` (five Opus personas: correctness, project standards, security, tests, api-contract, plus a Codex peer at high effort, read-only). Every finding fixed, P3 nits included, one signed commit per file (`cd345103..5a03f8c0`, 35 commits). Themes:
+
+| area | round-1 finding | fix |
+|------|-----------------|-----|
+| `interactive.rs` pre-trust | fixed tmp name raced across launches; every read error fell through to an empty stub; mode widened to 0644; host-global `bypassPermissionsModeAccepted` written unconditionally | unique tmp + process lock, `NotFound` only, mode copied, global key dropped; bypass acceptance now rides the interactive argv as `--settings {"skipDangerousModePermissionPrompt":true}` (golden regenerated) |
+| `answer.rs` routing | ancestor-cwd match too wide; text fallback typed into a picker; no verification the picker closed on the chosen option | nested matches gated on a raise transcript; digit + Enter with highlight and echo checks; text only when no picker is visible |
+| `rpc/mod.rs` idle bound | subscribed connections exempt from any idle bound (leak on a wedged peer); `board_card_create` bypassed the issue-create seam (no activity row, no assignee, no `IssueCreated`) | 24h subscribed bound with env override, forwarders counted only while alive; card-minted issues go through `snapshots::issue_create` |
+| `pull.rs` stage lifecycle | push-path runs left `board_column_id` NULL so a card parked in a gated column never finished; `STAGES_REMAIN_SQL` joined boards of other workspaces | `current_gated_column` stamps the run; join scoped by workspace; generation MAX over stage tasks only; index on `board_card(issue_id)` |
+| plugin | host globals suppressed by the per-frame capture flag (Esc/Ctrl+C died on an unavailable plugin screen); refusal note outlived its card; `replace_rows` reset selection and confirmed deletes against the wrong row; non-exhaustive status and verdict mapping; help overlay clipped from the top on short panes; dropped-link redraw unbounded | help ownership scoped to `PLUGINS_WITH_OWN_HELP`; note keyed to the attention id; selection followed by id, stale confirms dropped; `TaskStatus::ALL` + exhaustive `answer_verdict_note`; clip at the viewport edge; `RECONNECT_REDRAW_WINDOW` |
+
+Round 2 is a single Opus verify pass over the fix delta (each round-1 finding checked against the code, plus the delta reviewed for new defects).
