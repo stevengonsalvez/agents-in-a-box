@@ -289,6 +289,22 @@ impl KanbanState {
             .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
     }
 
+    /// The NEWEST card for `issue_id` whose run is still live (not in a terminal
+    /// status), or `None` when every run of the issue has finished. The
+    /// task-detail header names this row on an `already_active` dispatch
+    /// refusal (crisp B1, defect 5) instead of the bare `(queued)` the daemon
+    /// records.
+    #[must_use]
+    pub fn active_card_for_issue(&self, issue_id: &str) -> Option<&CardSummary> {
+        use ainb_hangar_core::task_status::TaskStatus;
+        self.columns
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .filter(|card| card.issue_id.as_deref() == Some(issue_id))
+            .filter(|card| TaskStatus::parse(&card.status).is_some_and(|s| !s.is_terminal()))
+            .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
+    }
+
     /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
     /// `issue_id -> title` map the `hangar/issues_list` snapshot carries, so N
     /// dispatch runs of ONE issue read as N runs of that issue rather than N

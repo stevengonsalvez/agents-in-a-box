@@ -810,6 +810,7 @@ impl ScreenStates {
         // `set_issues` re-apply their half the other way round.
         self.kanban.set_agent_names(&agent_names(&self.actors));
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.resolve_task_detail_names();
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -1030,6 +1031,7 @@ impl ScreenStates {
         // have landed before this roster did, in which case its cards are still
         // on the short-id fallback.
         self.kanban.set_agent_names(&agent_names(&self.actors));
+        self.resolve_task_detail_names();
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1303,6 +1305,35 @@ impl ScreenStates {
             td.seed_lifecycle(lifecycle);
         }
         self.task_detail = Some(td);
+        self.resolve_task_detail_names();
+    }
+
+    /// Resolve the open task-detail header's names against the cached agents +
+    /// tasks snapshots (crisp B1, defects 5 + 8): the assignee's roster name, the
+    /// bound run's agent name, and the issue's still-active run (the row an
+    /// `already_active` dispatch refusal names). Called at open AND whenever
+    /// either snapshot lands, so their arrival order never leaves a raw ULID on
+    /// the header. A no-op when no task detail is open.
+    fn resolve_task_detail_names(&mut self) {
+        let Some(td) = self.task_detail.as_mut() else {
+            return;
+        };
+        let names = agent_names(&self.actors);
+        let issue = td.issue();
+        let assignee_name = issue
+            .assignee
+            .as_deref()
+            .and_then(|a| a.strip_prefix("agent:"))
+            .and_then(|id| names.get(id).cloned());
+        let agent_name = self
+            .kanban
+            .card_for_task(td.task_id().as_str())
+            .and_then(|c| names.get(&c.agent_id).cloned());
+        let blocking_run = self.kanban.active_card_for_issue(issue.id.as_str()).map(|c| {
+            let agent = names.get(&c.agent_id).unwrap_or(&c.agent_label);
+            format!("#{} {agent} ({})", c.short_id, c.status)
+        });
+        td.set_resolved_names(assignee_name, agent_name, blocking_run);
     }
 
     /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
@@ -1436,7 +1467,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::TaskDetail(_) => {
             if let Some(td) = &states.task_detail {
-                super::task_detail::render_task_detail(buf, w, top, bottom, td);
+                crate::screen::task_detail::render_task_detail(buf, w, top, bottom, td);
             }
         }
         Screen::AgentPicker(_) => {
@@ -3029,6 +3060,126 @@ mod task_detail_open_tests {
         route_task_detail(&mut states, &press('R'));
 
         assert!(states.take_pending_task_retry_action().is_none());
+    }
+
+    /// The painted buffer, row-major, so an assertion can search the header text.
+    fn painted_text(buf: &WireBuffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.height {
+            for (coord, cell) in &buf.cells {
+                if coord.y == y {
+                    out.push_str(&cell.symbol);
+                }
+            }
+        }
+        out
+    }
+
+    fn agent(id: &str, name: &str) -> ActorRow {
+        ActorRow {
+            actor_ref: format!("agent:{id}"),
+            display_name: name.into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }
+    }
+
+    fn task(id: &str, agent_id: &str, status: &str) -> ainb_hangar_proto::events::TaskCardRow {
+        ainb_hangar_proto::events::TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: status.into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    /// Crisp B1 (defects 5 + 8): the header's names resolve from the agents +
+    /// tasks snapshots whichever order they land in, at open or afterwards. The
+    /// assignee resolves through the roster, the bound run's agent through its
+    /// task card, and the issue's live run is named for the dispatch refusal.
+    #[test]
+    fn open_resolves_names_from_snapshots_in_any_order() {
+        let mut issue = issue();
+        issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
+
+        // Snapshots landed BEFORE the open: resolved at once.
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue.clone(), None, None);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+
+        // Snapshots land AFTER the open: the same names, no raw ULID left behind.
+        let mut states = ScreenStates::default();
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue, None, None);
+        assert_eq!(states.task_detail.as_ref().unwrap().assignee_name(), None);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+    }
+
+    /// Crisp B1 (defect 5): an `already_active` refusal names the issue's live
+    /// run from the tasks snapshot; once every run is terminal there is nothing
+    /// to name and the line falls back to the daemon's detail.
+    #[test]
+    fn already_active_refusal_names_the_live_run() {
+        let mut issue = issue();
+        issue.last_dispatch_reason = Some("already_active".into());
+        issue.last_dispatch_detail = Some("a run is already active (queued)".into());
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("rev", "rev-1")]);
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "running")]);
+        states.open_task_detail(
+            TaskId::from_str("01HANGARTASKRUNNING001").unwrap(),
+            issue.clone(),
+            None,
+            Some("running"),
+        );
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("a run is already active: #ING001 rev-1 (running)"),
+            "the live run is named: {text}"
+        );
+
+        // The run finished: no live row to name, the detail prints once.
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "done")]);
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Not dispatched: a run is already active (queued)"),
+            "falls back to the daemon detail, undoubled: {text}"
+        );
     }
 }
 
