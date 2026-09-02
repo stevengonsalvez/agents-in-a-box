@@ -586,3 +586,87 @@ async fn a_card_walks_the_pipeline_one_stage_per_role() {
         "the card ends parked in the ungated Done column"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stages remaining (the issue-lifecycle gate)
+// ---------------------------------------------------------------------------
+
+/// A task that ran at a specific stage column (what a real pull records).
+async fn add_stage_task(pool: &SqlitePool, id: &str, issue_id: &str, status: &str, column: &str) {
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation, \
+          board_column_id) \
+         VALUES (?1,'ws-1','rt-1','ag-1',?2,?3,0,1,?4)",
+    )
+    .bind(id)
+    .bind(issue_id)
+    .bind(status)
+    .bind(column)
+    .execute(pool)
+    .await
+    .expect("stage task");
+}
+
+/// THE REGRESSION: a card that just advanced INTO the last gated stage still has
+/// that stage to run. Counting only columns strictly to the right answered
+/// `false` here, the issue-lifecycle hook promoted the issue to `done`, and
+/// `PULL_SQL` (which excludes done issues) could never pull the last stage.
+#[tokio::test]
+async fn stages_remain_counts_the_current_unrun_gated_stage() {
+    let (_dir, store) = store().await;
+    let pool = store.pool();
+    seed_pipeline(pool).await;
+    add_card(pool, "i-1", Some("col-review")).await;
+    // Implement finished (that is what moved the card into Review).
+    add_stage_task(pool, "t-impl", "i-1", "done", "col-impl").await;
+
+    assert!(
+        PullService::stages_remain(pool, "i-1").await.unwrap(),
+        "Review has not run yet, so a stage remains"
+    );
+}
+
+/// Once the stage the card sits in has produced its `done` task (auto-move off,
+/// or the advance not yet applied), no stage remains: the issue may finish.
+#[tokio::test]
+async fn stages_remain_is_false_once_the_current_stage_finished() {
+    let (_dir, store) = store().await;
+    let pool = store.pool();
+    seed_pipeline(pool).await;
+    add_card(pool, "i-1", Some("col-review")).await;
+    add_stage_task(pool, "t-impl", "i-1", "done", "col-impl").await;
+    add_stage_task(pool, "t-review", "i-1", "done", "col-review").await;
+
+    assert!(
+        !PullService::stages_remain(pool, "i-1").await.unwrap(),
+        "the last gated stage is complete"
+    );
+}
+
+/// A gated column to the right always counts, whatever ran so far; the terminal
+/// ungated column never does; an ungated board answers false.
+#[tokio::test]
+async fn stages_remain_right_of_card_and_terminal_column() {
+    let (_dir, store) = store().await;
+    let pool = store.pool();
+    seed_pipeline(pool).await;
+    add_card(pool, "i-mid", Some("col-impl")).await;
+    add_stage_task(pool, "t-mid", "i-mid", "done", "col-impl").await;
+    assert!(
+        PullService::stages_remain(pool, "i-mid").await.unwrap(),
+        "Review still lies to the right"
+    );
+
+    add_card(pool, "i-done", Some("col-done")).await;
+    assert!(
+        !PullService::stages_remain(pool, "i-done").await.unwrap(),
+        "the terminal column has nothing gated at or after it"
+    );
+
+    add_card(pool, "i-nocol", None).await;
+    assert!(
+        !PullService::stages_remain(pool, "i-nocol").await.unwrap(),
+        "a card with no column is not in a pipeline"
+    );
+}
