@@ -559,20 +559,18 @@ fn acquire_lite_lock(name: &str) -> Result<LiteLock> {
         .write(true)
         .open(&path)
         .with_context(|| format!("opening the lite-scanner lock {}", path.display()))?;
-    match file.try_lock_exclusive() {
-        Ok(()) => Ok(LiteLock(file)),
-        Err(_) => {
-            let held = live_lite_pid(name).map_or_else(
-                || "held by another process".to_string(),
-                |p| format!("pid {p}"),
-            );
-            bail!(
-                "a lite scanner already owns ATC '{name}' ({held}); refusing to start a second \
+    if file.try_lock_exclusive().is_err() {
+        let held = live_lite_pid(name).map_or_else(
+            || "held by another process".to_string(),
+            |p| format!("pid {p}"),
+        );
+        bail!(
+            "a lite scanner already owns ATC '{name}' ({held}); refusing to start a second \
 one. Two scanners double-spend the retry budget and send `continue` twice into the same pane. \
 Stop it with `ainb daemon atc stop`."
-            )
-        }
+        );
     }
+    Ok(LiteLock(file))
 }
 
 /// The pid of a lite scanner that is provably still running for `name`.
