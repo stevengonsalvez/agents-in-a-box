@@ -290,7 +290,22 @@ it changes nothing today",
             }
         }
         SupervisorMode::Full => {
-            out.lite_stopped_pid = stop_lite_supervisor(&meta.name);
+            match stop_lite_checked(&meta.name) {
+                crate::cli::daemon::StopOutcome::Signalled(pid) => {
+                    out.lite_stopped_pid = Some(pid);
+                    out.notes.push(format!("lite scanner stopped (pid {pid})"));
+                }
+                crate::cli::daemon::StopOutcome::NotRunning => {}
+                // Not fatal here, unlike `daemon atc restart`: the mode is
+                // already persisted, so any surviving scanner stands down on its
+                // next tick whether or not we could signal it. But a process the
+                // operator may still see in `ps` has to be accounted for.
+                crate::cli::daemon::StopOutcome::Unverified(pid) => out.notes.push(format!(
+                    "a process holds the lite scanner's pid {pid} but could not be verified as \
+that scanner, so it was not signalled. It sends nothing either way — the persisted mode stands \
+it down — but check `ps -p {pid}` if it lingers"
+                )),
+            }
             // A provider change is not just a meta edit. The new brain reads a
             // DIFFERENT file (codex reads AGENTS.md), and `repair` — the verb
             // below — reads meta and never writes anything else, so nothing
@@ -456,10 +471,13 @@ pub fn ensure_lite_running(name: &str) -> Result<()> {
     start_lite_supervisor(name)
 }
 
-/// Stop the lite scanner for `name`, returning the pid it signalled. Public so
-/// `ainb daemon atc stop` can take down whichever controller is actually there.
-pub fn stop_lite(name: &str) -> Option<u32> {
-    stop_lite_supervisor(name)
+/// Stop the lite scanner for `name`, reporting what was actually established.
+///
+/// Public so `ainb daemon atc stop` can take down whichever controller is really
+/// there — and so `restart` can refuse to start a second scanner over one it
+/// could not prove is gone.
+pub(crate) fn stop_lite_checked(name: &str) -> crate::cli::daemon::StopOutcome {
+    crate::cli::daemon::stop_by_heartbeat_pid_checked(&lite_heartbeat_id(name))
 }
 
 /// Start the lite scanner detached. Idempotent-ish: a live recorded pid means one
@@ -481,18 +499,6 @@ fn live_lite_pid(name: &str) -> Option<u32> {
     use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
     let hb = DaemonHeartbeat::read(&lite_heartbeat_id(name))?;
     (pid_identity(hb.pid, hb.started_at) == PidCheck::Matched).then_some(hb.pid)
-}
-
-/// SIGTERM the lite scanner, but only when the recorded pid is provably still
-/// the process that recorded it.
-///
-/// Shares [`crate::cli::daemon::stop_by_heartbeat_pid`], which does the
-/// pid-identity check. A recorded pid that merely happens to be ALIVE is not
-/// evidence: the OS recycles pids, so a scanner that was `SIGKILL`ed leaves a
-/// tombstone that would otherwise make us signal a stranger's process and report
-/// a successful stop.
-fn stop_lite_supervisor(name: &str) -> Option<u32> {
-    crate::cli::daemon::stop_by_heartbeat_pid(&lite_heartbeat_id(name))
 }
 
 /// `ainb fleet atc supervise <name>` — the LITE controller.

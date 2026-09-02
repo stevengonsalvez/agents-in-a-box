@@ -452,19 +452,31 @@ fn atc(action: Action) -> Result<String> {
                 Ok(format!("ATC '{name}' lite scanner running"))
             }
             Action::Restart => {
-                let stopped = crate::cli::fleet::atc_supervisor::stop_lite(&name);
-                crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
-                Ok(match stopped {
-                    Some(pid) => {
-                        format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
+                // Same rule as the fleet daemon: an unverified stop must never be
+                // followed by a start, or the restart button becomes the way two
+                // scanners end up owning one fleet.
+                match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
+                    StopOutcome::Unverified(pid) => {
+                        bail!(unverified_stop_message("lite scanner", pid))
                     }
-                    None => format!("ATC '{name}' lite scanner started"),
-                })
+                    stopped => {
+                        crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
+                        Ok(match stopped {
+                            StopOutcome::Signalled(pid) => {
+                                format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
+                            }
+                            _ => format!("ATC '{name}' lite scanner started"),
+                        })
+                    }
+                }
             }
-            Action::Stop => Ok(match crate::cli::fleet::atc_supervisor::stop_lite(&name) {
-                Some(pid) => format!("ATC '{name}' lite scanner stopped (pid {pid})"),
-                None => format!("ATC '{name}' lite scanner was not running"),
-            }),
+            Action::Stop => match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
+                StopOutcome::Signalled(pid) => {
+                    Ok(format!("ATC '{name}' lite scanner stopped (pid {pid})"))
+                }
+                StopOutcome::NotRunning => Ok(format!("ATC '{name}' lite scanner was not running")),
+                StopOutcome::Unverified(pid) => bail!(unverified_stop_message("lite scanner", pid)),
+            },
             // Unreachable: `control` intercepts these before any handler.
             Action::Pair | Action::ModeLite | Action::ModeFull => {
                 bail!("not a lifecycle verb for this daemon")
@@ -525,23 +537,44 @@ fn bridge(action: Action) -> Result<String> {
 
 // ── Fleet daemon ────────────────────────────────────────────────────────────
 
+/// The refusal shown when a stop cannot prove what it would be signalling.
+fn unverified_stop_message(what: &str, pid: u32) -> String {
+    format!(
+        "cannot stop the {what}: pid {pid} is alive but its start time does not match the \
+heartbeat, so it is probably a recycled pid belonging to another program — and might not be. \
+Refusing to signal it, and refusing to start a second one over it. Check `ps -p {pid}` and \
+either kill it yourself or delete the stale heartbeat."
+    )
+}
+
 fn fleet_daemon(action: Action) -> Result<String> {
     match action {
         Action::Start => {
             detach(&["fleet", "daemon"])?;
             Ok("fleet daemon started".to_string())
         }
-        Action::Stop => match stop_by_heartbeat_pid("fleet-daemon") {
-            Some(pid) => Ok(format!("fleet daemon stopped (pid {pid})")),
-            None => Ok("fleet daemon was not running".to_string()),
+        Action::Stop => match stop_by_heartbeat_pid_checked("fleet-daemon") {
+            StopOutcome::Signalled(pid) => Ok(format!("fleet daemon stopped (pid {pid})")),
+            StopOutcome::NotRunning => Ok("fleet daemon was not running".to_string()),
+            StopOutcome::Unverified(pid) => bail!(unverified_stop_message("fleet daemon", pid)),
         },
         Action::Restart => {
-            let stopped = stop_by_heartbeat_pid("fleet-daemon");
-            detach(&["fleet", "daemon"])?;
-            Ok(match stopped {
-                Some(pid) => format!("fleet daemon restarted (replaced pid {pid})"),
-                None => "fleet daemon started".to_string(),
-            })
+            // An UNVERIFIED stop must not be followed by a start. Reading it as
+            // "nothing was running" is how you end up with two auto-continue
+            // watchers sending into the same pane — the failure this whole
+            // supervisor exists to prevent, reintroduced by a restart button.
+            match stop_by_heartbeat_pid_checked("fleet-daemon") {
+                StopOutcome::Unverified(pid) => bail!(unverified_stop_message("fleet daemon", pid)),
+                stopped => {
+                    detach(&["fleet", "daemon"])?;
+                    Ok(match stopped {
+                        StopOutcome::Signalled(pid) => {
+                            format!("fleet daemon restarted (replaced pid {pid})")
+                        }
+                        _ => "fleet daemon started".to_string(),
+                    })
+                }
+            }
         }
         // Unreachable: `control` intercepts these before any handler.
         Action::Pair | Action::ModeLite | Action::ModeFull => {
@@ -550,25 +583,53 @@ fn fleet_daemon(action: Action) -> Result<String> {
     }
 }
 
-/// SIGTERM the pid a daemon's own heartbeat recorded, if it is still alive.
+/// What a stop attempt actually established.
 ///
-/// The heartbeat is the daemon's own claim about which process it is, which is
-/// a better answer than matching on a process name — that would happily kill
-/// somebody else's `ainb fleet daemon` in another checkout.
-pub(crate) fn stop_by_heartbeat_pid(name: &str) -> Option<u32> {
+/// Three outcomes, not two. The old bool-ish `Option<u32>` could not say
+/// "a process is alive at that pid but I cannot prove it is the daemon", and a
+/// caller that reads that as "nothing was running" will happily start a SECOND
+/// one alongside the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// The recorded process was proven to be the daemon and was signalled.
+    Signalled(u32),
+    /// No heartbeat, or its process is gone. Nothing to stop.
+    NotRunning,
+    /// A live process holds the recorded pid but its start instant does not
+    /// match the heartbeat, so it is very likely a recycled pid — and might not
+    /// be. Signalling it could kill a stranger; assuming it is dead could double
+    /// the daemon. Neither is ours to choose silently.
+    Unverified(u32),
+}
+
+/// SIGTERM the process a daemon's own heartbeat recorded, but only when that
+/// process is provably still the one that wrote the heartbeat.
+///
+/// LIVENESS IS NOT IDENTITY: the OS recycles pids, so a daemon that was
+/// SIGKILLed leaves a tombstone whose pid may now belong to somebody's editor.
+pub(crate) fn stop_by_heartbeat_pid_checked(name: &str) -> StopOutcome {
     use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
-    let hb = DaemonHeartbeat::read(name)?;
-    // LIVENESS IS NOT IDENTITY. A daemon that was SIGKILLed (or died with the
-    // box) leaves its heartbeat behind, and the OS recycles pids — so a live
-    // process at that pid may be somebody's editor. Signalling it would kill an
-    // unrelated program and report a successful stop. Only the ORIGINAL process,
-    // proven by its start instant, may be signalled.
-    if pid_identity(hb.pid, hb.started_at) != PidCheck::Matched {
-        return None;
+    let Some(hb) = DaemonHeartbeat::read(name) else {
+        return StopOutcome::NotRunning;
+    };
+    match pid_identity(hb.pid, hb.started_at) {
+        PidCheck::Dead => StopOutcome::NotRunning,
+        PidCheck::Recycled => StopOutcome::Unverified(hb.pid),
+        PidCheck::Matched => {
+            let Ok(raw) = i32::try_from(hb.pid) else {
+                return StopOutcome::Unverified(hb.pid);
+            };
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::Signal::SIGTERM,
+            ) {
+                Ok(()) => StopOutcome::Signalled(hb.pid),
+                // It exited between the identity check and the signal.
+                Err(nix::errno::Errno::ESRCH) => StopOutcome::NotRunning,
+                Err(_) => StopOutcome::Unverified(hb.pid),
+            }
+        }
     }
-    let target = nix::unistd::Pid::from_raw(i32::try_from(hb.pid).ok()?);
-    nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).ok()?;
-    Some(hb.pid)
 }
 
 // ── Delegation plumbing ─────────────────────────────────────────────────────
@@ -644,6 +705,36 @@ pub(crate) fn detach(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An UNVERIFIED stop must never be followed by a start.
+    ///
+    /// This is the whole reason `StopOutcome` has three variants instead of
+    /// being an `Option<u32>`. With two, "a live process holds that pid but I
+    /// cannot prove it is the daemon" collapsed into "nothing was running", and
+    /// `restart` then detached a SECOND daemon alongside the first — two
+    /// auto-continue watchers sending into the same pane, which is the exact
+    /// failure the ATC supervisor exists to prevent, reintroduced by a button.
+    #[test]
+    fn an_unverified_stop_is_distinguishable_from_nothing_running() {
+        use super::StopOutcome;
+        // The property the callers branch on: exactly one variant means "safe to
+        // start a replacement", and it is not the ambiguous one.
+        let safe_to_replace = |o: StopOutcome| !matches!(o, StopOutcome::Unverified(_));
+        assert!(safe_to_replace(StopOutcome::Signalled(42)));
+        assert!(safe_to_replace(StopOutcome::NotRunning));
+        assert!(
+            !safe_to_replace(StopOutcome::Unverified(42)),
+            "an unprovable stop must block the replacement start"
+        );
+        // And the refusal has to be actionable: it names the pid to inspect.
+        let msg = super::unverified_stop_message("fleet daemon", 4321);
+        assert!(msg.contains("4321"), "{msg}");
+        assert!(msg.contains("ps -p 4321"), "{msg}");
+        assert!(
+            msg.contains("Refusing to signal it"),
+            "must say what it did NOT do: {msg}"
+        );
+    }
 
     /// `pair` is offered only by the daemon that owns the Codex transport.
     ///
