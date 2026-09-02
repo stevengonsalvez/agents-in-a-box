@@ -1290,7 +1290,9 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
             // was deleted) and repair now reaches past it to the installed
             // ainb, so the fix is the same keypress as every other pointer
             // fault — not a lecture about rebuilding a tree that is gone.
-            let repair = "press I in Daemons to repoint at the installed ainb".to_string();
+            let repair =
+                "ainb doctor --fix-hooks, or press I in Daemons, to repoint at the installed ainb"
+                    .to_string();
             issues.push(HookHealthIssue {
                 component: "hook binary".to_string(),
                 message: hook_binary.as_ref().map_or_else(
