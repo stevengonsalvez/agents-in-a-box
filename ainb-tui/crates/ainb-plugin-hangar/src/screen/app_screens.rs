@@ -1532,6 +1532,12 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     let y0 = h.saturating_sub(u16::try_from(lines.len()).unwrap_or(0)) / 2;
     for (i, line) in lines.iter().enumerate() {
         let y = y0 + u16::try_from(i).unwrap_or(0);
+        // A short pane shows the head of the table and drops the tail; the
+        // host clamps off-viewport cells silently, so without this the top
+        // rows are the only ones lost.
+        if y >= h {
+            break;
+        }
         let line_w = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
         let x0 = w.saturating_sub(line_w) / 2;
         for (ch, cx) in line.chars().zip(x0..w) {
@@ -2654,20 +2660,60 @@ mod help_overlay_tests {
     /// (the overlay listed 8 of ~40 keys for months).
     #[test]
     fn help_overlay_names_every_router_key() {
-        let text = HELP_LINES.join(" ");
+        // A key counts as documented when it stands as its own token with a
+        // word label right after it (`K kanban`, `, settings`, `q back`), not
+        // when the letter merely appears somewhere inside another hint.
+        let tokens: Vec<&str> = HELP_LINES.iter().flat_map(|l| l.split_whitespace()).collect();
         for key in ROUTER_KEYS {
-            let needle = match key {
-                // `?` IS the overlay; it needs no line about itself.
-                '?' => continue,
-                'q' => "q back".to_string(),
-                ',' => ", settings".to_string(),
-                k => format!(" {k} "),
-            };
+            // `?` IS the overlay; it needs no line about itself.
+            if key == '?' {
+                continue;
+            }
+            let key_token = key.to_string();
+            let labelled = tokens.windows(2).any(|pair| {
+                pair[0] == key_token
+                    && pair[1].len() > 1
+                    && pair[1].chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+            });
             assert!(
-                text.contains(&needle),
-                "router key {key:?} has no help line (looked for {needle:?})"
+                labelled,
+                "router key {key:?} has no `{key} <label>` help entry"
             );
         }
+    }
+
+    /// A pane shorter than the table paints its first rows (the title and the
+    /// global keys) inside the viewport and nothing below it, instead of
+    /// centring the block so the rows that survive are the middle ones.
+    #[test]
+    fn help_overlay_clips_to_a_short_pane_from_the_top() {
+        let (w, h) = (120, 10);
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(w, h);
+        super::render_help(&mut buf, w, h);
+        let rows: std::collections::BTreeSet<u16> = buf.cells.iter().map(|(c, _)| c.y).collect();
+        assert!(
+            rows.iter().all(|&y| y < h),
+            "painted below the viewport: {rows:?}"
+        );
+        // Blank separator lines paint no cells, so count the non-blank head.
+        let painted_head =
+            HELP_LINES[..usize::from(h)].iter().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(
+            rows.len(),
+            painted_head,
+            "the first {h} lines land, one per row"
+        );
+        let first: String = buf
+            .cells
+            .iter()
+            .filter(|(c, _)| c.y == 0)
+            .map(|(_, cell)| cell.symbol.clone())
+            .collect();
+        assert_eq!(
+            first.trim(),
+            HELP_LINES[0].trim(),
+            "row 0 is the table's first line"
+        );
     }
 }
 
@@ -2788,6 +2834,104 @@ mod kanban_retry_route_tests {
             states.take_pending_task_retry_action().is_none(),
             "R on a non-terminal card must not lift a retry"
         );
+    }
+}
+
+#[cfg(test)]
+mod task_detail_open_tests {
+    use super::*;
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn issue() -> IssueRow {
+        IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
+            id: IssueId::from_str("issue-1").unwrap(),
+            display_id: None,
+            workspace_id: "ws".into(),
+            title: "Fix the widget".into(),
+            description: None,
+            state: "in_progress".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+            branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            external_ref: None,
+            run_count: 1,
+            last_run_status: None,
+            last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
+            context_refs: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Opening task detail from the issue list on a task that failed BEFORE
+    /// this screen subscribed seeds the lifecycle from the snapshot status, so
+    /// `R` lifts a retry at once. Without the seed the reducer's `Queued`
+    /// default made `R` a silent no-op on every already-terminal task.
+    #[test]
+    fn open_with_a_failed_status_makes_r_retry_live() {
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            TaskId::from_str("t-1").unwrap(),
+            issue(),
+            None,
+            Some("failed"),
+        );
+
+        route_task_detail(&mut states, &press('R'));
+
+        assert_eq!(
+            states.take_pending_task_retry_action().as_deref(),
+            Some("t-1")
+        );
+    }
+
+    /// A running task is not retryable: the same open path with a live status
+    /// leaves `R` inert, so a run is never forked from the detail screen.
+    #[test]
+    fn open_with_a_running_status_keeps_r_inert() {
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            TaskId::from_str("t-1").unwrap(),
+            issue(),
+            None,
+            Some("running"),
+        );
+
+        route_task_detail(&mut states, &press('R'));
+
+        assert!(states.take_pending_task_retry_action().is_none());
     }
 }
 
