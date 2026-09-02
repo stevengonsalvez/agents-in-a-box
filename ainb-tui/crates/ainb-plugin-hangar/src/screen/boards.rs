@@ -443,20 +443,20 @@ impl RepoOption {
     }
 }
 
-/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first
-/// (ALWAYS, the F2 guaranteed repo), then the injected roster
-/// (favorites-first + recency order preserved) fuzzy-filtered on `query`.
-/// Crate-visible so the Issues create-wizard repo stage shares the exact same
-/// candidate order + fuzzy filter as the Boards card create.
+/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first (the
+/// F2 guaranteed repo, so an EMPTY query always leads with it), then the
+/// injected roster (favorites-first + recency order preserved), every entry
+/// fuzzy-filtered on `query`, scratch included. Scratch used to be prepended
+/// unconditionally while the cursor reset to row 0 on every keystroke, so
+/// typing `@box` narrowed the list to boxtrack and Enter still picked scratch
+/// (proving run defect 12). Crate-visible so the Issues create-wizard repo
+/// stage shares the exact same candidate order + fuzzy filter as the Boards
+/// card create.
 pub(crate) fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
-    let mut out = vec![RepoOption::scratch()];
-    out.extend(
-        repos
-            .iter()
-            .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
-            .cloned(),
-    );
-    out
+    std::iter::once(RepoOption::scratch())
+        .chain(repos.iter().cloned())
+        .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
+        .collect()
 }
 
 /// Case-insensitive subsequence match: every char of `query`, in order, appears
@@ -1757,7 +1757,8 @@ fn card_repo_key(
         (Some(cursor), BoardsKey::Enter) => {
             let candidates = repo_candidates(state.repos(), &query);
             let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
-                // Impossible (scratch is always present), but never advance repo-less.
+                // A query that matches nothing: hold the dropdown open, never
+                // advance repo-less.
                 return reopen(state, query, Some(0));
             };
             set_overlay(
@@ -3526,8 +3527,11 @@ mod tests {
         assert!(out.state.overlay().is_none());
     }
 
-    /// Typing after `@` fuzzy-filters the dropdown; Enter picks the highlighted
-    /// scanned repo. Scratch stays index 0 (always first).
+    /// Typing after `@` fuzzy-filters the dropdown, scratch included, and Enter
+    /// picks the highlighted row: with `wid` typed the ONLY candidate is widget,
+    /// so a bare Enter picks it. Scratch used to be pinned at row 0 regardless
+    /// of the query while every keystroke reset the cursor there, so this exact
+    /// sequence picked scratch (proving run defect 12).
     #[test]
     fn repo_dropdown_fuzzy_filters_on_query() {
         let mut state = BoardsState::from_snapshot(&one_board());
@@ -3535,18 +3539,59 @@ mod tests {
         let s = typed_card(&state, "T");
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
-        // Type "wid" — only "widget" (and scratch, always-first) survive the filter.
+        assert_eq!(
+            repo_candidates(s.repos(), "").first().map(|r| r.label.as_str()),
+            Some("scratch"),
+            "an empty query still leads with the guaranteed repo"
+        );
         let mut s = s;
         for ch in "wid".chars() {
             s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
         }
-        // Candidates are [scratch, widget]; Down + Enter picks widget.
-        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "wid")
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["widget"],
+            "scratch is filtered like any other candidate"
+        );
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
         assert!(matches!(
             s.overlay(),
             Some(BoardsOverlay::CardAgent { repo_ref, .. }) if repo_ref == "/src/widget"
         ));
+    }
+
+    /// A query matching nothing leaves an empty dropdown; Enter holds it open
+    /// (never advances repo-less) and Backspace brings the candidates back.
+    #[test]
+    fn repo_dropdown_with_no_match_holds_open_on_enter() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_repos(repo_roster());
+        let s = typed_card(&state, "T");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('q'))).state;
+        assert!(repo_candidates(s.repos(), "q").is_empty());
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None);
+        assert!(
+            matches!(
+                out.state.overlay(),
+                Some(BoardsOverlay::CardRepo {
+                    dropdown: Some(0),
+                    ..
+                })
+            ),
+            "Enter on an empty dropdown holds the repo stage open"
+        );
+        let s = reduce_boards(&out.state, BoardsEvent::Key(BoardsKey::Backspace)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "").len(),
+            3,
+            "scratch + the two repos are back"
+        );
     }
 
     /// F2 repo-REQUIRED: Enter with the dropdown closed re-opens it (pointing at

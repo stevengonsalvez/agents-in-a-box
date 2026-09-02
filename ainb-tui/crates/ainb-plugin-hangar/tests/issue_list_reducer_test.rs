@@ -342,6 +342,35 @@ fn wizard_at_opens_repo_dropdown() {
     assert_eq!(s.wizard().unwrap().repo_query(), "z");
 }
 
+/// Proving run defect 12 (crisp B1): typing `@box` narrows the dropdown to the
+/// one matching repo, and Enter picks THAT repo. Scratch used to be pinned at
+/// row 0 whatever the query, with the cursor reset there on every keystroke, so
+/// Enter picked scratch despite the visible filter. An empty query still leads
+/// with scratch, so a repo-less workspace can always launch.
+#[test]
+fn wizard_dropdown_enter_picks_the_filtered_repo_not_scratch() {
+    use ainb_plugin_hangar::screen::boards::RepoOption;
+    let mut s = open_wizard();
+    s.set_repos(vec![RepoOption {
+        label: "boxtrack".into(),
+        repo_ref: "/home/dev/boxtrack".into(),
+        is_favorite: false,
+        is_remote_only: false,
+    }]);
+    let s = type_str(s, "Fix");
+    let s = focus_row(s, WizardRow::Repo);
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = type_str(s, "box");
+    let s = wiz(&s, WizardKey::Enter).state;
+    assert_eq!(s.wizard().unwrap().repo_ref(), Some("/home/dev/boxtrack"));
+    assert_eq!(s.wizard().unwrap().repo_dropdown(), None);
+
+    // The empty query keeps scratch first.
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = wiz(&s, WizardKey::Enter).state;
+    assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
+}
+
 /// Tabbing away from an open repo dropdown commits the highlighted candidate
 /// instead of discarding it — leaving the field with the pick made, dropdown
 /// closed, focus advanced.
