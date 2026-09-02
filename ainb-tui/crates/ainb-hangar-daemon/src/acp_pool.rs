@@ -139,6 +139,12 @@ pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
 pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
+/// Prefix of the token a DELIVERED leg carries: `stop=<StopReason>`.
+///
+/// The reason is the upstream enum's Debug name, so `stop=EndTurn`,
+/// `stop=MaxTokens`, `stop=MaxTurnRequests`. A FAILED turn carries the same
+/// reason after [`DELIVERY_TURN_FAILED`] instead.
+pub const DELIVERY_STOP_PREFIX: &str = "stop=";
 
 /// The resume path fingerprint carried on the next delivery's receipt detail
 /// and in the `acp.context_rebuilt` marker: the adapter still had the session.
@@ -1934,9 +1940,15 @@ impl SessionActor {
         self.pump().await;
 
         let (marker, state, detail) = match &result {
-            Ok(response) if turn_succeeded(response) => {
-                (Lifecycle::TurnCompleted, "DELIVERED", None)
-            }
+            // The stop reason rides on a SUCCESS too: `turn_succeeded` folds
+            // `EndTurn`, `MaxTokens` and `MaxTurnRequests` into one DELIVERED,
+            // and a task caller has to tell "the agent finished" from "the
+            // agent ran out of budget" without opening the transcript.
+            Ok(response) if turn_succeeded(response) => (
+                Lifecycle::TurnCompleted,
+                "DELIVERED",
+                Some(format!("{DELIVERY_STOP_PREFIX}{:?}", response.stop_reason)),
+            ),
             Ok(response) => (
                 Lifecycle::TurnFailed,
                 "FAILED",

@@ -353,8 +353,10 @@ async fn a_turn_puts_one_message_on_the_timeline_and_every_chunk_in_the_transcri
     let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
     assert_eq!(state, "DELIVERED", "detail: {detail:?}");
     assert_eq!(
-        detail, None,
-        "a first-ever turn resumed nothing, so its receipt carries no resume fingerprint"
+        detail.as_deref(),
+        Some("stop=EndTurn"),
+        "a first-ever turn resumed nothing, so its receipt carries the stop reason and no \
+         resume fingerprint"
     );
 
     // Timeline: exactly ONE agent row, threaded to the prompt.
@@ -707,10 +709,10 @@ async fn the_deadline_sweep_cancels_only_the_overdue_session() {
     assert_eq!(
         delivery_state(&store, &healthy_message, &healthy.session_key).await,
         // A brand-new session resumed NOTHING, so its receipt detail stays
-        // NULL: the resume fingerprint is reserved for a context that was
-        // actually lost and rebuilt, and it carries nothing about the deadline
-        // that hit its neighbour either.
-        Some(("DELIVERED".to_string(), None)),
+        // Only the stop reason: the resume fingerprint is reserved for a
+        // context that was actually lost and rebuilt, and it carries nothing
+        // about the deadline that hit its neighbour either.
+        Some(("DELIVERED".to_string(), Some("stop=EndTurn".to_string()))),
         "the other tenant of the same process is untouched"
     );
     assert!(
@@ -1780,7 +1782,7 @@ async fn a_forced_rebuild_keeps_the_session_key(shape: &str, key: &str) {
     assert_eq!(state, "DELIVERED", "{detail:?}");
     assert_eq!(
         detail.as_deref(),
-        Some("resume=reprimed"),
+        Some("stop=EndTurn; resume=reprimed"),
         "the receipt names the path that built this turn's context"
     );
 
@@ -1892,7 +1894,7 @@ async fn an_opaque_load_failure_rebuilds_on_the_second_attempt_only() {
     );
     assert_eq!(
         detail.as_deref(),
-        Some("resume=reprimed"),
+        Some("stop=EndTurn; resume=reprimed"),
         "and it must say so: the context came from the corpus, not from the adapter"
     );
 
@@ -1948,7 +1950,7 @@ async fn a_load_that_reverts_the_mode_is_re_applied_and_the_turn_proceeds() {
     );
     assert_eq!(
         detail.as_deref(),
-        Some("resume=loaded"),
+        Some("stop=EndTurn; resume=loaded"),
         "and the session was RESUMED, not rebuilt"
     );
     let lines = rpc_log(&log);
@@ -2093,7 +2095,7 @@ async fn a_load_whose_history_replays_writes_zero_transcript_rows() {
     pool.submit_prompt(&session.session_key, &message_id, "hi").await;
     let (state, detail) = await_terminal(&store, &message_id, &session.session_key).await;
     assert_eq!(state, "DELIVERED", "{detail:?}");
-    assert_eq!(detail.as_deref(), Some("resume=loaded"));
+    assert_eq!(detail.as_deref(), Some("stop=EndTurn; resume=loaded"));
 
     let rows = transcript(&store, &session.session_key).await;
     let kinds: Vec<&str> = rows.iter().map(|(kind, _)| kind.as_str()).collect();
@@ -2269,8 +2271,9 @@ async fn a_first_ever_turn_in_a_burst_is_fresh_not_reprimed() {
     let (state, detail) = await_terminal(&store, &first, &session.session_key).await;
     assert_eq!(state, "DELIVERED", "{detail:?}");
     assert_eq!(
-        detail, None,
-        "a session with no history rebuilt nothing, so its receipt claims nothing"
+        detail.as_deref(),
+        Some("stop=EndTurn"),
+        "a session with no history rebuilt nothing, so its receipt claims no resume path"
     );
     assert!(
         !transcript(&store, &session.session_key)
