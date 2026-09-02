@@ -805,6 +805,13 @@ fn hangar_daemon_census() -> usize {
         .unwrap_or(0)
 }
 
+/// What the ATC row says when no instance exists.
+///
+/// A constant because the Daemons screen decides which menu entries to offer
+/// from it: a paraphrase in either place would silently stop offering the one
+/// action that fixes the state it describes.
+pub const ATC_UNPROVISIONED: &str = "no ATC instance provisioned";
+
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     probe_atc_with(
         home,
@@ -842,13 +849,14 @@ pub(crate) fn probe_atc_with(
         {
             return DaemonStatus {
                 reason: format!(
-                    "heartbeat timer installed for '{orphan}' but no instance is provisioned; every beat fails"
+                    "{ATC_UNPROVISIONED}, but a heartbeat timer for '{orphan}' is installed \
+                     and failing every interval"
                 ),
                 scheduler_orphan: Some(orphan),
                 ..DaemonStatus::stopped(kind, String::new())
             };
         }
-        return DaemonStatus::stopped(kind, "no ATC instance provisioned");
+        return DaemonStatus::stopped(kind, ATC_UNPROVISIONED);
     }
 
     // Pick the most-recently-beating instance as the representative row, and
