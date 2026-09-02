@@ -134,14 +134,16 @@ impl TaskLifecycle {
     /// dead on a task the screen itself reports as failed.
     #[must_use]
     pub fn from_wire_status(status: &str) -> Option<Self> {
-        match status {
-            "queued" | "dispatched" => Some(Self::Queued),
-            "running" => Some(Self::Running),
-            "done" => Some(Self::Succeeded),
-            "failed" => Some(Self::Failed),
-            "cancelled" => Some(Self::Cancelled),
-            _ => None,
-        }
+        use ainb_hangar_core::task_status::TaskStatus;
+        // Exhaustive over the store's status enum: a new variant fails to
+        // compile here instead of silently leaving `R` dead on a seeded screen.
+        Some(match TaskStatus::parse(status)? {
+            TaskStatus::Queued | TaskStatus::Dispatched => Self::Queued,
+            TaskStatus::Running => Self::Running,
+            TaskStatus::Done => Self::Succeeded,
+            TaskStatus::Failed => Self::Failed,
+            TaskStatus::Cancelled => Self::Cancelled,
+        })
     }
 }
 
@@ -2462,20 +2464,42 @@ mod card_tests {
     /// seeded screen silently regresses to a dead `R` again.
     #[test]
     fn lifecycle_seeds_from_every_wire_status() {
-        let cases = [
-            ("queued", TaskLifecycle::Queued, false),
-            ("dispatched", TaskLifecycle::Queued, false),
-            ("running", TaskLifecycle::Running, false),
-            ("done", TaskLifecycle::Succeeded, true),
-            ("failed", TaskLifecycle::Failed, true),
-            ("cancelled", TaskLifecycle::Cancelled, true),
-        ];
-        for (wire, want, terminal) in cases {
-            let got = TaskLifecycle::from_wire_status(wire)
-                .unwrap_or_else(|| panic!("wire status `{wire}` unmapped"));
-            assert_eq!(got, want, "wire `{wire}`");
-            assert_eq!(got.is_terminal(), terminal, "terminal gate for `{wire}`");
+        use ainb_hangar_core::task_status::TaskStatus;
+        // Driven off the enum's own roster so a new variant reaches this loop.
+        for status in TaskStatus::ALL {
+            let got = TaskLifecycle::from_wire_status(status.as_str())
+                .unwrap_or_else(|| panic!("status `{}` unmapped", status.as_str()));
+            assert_eq!(
+                got.is_terminal(),
+                status.is_terminal(),
+                "terminal gate for `{}` must agree with the store",
+                status.as_str()
+            );
         }
+        assert_eq!(
+            TaskLifecycle::from_wire_status("queued"),
+            Some(TaskLifecycle::Queued)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("dispatched"),
+            Some(TaskLifecycle::Queued)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("running"),
+            Some(TaskLifecycle::Running)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("done"),
+            Some(TaskLifecycle::Succeeded)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("failed"),
+            Some(TaskLifecycle::Failed)
+        );
+        assert_eq!(
+            TaskLifecycle::from_wire_status("cancelled"),
+            Some(TaskLifecycle::Cancelled)
+        );
         assert_eq!(TaskLifecycle::from_wire_status("nonsense"), None);
     }
 }
