@@ -280,11 +280,9 @@ fn homebrew_launcher(exe: &Path) -> Option<PathBuf> {
     is_executable(&launcher).then_some(launcher)
 }
 
-fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
-    if let Some(launcher) = homebrew_launcher(exe) {
-        return Some(launcher);
-    }
-
+/// Every prefix an installed `ainb` is expected to live under, most specific
+/// first. Order is the preference order when several are populated.
+fn launcher_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![
         PathBuf::from("/opt/homebrew/bin/ainb"),
         PathBuf::from("/usr/local/bin/ainb"),
@@ -294,8 +292,30 @@ fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
         candidates.push(home.join(".cargo/bin/ainb"));
     }
     candidates
+}
+
+fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
+    if let Some(launcher) = homebrew_launcher(exe) {
+        return Some(launcher);
+    }
+    launcher_candidates()
         .into_iter()
         .find(|candidate| is_executable(candidate) && canonical_eq(candidate, exe))
+}
+
+/// The installed `ainb`, whatever binary happens to be running.
+///
+/// Unlike [`stable_launcher_for`] this does NOT require the launcher to be the
+/// same file as `exe`: that is the whole point. Hooks installed from a
+/// throwaway worktree build must point at the ainb that will still be there
+/// tomorrow, not at the `target/debug` path the worktree took with it.
+fn installed_launcher(exe: &Path) -> Option<PathBuf> {
+    // A Homebrew install resolves to its OWN launcher first, so a machine with
+    // two ainbs keeps the one the running binary belongs to.
+    if let Some(launcher) = homebrew_launcher(exe) {
+        return Some(launcher);
+    }
+    launcher_candidates().into_iter().find(|candidate| is_executable(candidate))
 }
 
 fn launcher_mode(path: &Path) -> HookBinaryMode {
@@ -303,9 +323,9 @@ fn launcher_mode(path: &Path) -> HookBinaryMode {
         HookBinaryMode::Dev
     } else if path == Path::new("/opt/homebrew/bin/ainb")
         || path == Path::new("/usr/local/bin/ainb")
-        || path.parent().is_some_and(|parent| {
-            parent.ends_with(".cargo/bin") || parent.ends_with(".local/bin")
-        })
+        || path
+            .parent()
+            .is_some_and(|parent| parent.ends_with(".cargo/bin") || parent.ends_with(".local/bin"))
     {
         HookBinaryMode::Release
     } else {
@@ -313,7 +333,34 @@ fn launcher_mode(path: &Path) -> HookBinaryMode {
     }
 }
 
+/// Why a hook binary pointer is being written.
+///
+/// The two intents differ only in whether the INSTALLED ainb is preferred over
+/// the one doing the writing. That is a policy choice, not a new kind of
+/// binary, so it deliberately does not add a [`HookBinaryMode`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryIntent {
+    /// Install / repair. Points hooks at the installed ainb so the pointer
+    /// survives the deletion of whatever tree the running binary was built in.
+    Install,
+    /// Pin the binary running right now — deliberate dev testing.
+    PinRunning,
+}
+
 fn hook_binary_target(exe: PathBuf, explicit: Option<&str>) -> HookBinaryTarget {
+    resolve_hook_binary(exe, explicit, BinaryIntent::Install, &installed_launcher)
+}
+
+/// Resolve the executable a hook should invoke.
+///
+/// `find_installed` is injected so the search is unit-testable without a real
+/// filesystem; production passes [`installed_launcher`].
+fn resolve_hook_binary(
+    exe: PathBuf,
+    explicit: Option<&str>,
+    intent: BinaryIntent,
+    find_installed: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> HookBinaryTarget {
     if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
         let path = PathBuf::from(path);
         let path = if path.is_absolute() {
@@ -334,6 +381,19 @@ fn hook_binary_target(exe: PathBuf, explicit: Option<&str>) -> HookBinaryTarget 
             mode: launcher_mode(&path),
             path,
         };
+    }
+    // Install/repair prefers the installed ainb even when it is a DIFFERENT
+    // file from the one writing the pointer. Pinning deliberately does not.
+    if intent == BinaryIntent::Install {
+        if let Some(path) = find_installed(&exe) {
+            // An installed launcher is a stable one by construction — that is
+            // the only kind `find_installed` yields — so it is Release
+            // regardless of the prefix it was found under.
+            return HookBinaryTarget {
+                path,
+                mode: HookBinaryMode::Release,
+            };
+        }
     }
     if let Some(path) = stable_launcher_for(&exe) {
         return HookBinaryTarget {
@@ -371,6 +431,24 @@ pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
     let bin = std::env::current_exe().context("resolving installing ainb binary")?;
     let target = hook_binary_target(bin, std::env::var("AINB_BIN").ok().as_deref());
     write_hook_binary_target(paths, &target)
+}
+
+/// Point the hooks at the binary running RIGHT NOW, installed or not.
+///
+/// The deliberate opposite of [`extract_hook_bin`]: for testing a local build's
+/// hooks. The pointer dies with the tree, which is the point — it is an
+/// explicit choice rather than the accident of having installed from a
+/// worktree.
+pub fn pin_running_hook_binary(paths: &Paths) -> Result<HookBinaryTarget> {
+    let bin = std::env::current_exe().context("resolving running ainb binary")?;
+    let target = resolve_hook_binary(
+        bin,
+        std::env::var("AINB_BIN").ok().as_deref(),
+        BinaryIntent::PinRunning,
+        &installed_launcher,
+    );
+    write_hook_binary_target(paths, &target)?;
+    Ok(target)
 }
 
 fn read_hook_binary_target(paths: &Paths) -> Option<HookBinaryTarget> {
@@ -1503,6 +1581,68 @@ mod tests {
         );
         assert_eq!(cellar_target.mode, HookBinaryMode::Release);
         assert_eq!(cellar_target.path, launcher);
+    }
+
+    /// The reported bug: hooks installed while running a worktree
+    /// `target/debug/ainb` stamped that doomed path into the pointer, and it
+    /// stayed there after the worktree was deleted. Install intent must reach
+    /// past the running binary to the installed one.
+    #[test]
+    fn install_prefers_the_installed_launcher_over_a_dev_build() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+        let found = installed.clone();
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::Install, &|_| {
+            Some(found.clone())
+        });
+
+        assert_eq!(target.path, installed);
+        assert_eq!(target.mode, HookBinaryMode::Release);
+    }
+
+    /// Pinning is the escape hatch, so it must NOT consult the installed
+    /// search — otherwise there would be no way to test a local build's hooks.
+    #[test]
+    fn pinning_keeps_the_running_binary_even_when_one_is_installed() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::PinRunning, &|_| {
+            Some(installed.clone())
+        });
+
+        assert_eq!(target.path, dev);
+        assert_eq!(target.mode, HookBinaryMode::Dev);
+    }
+
+    /// With nothing installed there is nothing better to point at, so install
+    /// falls back to the running binary rather than writing a dead path.
+    #[test]
+    fn install_falls_back_to_the_running_binary_when_nothing_is_installed() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::Install, &|_| None);
+
+        assert_eq!(target.path, dev);
+        assert_eq!(target.mode, HookBinaryMode::Dev);
+    }
+
+    /// An explicit `AINB_BIN` is the operator's stated intent and outranks both
+    /// policies.
+    #[test]
+    fn explicit_binary_wins_under_either_intent() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+        let chosen = PathBuf::from("/opt/custom/ainb");
+
+        for intent in [BinaryIntent::Install, BinaryIntent::PinRunning] {
+            let target =
+                resolve_hook_binary(dev.clone(), Some("/opt/custom/ainb"), intent, &|_| {
+                    Some(installed.clone())
+                });
+            assert_eq!(target.path, chosen, "intent {intent:?} ignored AINB_BIN");
+        }
     }
 
     /// `~/.local/bin` is a first-class install prefix (it is where `ainb`
