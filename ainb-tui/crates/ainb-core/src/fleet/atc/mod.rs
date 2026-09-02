@@ -9,12 +9,16 @@
 // - `render`    — pure `CLAUDE.md` policy template renderer
 // - `heartbeat` — pure heartbeat-message builder from `fleet needs` JSON,
 //                 idle-pause decision, and the ERR auto-continue retry cap
+// - `supervisor`— the ONE-owner rule: which mode a fleet is in, which controller
+//                 that mode permits to send actions, and which providers can
+//                 actually drive full mode
 // - `timer`     — launchd plist / systemd timer generation + idempotent install
 
 pub mod heartbeat;
 pub mod meta;
 pub mod paths;
 pub mod render;
+pub mod supervisor;
 pub mod timer;
 
 pub use heartbeat::{
@@ -24,3 +28,7 @@ pub use heartbeat::{
 pub use meta::AtcMeta;
 pub use paths::{AtcPaths, instance_name_for_cwd_in, sanitize_instance_name};
 pub use render::render_claude_md;
+pub use supervisor::{
+    Controller, DEFAULT_PROVIDER, SupervisorMode, lite_heartbeat_id, may_act, mode_help,
+    provider_control, resolve_full_provider, stand_down_reason, supported_full_providers,
+};

@@ -17,6 +17,7 @@ use ratatui::{
 
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
+use crate::fleet::atc::SupervisorMode;
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use ainb_plugin_notifyd::install::BinaryIntent;
@@ -64,6 +65,30 @@ pub struct Snapshot {
     /// Most-recent hook wiring health. Collected beside daemon state, never in
     /// the render path.
     pub hook_health: Option<HookHealth>,
+    /// The ATC supervisor's mode + full-mode provider, when a single instance
+    /// makes it unambiguous. Read off disk by the collector, never in render.
+    ///
+    /// `None` when there is no instance, several (nothing here could say WHICH
+    /// one a switch would act on), or the meta will not parse. The mode toggle
+    /// and the inline help are both hidden in that case rather than guessing.
+    pub atc: Option<AtcModeView>,
+}
+
+/// What the Daemons screen needs to know about the ATC supervisor beyond its
+/// runtime row: which mode owns the fleet, and which brain full mode would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtcModeView {
+    pub name: String,
+    pub mode: SupervisorMode,
+    pub provider: String,
+    /// The mode help, rendered once by the collector.
+    ///
+    /// `mode_help` rebuilds the whole provider registry (five `Arc`s, a HashMap,
+    /// a Vec) and allocates seven `String`s. Calling it from `render` ran that
+    /// every frame while the ATC row was selected, in the file whose entire
+    /// design is about keeping work off the UI thread. It is a pure function of
+    /// (mode, provider), so it belongs on the snapshot with everything else.
+    pub help: Vec<String>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -148,6 +173,10 @@ struct RowFacts {
     instance: Option<String>,
     /// ATC has an OS timer installed for an instance that does not exist.
     orphan: bool,
+    /// Which supervisor mode owns the fleet, when it is unambiguous. Captured
+    /// with the rest of the row so the mode entry cannot change under the
+    /// cursor mid-keystroke either.
+    mode: Option<SupervisorMode>,
 }
 
 impl RowFacts {
@@ -155,6 +184,9 @@ impl RowFacts {
         Self {
             instance: status.atc_instance.clone(),
             orphan: status.scheduler_orphan.is_some(),
+            // Filled in by `open_menu`, which has the snapshot; a status row
+            // alone does not carry the supervisor mode.
+            mode: None,
         }
     }
 
@@ -185,6 +217,17 @@ impl ActionMenu {
             .filter(|action| self.offers(*action))
             .map(MenuEntry::Act)
             .collect();
+        // The supervisor mode the fleet is NOT in. Offering both would put
+        // "switch to the mode you are already in" on screen, and offering it on
+        // an unprovisioned row would name a switch with nothing to switch.
+        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
+            if let Some(mode) = self.row.mode {
+                entries.push(MenuEntry::Act(match mode.other() {
+                    SupervisorMode::Lite => Action::ModeLite,
+                    SupervisorMode::Full => Action::ModeFull,
+                }));
+            }
+        }
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
@@ -304,13 +347,24 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
+        let atc_mode = self.atc_mode();
         if let Some(status) = self.selected_status() {
             self.menu = Some(ActionMenu {
                 kind: status.kind,
                 cursor: 0,
-                row: RowFacts::of(&status),
+                row: RowFacts {
+                    mode: atc_mode,
+                    ..RowFacts::of(&status)
+                },
             });
         }
+    }
+
+    /// The ATC supervisor mode from the latest snapshot, when unambiguous.
+    fn atc_mode(&mut self) -> Option<SupervisorMode> {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.atc.as_ref().map(|a| a.mode)
     }
 
     /// Close every overlay at once — for a key that leaves the screen outright.
@@ -504,6 +558,7 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+            atc: guard.atc.clone(),
         }
     }
 }
@@ -652,17 +707,41 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
+    let atc = collect_atc_mode();
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
             guard.collected_at_ms = now_ms();
             guard.hook_health = hook_health;
+            guard.atc = atc;
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
         Err(e) => tracing::warn!(error = %e, "daemons screen: collect failed"),
     }
+}
+
+/// Read the ATC supervisor mode, but only when ONE instance makes it
+/// unambiguous — the same rule `ainb daemon atc` uses to refuse acting on a
+/// guessed instance. Disk I/O, so it runs on the collector thread (H-D2).
+fn collect_atc_mode() -> Option<AtcModeView> {
+    use crate::fleet::atc::meta::AtcMeta;
+    use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
+    let names = list_instance_names_in(&root);
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    let paths = AtcPaths::under_root(&root, name);
+    let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta).ok()?).ok()?;
+    let help = crate::fleet::atc::mode_help(meta.mode, &meta.provider);
+    Some(AtcModeView {
+        name: meta.name,
+        mode: meta.mode,
+        provider: meta.provider,
+        help,
+    })
 }
 
 /// Spawn the detached background collector: one immediate collect, then a collect
@@ -723,10 +802,84 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    // Carve a one-line help footer off the bottom.
+    // Carve a one-line help footer off the bottom, plus — when the cursor is on
+    // the ATC row — the supervisor-mode help above it. The help is inline rather
+    // than an overlay on purpose: an operator about to switch the thing that
+    // drives their whole fleet should be reading what each mode does WHILE the
+    // row's real state is still on screen, not instead of it.
+    // WRAP FIRST, then budget. `mode_help`'s longest line is ~95 chars, so on an
+    // 80-column terminal an unwrapped Paragraph clipped it to
+    // "never resolves an ambiguo" — the stated limit of the mode cut off exactly
+    // where it matters, on the screen whose whole purpose is to inform a switch.
+    // The height must come from the WRAPPED count or the extra lines overflow
+    // the chunk they were budgeted into.
+    let atc_help = wrap_help(&atc_help_lines(&snapshot, state.selected), inner.width);
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
+    // The eviction order is: help first, then the Hooks box, then never the
+    // table. Budgeting only against the table let the help silently delete the
+    // hook-health panel on a 19-23 row terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    // HOOKS_SECTION_ROWS + HOOKS_MIN_TABLE is what `render` below requires to
+    // draw both.
+    // The eviction order is: help first, then never the Hooks box, then never
+    // the table. Budgeting only against the table let the help silently delete
+    // the hook-health panel on a mid-size terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    //
+    // `render` below draws the Hooks section only when the table chunk still has
+    // 14 rows, so that is the number the help has to respect.
+    const HOOKS_NEEDS: u16 = 14;
+    const TABLE_MIN: u16 = 7;
+    const FOOTER: u16 = 1;
+    // The first attempt at this budget fixed the silent eviction by making the
+    // help almost never appear: it required `inner.height >= wanted + 15`, so on
+    // a standard 80x24 terminal (inner 78x22, wanted 12 after wrapping) the
+    // screen whose stated purpose is to inform a mode switch showed nothing at
+    // all. Hiding the thing is not a fix for hiding the wrong thing.
+    //
+    // What was actually wrong in round one was that the hooks panel vanished
+    // SILENTLY. So the help renders whenever the table stays usable, and when it
+    // costs the operator the hooks panel it SAYS so, on a line it pays for out
+    // of its own budget.
+    let without_help = inner.height.saturating_sub(FOOTER);
+    let hooks_fit_without_help = without_help >= HOOKS_NEEDS;
+    let displaces_hooks = wanted > 0
+        && hooks_fit_without_help
+        && inner.height.saturating_sub(wanted + FOOTER) < HOOKS_NEEDS;
+    let atc_help = if displaces_hooks {
+        let mut lines = atc_help;
+        // Wrapped like every other line. Pushing it AFTER `wrap_help` left it
+        // the one line in the block that could be clipped mid-sentence, and it
+        // is the line explaining why a panel is missing.
+        lines.extend(wrap_help(
+            &["(hook health hidden at this height — move off this row to see it)".to_string()],
+            inner.width,
+        ));
+        lines
+    } else {
+        atc_help
+    };
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
+    let with_help = inner.height.saturating_sub(wanted + FOOTER);
+    let help_height = if wanted > 0 && with_help >= TABLE_MIN {
+        wanted
+    } else {
+        // No help, or showing it would squeeze the table itself — and the table
+        // is the screen. The footer still names the CLI verb that prints the
+        // same text.
+        0
+    };
+    debug_assert!(
+        help_height == 0 || inner.height.saturating_sub(help_height + FOOTER) >= TABLE_MIN,
+        "the help must never squeeze the table below a usable size"
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(help_height),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     // One table, plus the Hooks box. The old System services panel is gone: it
@@ -750,7 +903,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     } else {
         render_table(frame, chunks[0], &snapshot, state);
     }
-    render_footer(frame, chunks[1], state);
+    if help_height > 0 {
+        render_atc_help(frame, chunks[1], &atc_help);
+    }
+    // The hint follows the SELECTION, not merely "an ATC exists somewhere":
+    // advertising a mode switch while the cursor sits on the bridge promises a
+    // menu entry that `Action::for_kind_in_mode` will not offer.
+    let atc_selected = snapshot.rows.get(state.selected).map(|r| r.kind) == Some(DaemonKind::Atc);
+    render_footer(
+        frame,
+        chunks[2],
+        state,
+        snapshot.atc.as_ref().filter(|_| atc_selected),
+    );
     // Overlays paint last so they float above the table.
     if state.error_open.is_some() {
         render_error_view(frame, inner, state);
@@ -765,7 +930,9 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
         return;
     };
     let entries = menu.entries(state.has_error_for(menu.kind));
-    let width = 30_u16.min(area.width.saturating_sub(2));
+    // Wide enough for the longest label ("switch to full mode"), which the old
+    // 30-column popup clipped.
+    let width = 34_u16.min(area.width.saturating_sub(2));
     let height = u16::try_from(entries.len()).unwrap_or(3) + 3;
     let popup = centered(area, width, height.min(area.height));
     frame.render_widget(ratatui::widgets::Clear, popup);
@@ -789,7 +956,9 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     let mut lines: Vec<Line> = Vec::with_capacity(entries.len() + 1);
     for (i, entry) in entries.iter().enumerate() {
         let label = match entry {
-            MenuEntry::Act(a) => a.id(),
+            // `label`, not `id`: a bare verb id cannot say which mode a
+            // switch switches to.
+            MenuEntry::Act(a) => a.label(),
             MenuEntry::OpenMissionControl => "open mission control",
             MenuEntry::ViewError => "view last error",
         };
@@ -1166,7 +1335,96 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+/// The supervisor-mode help for the ATC row, or empty when the cursor is
+/// elsewhere / the mode is unknown.
+///
+/// The lines come from [`crate::fleet::atc::mode_help`] — the same text
+/// `ainb fleet atc mode` prints — so the screen and the CLI can never describe
+/// the modes differently.
+fn atc_help_lines(snapshot: &Snapshot, selected: usize) -> Vec<String> {
+    if snapshot.rows.get(selected).map(|r| r.kind) != Some(DaemonKind::Atc) {
+        return Vec::new();
+    }
+    let Some(atc) = snapshot.atc.as_ref() else {
+        return Vec::new();
+    };
+    atc.help.clone()
+}
+
+/// Wrap help lines to `width`, preserving each line's leading indent.
+///
+/// Done here rather than with `Paragraph::wrap` because the caller has to budget
+/// the block's height, and only the WRAPPED count is the real height.
+///
+/// The indent is load-bearing: `mode_help` indents its "limits:" lines so they
+/// read as belonging to the mode above them. An earlier version seeded the first
+/// output line from the first WORD, which silently dropped that indent and
+/// detached every limits line from its mode.
+///
+/// ponytail: a single word longer than `width` is emitted over-long rather than
+/// hard-split. Nothing in `mode_help` comes close, and an over-long line is
+/// clipped horizontally without changing the line COUNT, so the height budget
+/// stays correct. Hard-split if that ever stops being true.
+fn wrap_help(lines: &[String], width: u16) -> Vec<String> {
+    let width = usize::from(width).max(20);
+    let mut out = Vec::new();
+    for line in lines {
+        if line.chars().count() <= width {
+            out.push(line.clone());
+            continue;
+        }
+        let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        // Continuations sit two columns inside the original indent, so a wrapped
+        // line is visibly a continuation and not a new bullet.
+        let hang = format!("{lead}  ");
+        let mut current = lead.clone();
+        let mut has_word = false;
+        for word in line.split_whitespace() {
+            let prospective = if has_word {
+                current.chars().count() + 1 + word.chars().count()
+            } else {
+                current.chars().count() + word.chars().count()
+            };
+            if prospective > width && has_word {
+                out.push(std::mem::take(&mut current));
+                current.push_str(&hang);
+                has_word = false;
+            }
+            if has_word {
+                current.push(' ');
+            }
+            current.push_str(word);
+            has_word = true;
+        }
+        if has_word {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Paint the mode help. The first line (the current owner) is emphasised: it is
+/// the fact the rest of the block is context for.
+fn render_atc_help(frame: &mut Frame, area: Rect, lines: &[String]) {
+    let painted: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let style = if i == 0 {
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_GRAY)
+            };
+            Line::from(Span::styled(text.clone(), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(painted).style(Style::default().bg(PANEL_BG)),
+        area,
+    );
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Option<&AtcModeView>) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
     let spans = if state.error_open.is_some() {
@@ -1184,13 +1442,20 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
     } else {
+        let enter_hint = match atc {
+            Some(a) => format!(
+                " start / restart / stop / switch to {} mode  ",
+                a.mode.other().id()
+            ),
+            None => " start / restart / stop  ".to_string(),
+        };
         vec![
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
             // Not "start / restart / stop": the entries a row offers depend on
             // its state, so naming three of them in a fixed list goes stale the
-            // moment a row offers a fourth.
+            // moment a row offers a fourth — which the mode switch is.
             Span::styled(" actions  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
@@ -1274,6 +1539,7 @@ mod tests {
     /// This is the H-D2 test seam — render is decoupled from any live collect.
     fn seeded_state(rows: Vec<DaemonStatus>) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
@@ -1282,6 +1548,314 @@ mod tests {
             shared: Some(shared),
             ..DaemonsState::default()
         }
+    }
+
+    fn atc_view(mode: SupervisorMode, provider: &str) -> AtcModeView {
+        AtcModeView {
+            name: "tower".to_string(),
+            mode,
+            provider: provider.to_string(),
+            help: crate::fleet::atc::mode_help(mode, provider),
+        }
+    }
+
+    /// A seeded state whose ATC supervisor mode is known — the shape the mode
+    /// toggle and the inline help both read.
+    fn seeded_state_with_atc(rows: Vec<DaemonStatus>, mode: SupervisorMode) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(atc_view(mode, "claude")),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    /// A seeded state carrying BOTH the ATC mode and hook health, for the
+    /// layout-budget tests.
+    fn seeded_state_with_atc_and_hooks(
+        rows: Vec<DaemonStatus>,
+        mode: SupervisorMode,
+    ) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(atc_view(mode, "claude")),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: Some(hook_health()),
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    fn atc_row() -> DaemonStatus {
+        status(DaemonKind::Atc, DaemonState::Running, true, Some("tower"))
+    }
+
+    // ── Supervisor mode toggle ──────────────────────────────────────────────
+
+    #[test]
+    fn the_atc_menu_offers_only_the_mode_the_fleet_is_not_in() {
+        // Offering both would put "switch to the mode you are already in" on
+        // screen, which reads as a state the fleet might not be in.
+        for (mode, expected, forbidden) in [
+            (SupervisorMode::Full, Action::ModeLite, Action::ModeFull),
+            (SupervisorMode::Lite, Action::ModeFull, Action::ModeLite),
+        ] {
+            let mut state = seeded_state_with_atc(vec![atc_row()], mode);
+            state.open_menu();
+            let menu = state.menu.as_ref().expect("menu opens on the ATC row");
+            let entries = menu.entries(false);
+            assert!(
+                entries.contains(&MenuEntry::Act(expected)),
+                "{} mode must offer {expected:?}: {entries:?}",
+                mode.id()
+            );
+            assert!(
+                !entries.contains(&MenuEntry::Act(forbidden)),
+                "{} mode must not offer {forbidden:?}",
+                mode.id()
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_atc_row_never_offers_a_mode_switch() {
+        // Mode is an ATC supervisor concept; a bridge has no modes to switch.
+        let mut state = seeded_state_with_atc(
+            vec![status(DaemonKind::Bridge, DaemonState::Running, true, None)],
+            SupervisorMode::Full,
+        );
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "bridge offered a mode switch: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_mode_switch_is_offered_when_the_mode_is_unknown() {
+        // Several instances, or an unreadable meta: nothing here could say WHICH
+        // fleet a switch would act on, and a guessed one is worse than none.
+        let mut state = seeded_state(vec![atc_row()]);
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "offered a switch with no known mode: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_open_menu_does_not_reshuffle_when_the_collector_republishes() {
+        // The entry list is captured at open. If it re-read the mode per frame,
+        // a collect landing mid-keystroke would move the cursor's meaning — you
+        // press "switch to lite" and get "stop".
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let before = state.menu.as_ref().unwrap().entries(false);
+
+        // The collector publishes a switched mode underneath the open menu.
+        {
+            let shared = state.shared();
+            let mut guard = shared.lock().unwrap();
+            guard.atc = Some(atc_view(SupervisorMode::Lite, "claude"));
+        }
+        let after = state.menu.as_ref().unwrap().entries(false);
+        assert_eq!(before, after, "the open menu must not reshuffle");
+    }
+
+    #[test]
+    fn the_menu_labels_say_which_mode_they_switch_to() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let text = render_to_string(&mut state, 100, 24);
+        assert!(
+            text.contains("switch to lite mode"),
+            "a bare verb id would not say what it does: {text}"
+        );
+    }
+
+    // ── Inline mode help ────────────────────────────────────────────────────
+
+    #[test]
+    fn selecting_the_atc_row_explains_both_modes_and_names_the_owner() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 120, 30);
+        assert!(text.contains("full heartbeat"), "current owner: {text}");
+        assert!(text.contains("no LLM"), "lite behaviour: {text}");
+        assert!(text.contains("never answers an ASK"), "lite limits: {text}");
+        assert!(text.contains("spends tokens"), "full limits: {text}");
+    }
+
+    #[test]
+    fn the_help_comes_from_the_same_text_the_cli_prints() {
+        // One source for both surfaces: a screen and a CLI that describe the
+        // modes differently is how an operator switches the wrong way.
+        let snapshot = Snapshot {
+            atc: Some(atc_view(SupervisorMode::Lite, "codex")),
+            rows: vec![atc_row()],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        };
+        assert_eq!(
+            atc_help_lines(&snapshot, 0),
+            crate::fleet::atc::mode_help(SupervisorMode::Lite, "codex")
+        );
+    }
+
+    #[test]
+    fn the_help_is_absent_on_every_other_row() {
+        let snapshot = Snapshot {
+            atc: Some(atc_view(SupervisorMode::Full, "claude")),
+            rows: vec![
+                status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                atc_row(),
+            ],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+        };
+        assert!(atc_help_lines(&snapshot, 0).is_empty(), "bridge row");
+        assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
+    }
+
+    #[test]
+    fn the_mode_switch_is_offered_only_on_a_provisioned_atc_row() {
+        // The footer no longer names individual verbs (it says "actions", since
+        // the entries a row offers depend on its state), so the property lives
+        // in the MENU: the switch appears on a provisioned ATC row and nowhere
+        // else — never on another daemon, never on an unprovisioned ATC.
+        let bridge = status(DaemonKind::Bridge, DaemonState::Running, true, None);
+        let mut state = seeded_state_with_atc(vec![atc_row(), bridge], SupervisorMode::Full);
+
+        state.open_menu();
+        let on_atc = state.menu.as_ref().unwrap().entries(false);
+        assert!(
+            on_atc.contains(&MenuEntry::Act(Action::ModeLite)),
+            "a provisioned full ATC row must offer the lite switch: {on_atc:?}"
+        );
+
+        state.close_all_overlays();
+        state.move_selection(1);
+        state.open_menu();
+        let on_bridge = state.menu.as_ref().unwrap().entries(false);
+        for verb in [Action::ModeLite, Action::ModeFull] {
+            assert!(
+                !on_bridge.contains(&MenuEntry::Act(verb)),
+                "the bridge row must not offer {verb:?}: {on_bridge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_wraps_instead_of_clipping_the_limits_it_exists_to_state() {
+        // On 80 columns the longest help line was cut at "…ambiguo", losing the
+        // limit on the screen whose purpose is to inform a switch.
+        let lines = crate::fleet::atc::mode_help(SupervisorMode::Full, "claude");
+        let wrapped = wrap_help(&lines, 78);
+        assert!(
+            wrapped.iter().all(|l| l.chars().count() <= 78),
+            "a wrapped line still overflows: {wrapped:?}"
+        );
+        // Wrapping inserts a continuation indent, so compare on collapsed
+        // whitespace — the phrase surviving across a line break is the point.
+        let joined = wrapped.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        for phrase in [
+            "never answers an ASK",
+            "no fleet coordination",
+            "spends tokens",
+        ] {
+            assert!(
+                joined.contains(phrase),
+                "wrapping lost {phrase:?}: {joined}"
+            );
+        }
+        assert!(
+            wrapped.len() >= lines.len(),
+            "wrapping cannot shrink the block"
+        );
+    }
+
+    #[test]
+    fn the_help_renders_on_a_standard_eighty_by_twentyfour_terminal() {
+        // The regression an over-cautious budget introduced: suppressing the
+        // help whenever it would cost the hooks panel meant it needed a 29-row
+        // terminal, so the screen whose purpose is to inform a mode switch
+        // showed nothing at the commonest size. Hiding the thing is not a fix
+        // for hiding the wrong thing.
+        let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 80, 24);
+        assert!(
+            text.contains("never answers an ASK"),
+            "the mode help must render at 80x24: {text}"
+        );
+    }
+
+    #[test]
+    fn the_help_never_squeezes_the_table_itself() {
+        // The one thing that outranks both help and hooks: the rows ARE the
+        // screen.
+        for height in 8..40_u16 {
+            let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            let text = render_to_string(&mut state, 100, height);
+            assert!(
+                text.contains("ATC"),
+                "height {height}: the daemon row was squeezed out"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hooks_panel_never_disappears_without_saying_so() {
+        // A sweep rather than one band: the budget is a size calculation, so the
+        // property is the invariant, not any single terminal size.
+        for height in 8..40_u16 {
+            let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            // Selection defaults to the ATC row (index 0) in both, so the only
+            // difference is whether the help is eligible at this height.
+            let with_atc_selected = render_to_string(&mut bare, 100, height);
+
+            let mut other = seeded_state_with_atc_and_hooks(
+                vec![
+                    atc_row(),
+                    status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                ],
+                SupervisorMode::Full,
+            );
+            other.move_selection(1); // off the ATC row: no help
+            let without_help = render_to_string(&mut other, 100, height);
+
+            // The panel may yield to the help. What it may never do is vanish
+            // in silence, which was the actual complaint.
+            if without_help.contains("Hooks") && !with_atc_selected.contains("Hooks") {
+                assert!(
+                    with_atc_selected.contains("hook health hidden"),
+                    "height {height}: the hooks panel vanished with nothing to say so"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_terminal_drops_the_help_rather_than_the_table() {
+        // The rows are the point of the screen; the help is context. On a
+        // terminal too short for both, the help goes.
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 100, 10);
+        assert!(text.contains("ATC"), "the row must survive: {text}");
+        assert!(
+            !text.contains("never answers an ASK"),
+            "the help must not squeeze the table: {text}"
+        );
     }
 
     fn hook_health() -> HookHealth {
@@ -1329,6 +1903,7 @@ mod tests {
 
     fn seeded_state_with_hook(rows: Vec<DaemonStatus>, hook_health: HookHealth) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),

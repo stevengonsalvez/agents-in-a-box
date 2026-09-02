@@ -21,10 +21,16 @@ allowed-tools:
 
 # ainb fleet:daemon
 
-> **DEPRECATED. Use [`/ainb-fleet:atc`](../atc/SKILL.md).** `ainb fleet daemon`
-> now REFUSES to start while a live ATC supervises the fleet, because both send
-> the same auto-`continue` to the same pane and each de-dups only inside its own
-> process, so the pane gets it twice. Pass `--force-race` to run both anyway.
+> **DEPRECATED. Use [`/ainb-fleet:atc`](../atc/SKILL.md) in `lite` mode.**
+> `ainb fleet atc mode <name> --set lite` gives you this exact loop — the same
+> 5-second scan, the same auto-`continue` on the same known transient errors —
+> owned by the ATC supervisor, inside its per-session retry cap and its safety
+> ledger, and structurally unable to run beside the LLM heartbeat.
+>
+> This standalone daemon REFUSES to start while ATC owns the fleet in EITHER
+> mode, because both send the same auto-`continue` to the same pane and each
+> de-dups only inside its own process, so the pane gets it twice. Pass
+> `--force-race` to run both anyway.
 >
 > The difference that matters is the **retry cap**: ATC gives up on a session
 > after a bounded number of attempts and escalates to you. This daemon has no

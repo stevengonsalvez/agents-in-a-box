@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::fleet::atc::supervisor::{DEFAULT_PROVIDER, SupervisorMode};
+
 /// Default heartbeat cadence in minutes.
 pub const DEFAULT_HEARTBEAT_INTERVAL_MIN: u32 = 15;
 
@@ -28,6 +30,29 @@ pub struct AtcMeta {
 
     /// Minutes of fleet quiet before the heartbeat downgrades to a cheap idle ping.
     pub idle_pause_min: u32,
+
+    /// Which supervisor owns this fleet. Exactly one is active at a time; see
+    /// [`crate::fleet::atc::supervisor`].
+    ///
+    /// `#[serde(default)]` is load-bearing for compatibility: an instance
+    /// provisioned before modes existed has no such key, and it was a full LLM
+    /// ATC. [`SupervisorMode::default`] is `Full`, so reading an old meta.json
+    /// keeps that instance behaving exactly as it did.
+    #[serde(default)]
+    pub mode: SupervisorMode,
+
+    /// The provider driving the full-mode brain. Ignored in lite mode, which
+    /// runs no brain — but retained across a switch so toggling back does not
+    /// silently reset the operator's choice.
+    ///
+    /// Defaults to `claude` for the same compatibility reason as `mode`.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+}
+
+/// Serde default for [`AtcMeta::provider`] — the pre-existing behaviour.
+fn default_provider() -> String {
+    DEFAULT_PROVIDER.to_string()
 }
 
 impl AtcMeta {
@@ -39,7 +64,15 @@ impl AtcMeta {
             heartbeat_enabled: true,
             heartbeat_interval_min: DEFAULT_HEARTBEAT_INTERVAL_MIN,
             idle_pause_min: DEFAULT_IDLE_PAUSE_MIN,
+            mode: SupervisorMode::default(),
+            provider: default_provider(),
         }
+    }
+
+    /// The controller currently permitted to send actions for this instance.
+    #[must_use]
+    pub const fn owner(&self) -> crate::fleet::atc::supervisor::Controller {
+        self.mode.owner()
     }
 
     /// The tmux session name ATC runs under (`ainb run --name <name>` →
@@ -83,6 +116,38 @@ mod tests {
         assert!(m.heartbeat_enabled);
         assert_eq!(m.heartbeat_interval_min, 15);
         assert_eq!(m.idle_pause_min, 60);
+        // A fresh instance is a full LLM ATC on Claude — the pre-existing
+        // behaviour, unchanged by the mode feature.
+        assert_eq!(m.mode, SupervisorMode::Full);
+        assert_eq!(m.provider, "claude");
+    }
+
+    #[test]
+    fn a_meta_written_before_modes_existed_reads_back_as_full_claude() {
+        // The compatibility contract. An on-disk meta.json from an older ainb
+        // has neither key; deserializing it must NOT silently downgrade a
+        // running LLM ATC to the no-LLM scanner.
+        let legacy = r#"{
+            "name": "tower",
+            "heartbeat_enabled": true,
+            "heartbeat_interval_min": 10,
+            "idle_pause_min": 45
+        }"#;
+        let m = AtcMeta::from_json(legacy).expect("legacy meta must still parse");
+        assert_eq!(m.mode, SupervisorMode::Full);
+        assert_eq!(m.provider, "claude");
+        assert_eq!(m.heartbeat_interval_min, 10, "existing knobs survive");
+    }
+
+    #[test]
+    fn mode_and_provider_persist_across_a_write_read_cycle() {
+        let mut m = AtcMeta::new("tower");
+        m.mode = SupervisorMode::Lite;
+        m.provider = "codex".into();
+        let back = AtcMeta::from_json(&m.to_json().unwrap()).unwrap();
+        assert_eq!(back.mode, SupervisorMode::Lite);
+        assert_eq!(back.provider, "codex");
+        assert_eq!(back.owner(), SupervisorMode::Lite.owner());
     }
 
     #[test]
@@ -92,6 +157,8 @@ mod tests {
             heartbeat_enabled: false,
             heartbeat_interval_min: 5,
             idle_pause_min: 30,
+            mode: SupervisorMode::Lite,
+            provider: "codex".into(),
         };
         let json = m.to_json().expect("serialize");
         let back = AtcMeta::from_json(&json).expect("deserialize");
@@ -123,6 +190,7 @@ mod tests {
             heartbeat_enabled: true,
             heartbeat_interval_min: 0,
             idle_pause_min: 60,
+            ..AtcMeta::new("z")
         };
         assert_eq!(m.interval_secs(), 60);
     }

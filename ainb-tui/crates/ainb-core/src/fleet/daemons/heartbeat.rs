@@ -168,14 +168,29 @@ pub struct DaemonHeartbeat {
 }
 
 impl DaemonHeartbeat {
-    /// A fresh heartbeat for the current process at startup: `started_at` and
-    /// `last_heartbeat_at` both `now`, nothing relayed yet, not connected.
+    /// A fresh heartbeat for the current process at startup.
+    ///
+    /// `started_at` is the PROCESS's start instant, not the moment this struct
+    /// was built. That distinction is load-bearing: [`pid_identity`] compares
+    /// this field against the live process's start time to tell the original
+    /// daemon from a recycled pid, and a daemon that does work before writing
+    /// its first heartbeat would otherwise fail its own identity check forever.
+    ///
+    /// `ainb fleet daemon` is exactly that shape — it probes ATC (which shells
+    /// `tmux has-session`) before its first write — so with a wall-clock stamp,
+    /// a slow startup past [`PID_IDENTITY_TOLERANCE_MS`] permanently classified
+    /// a perfectly healthy daemon as `Recycled`, making it unstoppable by its
+    /// own `stop` verb.
+    ///
+    /// Falls back to `now` when the process table cannot be read, which is the
+    /// pre-existing behaviour and no worse than it was.
     #[must_use]
     pub fn starting() -> Self {
         let now = now_ms();
+        let pid = std::process::id();
         Self {
-            pid: std::process::id(),
-            started_at: now,
+            pid,
+            started_at: process_start_ms(pid).unwrap_or(now),
             last_heartbeat_at: now,
             ainb_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             last_activity_at: None,
@@ -523,11 +538,53 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A daemon must pass its OWN identity check no matter how long it spends
+    /// starting up.
+    ///
+    /// `started_at` used to be the moment the struct was built, while
+    /// `pid_identity` compares it against the PROCESS start. `ainb fleet daemon`
+    /// probes ATC (shelling `tmux has-session`) before its first write, so a
+    /// slow start past the 5s tolerance made a healthy daemon classify itself as
+    /// `Recycled` — permanently unstoppable by its own `stop` verb, and with the
+    /// new no-double-start rule, permanently un-restartable too.
+    #[test]
+    fn a_fresh_heartbeat_passes_its_own_identity_check() {
+        let hb = DaemonHeartbeat::starting();
+        assert_eq!(hb.pid, std::process::id());
+        assert_eq!(
+            pid_identity(hb.pid, hb.started_at),
+            PidCheck::Matched,
+            "a daemon's own fresh heartbeat must identify as itself"
+        );
+    }
+
+    /// The property the fix turns on: the stamp tracks the process, so it does
+    /// not drift as the daemon does startup work before its first write.
+    #[test]
+    fn started_at_is_the_process_start_not_the_call_time() {
+        let pid = std::process::id();
+        let Some(actual) = process_start_ms(pid) else {
+            return; // process table unreadable on this platform; nothing to assert
+        };
+        let hb = DaemonHeartbeat::starting();
+        assert_eq!(
+            hb.started_at, actual,
+            "started_at must be the process start instant"
+        );
+    }
+
     #[test]
     fn starting_stamps_pid_and_clocks() {
         let hb = DaemonHeartbeat::starting();
         assert_eq!(hb.pid, std::process::id());
-        assert_eq!(hb.started_at, hb.last_heartbeat_at);
+        // NOT equality. This used to assert `started_at == last_heartbeat_at`,
+        // which encoded the very bug that made a slow-starting daemon fail its
+        // own identity check: `started_at` is the PROCESS start, so it precedes
+        // the first beat by however long startup took.
+        assert!(
+            hb.started_at <= hb.last_heartbeat_at,
+            "the process cannot have started after its first beat"
+        );
         assert_eq!(hb.ainb_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert!(hb.last_activity_at.is_none());
         assert!(!hb.connected);

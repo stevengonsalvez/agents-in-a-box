@@ -1,6 +1,6 @@
 //! Built-in `claude` provider — Anthropic Claude Code CLI.
 
-use super::Provider;
+use super::{AtcControl, Provider};
 
 #[derive(Debug, Default)]
 pub struct ClaudeProvider;
@@ -23,5 +23,11 @@ impl Provider for ClaudeProvider {
     }
     fn install_docs_url(&self) -> &'static str {
         "https://docs.anthropic.com/en/docs/claude-code"
+    }
+    /// The original — and default — ATC full-mode brain. `ainb run --tool claude`
+    /// gives a resident tmux session, `fleet send` injects the heartbeat into it,
+    /// and Claude Code reads `CLAUDE.md` out of the instance dir.
+    fn atc_control(&self) -> AtcControl {
+        AtcControl::supported("CLAUDE.md")
     }
 }
