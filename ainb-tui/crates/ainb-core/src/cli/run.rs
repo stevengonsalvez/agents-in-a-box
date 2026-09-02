@@ -431,17 +431,25 @@ fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 /// Parse a `--remote-repo` value into the source and the host/owner/repo
 /// components `RemoteRepoManager` keys its cache path on.
 ///
-/// Parses with `from_input` rather than smart-parse `parse_with` so an
-/// `owner/repo` value cannot be captured by a directory of that name under the
-/// cwd, then REJECTS anything that did not classify as a remote. Both parsers
-/// have a `LocalPath` fallback that swallows unrecognised input, and a local
-/// path is not something this flag can clone: `to_clone_url` hands the raw
-/// string to `git clone`, so a value beginning with `-` would be read by git as
-/// an option rather than a repository. Local checkouts belong on `--repo`.
+/// Reads a bare `owner/repo` as a GitHub shorthand first (see
+/// [`github_shorthand`]), falls back to `from_input` for URL forms, and then
+/// REJECTS anything that did not classify as a remote. `from_input` is used
+/// rather than smart-parse `parse_with` so an `owner/repo` value cannot be
+/// captured by a directory of that name under the cwd; both parsers have a
+/// `LocalPath` fallback that swallows unrecognised input, and a local path is
+/// not something this flag can clone: `to_clone_url` hands the raw string to
+/// `git clone`, so a value beginning with `-` would be read by git as an option
+/// rather than a repository. Local checkouts belong on `--repo`.
 fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
-    #[allow(deprecated)]
-    let source = crate::git::RepoSource::from_input(remote)
-        .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?;
+    let source = match github_shorthand(remote) {
+        Some(source) => source,
+        None =>
+        {
+            #[allow(deprecated)]
+            crate::git::RepoSource::from_input(remote)
+                .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?
+        }
+    };
     anyhow::ensure!(
         source.is_remote(),
         "--remote-repo needs a remote: `owner/repo`, an https:// URL, or git@host:owner/repo. \
@@ -451,6 +459,32 @@ fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git
         .parse_components()
         .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
     Ok((source, parsed))
+}
+
+/// Read `owner/repo` as a GitHub shorthand, which is what `--remote-repo`
+/// declares its bare values to be.
+///
+/// `from_input`'s own shorthand branch rejects a `.` anywhere in the value, so
+/// `mrdoob/three.js` fell through to its no-protocol-URL heuristic and became
+/// `https://mrdoob/three.js`, which has no owner segment to parse. The inline
+/// clone this replaced wrapped every bare value into
+/// `https://github.com/<value>.git`, so dotted repo names used to work.
+///
+/// Deliberately strict about what counts as a bare shorthand: a segment that
+/// carries a scheme, a host, a path, or a leading `-` is left to `from_input`,
+/// which classifies URLs, and to the `is_remote` gate, which rejects the rest.
+fn github_shorthand(remote: &str) -> Option<crate::git::RepoSource> {
+    let (owner, repo) = remote.split_once('/')?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let bare = |segment: &str| {
+        !segment.is_empty()
+            && !segment.contains(['/', '\\', ':', ' ', '@'])
+            && !segment.starts_with(['-', '.', '~'])
+    };
+    (bare(owner) && bare(repo)).then(|| crate::git::RepoSource::GithubShorthand {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
 }
 
 /// Clone (or fetch) a remote repository into AINB's shared clone cache.
@@ -466,8 +500,18 @@ fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     let (source, parsed) = parse_remote_repo(remote)?;
     let manager = crate::git::RemoteRepoManager::new()?;
 
-    // Blocking git under `#[tokio::main]`: `ainb run` resolves its repo before
-    // anything else is on the runtime, so there is no task to starve.
+    // `clone_repo` reports through `info!`, which a plain `ainb run` does not
+    // print, so say something before a transfer that can take minutes. Phrased
+    // for both outcomes rather than probing `is_cached` for a better verb: the
+    // probe would race a concurrent publish and `clone_repo` re-checks anyway.
+    println!("Preparing {}...", source.to_clone_url());
+
+    // Blocking git under `#[tokio::main]`: `ainb run` resolves its repo as the
+    // second statement of `execute`, before anything is spawned onto the
+    // runtime, so there is no task to starve. This is narrower than the
+    // `Command::output().await` it replaced — the TUI's own call sites wrap the
+    // same manager in `spawn_blocking` because they run inside a live event
+    // loop. Anything that starts work before repo resolution must do the same.
     manager.clone_repo(&source, &parsed).map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -724,6 +768,7 @@ mod tests {
 
         for remote in [
             "stevengonsalvez/agents-in-a-box",
+            "stevengonsalvez/agents-in-a-box.git",
             "https://github.com/stevengonsalvez/agents-in-a-box.git",
         ] {
             let (_source, parsed) = parse_remote_repo(remote).expect("parse");
@@ -731,6 +776,33 @@ mod tests {
                 manager.get_cache_path(&parsed),
                 tmp.path().join("github.com").join("stevengonsalvez").join("agents-in-a-box"),
                 "{remote} must resolve to the host/owner/repo cache path the TUI uses"
+            );
+        }
+    }
+
+    /// A repo whose NAME contains a dot is an ordinary GitHub shorthand.
+    ///
+    /// `from_input`'s shorthand branch rejects a `.` anywhere in the value, so
+    /// `mrdoob/three.js` became `https://mrdoob/three.js` and failed to parse.
+    /// The inline clone this replaced wrapped bare values into
+    /// `https://github.com/<value>.git`, so these used to clone fine.
+    #[test]
+    fn remote_repo_accepts_shorthand_with_a_dotted_repo_name() {
+        for (remote, owner, repo) in [
+            ("mrdoob/three.js", "mrdoob", "three.js"),
+            ("chartjs/Chart.js", "chartjs", "Chart.js"),
+            ("socketio/socket.io", "socketio", "socket.io"),
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote)
+                .unwrap_or_else(|e| panic!("{remote} must parse as a shorthand: {e}"));
+            assert_eq!(
+                (
+                    parsed.host.as_str(),
+                    parsed.owner.as_str(),
+                    parsed.repo_name.as_str()
+                ),
+                ("github.com", owner, repo),
+                "{remote}"
             );
         }
     }
