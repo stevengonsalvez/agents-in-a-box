@@ -301,24 +301,26 @@ impl AcpPermission {
 
 /// The ACP permission a row's payload carries, or `None` for any other payload
 /// (a hook ASK, an ERR, an escalation). A payload claiming the kind without a
-/// session key, a fingerprint or any option is not routable and is `None` too.
+/// session key, a fingerprint or any option is not routable and is `None` too,
+/// and so is one with a malformed option: dropping just that option would
+/// shift the 1-based digits against the full list a surface renders.
 fn acp_permission_from_payload(payload: &str) -> Option<AcpPermission> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("acp_permission") {
         return None;
     }
     let text = |key: &str| v.get(key)?.as_str().filter(|s| !s.is_empty()).map(str::to_string);
-    let options: Vec<AcpOption> = v
+    let options = v
         .get("options")?
         .as_array()?
         .iter()
-        .filter_map(|o| {
+        .map(|o| {
             Some(AcpOption {
                 option_id: o.get("optionId")?.as_str()?.to_string(),
                 name: o.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
             })
         })
-        .collect();
+        .collect::<Option<Vec<AcpOption>>>()?;
     (!options.is_empty()).then_some(AcpPermission {
         session_key: text("sessionKey")?,
         fingerprint: text("requestFingerprint")?,
@@ -1046,6 +1048,11 @@ mod tests {
             ),
             None,
             "no options, nothing to choose"
+        );
+        assert_eq!(
+            acp_permission_from_payload(&ACP_PAYLOAD.replace(r#""optionId":"allow-once","#, "")),
+            None,
+            "a malformed option makes the whole row unroutable, never a shifted digit"
         );
     }
 
