@@ -233,7 +233,7 @@ fn probe_atc_lite(
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::supervisor::{SupervisorMode, lite_heartbeat_id};
-    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, is_pid_alive};
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
 
     let kind = DaemonKind::Atc;
     let name = meta.name.clone();
@@ -259,7 +259,9 @@ fn probe_atc_lite(
             ..DaemonStatus::running(kind)
         };
     };
-    if !is_pid_alive(hb.pid) {
+    // Identity, not bare liveness: a recycled pid would report a crashed scanner
+    // as running, which is the one state an unattended lite fleet must not fake.
+    if pid_identity(hb.pid, hb.started_at) != PidCheck::Matched {
         return DaemonStatus {
             kind,
             state: DaemonState::Stopped,
@@ -875,6 +877,18 @@ fn hangar_daemon_census() -> usize {
         .unwrap_or(0)
 }
 
+/// Is a lite scanner provably running for `name`?
+///
+/// Identity, not bare liveness: a recycled pid is a tombstone from a crashed
+/// scanner, and counting it as running would let a dead lite instance claim the
+/// row from a healthy full one.
+fn lite_scanner_is_live(name: &str) -> bool {
+    use crate::fleet::atc::supervisor::lite_heartbeat_id;
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+    DaemonHeartbeat::read(&lite_heartbeat_id(name))
+        .is_some_and(|hb| pid_identity(hb.pid, hb.started_at) == PidCheck::Matched)
+}
+
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
     probe_atc_with(home, now_ms, &crate::tmux::session_alive)
 }
@@ -905,6 +919,16 @@ pub(crate) fn probe_atc_with(
     // no brain session, a resident scan loop instead. Probing it with the
     // full-mode signals (heartbeat_enabled, tmux session liveness) would report
     // a perfectly healthy lite fleet as stopped-or-degraded forever.
+    //
+    // Selection matters as much as the probe. Returning the FIRST lite instance
+    // in directory order let a months-dead `alpha` permanently hide a healthy,
+    // actively-beating `tower` — the row would sit on "no scanner is running"
+    // while the real supervisor was fine. So a lite instance only wins the row
+    // when it is genuinely the liveliest thing here: a RUNNING scanner beats
+    // everything, and a merely-provisioned one is the fallback taken only when
+    // no full instance has a usable heartbeat either.
+    let mut lite_running: Option<(AtcPaths, AtcMeta)> = None;
+    let mut lite_idle: Option<(AtcPaths, AtcMeta)> = None;
     for name in &names {
         let p = AtcPaths::under_root(&atc_root, name);
         let Some(meta) =
@@ -912,9 +936,19 @@ pub(crate) fn probe_atc_with(
         else {
             continue;
         };
-        if meta.mode == SupervisorMode::Lite {
-            return probe_atc_lite(&p, &meta, now_ms);
+        if meta.mode != SupervisorMode::Lite {
+            continue;
         }
+        if lite_scanner_is_live(&meta.name) {
+            lite_running = Some((p, meta));
+            break;
+        }
+        if lite_idle.is_none() {
+            lite_idle = Some((p, meta));
+        }
+    }
+    if let Some((p, meta)) = lite_running {
+        return probe_atc_lite(&p, &meta, now_ms);
     }
 
     // Pick the most-recently-beating instance as the representative row, and
@@ -959,25 +993,32 @@ pub(crate) fn probe_atc_with(
         }
     }
 
+    let fall_back_to_idle_lite = |reason_if_none: DaemonStatus| -> DaemonStatus {
+        match &lite_idle {
+            Some((p, meta)) => probe_atc_lite(p, meta, now_ms),
+            None => reason_if_none,
+        }
+    };
+
     let Some((name, hbs, interval_min, provider)) = best else {
         // No enabled instance produced a usable heartbeat. If NONE of the
         // provisioned instances are even enabled, the daemon is configured off.
         if enabled_count == 0 {
-            return DaemonStatus::stopped(
+            return fall_back_to_idle_lite(DaemonStatus::stopped(
                 kind,
                 format!(
                     "{} instance(s) provisioned, all heartbeat-disabled",
                     names.len()
                 ),
-            );
+            ));
         }
-        return DaemonStatus::stopped(
+        return fall_back_to_idle_lite(DaemonStatus::stopped(
             kind,
             format!(
                 "{} enabled instance(s), none have beaten yet",
                 enabled_count
             ),
-        );
+        ));
     };
 
     if hbs.last_heartbeat_ms == 0 {
