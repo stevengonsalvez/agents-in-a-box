@@ -46,7 +46,7 @@ Discovery run HGR-1 (before the env fix): attempt 1 failed `agent_error` in 16ms
 | 11 | `pr_url` not captured from a real `gh pr create` under stream-json; PR badge absent though PR #1 exists | capture | queued |
 | 12 | wizard `@` filter narrows the list but the cursor stays on `scratch`; Enter picks scratch | picker UX | queued |
 | 13 | daemon logs ERROR `Codex managed transport degraded` every ~16s forever when codex is simply not configured | log noise | queued (run uses `AINB_CODEX_MANAGED=0`) |
-| 14 | plugin showed "Hangar daemon offline" with the daemon alive and bound (14x `plugin/render exceeded its budget (2s)` burst first); never re-dialed | reconnect | queued |
+| 14 | plugin showed "Hangar daemon offline" with the daemon alive: the daemon idle-closed any connection with no REQUEST for 600s (built for request/response clients), but the TUI holds one long-lived subscribed push channel and sends nothing while the operator watches a run; the plugin read EOF and never re-dialed | reconnect | FIXED e3598584 (subscribed connections exempt from idle-close) 9f3a45d3 (plugin auto re-dial with backoff) |
 | 15 | CLI verbs write the store directly with no event, so a running TUI never learns of a CLI-created board/issue until restart | CLI/TUI seam | queued |
 | 16 | Boards card create/edit has no brief stage; a card-minted issue has an empty description | authoring gap | queued |
 | 17 | no TUI path creates a briefed issue WITHOUT push-dispatching it, so pipeline work cannot be authored end to end in the TUI | authoring gap | queued |
@@ -58,6 +58,7 @@ Discovery run HGR-1 (before the env fix): attempt 1 failed `agent_error` in 16ms
 | 23 | daemon stop while an interactive task runs: task finalized `failed/spawn_error` (recovery respawn collides with the surviving tmux session) and the session is NOT reaped | recovery | queued |
 | 24 | `attention/answer` reply swallowed by the TUI: no_target / ambiguous / delivery_failed / already_answered all rendered as silence while the agent stayed blocked | feedback | FIXED eeb221b9 e40b2eb3 |
 | 25 | C1 target resolution compared the hook's cwd to the session root for string equality; after the agent `cd`s into `api/` every answer is refused `no_target` | answer routing | FIXED 4178f216 |
+| 27 | third ASK from one session went unseen because the plugin was already in the FIND-14 offline state; the row stayed open, the board read `0 need you` | reconnect fallout | covered by 14 |
 | 26 | **operator's pick silently replaced by the default**: answers were typed as text + Enter into the AskUserQuestion picker, which ignores text, so Enter accepted option ① while the store recorded option ② | answer delivery | FIXED d195fa86 50c5ba9e (route by position, verify picker closed, never type an option) |
 
 Docs drift found: wizard rows Accept / Context / Priority / Due / Labels missing from `tui-keybindings.md`.
