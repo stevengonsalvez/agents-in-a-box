@@ -359,20 +359,27 @@ pub fn atc_target_name() -> Result<String> {
         .unwrap_or_else(|| "main".to_string()))
 }
 
-/// Instance directories with no `meta.json`: leftovers, not instances.
+/// Names with something on disk but no `meta.json`: leftovers, not instances.
 ///
 /// The only names `provision` and `remove-orphan` may act on. Acting on a
 /// PROVISIONED name would reset a live instance's config or unload a heartbeat
 /// that is doing its job, and on a host with several instances the
 /// alphabetically-first directory is very likely to be one of those.
+///
+/// Leftover DIRECTORIES and installed UNITS both count: deleting an instance
+/// dir does not remove its unit, and that unit keeps firing.
 fn unprovisioned_atc_names() -> Result<Vec<String>> {
     use crate::fleet::atc::paths::{list_instance_dirs_in, list_instance_names_in};
     let root = crate::fleet::plumbing::paths::ainb_home()?.join("atc");
     let provisioned = list_instance_names_in(&root);
-    Ok(list_instance_dirs_in(&root)
+    let mut names: Vec<String> = list_instance_dirs_in(&root)
         .into_iter()
+        .chain(crate::fleet::atc::timer::installed_instance_names())
         .filter(|name| !provisioned.contains(name))
-        .collect())
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 fn atc(action: Action) -> Result<String> {
