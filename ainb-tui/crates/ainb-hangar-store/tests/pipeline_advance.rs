@@ -36,9 +36,11 @@
 
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::idgen::IdGen;
-use ainb_hangar_store::Store;
 use ainb_hangar_core::ids::WorkspaceId;
-use ainb_hangar_store::service::pull::{ADVANCE_SQL, PullService, STAGES_REMAIN_SQL, current_gated_column};
+use ainb_hangar_store::Store;
+use ainb_hangar_store::service::pull::{
+    ADVANCE_SQL, PullService, STAGES_REMAIN_SQL, current_gated_column,
+};
 use sqlx::SqlitePool;
 
 const NOW_MS: i64 = 1_700_000_500_000;
@@ -626,7 +628,12 @@ async fn add_stage_task_gen(
 /// Run a MUTANT of [`STAGES_REMAIN_SQL`] with `guard` replaced by
 /// `replacement`, returning the mutant's verdict. Panics if `guard` is not
 /// found verbatim, so a reworded clause breaks the proof loudly.
-async fn stages_remain_mutant(pool: &SqlitePool, issue_id: &str, guard: &str, replacement: &str) -> bool {
+async fn stages_remain_mutant(
+    pool: &SqlitePool,
+    issue_id: &str,
+    guard: &str,
+    replacement: &str,
+) -> bool {
     assert!(
         STAGES_REMAIN_SQL.contains(guard),
         "mutation target not found verbatim in STAGES_REMAIN_SQL; the proof would test nothing:\n{guard}"
@@ -671,7 +678,13 @@ async fn mutation_proofs_for_the_current_stage_clauses() {
     add_stage_task(pool, "t-impl", "i-1", "done", "col-impl").await;
     assert!(PullService::stages_remain(pool, "i-1").await.unwrap());
     assert!(
-        !stages_remain_mutant(pool, "i-1", "n.id = cur.id AND NOT EXISTS", "0 AND NOT EXISTS").await,
+        !stages_remain_mutant(
+            pool,
+            "i-1",
+            "n.id = cur.id AND NOT EXISTS",
+            "0 AND NOT EXISTS"
+        )
+        .await,
         "without the current-column clause the unrun last stage reads as finished"
     );
 
@@ -700,7 +713,13 @@ async fn current_gated_column_names_the_cards_stage() {
         Some("col-impl")
     );
     add_card(pool, "i-backlog", Some("col-backlog")).await;
-    assert_eq!(current_gated_column(pool, &ws, "i-backlog").await.unwrap(), None);
+    assert_eq!(
+        current_gated_column(pool, &ws, "i-backlog").await.unwrap(),
+        None
+    );
     let other = WorkspaceId::from_str("ws-other").unwrap();
-    assert_eq!(current_gated_column(pool, &other, "i-impl").await.unwrap(), None);
+    assert_eq!(
+        current_gated_column(pool, &other, "i-impl").await.unwrap(),
+        None
+    );
 }
