@@ -1257,8 +1257,14 @@ mod tests {
         // `?`/`H` belong to the plugin on its own screen: reserving them off the
         // lagging per-frame capture flag stole the first keystrokes typed into
         // a plugin text field and then swallowed everything until Esc.
-        assert!(!is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE)));
-        assert!(!is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE)));
+        assert!(!is_host_reserved_key(&mk(
+            CtKey::Char('?'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_host_reserved_key(&mk(
+            CtKey::Char('H'),
+            KeyModifiers::NONE
+        )));
         // Esc is plugin-owned (overlay-panels redesign): the plugin pops
         // one internal level per press and publishes `ui.close_request`
         // at its root — see the doc on `is_host_reserved_key`.
