@@ -175,7 +175,19 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         if daemon_registered {
             // A prior daemon-down run may have installed a local timer; remove it
             // now that the daemon cron is the single active scheduler.
-            let _ = timer::teardown(&meta.name);
+            //
+            // Reported, not swallowed: the presence of this unit is what the
+            // ledger-handover predicate reads as "the local timer was the
+            // scheduler". A teardown that failed silently leaves it looking
+            // installed while the daemon owns the schedule, and a later switch
+            // to lite then skips the handover it needed.
+            if let Err(e) = timer::teardown(&meta.name) {
+                eprintln!(
+                    "warning: the daemon owns the heartbeat but the local timer unit could not \
+be removed ({e}); `ainb fleet atc repair {}` re-asserts a single scheduler",
+                    meta.name
+                );
+            }
         } else {
             timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
             // Pinning `current_exe()` used to guarantee the unit pointed at a

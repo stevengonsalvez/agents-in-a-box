@@ -198,6 +198,22 @@ its next action, but neither controller was started or stopped"
 ///
 /// Here, a failure is free: nothing is persisted and nothing is dismantled, so
 /// the `?` leaves the fleet as it was.
+/// The pure predicate behind [`prepare_handover`], split out so the test
+/// exercises the real rule rather than a copy of it.
+///
+/// The previous test mirrored the logic in a local closure, which passed just as
+/// happily with a condition deleted — coverage that asserts nothing.
+#[must_use]
+const fn handover_applies(
+    previous: SupervisorMode,
+    target: SupervisorMode,
+    local_timer_installed: bool,
+) -> bool {
+    matches!(target, SupervisorMode::Lite)
+        && matches!(previous, SupervisorMode::Full)
+        && !local_timer_installed
+}
+
 fn prepare_handover(
     meta: &AtcMeta,
     previous: SupervisorMode,
@@ -217,15 +233,18 @@ fn prepare_handover(
     //                           no daemon ledger to hand over, and its scanner
     //                           is ALREADY RUNNING — the seal would hit a live
     //                           fleet mid-budget.
-    //   heartbeat_enabled       with the heartbeat off nothing was scheduled at
-    //                           all, so nothing counted anywhere.
     //   no local timer          `setup` installs that unit ONLY when daemon
     //                           registration failed, so its absence is what says
     //                           the daemon was scheduling, and counting.
-    let daemon_owned = previous == SupervisorMode::Full
-        && meta.heartbeat_enabled
-        && !timer::is_installed(&meta.name);
-    if !daemon_owned {
+    //
+    // `meta.heartbeat_enabled` is deliberately NOT a condition, though it looks
+    // like one. It is a meta-local flag; the daemon's cron selects on its own
+    // `atc_instance.enabled` column and never reads meta. `setup --no-heartbeat`
+    // flips the flag WITHOUT unregistering, so a fleet the daemon is still
+    // scheduling and still counting reads as "nothing scheduled anywhere" — and
+    // skipping the arm there is exactly the fail-open the handover exists to
+    // close. Being wrong the other way merely seals budgets nobody was spending.
+    if !handover_applies(previous, target, timer::is_installed(&meta.name)) {
         return Ok(());
     }
     arm_daemon_handoff(&meta.name).with_context(|| {
@@ -302,9 +321,20 @@ it changes nothing today",
                 ));
             }
             match start_lite_supervisor(&meta.name) {
+                // `detach` only proves a fork succeeded. The child can still bail
+                // seconds later on the flock or a bad meta, so confirm it is
+                // actually up rather than reporting a start that did not happen.
                 Ok(()) => {
-                    out.lite_started = true;
-                    out.notes.push("lite scanner started".to_string());
+                    if lite_came_up(&meta.name) {
+                        out.lite_started = true;
+                        out.notes.push("lite scanner started".to_string());
+                    } else {
+                        out.notes.push(
+                            "lite scanner was launched but has not registered; check \
+`ainb fleet daemons` and the daemon log"
+                                .to_string(),
+                        );
+                    }
                 }
                 Err(e) => out.notes.push(format!("lite scanner not started: {e}")),
             }
@@ -326,6 +356,17 @@ that scanner, so it was not signalled. It sends nothing either way — the persi
 it down — but check `ps -p {pid}` if it lingers"
                 )),
             }
+            // Wait for the signalled scanner to actually go before touching the
+            // file it owns. `stop_lite_checked` only SIGTERMs; a scanner still
+            // inside `tick`'s awaits rewrites the whole HeartbeatState at the
+            // end of that tick, so a disarm racing it either loses the disarm or
+            // loses that tick's counts.
+            if let Some(pid) = out.lite_stopped_pid {
+                if let Err(e) = await_lite_exit(&meta.name) {
+                    tracing::warn!(pid, error = %e, "atc mode: lite scanner did not exit promptly");
+                }
+            }
+
             // Only NOW is it safe to drop a handover that was never consumed.
             // Doing it in the pre-flight cleared the flag while a scanner was
             // still ticking: a tick already past its `read_meta` still saw lite,
@@ -495,18 +536,44 @@ pub fn ensure_lite_running(name: &str) -> Result<()> {
 /// that then had no scanner at all.
 pub fn restart_lite(name: &str, stopped: Option<u32>) -> Result<()> {
     if stopped.is_some() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while live_lite_pid(name).is_some() {
-            if std::time::Instant::now() >= deadline {
-                bail!(
-                    "the previous lite scanner for ATC '{name}' did not exit within 10s of \
-SIGTERM; refusing to start a second one beside it"
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        await_lite_exit(name)?;
     }
     start_lite_supervisor(name)
+}
+
+/// Wait briefly for a just-detached scanner to register itself.
+///
+/// Bounded and short: this is a report-accuracy check, not a readiness gate, and
+/// the caller says "launched but not registered" rather than blocking a switch
+/// on a slow fork.
+fn lite_came_up(name: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if live_lite_pid(name).is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// Block until `name`'s lite scanner is gone, or fail after 10s.
+///
+/// A process does not die at the instant it is signalled. Every caller that
+/// SIGTERMs the scanner and then touches something it owns — its lock, its
+/// heartbeat-state file — has to wait for it to actually go first.
+fn await_lite_exit(name: &str) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while live_lite_pid(name).is_some() {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "the lite scanner for ATC '{name}' did not exit within 10s of SIGTERM; \
+it may still be holding its lock and its ledger"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// Stop the lite scanner for `name`, reporting what was actually established.
@@ -518,9 +585,11 @@ pub(crate) fn stop_lite_checked(name: &str) -> crate::cli::daemon::StopOutcome {
     crate::cli::daemon::stop_by_heartbeat_pid_checked(&lite_heartbeat_id(name))
 }
 
-/// Start the lite scanner detached. Idempotent-ish: a live recorded pid means one
-/// is already running, and a second would be the double-controller this whole
-/// design exists to prevent.
+/// Start the lite scanner detached, unless one is already registered.
+///
+/// This check is a courtesy that avoids a pointless fork; it is NOT the
+/// single-instance guarantee. That belongs to the `flock` the child itself takes
+/// in `supervise`, which is the only thing two racing starters cannot both win.
 fn start_lite_supervisor(name: &str) -> Result<()> {
     if live_lite_pid(name).is_some() {
         return Ok(());
@@ -1176,37 +1245,84 @@ mod tests {
     }
 
     #[test]
-    fn the_handover_arms_only_where_the_daemon_could_have_owned_the_ledger() {
-        // Arming on "switching to lite" alone armed on switches where nothing
-        // had ever counted, and the seal then burns retries the LOCAL ledger was
-        // tracking accurately. Three conditions, each necessary.
-        let full_scheduled = AtcMeta {
-            heartbeat_enabled: true,
-            ..AtcMeta::new("t")
-        };
-        let full_unscheduled = AtcMeta {
-            heartbeat_enabled: false,
-            ..AtcMeta::new("t")
-        };
-        // `arms(previous, meta)` mirrors the predicate, with the timer probe
-        // pinned false (no local unit == the daemon was scheduling).
-        let arms = |previous: SupervisorMode, meta: &AtcMeta| {
-            previous == SupervisorMode::Full && meta.heartbeat_enabled
-        };
+    fn the_handover_applies_only_where_the_daemon_could_have_owned_the_ledger() {
+        // Calls the REAL predicate. The version this replaced mirrored the logic
+        // in a local closure, so it passed just as happily with a condition
+        // deleted — coverage that asserted nothing.
+        use SupervisorMode::{Full, Lite};
 
+        // The case the handover exists for: a full instance the daemon was
+        // scheduling (no local unit) switching to lite.
+        assert!(handover_applies(Full, Lite, false));
+
+        // A local timer means the beat ran locally and counted locally, so the
+        // budget is already in the file lite is about to read.
+        assert!(!handover_applies(Full, Lite, true));
+
+        // lite→lite (a --provider change) has no daemon ledger to hand over, and
+        // its scanner is already running: sealing would hit a live fleet
+        // mid-budget.
+        assert!(!handover_applies(Lite, Lite, false));
+
+        // Switching TO full never arms; the disarm happens after the stop.
+        assert!(!handover_applies(Full, Full, false));
+        assert!(!handover_applies(Lite, Full, false));
+    }
+
+    #[test]
+    fn heartbeat_enabled_is_not_part_of_the_predicate() {
+        // Deliberately absent, and worth pinning because it reads like it
+        // belongs: it is a meta-local flag, while the daemon's cron selects on
+        // its own `atc_instance.enabled` column and never reads meta. A
+        // `setup --no-heartbeat` flips it WITHOUT unregistering, so keying on it
+        // skipped the arm for a fleet the daemon was still counting for.
+        //
+        // The predicate takes no meta at all, which is the structural way to say
+        // that flag cannot creep back in.
+        assert!(handover_applies(
+            SupervisorMode::Full,
+            SupervisorMode::Lite,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_second_scanner_cannot_take_the_lock_while_the_first_holds_it() {
+        // Round 4 replaced the hand-rolled lock with flock and deleted its four
+        // tests without adding any, leaving the single-instance guard with no
+        // coverage at all. This exercises the primitive the guard now rests on.
+        use fs2::FileExt;
+        let dir = std::env::temp_dir().join(format!("atc-flock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scanner.lock");
+
+        let first = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        first.try_lock_exclusive().expect("the first taker wins");
+
+        let second = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .unwrap();
         assert!(
-            arms(SupervisorMode::Full, &full_scheduled),
-            "a scheduled full instance is the case the handover exists for"
+            second.try_lock_exclusive().is_err(),
+            "a second scanner must be refused while the first holds the lock"
         );
+
+        // Releasing hands it straight over — no staleness logic, no reclaim, and
+        // nothing left behind for a recycled pid to poison.
+        drop(first);
         assert!(
-            !arms(SupervisorMode::Lite, &full_scheduled),
-            "a lite→lite switch has no daemon ledger, and its scanner is already \
-running — sealing would hit a live fleet mid-budget"
+            second.try_lock_exclusive().is_ok(),
+            "a released lock must be immediately takeable"
         );
-        assert!(
-            !arms(SupervisorMode::Full, &full_unscheduled),
-            "with the heartbeat off nothing was scheduled, so nothing counted"
-        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
