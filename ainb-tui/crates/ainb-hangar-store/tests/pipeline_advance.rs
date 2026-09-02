@@ -647,6 +647,33 @@ async fn stages_remain_mutant(
     found.is_some()
 }
 
+/// A gated column to the right always counts, whatever ran so far; the terminal
+/// ungated column never does; a card with no column is not in a pipeline.
+#[tokio::test]
+async fn stages_remain_right_of_card_and_terminal_column() {
+    let (_dir, store) = store().await;
+    let pool = store.pool();
+    seed_pipeline(pool).await;
+    add_card(pool, "i-mid", Some("col-impl")).await;
+    add_stage_task(pool, "t-mid", "i-mid", "done", "col-impl").await;
+    assert!(
+        PullService::stages_remain(pool, "i-mid").await.unwrap(),
+        "Review still lies to the right"
+    );
+
+    add_card(pool, "i-done", Some("col-done")).await;
+    assert!(
+        !PullService::stages_remain(pool, "i-done").await.unwrap(),
+        "the terminal column has nothing gated at or after it"
+    );
+
+    add_card(pool, "i-nocol", None).await;
+    assert!(
+        !PullService::stages_remain(pool, "i-nocol").await.unwrap(),
+        "a card with no column is not in a pipeline"
+    );
+}
+
 /// A later non-stage task on the issue (a push-path retry, a chat task) bumps
 /// the issue-wide generation but must NOT un-finish a completed stage: the
 /// current generation is the newest among STAGE tasks only.
@@ -693,9 +720,78 @@ async fn mutation_proofs_for_the_current_stage_clauses() {
     add_stage_task_gen(pool, "t2-push", "i-2", "done", None, 2).await;
     assert!(!PullService::stages_remain(pool, "i-2").await.unwrap());
     assert!(
-        stages_remain_mutant(pool, "i-2", "AND g.board_column_id IS NOT NULL", " ").await,
-        "without the stage-row filter a later push run un-finishes the stage"
+        stages_remain_mutant(
+            pool,
+            "i-2",
+            "JOIN board_column AS gc ON gc.id = g.board_column_id \
+                                           WHERE g.issue_id = bc.issue_id \
+                                             AND gc.board_id = bc.board_id",
+            "WHERE g.issue_id = bc.issue_id"
+        )
+        .await,
+        "without the stage-row join a later push run un-finishes the stage"
     );
+}
+
+/// One issue carded on TWO boards of the same workspace: each board's current
+/// stage is judged against the newest stage task of ITS OWN columns. Both
+/// cards sit in their last gated column with that stage done (board B's run
+/// newer), so nothing remains; scoping the generation to the whole issue made
+/// board A's finished stage lose to board B's newer task and read unfinished.
+#[tokio::test]
+async fn stages_remain_judges_each_board_by_its_own_stage_tasks() {
+    let (_dir, store) = store().await;
+    let pool = store.pool();
+    seed_pipeline(pool).await;
+    sqlx::query(
+        "INSERT INTO board (id, workspace_id, name, auto_move, created_at) \
+         VALUES ('b-2','ws-1','Second',1,0)",
+    )
+    .execute(pool)
+    .await
+    .expect("second board");
+    for (id, ord, role) in [("c2-impl", 0, Some("implementer")), ("c2-done", 1, None)] {
+        sqlx::query(
+            "INSERT INTO board_column \
+             (id, board_id, ord, name, fsm_state, auto_move, services_role, wip_limit, \
+              excludes_prior_agent) \
+             VALUES (?1,'b-2',?2,?1,NULL,1,?3,NULL,0)",
+        )
+        .bind(id)
+        .bind(ord)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("second board column");
+    }
+    // Board A: card in Review (its last gated column), Review done at gen 1.
+    add_card(pool, "i-two", Some("col-review")).await;
+    add_stage_task_gen(pool, "t-a-review", "i-two", "done", Some("col-review"), 1).await;
+    // Board B: same issue in its only gated column, done at the NEWER gen 2.
+    sqlx::query(
+        "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+         VALUES ('b-2','i-two','c2-impl',0,0)",
+    )
+    .execute(pool)
+    .await
+    .expect("second card");
+    add_stage_task_gen(pool, "t-b-impl", "i-two", "done", Some("c2-impl"), 2).await;
+
+    assert!(
+        !PullService::stages_remain(pool, "i-two").await.unwrap(),
+        "both boards finished their last stage: nothing remains"
+    );
+    assert!(
+        stages_remain_mutant(pool, "i-two", "AND gc.board_id = bc.board_id", " ").await,
+        "an issue-wide generation lets board B's newer run un-finish board A's stage"
+    );
+    // Board B still mid-pipeline: the issue has stages remaining even though
+    // board A is finished.
+    sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = 't-b-impl'")
+        .execute(pool)
+        .await
+        .expect("reopen B's stage");
+    assert!(PullService::stages_remain(pool, "i-two").await.unwrap());
 }
 
 /// A push-path Run on a card in a gated column is that stage's run: the helper
