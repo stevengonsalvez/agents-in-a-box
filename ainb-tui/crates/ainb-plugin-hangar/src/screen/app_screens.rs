@@ -2242,12 +2242,17 @@ fn route_timeline_key(states: &mut ScreenStates, key: &KeyEvent) {
 /// open. Every printable char / Backspace / Enter / Esc / ↑ / ↓ is folded into
 /// the input; unmapped keys are dropped.
 fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
+    let ctrl = key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0;
     let k = match &key.code {
         KeyCode::Enter => BoardsKey::Enter,
         KeyCode::Esc => BoardsKey::Esc,
         KeyCode::Backspace => BoardsKey::Backspace,
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
+        // Ctrl+U clears the input (crisp B1, defect 21); any other Ctrl chord
+        // is dropped rather than typed as its bare letter.
+        KeyCode::Char { ch: 'u' } if ctrl => BoardsKey::ClearLine,
+        KeyCode::Char { .. } if ctrl => return None,
         KeyCode::Char { ch } => BoardsKey::Char(*ch),
         // Overlay-local only: the dep picker cycles its link kind (multica parity
         // #20). No global binding is added, so no host-reserved key is touched.

@@ -661,6 +661,9 @@ pub enum BoardsKey {
     Up,
     /// Cursor down (move a picker selection down).
     Down,
+    /// Ctrl+U: clear the text input (crisp B1, defect 21). The rename / title /
+    /// repo-query inputs empty their buffer; the pickers and confirms ignore it.
+    ClearLine,
 }
 
 /// The render-state cache for the Boards screen.
@@ -1469,13 +1472,15 @@ fn squad_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::SquadPick {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::SquadPick {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -1542,7 +1547,9 @@ fn dep_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(state, repick(cursor, kind)),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::ClearLine => {
+            set_overlay(state, repick(cursor, kind))
+        }
     }
 }
 
@@ -1572,7 +1579,8 @@ fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::RemoveConfirm {
                 issue_id: issue_id.to_string(),
@@ -1608,7 +1616,8 @@ fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::CancelConfirm {
                 issue_id: issue_id.to_string(),
@@ -1644,6 +1653,13 @@ fn card_title_key(
             BoardsOverlay::CardTitle {
                 column_id: column_id.to_string(),
                 title,
+            },
+        ),
+        BoardsKey::ClearLine => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title: String::new(),
             },
         ),
         BoardsKey::Char(c) => {
@@ -1747,6 +1763,7 @@ fn card_repo_key(
             query.pop();
             reopen(state, query, Some(0))
         }
+        (Some(_), BoardsKey::ClearLine) => reopen(state, String::new(), Some(0)),
         // Tab is the dep picker's kind cycle; here it is inert.
         (Some(cursor), BoardsKey::Tab) => reopen(state, query, Some(cursor)),
         (Some(cursor), BoardsKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
@@ -1860,7 +1877,9 @@ fn card_agent_key(
                 },
             ),
         },
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1913,7 +1932,9 @@ fn card_profile_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1944,6 +1965,7 @@ fn column_rename_key(
             name.push(c);
             reopen(state, name)
         }
+        BoardsKey::ClearLine => reopen(state, String::new()),
         BoardsKey::Up | BoardsKey::Down | BoardsKey::Tab => reopen(state, name),
         BoardsKey::Enter => {
             if name.trim().is_empty() {
@@ -2006,13 +2028,15 @@ fn run_mode_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::RunMode {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::RunMode {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -3734,6 +3758,26 @@ mod tests {
                 name: "Today!".into(),
             })
         );
+
+        // Ctrl+U empties the input instead of typing a `u` (crisp B1, defect 21);
+        // Enter on the emptied input holds it open, typing then commits fresh.
+        let s = reduce_boards(&state, BoardsEvent::RenameColumn).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::ClearLine)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::ColumnRename { name, .. }) if name.is_empty()
+        ));
+        let held = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(held.intent, None, "a blank rename never commits");
+        let mut s = held.state;
+        for ch in "QA".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert!(matches!(
+            out.intent,
+            Some(BoardsIntent::RenameColumn { name, .. }) if name == "QA"
+        ));
     }
 
     /// Esc cancels an open overlay without raising an intent.

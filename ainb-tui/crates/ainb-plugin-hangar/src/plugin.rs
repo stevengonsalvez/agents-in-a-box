@@ -7862,6 +7862,33 @@ mod tests {
             "typing `H`/`?` must not toggle help or leave the Boards screen, got {:?}",
             p.app_state().screen
         );
+
+        // Crisp B1 (defect 21): Ctrl+U through the real key path CLEARS the input
+        // instead of typing a `u`; another Ctrl chord is dropped, not typed.
+        let ctrl = |ch: char| ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        };
+        p.on_key(&ctrl('u'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::CardTitle { title, .. }) if title.is_empty()
+            ),
+            "Ctrl+U must clear the title, got {:?}",
+            p.screens.boards.overlay()
+        );
+        p.on_key(&char_press('x'));
+        p.on_key(&ctrl('k'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::CardTitle { title, .. }) if title == "x"
+            ),
+            "an unmapped Ctrl chord is dropped, never typed as its letter, got {:?}",
+            p.screens.boards.overlay()
+        );
     }
 
     // ----- #450: advertised screen keys must survive the global router -----
