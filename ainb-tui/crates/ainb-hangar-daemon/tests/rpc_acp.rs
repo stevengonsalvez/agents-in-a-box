@@ -46,6 +46,7 @@ use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1118,6 +1119,73 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             .count(),
         1,
         "the loser delivered nothing"
+    );
+
+    // A row whose responder is gone (the ask was answered or the adapter moved
+    // on: the pool says NotWaiting; or the session has no actor at all:
+    // NoSession) is NOT reopened: nothing could ever answer it again, so the
+    // claim stands and the operator is told the answer did not land. Both rows
+    // are planted by hand with the live session's payload shape.
+    for (row_id, row_session, expect) in [
+        (
+            "ghost-not-waiting",
+            session_key.as_str(),
+            "no longer waiting",
+        ),
+        ("ghost-no-session", "acp:nobody-home", "no live ACP session"),
+    ] {
+        let mut ghost = payload.clone();
+        ghost["sessionKey"] = serde_json::json!(row_session);
+        ghost["requestFingerprint"] = serde_json::json!(format!("spent-{row_id}"));
+        AttentionRepo::insert(
+            harness.store.pool(),
+            &NewAttention {
+                id: row_id.to_string(),
+                session_id: row_session.to_string(),
+                cwd: harness.dir.to_string_lossy().into_owned(),
+                workspace_id: None,
+                kind: AttentionKind::Approval,
+                payload: ghost.to_string(),
+                degraded: false,
+                created_at: 1,
+                raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::default(),
+            },
+        )
+        .await
+        .expect("plant a spent row");
+        let spent = client
+            .call(
+                methods::ATTENTION_ANSWER,
+                serde_json::json!({
+                    "attention_id": row_id,
+                    "answer": "Reject",
+                    "answered_by": "tui",
+                }),
+            )
+            .await;
+        assert_eq!(spent["result"]["outcome"], "delivery_failed", "{spent}");
+        assert!(
+            spent["result"]["reason"].as_str().unwrap_or_default().contains(expect),
+            "{row_id}: {spent}"
+        );
+        let (state, answered_by): (String, Option<String>) =
+            sqlx::query_as("SELECT state, answered_by FROM attention WHERE id = ?")
+                .bind(row_id)
+                .fetch_one(harness.store.pool())
+                .await
+                .expect("attention row");
+        assert_eq!(state, "answered", "{row_id}: a spent ask is not reopened");
+        assert_eq!(answered_by.as_deref(), Some("tui"), "{row_id}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&log)
+            .expect("rpc log")
+            .lines()
+            .filter(|line| line.starts_with("permission:"))
+            .count(),
+        1,
+        "no spent row reached the adapter"
     );
 
     harness.finish().await;

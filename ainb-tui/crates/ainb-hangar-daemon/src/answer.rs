@@ -178,11 +178,17 @@ async fn claim(
 /// not on a screen), so a text the adapter never offered refuses with the row
 /// still open, and a missing pool is a `NoTarget` with nothing claimed. Once
 /// claimed, the pool's answer is a HAND-OFF to the adapter's pending JSON-RPC
-/// id, never an acknowledgement (ACP defines none), and any refusal from the
-/// pool reopens the row like a failed tmux send would. The actor's own
+/// id, never an acknowledgement (ACP defines none). The actor's own
 /// `retire_attention` runs the same conditional flip after the hand-off and
 /// finds the row already ours: benign, and what keeps `answered_by` naming the
 /// surface that answered rather than a generic "operator".
+///
+/// Only an `UnknownOption` refusal reopens the row: the pool answers it with
+/// the responder STILL PARKED, so a corrected answer can land. `NotWaiting`
+/// and `NoSession` mean the responder is spent or gone and the pool has
+/// already closed (or convergence will close) the ask; reopening our claim
+/// there would leave a row nothing can ever answer, so the claim is kept and
+/// the operator is told the answer did not reach the adapter.
 async fn answer_acp(
     pool: &SqlitePool,
     events: &EventSink,
@@ -226,16 +232,18 @@ async fn answer_acp(
                 via: format!("acp ({}, option {option})", permission.session_key),
             });
         }
+        PermissionAnswer::UnknownOption => {
+            reopen_on_failed_delivery(pool, events, row, params, now_ms).await?;
+            format!("the adapter never offered option {option_id}")
+        }
         PermissionAnswer::NotWaiting => {
             "the ACP permission is no longer waiting (answered elsewhere, or the adapter moved on)"
                 .to_string()
         }
-        PermissionAnswer::UnknownOption => format!("the adapter never offered option {option_id}"),
         PermissionAnswer::NoSession => {
             format!("no live ACP session for {}", permission.session_key)
         }
     };
-    reopen_on_failed_delivery(pool, events, row, params, now_ms).await?;
     Ok(AnswerResult::DeliveryFailed { reason })
 }
 
