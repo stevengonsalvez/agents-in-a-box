@@ -671,6 +671,35 @@ impl Default for HangarPlugin {
     }
 }
 
+/// The operator-facing note for an `attention/answer` verdict, or `None` for a
+/// delivered answer (which clears any earlier note). Exhaustive over
+/// [`AnswerResult`](ainb_hangar_proto::snapshots::AnswerResult) so a new
+/// verdict variant cannot fall back to silence.
+fn answer_verdict_note(
+    verdict: Option<&ainb_hangar_proto::snapshots::AnswerResult>,
+    error: Option<&ainb_hangar_proto::RpcError>,
+) -> Option<String> {
+    use ainb_hangar_proto::snapshots::AnswerResult;
+    Some(match verdict {
+        Some(AnswerResult::Delivered { .. }) => return None,
+        Some(AnswerResult::AlreadyAnswered { by }) => format!("already answered by {by}"),
+        Some(AnswerResult::Ambiguous { reason }) => {
+            format!("not delivered (ambiguous target): {reason}")
+        }
+        Some(AnswerResult::NoTarget { reason }) => {
+            format!("not delivered (no live session): {reason}")
+        }
+        Some(AnswerResult::DeliveryFailed { reason }) => {
+            format!("delivery failed, row reopened: {reason}")
+        }
+        None => {
+            let detail =
+                error.map_or_else(|| "unrecognised reply".to_string(), |e| e.message.clone());
+            format!("answer failed: {detail}")
+        }
+    })
+}
+
 impl HangarPlugin {
     /// Construct a fresh, disconnected plugin.
     #[must_use]
@@ -1017,6 +1046,11 @@ impl HangarPlugin {
     const RECONNECT_INITIAL_GAP: std::time::Duration = std::time::Duration::from_secs(2);
     /// Longest pause between two automatic reconnect attempts.
     const RECONNECT_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How long a dropped link keeps self-rendering so the reconnect pump runs
+    /// with no input. A daemon down for hours would otherwise cost a frame per
+    /// tick all night; past this window the pump waits for the next keypress or
+    /// snapshot (that render redials at once, the backoff is long overdue).
+    const RECONNECT_REDRAW_WINDOW: std::time::Duration = std::time::Duration::from_mins(10);
 
     /// Re-dial a link that dropped after it was up (called from `render`, where
     /// host IO is safe), with exponential backoff from
@@ -1377,35 +1411,18 @@ impl HangarPlugin {
         let verdict = resp.result.as_ref().and_then(|r| {
             serde_json::from_value::<ainb_hangar_proto::snapshots::AnswerResult>(r.clone()).ok()
         });
-        use ainb_hangar_proto::snapshots::AnswerResult;
-        match verdict {
-            Some(AnswerResult::Delivered { .. }) => self.screens.control_center.clear_note(),
-            Some(AnswerResult::AlreadyAnswered { by }) => {
-                self.screens.control_center.set_note(format!("already answered by {by}"));
-            }
-            Some(AnswerResult::Ambiguous { reason }) => {
-                self.screens
-                    .control_center
-                    .set_note(format!("not delivered (ambiguous target): {reason}"));
-            }
-            Some(AnswerResult::NoTarget { reason }) => {
-                self.screens
-                    .control_center
-                    .set_note(format!("not delivered (no live session): {reason}"));
-            }
-            Some(AnswerResult::DeliveryFailed { reason }) => {
-                self.screens
-                    .control_center
-                    .set_note(format!("delivery failed, row reopened: {reason}"));
-            }
-            None => {
-                let detail = resp
-                    .error
-                    .as_ref()
-                    .map_or_else(|| "unrecognised reply".to_string(), |e| e.message.clone());
-                self.screens.control_center.set_note(format!("answer failed: {detail}"));
-            }
-        }
+        let Some(note) = answer_verdict_note(verdict.as_ref(), resp.error.as_ref()) else {
+            self.screens.control_center.clear_note();
+            return;
+        };
+        // The reply carries no attention id; the note is about the card whose
+        // answer was in flight, which is the selected one.
+        let card = self
+            .screens
+            .control_center
+            .selected_id()
+            .map_or_else(String::new, str::to_string);
+        self.screens.control_center.set_note(card, note);
     }
 
     /// Populate the issue-list cache from an `hangar/issues_list` result.
@@ -5517,8 +5534,11 @@ impl Plugin for HangarPlugin {
             // input — renders were the only place host IO is safe, and with no
             // frames the daemon coming up was never noticed.
             || self.daemon_start_redial_until.is_some()
-            // A dropped link keeps frames coming so the reconnect pump runs.
-            || self.link_lost_at.is_some()
+            // A dropped link keeps frames coming so the reconnect pump runs,
+            // bounded like the `[s]` window (RECONNECT_REDRAW_WINDOW).
+            || self
+                .link_lost_at
+                .is_some_and(|lost| lost.elapsed() < Self::RECONNECT_REDRAW_WINDOW)
             // Phase 5: a wizard dispatch armed by the `issue_create` reply needs a
             // render to fire its `issue_update` + `issue_run` (host IO is only
             // safe there). Consumed (taken) by that render, so not level-held.
@@ -6140,10 +6160,32 @@ mod tests {
         for (attempts, gap_secs) in [(1u32, 4u64), (2, 8), (3, 16), (4, 30), (9, 30)] {
             p.link_redial_attempts = attempts;
             p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs - 1));
-            assert!(!p.reconnect_due(), "attempt {attempts}: not yet at {gap_secs}s");
+            assert!(
+                !p.reconnect_due(),
+                "attempt {attempts}: not yet at {gap_secs}s"
+            );
             p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs + 1));
-            assert!(p.reconnect_due(), "attempt {attempts}: due after {gap_secs}s");
+            assert!(
+                p.reconnect_due(),
+                "attempt {attempts}: due after {gap_secs}s"
+            );
         }
+    }
+
+    /// The self-render that drives the reconnect pump is bounded: a link down
+    /// longer than `RECONNECT_REDRAW_WINDOW` stops asking for frames (the next
+    /// keypress or snapshot render redials), so a daemon down overnight does not
+    /// cost a frame per tick all night.
+    #[test]
+    fn reconnect_redraw_stops_after_the_window() {
+        use std::time::{Duration, Instant};
+        let mut p = HangarPlugin::new();
+        p.link_lost_at = Some(Instant::now() - Duration::from_secs(3));
+        assert!(p.wants_redraw(), "inside the window the pump needs frames");
+        p.link_lost_at =
+            Some(Instant::now() - HangarPlugin::RECONNECT_REDRAW_WINDOW - Duration::from_secs(1));
+        assert!(!p.wants_redraw(), "past the window the plugin goes quiet");
+        assert!(p.reconnect_due(), "...but the next render still redials");
     }
 
     /// A first dial that never came up is the offline empty state's business
@@ -8957,5 +8999,124 @@ mod tests {
         assert!(command.contains("tmux select-window -t 'fleet-alpha:3.7'"));
         assert!(command.contains("tmux select-pane -t 'fleet-alpha:3.7'"));
         assert!(command.ends_with("tmux attach-session -t 'fleet-alpha'"));
+    }
+}
+
+/// The `attention/answer` reply (request id [`ATTENTION_ANSWER_REQ_ID`]) drives
+/// the control-center note: a refusal is painted against the card whose answer
+/// was in flight, a delivery clears it. Goes through `on_daemon_response` so the
+/// id dispatch is under test, not just the note text.
+#[cfg(test)]
+mod answer_verdict_tests {
+    use super::*;
+    use ainb_hangar_proto::events::AttentionRow;
+
+    fn ask_row(id: &str) -> AttentionRow {
+        let payload = serde_json::json!({
+            "kind": "ASK",
+            "context": { "question": "which?", "options": [{ "label": "x" }, { "label": "y" }] }
+        });
+        AttentionRow {
+            id: id.to_string(),
+            session_id: format!("sess-{id}"),
+            cwd: format!("/work/{id}"),
+            workspace_id: None,
+            kind: "ask_user_question".into(),
+            payload: payload.to_string(),
+            degraded: false,
+            created_at: 1,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
+        }
+    }
+
+    fn plugin_with_open_card() -> HangarPlugin {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        p.screens.set_attention(&[ask_row("a1")]);
+        p
+    }
+
+    fn answer_reply(result: serde_json::Value) -> RpcResponse {
+        RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ATTENTION_ANSWER_REQ_ID),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn every_non_delivery_verdict_paints_a_note_on_the_selected_card() {
+        let cases = [
+            (
+                serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }),
+                "ambiguous",
+            ),
+            (
+                serde_json::json!({ "outcome": "no_target", "reason": "exited" }),
+                "no live session",
+            ),
+            (
+                serde_json::json!({ "outcome": "delivery_failed", "reason": "tmux gone" }),
+                "row reopened",
+            ),
+            (
+                serde_json::json!({ "outcome": "already_answered", "by": "slack" }),
+                "already answered by slack",
+            ),
+        ];
+        for (result, needle) in cases {
+            let mut p = plugin_with_open_card();
+            p.on_daemon_response(&answer_reply(result.clone()));
+            let note = p
+                .screens
+                .control_center
+                .note()
+                .unwrap_or_else(|| panic!("verdict {result} must leave a note"));
+            assert!(note.contains(needle), "{result} -> {note:?}");
+            // The note belongs to a1: a refresh that keeps a1 keeps it.
+            p.screens.set_attention(&[ask_row("a1")]);
+            assert!(p.screens.control_center.note().is_some());
+            // ...and a refresh where a1 is gone drops it.
+            p.screens.set_attention(&[ask_row("a2")]);
+            assert!(
+                p.screens.control_center.note().is_none(),
+                "{result}: stale note survived"
+            );
+        }
+    }
+
+    #[test]
+    fn a_delivered_verdict_clears_the_note_and_an_rpc_error_sets_one() {
+        let mut p = plugin_with_open_card();
+        p.on_daemon_response(&answer_reply(
+            serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }),
+        ));
+        assert!(p.screens.control_center.note().is_some());
+
+        p.on_daemon_response(&answer_reply(
+            serde_json::json!({ "outcome": "delivered", "via": "tmux (s)" }),
+        ));
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "delivery clears the note"
+        );
+
+        p.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ATTENTION_ANSWER_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32000,
+                message: "attention row not found".into(),
+                data: None,
+            }),
+        });
+        assert_eq!(
+            p.screens.control_center.note(),
+            Some("answer failed: attention row not found")
+        );
     }
 }
