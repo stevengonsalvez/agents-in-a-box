@@ -1589,6 +1589,11 @@ async fn run_interactive(
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
+    // A live `claude` in a never-seen worktree stops at its trust dialog with
+    // nobody at the pane; pre-trust the cwd the way the host's `ainb run` does.
+    if matches!(dispatch.backend, Backend::Claude) {
+        crate::interactive::pre_trust_claude_workdir(&child_env, cwd);
+    }
 
     // F5: the attachable tmux session runs in the provisioned worktree / scratch
     // dir (`cwd`), not the in-tree workdir; logs still stream to the task tree.
