@@ -372,7 +372,13 @@ async fn resolve_target(
     // discovery lists the session at its root. Match a session whose root is
     // the raise cwd or an ancestor of it, most specific root first, so a nested
     // scratch dir under another session's root still resolves to the nearest.
-    let root_len = |s: &Session| if session_owns_cwd(&s.cwd, cwd) { s.cwd.len() } else { 0 };
+    let root_len = |s: &Session| {
+        if session_owns_cwd(&s.cwd, cwd) {
+            s.cwd.len()
+        } else {
+            0
+        }
+    };
     let deepest = ainb.iter().chain(peers.iter()).map(root_len).max().unwrap_or(0);
     let raw_cwd_count = if cwd.is_empty() || deepest == 0 {
         0
@@ -442,10 +448,7 @@ fn session_owns_cwd(root: &str, raise_cwd: &str) -> bool {
     }
     let root = root.trim_end_matches('/');
     let raise_cwd = raise_cwd.trim_end_matches('/');
-    raise_cwd == root
-        || raise_cwd
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/'))
+    raise_cwd == root || raise_cwd.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Does the session that raised the request still OWN `cwd`? True when the newest
@@ -488,12 +491,19 @@ mod tests {
     #[test]
     fn picker_position_resolves_label_digit_and_prefix() {
         assert_eq!(picker_position(ASK_PAYLOAD, "api/app.db"), Some(1));
-        assert_eq!(picker_position(ASK_PAYLOAD, "data/boxtrack.db (Recommended)"), Some(0));
+        assert_eq!(
+            picker_position(ASK_PAYLOAD, "data/boxtrack.db (Recommended)"),
+            Some(0)
+        );
         assert_eq!(picker_position(ASK_PAYLOAD, "API/APP.DB"), Some(1));
         assert_eq!(picker_position(ASK_PAYLOAD, "2"), Some(1));
         assert_eq!(picker_position(ASK_PAYLOAD, "1"), Some(0));
         assert_eq!(picker_position(ASK_PAYLOAD, "data/"), Some(0));
-        assert_eq!(picker_position(ASK_PAYLOAD, "3"), None, "out of range digit is free text");
+        assert_eq!(
+            picker_position(ASK_PAYLOAD, "3"),
+            None,
+            "out of range digit is free text"
+        );
         assert_eq!(picker_position(ASK_PAYLOAD, "use postgres"), None);
     }
 
@@ -504,10 +514,16 @@ mod tests {
         let multi = ASK_PAYLOAD.replace("\"multi_select\":false", "\"multi_select\":true");
         assert_eq!(picker_labels(&multi), None);
         assert_eq!(picker_labels(r#"{"kind":"ERR","context":{}}"#), None);
-        assert_eq!(picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#), None);
+        assert_eq!(
+            picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#),
+            None
+        );
         assert_eq!(
             picker_labels(ASK_PAYLOAD).unwrap(),
-            vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()]
+            vec![
+                "data/boxtrack.db (Recommended)".to_string(),
+                "api/app.db".to_string()
+            ]
         );
     }
 
@@ -516,7 +532,10 @@ mod tests {
     #[test]
     fn picker_probe_is_a_bounded_prefix() {
         assert_eq!(picker_probe("api/app.db"), "api/app.db");
-        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrac");
+        assert_eq!(
+            picker_probe("data/boxtrack.db (Recommended)"),
+            "data/boxtrac"
+        );
         assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééé");
     }
 
@@ -525,7 +544,10 @@ mod tests {
     /// NOT see a picker in a pane that only echoes the prompt text.
     #[test]
     fn picker_visible_matches_the_wrapped_pane_render() {
-        let labels = vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()];
+        let labels = vec![
+            "data/boxtrack.db (Recommended)".to_string(),
+            "api/app.db".to_string(),
+        ];
         let pane = "\
  Where should Boxtrack's sqlite file live by default?
  ❯ 1. data/boxtrack.db             ┌──────┐
