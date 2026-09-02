@@ -5,7 +5,6 @@
 // render. Follows the ainb-tui style guide: rounded borders, gold title,
 // cornflower-blue panel, green for healthy.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,14 +42,15 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How finely the collector's sleep is chopped so an explicit `r` refresh does
-/// not have to wait out the rest of [`COLLECT_INTERVAL`].
-const WAKE_SLICE: Duration = Duration::from_millis(200);
-
 /// How long a lifecycle action may run before the row gives up on it. Generous:
 /// a real restart genuinely takes seconds. The point is only that a wedged
 /// action cannot hold its row's one-outstanding guard forever.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a finished hook action's line stays on screen before the live issue
+/// line comes back. Long enough to read a failure, short enough that it cannot
+/// mask a fault that appears afterwards.
+const STATUS_LINGER: Duration = Duration::from_secs(20);
 
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
@@ -80,8 +80,9 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
-    /// Set to ask the collector to re-collect now rather than finish its sleep.
-    wake: Arc<AtomicBool>,
+    /// Wakes the collector for an immediate re-collect. `None` until the
+    /// collector is armed.
+    wake: Option<std::sync::mpsc::Sender<()>>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     selected: usize,
     /// The open per-row action menu, if any.
@@ -110,12 +111,15 @@ pub struct DaemonsState {
         tokio::sync::mpsc::UnboundedReceiver<String>,
         std::time::Instant,
     )>,
-    /// What the last hook action reported, and the collect clock it was
-    /// recorded against. Dropped once a LATER collect lands: the panel replaces
-    /// the live issue line while a status is set, so a status that never
-    /// expires would hide every fault found after it for the rest of the
-    /// process (this state is app-level and outlives leaving the screen).
-    hooks_status: Option<(String, i64)>,
+    /// What the last hook action reported, and when it may stop being shown.
+    ///
+    /// It has to expire: the panel replaces the live issue line while a status
+    /// is set, and this state is app-level, so a status that never expired
+    /// would hide every fault found after it for the rest of the process. It
+    /// also has to be READABLE, and the collector republishes every two
+    /// seconds, so expiry is a wall clock the reader can keep up with rather
+    /// than the next collect.
+    hooks_status: Option<(String, std::time::Instant)>,
     /// A tmux session the screen wants attached. Drained by the key handler,
     /// which owns the app-level pending-action slot; the component itself must
     /// not reach into `AppState`.
@@ -137,8 +141,11 @@ struct ActionMenu {
 /// The parts of a row's status that decide which entries its menu offers.
 #[derive(Debug, Clone, Default)]
 struct RowFacts {
-    /// ATC has no provisioned instance, so every lifecycle verb would bail.
-    unprovisioned: bool,
+    /// The provisioned ATC instance, when there is one. `None` means every
+    /// lifecycle verb would bail. Read from a typed field, never inferred from
+    /// the reason sentence: which actions the row offers, and which tmux
+    /// session it attaches, must not change when someone rewords a message.
+    instance: Option<String>,
     /// ATC has an OS timer installed for an instance that does not exist.
     orphan: bool,
 }
@@ -146,9 +153,13 @@ struct RowFacts {
 impl RowFacts {
     fn of(status: &DaemonStatus) -> Self {
         Self {
-            unprovisioned: status.reason.contains(crate::fleet::daemons::probe::ATC_UNPROVISIONED),
+            instance: status.atc_instance.clone(),
             orphan: status.scheduler_orphan.is_some(),
         }
+    }
+
+    fn unprovisioned(&self) -> bool {
+        self.instance.is_none()
     }
 }
 
@@ -177,7 +188,7 @@ impl ActionMenu {
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
-        if self.kind == DaemonKind::Atc && !self.row.unprovisioned {
+        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
             entries.push(MenuEntry::OpenMissionControl);
         }
         if has_error {
@@ -197,9 +208,9 @@ impl ActionMenu {
             return true;
         }
         match action {
-            Action::Provision => self.row.unprovisioned,
+            Action::Provision => self.row.unprovisioned(),
             Action::RemoveOrphan => self.row.orphan,
-            _ => !self.row.unprovisioned,
+            _ => !self.row.unprovisioned(),
         }
     }
 }
@@ -230,7 +241,9 @@ impl DaemonsState {
             return Arc::clone(shared);
         }
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        spawn_collector(Arc::clone(&shared), Arc::clone(&self.wake));
+        let (wake, wake_rx) = std::sync::mpsc::channel();
+        spawn_collector(Arc::clone(&shared), wake_rx);
+        self.wake = Some(wake);
         self.shared = Some(Arc::clone(&shared));
         shared
     }
@@ -239,7 +252,9 @@ impl DaemonsState {
     /// only shortens the wait; it never collects on the UI thread.
     pub fn force_collect(&mut self) {
         self.arm();
-        self.wake.store(true, Ordering::Relaxed);
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(());
+        }
     }
 
     /// Arm the background collector without rendering — called on navigation INTO
@@ -338,6 +353,7 @@ impl DaemonsState {
             return;
         };
         let kind = menu.kind;
+        let menu_instance = menu.row.instance.clone();
         let entries = menu.entries(self.has_error_for(kind));
         let Some(entry) = entries.get(menu.cursor).copied() else {
             return;
@@ -347,9 +363,10 @@ impl DaemonsState {
             MenuEntry::OpenMissionControl => {
                 self.error_open = None;
                 self.menu = None;
-                // Resolving the instance name reads one directory. That is a
-                // keystroke path, not render, so H-D2 does not apply.
-                if let Ok(name) = crate::cli::daemon::atc_target_name() {
+                // The name comes off THIS row. Re-deriving it would resolve a
+                // leftover or a default rather than the instance the row is
+                // reporting, and attach a session that does not exist.
+                if let Some(name) = menu_instance {
                     self.attach_request =
                         Some(crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session());
                 }
@@ -441,21 +458,22 @@ impl DaemonsState {
                 BinaryIntent::PinRunning => "pinning the running binary…",
             }
             .to_string(),
-            i64::MAX,
+            // A running action outlives every clock until it finishes.
+            std::time::Instant::now() + ACTION_TIMEOUT + STATUS_LINGER,
         ));
         std::thread::spawn(move || {
             let _ = tx.send(run_hook_action(intent));
         });
     }
 
-    /// Drain a finished hook action. A channel poll, not I/O — same reasoning
+    /// Drain a finished hook action. A channel poll, not I/O, same reasoning
     /// as [`DaemonsState::poll_actions`].
-    fn poll_hooks(&mut self, collected_at_ms: i64) {
+    fn poll_hooks(&mut self) {
         let Some((rx, started)) = self.hooks_inflight.as_mut() else {
             return;
         };
         if let Ok(line) = rx.try_recv() {
-            self.hooks_status = Some((line, collected_at_ms));
+            self.hooks_status = Some((line, std::time::Instant::now() + STATUS_LINGER));
             self.hooks_inflight = None;
         } else if started.elapsed() > ACTION_TIMEOUT {
             self.hooks_status = Some((
@@ -463,18 +481,17 @@ impl DaemonsState {
                     "hook repair did not finish within {}s",
                     ACTION_TIMEOUT.as_secs()
                 ),
-                collected_at_ms,
+                std::time::Instant::now() + STATUS_LINGER,
             ));
             self.hooks_inflight = None;
         }
     }
 
-    /// The hook status to paint, if it is still newer than the health beside
-    /// it. `i64::MAX` marks an action that is still running, which always wins.
-    fn live_hooks_status(&self, collected_at_ms: i64) -> Option<&str> {
+    /// The hook status to paint, until it expires and the issue line returns.
+    fn live_hooks_status(&self) -> Option<&str> {
         self.hooks_status
             .as_ref()
-            .filter(|(_, at)| *at >= collected_at_ms)
+            .filter(|(_, until)| std::time::Instant::now() < *until)
             .map(|(line, _)| line.as_str())
     }
 
@@ -651,23 +668,21 @@ fn collect_into(shared: &Mutex<Snapshot>) {
 /// Spawn the detached background collector: one immediate collect, then a collect
 /// every [`COLLECT_INTERVAL`] forever. Keeps ALL disk I/O / socket connects off
 /// the UI render thread (H-D2).
-fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: Arc<AtomicBool>) {
+fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: std::sync::mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("ainb-daemons-collect".into())
         .spawn(move || {
             loop {
                 collect_into(&shared);
-                // Sleep in slices so an explicit refresh lands promptly instead
-                // of waiting out the remainder of the interval. Cheap: the
-                // check is an atomic load, the collect still runs at most once
-                // per slice boundary.
-                let mut slept = Duration::ZERO;
-                while slept < COLLECT_INTERVAL {
-                    if wake.swap(false, Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(WAKE_SLICE);
-                    slept += WAKE_SLICE;
+                // Blocks for the whole interval and returns the INSTANT `r` is
+                // pressed. Polling a flag on a short timer would wake this
+                // detached thread several times a second for the life of the
+                // process to answer a question that is almost always "no".
+                match wake.recv_timeout(COLLECT_INTERVAL) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    // The screen's state was dropped; nothing will read another
+                    // snapshot.
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
         })
@@ -681,8 +696,8 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: Arc<AtomicBool>) {
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
 pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     state.poll_actions();
+    state.poll_hooks();
     let snapshot = state.snapshot();
-    state.poll_hooks(snapshot.collected_at_ms);
     // Clamp before painting: the collector can shrink the table under us.
     state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
 
@@ -719,17 +734,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     // lines because they had no DaemonKind, and it sat on "collecting…" when
     // its separate async fetch wedged. Those three are real rows now, so the
     // panel was a second place to look that showed strictly less.
-    if chunks[0].height >= 15 {
+    if chunks[0].height >= 14 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(7), Constraint::Length(8)])
+            .constraints([Constraint::Min(7), Constraint::Length(7)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot, state);
         render_hook_section(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
-            state.live_hooks_status(snapshot.collected_at_ms),
+            state.live_hooks_status(),
             snapshot.collected_at_ms > 0,
         );
     } else {
@@ -937,10 +952,7 @@ fn render_hook_section(
                     health.issues.first().map_or_else(
                         || "✓ wiring healthy".to_string(),
                         |issue| {
-                            format!(
-                                "! {}: {} — {}",
-                                issue.component, issue.message, issue.repair
-                            )
+                            format!("! {}: {}: {}", issue.component, issue.message, issue.repair)
                         },
                     )
                 },
@@ -957,8 +969,10 @@ fn render_hook_section(
                 .running_binary
                 .as_ref()
                 .map_or_else(|| "(unknown)".to_string(), |p| p.display().to_string());
-            let pointer_matches_running =
-                health.hook_binary.is_some() && health.hook_binary == health.running_binary;
+            // Decided by the probe with `canonical_eq`: current_exe resolves
+            // symlinks and the pointer does not, so comparing the paths here
+            // would gold-flag every healthy Homebrew install.
+            let pointer_matches_running = health.hook_binary_is_running_binary;
             vec![
                 Line::from(vec![
                     Span::styled("version ", Style::default().fg(MUTED_GRAY)),
@@ -993,22 +1007,10 @@ fn render_hook_section(
                     }),
                 )),
                 Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
-                Line::from(Span::styled(
-                    format!(
-                        "notifyd {}  ·  approval broker {}",
-                        if health.notify_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                        if health.approve_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                    ),
-                    Style::default().fg(MUTED_GRAY),
-                )),
+                // notifyd and the approve broker had a line here when they had
+                // no row of their own. They are first-class rows in the table
+                // above now, so this only restated it, and the line it costs is
+                // what made the whole panel vanish on a short terminal.
                 Line::from(Span::styled(
                     issue,
                     Style::default().fg(if health.issues.is_empty() {
@@ -1234,6 +1236,11 @@ mod tests {
             inbound_live: 0,
             last_inbound_error: None,
             scheduler_orphan: None,
+            // A real ATC row names its instance whenever one is provisioned,
+            // and the menu reads that rather than the reason text. A fixture
+            // that left it None would be an UNPROVISIONED row.
+            atc_instance: (kind == DaemonKind::Atc)
+                .then(|| channel.map_or_else(|| "main".to_string(), ToString::to_string)),
             reason: if connected {
                 "running + connected".to_string()
             } else {
@@ -1585,6 +1592,8 @@ mod tests {
     #[test]
     fn an_unprovisioned_atc_offers_provisioning_instead_of_dead_verbs() {
         let mut row = status(DaemonKind::Atc, DaemonState::Stopped, false, None);
+        // No instance: what the probe reports when nothing is provisioned.
+        row.atc_instance = None;
         row.reason = format!(
             "{}, but a heartbeat timer for 'main' is installed and failing every interval",
             crate::fleet::daemons::probe::ATC_UNPROVISIONED
@@ -1845,30 +1854,35 @@ mod tests {
     /// live issue line for the rest of the process, hiding every fault found
     /// after the last repair.
     #[test]
-    fn a_finished_hook_status_expires_when_a_newer_collect_lands() {
+    fn a_finished_hook_status_expires_and_gives_the_issue_line_back() {
         let mut state = DaemonsState::default();
-        state.hooks_status = Some(("hooks installed for claude".to_string(), 1_000));
+        let now = std::time::Instant::now();
 
+        state.hooks_status = Some((
+            "hooks installed for claude".to_string(),
+            now + STATUS_LINGER,
+        ));
         assert_eq!(
-            state.live_hooks_status(1_000),
+            state.live_hooks_status(),
             Some("hooks installed for claude"),
-            "the collect it was recorded against still shows it"
-        );
-        assert_eq!(
-            state.live_hooks_status(1_001),
-            None,
-            "a later collect must give the issue line back"
+            "a fresh result must be readable, not gone on the next collect"
         );
 
-        // An action still running outranks every collect until it finishes.
-        state.hooks_status = Some(("installing hooks…".to_string(), i64::MAX));
-        assert_eq!(state.live_hooks_status(9_999), Some("installing hooks…"));
+        state.hooks_status = Some(("hooks installed for claude".to_string(), now));
+        assert_eq!(
+            state.live_hooks_status(),
+            None,
+            "once expired the live issue line must come back"
+        );
     }
 
     #[test]
     fn renders_hook_repair_progress_from_its_own_state() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        state.hooks_status = Some(("hooks repaired for claude, codex".to_string(), i64::MAX));
+        state.hooks_status = Some((
+            "hooks repaired for claude, codex".to_string(),
+            std::time::Instant::now() + STATUS_LINGER,
+        ));
         let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("I hooks repaired for claude, codex"),

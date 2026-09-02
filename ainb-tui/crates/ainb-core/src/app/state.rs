@@ -1146,10 +1146,6 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 }
 
 // ============================================================================
-// Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions)
-// ============================================================================
-
-// ============================================================================
 // Home Screen State
 // ============================================================================
 
@@ -3201,7 +3197,6 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
-    // Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions).
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -5357,8 +5352,6 @@ impl AppState {
             let _ = tx.send(result);
         });
     }
-
-    // ── Daemons overlay ──────────────────────────────────────────────────────
 
     /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
     /// shared proxy went down, re-ensure it. Throttled to ~10s, async, and
@@ -12913,7 +12906,6 @@ impl App {
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
         self.state.check_mcp_overlay();
-        // Drain completed daemons overlay fetch (no-op when closed).
         // Re-ensure the Headroom proxy if a Headroom session is live but the
         // proxy died (throttled, async, best-effort).
         self.state.headroom_watchdog();

@@ -53,10 +53,11 @@ pub enum AppEvent {
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
     // Daemons screen
+    /// Re-collect the daemon table now instead of waiting out the interval.
     DaemonsRefresh,
-    /// Move the overlay's row selection by a signed step (saturating).
-    /// Restart whichever daemon row is selected in the overlay.
+    /// Install or repair the hooks, pointing them at the installed ainb.
     DaemonsRepairHooks,
+    /// Point the hooks at the binary running right now, for dev testing.
     DaemonsPinHookBinary,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
@@ -3968,6 +3969,7 @@ impl EventHandler {
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
             AppEvent::DaemonsRefresh => state.daemons_state.force_collect(),
+            // Kept next to the two hook events it belongs with.
             AppEvent::DaemonsRepairHooks => state
                 .daemons_state
                 .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
