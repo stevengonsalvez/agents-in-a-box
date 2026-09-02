@@ -1235,6 +1235,14 @@ impl HangarPlugin {
             // Parity #24: a toggle changes only the per-agent link, so refresh
             // the link map rather than the whole snapshot batch.
             RpcId::Number(SKILL_SET_ENABLED_REQ_ID) => self.refresh_agent_skill_links = true,
+            // An answer verdict other than `delivered` means the agent is STILL
+            // blocked; say so on the board instead of silently refreshing, which
+            // read as "nothing happened" while the row stayed open.
+            RpcId::Number(ATTENTION_ANSWER_REQ_ID) => {
+                self.apply_answer_verdict(resp);
+                self.fetch_pending = true;
+                self.conn.on_event();
+            }
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
@@ -1244,7 +1252,6 @@ impl HangarPlugin {
                 | TASK_TRANSITION_REQ_ID
                 | ISSUE_UPDATE_REQ_ID
                 | INBOX_MARK_READ_REQ_ID
-                | ATTENTION_ANSWER_REQ_ID
                 // P5: a profile/upsert reply re-fetches the snapshot batch so the
                 // roster row reflects the new tier; the detail re-fetch is armed
                 // separately in the render drain (both previews re-resolve).
@@ -1258,6 +1265,39 @@ impl HangarPlugin {
             }
             // Any other response/event keeps the link alive.
             _ => self.conn.on_event(),
+        }
+    }
+
+    /// Fold an `attention/answer` reply into the control-center note: a
+    /// delivered answer clears it; a refusal, a lost target, a failed delivery
+    /// or a race lost to another surface names itself so the operator knows the
+    /// agent is still waiting.
+    fn apply_answer_verdict(&mut self, resp: &RpcResponse) {
+        let verdict = resp.result.as_ref().and_then(|r| {
+            serde_json::from_value::<ainb_hangar_proto::snapshots::AnswerResult>(r.clone()).ok()
+        });
+        use ainb_hangar_proto::snapshots::AnswerResult;
+        match verdict {
+            Some(AnswerResult::Delivered { .. }) => self.screens.control_center.clear_note(),
+            Some(AnswerResult::AlreadyAnswered { by }) => {
+                self.screens.control_center.set_note(format!("already answered by {by}"));
+            }
+            Some(AnswerResult::Ambiguous { reason }) => {
+                self.screens.control_center.set_note(format!("not delivered (ambiguous target): {reason}"));
+            }
+            Some(AnswerResult::NoTarget { reason }) => {
+                self.screens.control_center.set_note(format!("not delivered (no live session): {reason}"));
+            }
+            Some(AnswerResult::DeliveryFailed { reason }) => {
+                self.screens.control_center.set_note(format!("delivery failed, row reopened: {reason}"));
+            }
+            None => {
+                let detail = resp
+                    .error
+                    .as_ref()
+                    .map_or_else(|| "unrecognised reply".to_string(), |e| e.message.clone());
+                self.screens.control_center.set_note(format!("answer failed: {detail}"));
+            }
         }
     }
 
