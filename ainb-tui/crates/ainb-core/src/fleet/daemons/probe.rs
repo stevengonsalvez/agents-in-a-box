@@ -217,6 +217,13 @@ pub struct DaemonStatus {
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
     pub reason: String,
+    /// The instance whose OS scheduler is installed while the instance itself
+    /// is NOT provisioned (ATC only). A timer firing into nothing produces an
+    /// error every interval forever and is invisible from the row's own state,
+    /// so it is carried as its own fact rather than buried in [`Self::reason`]
+    /// — the screen needs it in order to offer the teardown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_orphan: Option<String>,
 }
 
 impl DaemonStatus {
@@ -239,6 +246,7 @@ impl DaemonStatus {
             inbound_live: 0,
             last_inbound_error: None,
             reason: reason.into(),
+            scheduler_orphan: None,
         }
     }
 
@@ -557,6 +565,7 @@ pub fn classify_heartbeat(
             inbound_live: hb.inbound_live,
             last_inbound_error: hb.last_inbound_error,
             reason,
+            scheduler_orphan: None,
         };
     }
 
@@ -582,6 +591,7 @@ pub fn classify_heartbeat(
             inbound_live: hb.inbound_live,
             last_inbound_error: hb.last_inbound_error,
             reason: format!("stale heartbeat — last beat {}s ago (wedged?)", age / 1000),
+            scheduler_orphan: None,
         };
     }
 
@@ -618,6 +628,7 @@ pub fn classify_heartbeat(
         inbound_live: hb.inbound_live,
         last_inbound_error: hb.last_inbound_error,
         reason,
+        scheduler_orphan: None,
     }
 }
 
@@ -700,6 +711,7 @@ pub fn probe_notifyd(base: &Path, now_ms: i64) -> DaemonStatus {
         inbound_live: 0,
         last_inbound_error: None,
         reason,
+        scheduler_orphan: None,
     }
     .with_now(now_ms)
 }
@@ -758,6 +770,7 @@ pub fn probe_approve_broker(base: &Path, now_ms: i64) -> DaemonStatus {
         inbound_live: 0,
         last_inbound_error: None,
         reason,
+        scheduler_orphan: None,
     }
     .with_now(now_ms)
 }
@@ -793,7 +806,12 @@ fn hangar_daemon_census() -> usize {
 }
 
 pub fn probe_atc(home: &Path, now_ms: i64) -> DaemonStatus {
-    probe_atc_with(home, now_ms, &crate::tmux::session_alive)
+    probe_atc_with(
+        home,
+        now_ms,
+        &crate::tmux::session_alive,
+        &crate::fleet::atc::timer::is_installed,
+    )
 }
 
 /// [`probe_atc`] with the session check injected.
@@ -805,15 +823,31 @@ pub(crate) fn probe_atc_with(
     home: &Path,
     now_ms: i64,
     session_alive: &dyn Fn(&str) -> Option<bool>,
+    timer_installed: &dyn Fn(&str) -> bool,
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::meta::AtcMeta;
-    use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    use crate::fleet::atc::paths::{AtcPaths, list_instance_dirs_in, list_instance_names_in};
 
     let kind = DaemonKind::Atc;
     let atc_root = home.join("atc");
     let names = list_instance_names_in(&atc_root);
     if names.is_empty() {
+        // An OS timer for an instance that does not exist is not "nothing
+        // provisioned": it fires forever and logs a failure every interval.
+        // Name it so the row can offer the teardown, instead of leaving the
+        // operator to find it in launchctl.
+        if let Some(orphan) =
+            list_instance_dirs_in(&atc_root).into_iter().find(|name| timer_installed(name))
+        {
+            return DaemonStatus {
+                reason: format!(
+                    "heartbeat timer installed for '{orphan}' but no instance is provisioned; every beat fails"
+                ),
+                scheduler_orphan: Some(orphan),
+                ..DaemonStatus::stopped(kind, String::new())
+            };
+        }
         return DaemonStatus::stopped(kind, "no ATC instance provisioned");
     }
 
@@ -954,6 +988,7 @@ pub(crate) fn probe_atc_with(
         inbound_live: 0,
         last_inbound_error: None,
         reason: format!("heartbeat alive — last beat {}m ago", age / 60_000),
+        scheduler_orphan: None,
     }
 }
 
@@ -2189,9 +2224,46 @@ mod tests {
     #[test]
     fn probe_atc_no_instance_is_stopped() {
         let home = TempDir::new().unwrap();
-        let s = probe_atc_with(home.path(), 0, &|_| Some(true));
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|_| false);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
+    }
+
+    /// The reported failure: `atc/main/` held nothing but a heartbeat.log while
+    /// a loaded launchd unit fired into it every interval, and the row said
+    /// only "no ATC instance provisioned" — no mention of the timer that was
+    /// still running, and nothing to act on.
+    #[test]
+    fn probe_atc_names_a_timer_firing_into_an_unprovisioned_instance() {
+        let home = TempDir::new().unwrap();
+        let ghost = home.path().join("atc").join("main");
+        std::fs::create_dir_all(&ghost).unwrap();
+        std::fs::write(ghost.join("heartbeat.log"), "Error: no ATC instance\n").unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|name| name == "main");
+
+        assert_eq!(s.state, DaemonState::Stopped);
+        assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
+        assert!(
+            s.reason.contains("timer installed for 'main'"),
+            "the orphan timer must be named: {}",
+            s.reason
+        );
+    }
+
+    /// The same ghost directory with no timer installed is just leftover state,
+    /// not an orphan. Reporting one would send the operator to tear down a unit
+    /// that does not exist.
+    #[test]
+    fn probe_atc_reports_no_orphan_when_no_timer_is_installed() {
+        let home = TempDir::new().unwrap();
+        let ghost = home.path().join("atc").join("main");
+        std::fs::create_dir_all(&ghost).unwrap();
+
+        let s = probe_atc_with(home.path(), 0, &|_| Some(true), &|_| false);
+
+        assert_eq!(s.scheduler_orphan, None);
+        assert!(s.reason.contains("no ATC instance provisioned"));
     }
 
     #[test]
@@ -2214,7 +2286,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
         assert_eq!(s.state, DaemonState::Running);
         assert!(s.connected);
         assert!(s.channel.as_deref().unwrap().contains("primary"));
@@ -2244,7 +2316,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(false));
+        let s = probe_atc_with(home.path(), now, &|_| Some(false), &|_| false);
         assert_eq!(
             s.state,
             DaemonState::Degraded,
@@ -2361,7 +2433,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
         assert_eq!(
             s.state,
             DaemonState::Stopped,
@@ -2401,7 +2473,7 @@ mod tests {
             )
             .unwrap();
         }
-        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
         assert_eq!(s.state, DaemonState::Running);
         assert!(
             s.channel.as_deref().unwrap().contains("on"),
@@ -2430,7 +2502,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &|_| false);
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("stale"));
     }
