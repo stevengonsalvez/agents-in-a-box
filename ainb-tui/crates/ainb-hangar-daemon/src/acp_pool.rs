@@ -223,8 +223,10 @@ fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterTom
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// The adapter registry: token to spawn recipe. A provider absent here
-    /// cannot be created by `fleet/acp_session_create`.
+    /// The adapter registry the pool STARTS with: token to spawn recipe. The
+    /// live registry ([`AcpPool::register_adapter`]) grows past this at
+    /// runtime; a provider in neither cannot be created by
+    /// `fleet/acp_session_create`.
     pub adapters: HashMap<String, AdapterConfig>,
     /// Sessions multiplexed on ONE provider process before the LRU evicts.
     ///
@@ -346,21 +348,6 @@ impl PoolConfig {
             }
         }
         config
-    }
-
-    /// The pinned permission mode for `provider`, or `default`.
-    #[must_use]
-    pub fn permission_mode(&self, provider: &str) -> String {
-        self.adapters.get(provider).map_or_else(
-            || "default".to_string(),
-            |config| config.permission_mode.clone(),
-        )
-    }
-
-    /// Whether the registry knows how to spawn `provider`.
-    #[must_use]
-    pub fn knows(&self, provider: &str) -> bool {
-        self.adapters.contains_key(provider)
     }
 }
 
@@ -567,6 +554,11 @@ pub struct AcpPool {
     store: Store,
     events: crate::events::EventSink,
     config: PoolConfig,
+    /// The LIVE adapter registry: seeded from [`PoolConfig::adapters`], grown
+    /// by [`AcpPool::register_adapter`] and shrunk by
+    /// [`AcpPool::unregister_adapter`]. Keyed by the same string as
+    /// `providers`, so one key is one spawn recipe AND at most one process.
+    adapters: StdMutex<HashMap<String, AdapterConfig>>,
     providers: tokio::sync::Mutex<HashMap<String, Arc<ProviderProcess>>>,
     /// One spawn at a time per provider, held INSTEAD of the `providers` map
     /// lock: `AdapterProcess::spawn` runs initialize plus the mode assertion and
@@ -590,6 +582,7 @@ impl AcpPool {
         Arc::new(Self {
             store,
             events,
+            adapters: StdMutex::new(config.adapters.clone()),
             config,
             providers: tokio::sync::Mutex::new(HashMap::new()),
             spawn_locks: StdMutex::new(HashMap::new()),
@@ -601,11 +594,74 @@ impl AcpPool {
         })
     }
 
-    /// The adapter registry this pool validates `fleet/acp_session_create`
-    /// against.
+    /// The tuning this pool was built with. Its `adapters` is the SEED; ask
+    /// [`AcpPool::knows`] and [`AcpPool::permission_mode`] about the live
+    /// registry.
     #[must_use]
     pub const fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Whether the live registry knows how to spawn `provider`.
+    #[must_use]
+    pub fn knows(&self, provider: &str) -> bool {
+        self.adapters.lock().is_ok_and(|adapters| adapters.contains_key(provider))
+    }
+
+    /// The pinned permission mode for `provider`, or `default`.
+    #[must_use]
+    pub fn permission_mode(&self, provider: &str) -> String {
+        self.adapters
+            .lock()
+            .ok()
+            .and_then(|adapters| {
+                adapters.get(provider).map(|config| config.permission_mode.clone())
+            })
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Add `adapter` to the live registry under `key`, so a session whose
+    /// `provider` is `key` spawns from THIS recipe on its first prompt.
+    ///
+    /// This is how a task gets its own adapter process: register under a
+    /// synthetic key (`claude-agent-acp#task:<id>`) whose recipe carries the
+    /// task's command wrapper, environment and permission mode, and the pool's
+    /// one-process-per-key rule does the isolation. Replaces an existing entry;
+    /// a process already running under `key` keeps the recipe it was spawned
+    /// with until it stops.
+    pub fn register_adapter(&self, key: impl Into<String>, adapter: AdapterConfig) {
+        if let Ok(mut adapters) = self.adapters.lock() {
+            adapters.insert(key.into(), adapter);
+        }
+    }
+
+    /// Remove `key` from the live registry and stop its process, if one is
+    /// running. Returns whether `key` was registered.
+    ///
+    /// The stop is INTENTIONAL, exactly like the idle sweep's: it neither counts
+    /// on the breaker nor leaves a phantom `exited` row on the health pane, and
+    /// the breaker and spawn-lock entries for the key go with it so a fleet of
+    /// short-lived task keys does not accrete bookkeeping. Sessions hosted on
+    /// the process converge through the ordinary exit path. A spawn still in
+    /// flight under `key` is not interrupted: it lands in `providers` as usual
+    /// and the idle sweep reclaims it once its tenants leave, so a caller that
+    /// wants a clean stop tears its sessions down first.
+    pub async fn unregister_adapter(&self, key: &str) -> bool {
+        let was_registered =
+            self.adapters.lock().is_ok_and(|mut adapters| adapters.remove(key).is_some());
+        if let Ok(mut locks) = self.spawn_locks.lock() {
+            locks.remove(key);
+        }
+        if let Ok(mut circuits) = self.circuits.lock() {
+            circuits.remove(key);
+        }
+        let process = self.providers.lock().await.remove(key);
+        if let Some(process) = process {
+            tracing::info!(provider = %key, "stopping the adapter process of an unregistered key");
+            process.stopping.store(true, Ordering::Relaxed);
+            process.process.kill();
+        }
+        was_registered
     }
 
     /// Hand one prompt to the recipient's OWN session (never a broadcast
@@ -1049,8 +1105,12 @@ impl AcpPool {
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
-        let config =
-            self.config.adapters.get(provider).cloned().ok_or_else(|| AcpError::Spawn {
+        let config = self
+            .adapters
+            .lock()
+            .ok()
+            .and_then(|adapters| adapters.get(provider).cloned())
+            .ok_or_else(|| AcpError::Spawn {
                 adapter: provider.to_string(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::NotFound,

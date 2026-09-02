@@ -35,6 +35,9 @@
 //! * **I12** transcript wakeups arrive DURING the turn, not at its end.
 //! * **LRU** the oldest idle session is evicted while the process stays warm,
 //!   and a process stops only after its idle window has actually elapsed.
+//! * **Runtime registry** an adapter registered after construction under its
+//!   own key gets its own process, and unregistering the key reaps exactly
+//!   that process.
 //! * **I16 boot** a session a daemon killed with SIGKILL left mid-turn is
 //!   converged at startup, with no pool and no operator.
 //! * **Re-prime corpus is history** the delivery-join corpus stops BELOW the
@@ -137,6 +140,11 @@ async fn harness_with_broker(
 
 /// Create one ACP session pair exactly as `fleet/acp_session_create` does.
 async fn seed_session(store: &Store, session_key: &str) -> FleetAcpSessionRow {
+    seed_session_for(store, session_key, ainb_acp::config::CLAUDE_ADAPTER).await
+}
+
+/// [`seed_session`] on a specific adapter key.
+async fn seed_session_for(store: &Store, session_key: &str, provider: &str) -> FleetAcpSessionRow {
     let scope_key = format!("session:{session_key}");
     let event = NewFleetEvent {
         event_id: format!("acp-session-create:{session_key}"),
@@ -159,7 +167,7 @@ async fn seed_session(store: &Store, session_key: &str) -> FleetAcpSessionRow {
         &NewFleetAcpSession {
             session_key: session_key.to_string(),
             scope_key,
-            provider: ainb_acp::config::CLAUDE_ADAPTER.to_string(),
+            provider: provider.to_string(),
             cwd: "/tmp/acp".to_string(),
             permission_mode: "default".to_string(),
             state: "IDLE".to_string(),
@@ -1675,6 +1683,136 @@ async fn a_zero_session_process_stops_after_its_idle_window() {
         pool.health().await.processes.is_empty(),
         "a tenant-free process is stopped once its idle window has elapsed"
     );
+}
+
+/// An adapter registered AFTER the pool was built, under its own key, is a
+/// process of its own: a session whose provider is that key spawns from the
+/// registered recipe rather than joining the shared provider's process, and
+/// unregistering the key kills exactly that process. This is the isolation a
+/// per-task adapter (`claude-agent-acp#task:<id>`) rests on.
+///
+/// The kill is proven through the store, not the process table: the task
+/// session is left with a HUNG turn when the key is removed, and the only
+/// thing that can resolve that leg inside the test's window is the process
+/// exit path (the deadline sweep is thirty minutes away).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_runtime_registered_adapter_gets_its_own_process_and_removal_reaps_it() {
+    let evidence = tempfile::tempdir().expect("evidence dir");
+    let shared_log = evidence.path().join("shared.log");
+    let task_log = evidence.path().join("task.log");
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_CHUNKS", "1"),
+        ("FAKE_ACP_RPC_LOG", shared_log.to_str().expect("utf8")),
+    ])
+    .await;
+    let task_key = format!("{}#task:t-1", ainb_acp::config::CLAUDE_ADAPTER);
+    assert!(!pool.knows(&task_key), "the seed registry has no task keys");
+
+    pool.register_adapter(
+        &task_key,
+        ainb_acp::config::AdapterConfig::new(&task_key, "acceptEdits")
+            .command(fake_adapter())
+            .extra_env(vec![
+                ("FAKE_ACP_CHUNKS".to_string(), "1".to_string()),
+                ("FAKE_ACP_HANG_PROMPTS".to_string(), "hang".to_string()),
+                (
+                    "FAKE_ACP_RPC_LOG".to_string(),
+                    task_log.to_str().expect("utf8").to_string(),
+                ),
+            ]),
+    );
+    assert!(pool.knows(&task_key));
+    assert_eq!(
+        pool.permission_mode(&task_key),
+        "acceptEdits",
+        "the registered recipe's mode is what a create would pin"
+    );
+
+    let shared = seed_session(&store, "acp:shared-tenant").await;
+    let task = seed_session_for(&store, "acp:task-tenant", &task_key).await;
+    let shared_message = seed_message(&store, &shared.session_key, "a").await;
+    let task_message = seed_message(&store, &task.session_key, "bb").await;
+    pool.submit_prompt(&shared.session_key, &shared_message, "a").await;
+    pool.submit_prompt(&task.session_key, &task_message, "bb").await;
+    let (state, detail) = await_terminal(&store, &shared_message, &shared.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+    let (state, detail) = await_terminal(&store, &task_message, &task.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+
+    // Two processes, one per key: the task did not ride the shared adapter.
+    let health = pool.health().await;
+    let mut providers: Vec<&str> =
+        health.processes.iter().map(|row| row.provider.as_str()).collect();
+    providers.sort_unstable();
+    assert_eq!(
+        providers,
+        [ainb_acp::config::CLAUDE_ADAPTER, task_key.as_str()],
+        "one process under each key"
+    );
+    assert_eq!(
+        rpc_log(&task_log).iter().filter(|line| *line == "spawn").count(),
+        1,
+        "the task's recipe spawned exactly once: {:?}",
+        rpc_log(&task_log)
+    );
+    assert_eq!(
+        rpc_log(&shared_log).iter().filter(|line| *line == "spawn").count(),
+        1,
+        "and the shared adapter spawned exactly once: {:?}",
+        rpc_log(&shared_log)
+    );
+
+    // Leave the task mid-turn, then remove its key.
+    let hung = seed_message(&store, &task.session_key, "hang").await;
+    pool.submit_prompt(&task.session_key, &hung, "hang").await;
+    await_open_turn(&store, &task.session_key).await;
+    assert!(
+        pool.unregister_adapter(&task_key).await,
+        "the key was registered"
+    );
+    assert!(!pool.knows(&task_key));
+    assert!(
+        !pool.unregister_adapter(&task_key).await,
+        "a second removal reports the key already gone"
+    );
+
+    // The hung turn resolved through the exit path: the process really died.
+    let (state, detail) = await_terminal(&store, &hung, &task.session_key).await;
+    assert_eq!(state, "UNKNOWN", "{detail:?}");
+    assert!(
+        detail.as_deref().is_some_and(|detail| detail.starts_with("adapter_exit")),
+        "the leg names the exit, not a deadline or an operator: {detail:?}"
+    );
+    let health = pool.health().await;
+    let providers: Vec<&str> = health.processes.iter().map(|row| row.provider.as_str()).collect();
+    assert_eq!(
+        providers,
+        [ainb_acp::config::CLAUDE_ADAPTER],
+        "only the shared process survives"
+    );
+    assert!(
+        health.processes[0].breaker_failures == 0,
+        "an intentional stop is not a crash on anyone's breaker: {health:?}"
+    );
+
+    // Nothing respawns under the removed key, and the shared tenant is untouched.
+    let after = seed_message(&store, &task.session_key, "ccc").await;
+    pool.submit_prompt(&task.session_key, &after, "ccc").await;
+    let (state, _) = await_terminal(&store, &after, &task.session_key).await;
+    assert_eq!(
+        state, "FAILED",
+        "a prompt on an unregistered key cannot deliver"
+    );
+    assert_eq!(
+        rpc_log(&task_log).iter().filter(|line| *line == "spawn").count(),
+        1,
+        "the removed recipe was never spawned again: {:?}",
+        rpc_log(&task_log)
+    );
+    let shared_again = seed_message(&store, &shared.session_key, "dddd").await;
+    pool.submit_prompt(&shared.session_key, &shared_again, "dddd").await;
+    let (state, detail) = await_terminal(&store, &shared_again, &shared.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
 }
 
 /// A cancel is per SESSION: convergence is idempotent and leaves the scope

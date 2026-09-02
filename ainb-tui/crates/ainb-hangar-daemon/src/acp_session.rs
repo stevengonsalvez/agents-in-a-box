@@ -84,7 +84,7 @@ pub async fn ensure(
     let acp = crate::acp_pool::active_handle().await;
     let known = acp.as_ref().map_or_else(
         || ainb_acp::config::AdapterConfig::is_known_adapter(provider),
-        |pool| pool.config().knows(provider),
+        |pool| pool.knows(provider),
     );
     if !known {
         return Err(EnsureError::UnknownProvider {
@@ -93,7 +93,7 @@ pub async fn ensure(
     }
     let permission_mode = acp.as_ref().map_or_else(
         || "default".to_string(),
-        |pool| pool.config().permission_mode(provider),
+        |pool| pool.permission_mode(provider),
     );
 
     let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
