@@ -136,7 +136,7 @@ its next action, but neither controller was started or stopped"
         }
         out
     } else {
-        reconcile_controllers(&meta).await
+        reconcile_controllers(&meta, previous_provider != provider).await
     };
 
     let summary = json!({
@@ -218,7 +218,7 @@ struct Reconcile {
 }
 
 /// Stop the controller the new mode does not own, then start the one it does.
-async fn reconcile_controllers(meta: &AtcMeta) -> Reconcile {
+async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconcile {
     let mut out = Reconcile::default();
     match meta.mode {
         SupervisorMode::Lite => {
@@ -267,6 +267,13 @@ had escalated may get a fresh budget in lite"
                         .to_string(),
                 );
             }
+            if provider_changed {
+                out.notes.push(format!(
+                    "provider remembered as {} for a later switch to full; lite runs no brain, so \
+it changes nothing today",
+                    meta.provider
+                ));
+            }
             match start_lite_supervisor(&meta.name) {
                 Ok(()) => {
                     out.lite_started = true;
@@ -277,6 +284,16 @@ had escalated may get a fresh budget in lite"
         }
         SupervisorMode::Full => {
             out.lite_stopped_pid = stop_lite_supervisor(&meta.name);
+            // A provider change is not just a meta edit. The new brain reads a
+            // DIFFERENT file (codex reads AGENTS.md), and `repair` — the verb
+            // below — reads meta and never writes anything else, so nothing
+            // would render that policy. Every surface would report FULL(codex)
+            // over an instance dir that only has a CLAUDE.md.
+            match render_policy_for_provider(meta) {
+                Ok(Some(file)) => out.notes.push(format!("policy rendered to {file}")),
+                Ok(None) => {}
+                Err(e) => out.notes.push(format!("policy not rendered for the new brain: {e}")),
+            }
             if let Some(pid) = out.lite_stopped_pid {
                 out.notes.push(format!("lite scanner stopped (pid {pid})"));
             }
@@ -288,13 +305,27 @@ had escalated may get a fresh budget in lite"
                 Ok(report) => {
                     out.scheduler_asserted = true;
                     out.notes.push(report);
-                    out.notes.extend(brain_session_note(meta));
+                    out.notes.extend(brain_session_note(meta, provider_changed));
                 }
                 Err(e) => out.notes.push(format!("heartbeat scheduler not re-asserted: {e}")),
             }
         }
     }
     out
+}
+
+/// Render the policy under the filename this instance's provider actually reads,
+/// returning the file when one was written beyond the always-present CLAUDE.md.
+fn render_policy_for_provider(meta: &AtcMeta) -> Result<Option<String>> {
+    let control = resolve_full_provider(&meta.provider)?;
+    if control.policy_file == "CLAUDE.md" {
+        return Ok(None);
+    }
+    let paths = AtcPaths::resolve(&meta.name)?;
+    let policy = crate::fleet::atc::render_claude_md(meta);
+    plumbing::atomic::write_atomic(&paths.dir.join(control.policy_file), policy.as_bytes())
+        .with_context(|| format!("writing {}", control.policy_file))?;
+    Ok(Some(control.policy_file.to_string()))
 }
 
 /// Say so when full mode's scheduler now has nothing to beat into.
@@ -308,14 +339,24 @@ had escalated may get a fresh budget in lite"
 /// Only a PROVEN dead session earns the note. `None` means the check itself
 /// could not run (tmux off PATH), and reporting an environment problem as a
 /// missing brain would send the operator to the wrong fix.
-fn brain_session_note(meta: &AtcMeta) -> Option<String> {
+fn brain_session_note(meta: &AtcMeta, provider_changed: bool) -> Option<String> {
     let session = meta.tmux_session();
-    (crate::tmux::session_alive(&session) == Some(false)).then(|| {
-        format!(
+    match crate::tmux::session_alive(&session) {
+        Some(false) => Some(format!(
             "no brain session: {session} is not running, so beats would land nowhere. \
 `ainb daemon atc start` spawns it without reconfiguring the instance"
-        )
-    })
+        )),
+        // A LIVE session is not evidence the provider took effect. Nothing here
+        // restarts it, so a `--provider` change leaves the previous brain taking
+        // the heartbeats while every surface reports the new one. Say so rather
+        // than let the two disagree silently.
+        Some(true) if provider_changed => Some(format!(
+            "{session} is still running the PREVIOUS brain — a provider change does not restart \
+it. `ainb kill {}` then `ainb daemon atc start` to bring up {} instead",
+            meta.name, meta.provider
+        )),
+        _ => None,
+    }
 }
 
 /// Seed the local ledger at the cap for every session currently erroring, and
