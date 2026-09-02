@@ -45,7 +45,6 @@ Discovery run HGR-1 (before the env fix): attempt 1 failed `agent_error` in 16ms
 | 10 | `set_issues` rebuilt `IssueListState` wholesale on every issues snapshot (armed by any daemon push), destroying an open wizard, filters and selection mid-typing | state clobber | FIXED d9b985cb 55a290df |
 | 11 | `pr_url` not captured from a real `gh pr create` under stream-json; PR badge absent though PR #1 exists | capture | queued |
 | 12 | wizard `@` filter narrows the list but the cursor stays on `scratch`; Enter picks scratch | picker UX | queued |
-
 | 13 | daemon logs ERROR `Codex managed transport degraded` every ~16s forever when codex is simply not configured | log noise | queued (run uses `AINB_CODEX_MANAGED=0`) |
 | 14 | plugin showed "Hangar daemon offline" with the daemon alive and bound (14x `plugin/render exceeded its budget (2s)` burst first); never re-dialed | reconnect | queued |
 | 15 | CLI verbs write the store directly with no event, so a running TUI never learns of a CLI-created board/issue until restart | CLI/TUI seam | queued |
