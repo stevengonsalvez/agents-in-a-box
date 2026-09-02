@@ -7,12 +7,13 @@
 //! ([`crate::widgets::transcript::render_transcript`]), so a card's history reads
 //! with the identical 5-colour taxonomy.
 //!
-//! The classification itself lives in
-//! [`ainb_hangar_proto::transcript`], shared with the daemon's live
-//! `TaskMessage` producer and durable timeline read, so a line streamed live
-//! and the same line re-read from disk are byte-identical. That module also
-//! documents the provider shapes and the truncated / mid-write robustness
-//! contract; this one only wraps its output in the plugin's view type.
+//! The classification itself lives in [`ainb_hangar_proto::transcript`] so
+//! the daemon can call the same function when it starts producing the live
+//! `TaskMessage` stream (track A step A2): from then on a line streamed live
+//! and the same line re-read from disk classify identically. Today this
+//! wrapper is the only caller. That module documents the provider shapes and
+//! the truncated / mid-write robustness contract; this one only wraps its
+//! output in the plugin's view type.
 
 use ainb_hangar_proto::transcript::classify_stream_json;
 

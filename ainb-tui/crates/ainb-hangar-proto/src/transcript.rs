@@ -9,9 +9,10 @@
 //! extended thinking, and a closing LAST REPLY + run-status line.
 //!
 //! It lives in the proto crate so the daemon (the live `TaskMessage` producer
-//! and the durable timeline read) and the plugin (the on-disk timeline render)
-//! share exactly one classifier: a live-appended line and its later re-read
-//! twin are byte-identical.
+//! and the durable timeline read, track A steps A2 and A6) and the plugin (the
+//! on-disk timeline render, the only caller today) can share exactly one
+//! classifier, so that a live-appended line and its later re-read twin are
+//! byte-identical.
 //!
 //! # Robust to a truncated / mid-write file (the aws lesson: files lag)
 //!
