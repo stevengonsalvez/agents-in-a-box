@@ -2706,6 +2706,9 @@ pub struct IssueCreateInput<'a> {
     pub description: Option<&'a str>,
     /// The creating actor (already parsed from its `kind:id` wire form).
     pub creator: &'a ActorRef,
+    /// The agent the issue is born assigned to, when the caller resolved one
+    /// (a board card names its runner at create); `None` leaves it unassigned.
+    pub assignee: Option<&'a ActorRef>,
     /// Optional upstream-issue link (migration 0043).
     pub external_ref: Option<&'a str>,
     /// Optional parent issue, making this a sub-issue (migration 0046).
@@ -2739,8 +2742,9 @@ pub struct IssueCreateInput<'a> {
 ///
 /// Mints a fresh ULID via `idgen`, stamps `created_at` from `clock`, and inserts
 /// through [`IssueRepo::insert`] in the `open` lifecycle state. The new issue is
-/// unassigned (the create flow captures attributes, never an assignee);
-/// `creator` is the already-parsed actor-ref. Authored labels are attached
+/// unassigned unless the caller resolved an `assignee` (a board card names its
+/// runner at create; the issue wizard never does); `creator` is the
+/// already-parsed actor-ref. Authored labels are attached
 /// through the 0016 join and read back from it, so the re-wrapped [`IssueRow`]
 /// mirrors the `issues_list` shape (a freshly-created issue has no completed
 /// task, so `pr_url` is always `None`) — the response row and the pushed
@@ -2764,6 +2768,7 @@ pub async fn issue_create(
         title,
         description,
         creator,
+        assignee,
         external_ref,
         parent_issue_id,
         stage,
@@ -2797,7 +2802,7 @@ pub async fn issue_create(
             title: title.clone(),
             description: description.map(ToString::to_string),
             state: "open".to_string(),
-            assignee: None,
+            assignee: assignee.cloned(),
             creator: creator.clone(),
             created_at,
             priority,
@@ -2878,7 +2883,7 @@ pub async fn issue_create(
         title,
         description: description.map(ToString::to_string),
         state: "open".to_string(),
-        assignee: None,
+        assignee: assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
         creator: format!("{}:{}", creator.kind().as_str(), creator.id()),
         created_at,
         // The urgency + deadline the create captured (0014), echoed so the
