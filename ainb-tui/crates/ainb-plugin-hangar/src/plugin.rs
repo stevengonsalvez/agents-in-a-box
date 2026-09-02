@@ -274,6 +274,11 @@ const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
 /// `hangar/issue_timeline` — the per-issue activity + comment narrative behind
 /// the `y` modal (multica parity #13).
 const ISSUE_TIMELINE_REQ_ID: i64 = 64;
+/// `hangar/board_card_timeline` fired for a just-opened TASK-DETAIL screen
+/// (crisp B1, defect 7): its own id, so the reply backfills the detail's
+/// transcript instead of opening the Boards overlay the shared
+/// [`BOARD_CARD_TIMELINE_REQ_ID`] reply does.
+const TASK_DETAIL_TIMELINE_REQ_ID: i64 = 66;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -459,6 +464,11 @@ pub struct HangarPlugin {
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
     /// refresh is armed; consumed (taken) once fired.
     pending_pr_status_refresh: Option<String>,
+    /// The issue id of a task-detail screen that just opened (crisp B1, defect
+    /// 7), so `render` can fire `hangar/board_card_timeline` (no board named)
+    /// and backfill the transcript from the run's on-disk stream-json. `None`
+    /// when nothing is armed; consumed (taken) once fired.
+    pending_task_timeline_fetch: Option<String>,
     /// The card-board mouse drag FSM (63l.2). `handle_mouse` folds each forwarded
     /// pointer event against the [`hit_map`](Self::hit_map) into this, producing a
     /// [`MouseIntent`](crate::mouse::MouseIntent).
@@ -667,6 +677,7 @@ impl Default for HangarPlugin {
             link_redial_attempts: 0,
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
+            pending_task_timeline_fetch: None,
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
@@ -1304,6 +1315,7 @@ impl HangarPlugin {
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(ISSUE_TIMELINE_REQ_ID) => self.apply_issue_timeline(resp),
+            RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID) => self.apply_task_detail_timeline(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
@@ -3736,6 +3748,60 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire the deferred `hangar/board_card_timeline` for the just-opened
+    /// task-detail's issue (crisp B1, defect 7), naming NO board so an issue
+    /// that was never placed on one still resolves. The reply
+    /// ([`Self::apply_task_detail_timeline`]) backfills the transcript. A send
+    /// failure is logged, not fatal: the screen simply opens empty as before.
+    async fn fire_task_detail_timeline(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            TASK_DETAIL_TIMELINE_REQ_ID,
+            daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: task timeline send failed: {e}")).await;
+        }
+    }
+
+    /// Backfill the open task-detail transcript from a `hangar/board_card_timeline`
+    /// reply (crisp B1, defect 7): the run's raw stream-json parsed through the
+    /// same [`jsonl_timeline`](crate::widgets::jsonl_timeline) taxonomy the
+    /// Boards overlay uses. Applied only when the reply's task is the one the
+    /// screen is bound to (the daemon serves the issue's NEWEST run, the screen
+    /// may show an older attempt); an error, a malformed reply, a never-run
+    /// issue, or a closed screen leaves the transcript as it was.
+    fn apply_task_detail_timeline(&mut self, resp: &RpcResponse) {
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardTimelineResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        let Some(task_id) = r.task_id else {
+            return;
+        };
+        let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl)
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(line) => Some(line),
+                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        if self.screens.backfill_task_detail_transcript(&task_id, entries) {
+            self.conn.on_event();
+        }
+    }
+
     /// Fold a `hangar/pr_status_refresh` reply onto the open task-detail badge
     /// (e38.34): apply the fetched CI + merge status. A merged-PR transition was
     /// already performed daemon-side (and announced via `IssueUpdated`), so the
@@ -4930,6 +4996,9 @@ impl HangarPlugin {
         if let Some(status) = card.pr_status {
             self.screens.set_task_detail_pr_status(status);
         }
+        // Crisp B1 (defect 7): backfill the transcript from the run's on-disk
+        // stream-json. Deferred to `render` (no socket send in the key path).
+        self.pending_task_timeline_fetch = card.issue_id.clone();
         let mut next = self.app_state().clone();
         next.selected_task = Some(tid.clone());
         next.prior_screen = None;
@@ -5298,6 +5367,9 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
+                    // Crisp B1 (defect 7): backfill the transcript of the issue's
+                    // newest run from its on-disk stream-json, fired in `render`.
+                    self.pending_task_timeline_fetch = Some(issue.id.as_str().to_string());
                     // ch3: prefer the bound card's own run branch; an issue with
                     // no runs seeds from the issue row's `branch` — the daemon
                     // derives it from the issue's latest completed task (mirroring
@@ -5772,6 +5844,12 @@ impl Plugin for HangarPlugin {
         // auto-moved to Done daemon-side (announced via `IssueUpdated`).
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
+        }
+        // Crisp B1 (defect 7): drain a deferred transcript backfill (armed when a
+        // task-detail screen opened) and fire `hangar/board_card_timeline` with no
+        // board named; the reply folds the parsed run transcript into the screen.
+        if let Some(issue_id) = self.pending_task_timeline_fetch.take() {
+            self.fire_task_detail_timeline(host, issue_id).await;
         }
         // multica parity #13: drain a deferred activity-timeline fetch (armed by
         // `y` opening the modal, or `r` inside it) and fire
@@ -6563,6 +6641,73 @@ mod tests {
             dependencies: Vec::new(),
         }]);
         p
+    }
+
+    /// USER-VISIBLE PROOF (key+reply+render), crisp B1 defect 7: Enter on an
+    /// issue opens task detail AND arms a board-less `hangar/board_card_timeline`
+    /// for it; the reply's stream-json backfills the transcript, which renders on
+    /// the screen instead of the empty pane the open used to leave behind. A
+    /// reply for a different task (an older attempt on screen) is ignored.
+    #[test]
+    fn opening_task_detail_backfills_the_transcript_from_the_timeline_reply() {
+        use ainb_hangar_proto::events::TaskCardRow;
+        let mut p = connected_plugin_with_issue();
+        // The issue's newest run, so the detail binds a REAL task id.
+        p.screens.set_tasks(&[TaskCardRow {
+            id: ainb_hangar_core::ids::TaskId::from_str("task-9").unwrap(),
+            workspace_id: "default".into(),
+            agent_id: "agent-1".into(),
+            issue_id: Some("issue-1".into()),
+            status: "done".into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }]);
+
+        p.on_key(&enter_press());
+        assert!(matches!(p.app_state().screen, Screen::TaskDetail(_)));
+        assert_eq!(
+            p.pending_task_timeline_fetch.as_deref(),
+            Some("issue-1"),
+            "opening the detail arms the transcript backfill for its issue"
+        );
+        assert_eq!(p.screens.task_detail.as_ref().unwrap().transcript_len(), 0);
+
+        // A reply for ANOTHER task (not the one on screen) changes nothing.
+        let fixture = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n",
+        );
+        let reply = |task_id: &str| ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some(task_id.into()),
+                    provider: Some("claude".into()),
+                    jsonl: fixture.into(),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        };
+        p.on_daemon_response(&reply("task-other"));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().transcript_len(),
+            0,
+            "a transcript for a different task never lands on this screen"
+        );
+
+        // The bound task's reply backfills and renders.
+        p.on_daemon_response(&reply("task-9"));
+        assert_eq!(p.screens.task_detail.as_ref().unwrap().transcript_len(), 2);
+        let text = buf_text(&p.compose_frame(100, 40), 100, 40);
+        assert!(
+            text.contains("cargo test"),
+            "the backfilled tool call renders on the detail screen:\n{text}"
+        );
     }
 
     /// USER-VISIBLE PROOF (key+render): `Ctrl+P` opens the command-palette modal

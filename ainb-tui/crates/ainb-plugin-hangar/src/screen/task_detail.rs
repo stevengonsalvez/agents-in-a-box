@@ -415,6 +415,26 @@ impl TaskDetailState {
         );
     }
 
+    /// Backfill the transcript from the run's durable stream-json (crisp B1,
+    /// defect 7): `entries` are the parsed lines in stream order and go BEFORE
+    /// anything already on screen, so a system line pushed since the open (or a
+    /// live message that beat the reply) keeps its place after the history.
+    /// Sticky-bottom follows the new tail; a released viewport keeps its line.
+    pub fn backfill_transcript(&mut self, entries: Vec<TranscriptEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        let added = entries.len();
+        let mut transcript = entries;
+        transcript.append(&mut self.transcript);
+        self.transcript = transcript;
+        self.scroll_offset = if self.stuck_to_bottom {
+            self.transcript.len().saturating_sub(1)
+        } else {
+            self.scroll_offset.saturating_add(added)
+        };
+    }
+
     /// The current lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> TaskLifecycle {

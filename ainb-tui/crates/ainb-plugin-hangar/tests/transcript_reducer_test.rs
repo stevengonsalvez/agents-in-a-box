@@ -141,6 +141,56 @@ fn auto_scroll_releases_when_user_scrolls_up() {
     assert_eq!(after.scroll_offset(), offset_before);
 }
 
+/// Crisp B1 (defect 7): a durable-log backfill lands BEFORE whatever the screen
+/// already holds (a system line pushed since the open), sticky-bottom follows
+/// the new tail, and a released viewport keeps pointing at the same line.
+#[test]
+fn backfill_prepends_history_and_keeps_the_viewport_honest() {
+    let history = || {
+        vec![
+            TranscriptEntry::new(MessageKind::ToolCall, "Edit api.ts".into(), false),
+            TranscriptEntry::new(MessageKind::ToolResult, "3 files changed".into(), false),
+        ]
+    };
+
+    // Sticky: the offset tracks the new tail.
+    let mut s = state_for_task();
+    s.push_system_line("this run finished".into());
+    s.backfill_transcript(history());
+    let lines: Vec<&str> = s.transcript().map(TranscriptEntry::body).collect();
+    assert_eq!(
+        lines,
+        vec!["Edit api.ts", "3 files changed", "this run finished"]
+    );
+    assert!(s.is_stuck_to_bottom());
+    assert_eq!(s.scroll_offset(), 2);
+
+    // Released: the user's line stays the same line after history is prepended.
+    let mut s = state_for_task();
+    for i in 0..3 {
+        s = reduce_task_detail(
+            &s,
+            TaskDetailEvent::Event(message_event(MessageKind::Agent, &format!("live {i}"))),
+        )
+        .state;
+    }
+    let mut s = reduce_task_detail(&s, TaskDetailEvent::Key('k')).state;
+    assert!(!s.is_stuck_to_bottom());
+    let before = s.scroll_offset();
+    s.backfill_transcript(history());
+    assert_eq!(
+        s.scroll_offset(),
+        before + 2,
+        "offset shifts by the prepended count"
+    );
+    assert_eq!(s.transcript_len(), 5);
+
+    // Nothing to backfill: a no-op, not a reset.
+    let mut s = state_for_task();
+    s.backfill_transcript(Vec::new());
+    assert_eq!(s.transcript_len(), 0);
+}
+
 /// `R` emits a retry intent only after the task reached a terminal state.
 #[test]
 fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
