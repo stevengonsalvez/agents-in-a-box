@@ -95,8 +95,8 @@
 //! containing `%` or `_` cannot act as a wildcard and silently over-match.
 
 use ainb_hangar_core::clock::HangarClock;
-use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
 
 /// A card successfully pulled into the execution queue: the freshly-inserted
