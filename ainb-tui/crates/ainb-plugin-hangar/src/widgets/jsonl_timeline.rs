@@ -39,68 +39,33 @@ mod tests {
 
     use super::*;
 
-    /// A claude-shape run: the wrapper yields one plain `ViewEntry::Line` per
-    /// classified line, in the classifier's lanes and order (system status,
-    /// prose, tool call, tool result, run status, LAST REPLY marker + text).
+    /// The wrapper is a map over `classify_stream_json`, so this pins only what
+    /// the map can get wrong: every entry is a plain `ViewEntry::Line` (never a
+    /// thinking fold, never a comment) carrying the classifier's kind and body
+    /// unchanged, across every lane of the taxonomy. The move itself is pinned
+    /// against the pre-move behaviour in `ainb-hangar-proto`'s
+    /// `tests/transcript_classify.rs` (T0).
     #[test]
-    fn wrapper_yields_line_entries_in_the_classifier_lanes() {
-        let jsonl = r#"
-{"type":"system","subtype":"init","session_id":"abc123session"}
-{"type":"assistant","timestamp":1000,"message":{"content":[{"type":"text","text":"Let me check."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}
-{"type":"user","timestamp":2500,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}
-{"type":"result","subtype":"success","duration_ms":4200,"result":"All green."}
-"#;
-        let kinds: Vec<MessageKind> = parse_timeline(jsonl)
-            .iter()
-            .map(|e| match e {
-                ViewEntry::Line(l) => l.kind(),
-                ViewEntry::CollapsedThinking { .. } => panic!("the wrapper never folds: {e:?}"),
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![
-                MessageKind::ToolResult,
-                MessageKind::Agent,
-                MessageKind::ToolCall,
-                MessageKind::ToolResult,
-                MessageKind::ToolResult,
-                MessageKind::Agent,
-                MessageKind::Agent,
-            ]
-        );
-    }
-
-    /// T0 (move 1 step 1): the classifier move is behaviour-preserving. One
-    /// fixture spanning both provider shapes (claude's system / assistant /
-    /// tool_result / result taxonomy, an explicit error line, and the codex
-    /// `{"msg":{…}}` envelope) classified through proto directly and through
-    /// this wrapper yields the identical `(kind, body)` sequence: what the
-    /// daemon streams live is what the plugin renders from disk.
-    #[test]
-    fn t0_wrapper_matches_the_proto_classifier_on_both_provider_shapes() {
+    fn wrapper_preserves_kind_and_body_and_folds_nothing() {
         let jsonl = r#"
 {"type":"system","subtype":"init","session_id":"abc123session"}
 {"type":"assistant","timestamp":1000,"message":{"content":[{"type":"thinking","thinking":"plan\nthen act"},{"type":"text","text":"Let me check."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}
 {"type":"user","timestamp":2500,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"boom","is_error":true}]}}
-{"type":"error","error":"rate limited"}
-not json at all
 {"msg":{"type":"agent_message","message":"shipping it"}}
-{"msg":{"type":"error","message":"codex broke"}}
-{"msg":{"type":"token_count","n":5}}
 {"type":"result","subtype":"success","total_cost_usd":0.1234,"duration_ms":4200,"result":"All green."}
 "#;
         let via_wrapper: Vec<(MessageKind, String)> = parse_timeline(jsonl)
             .iter()
             .map(|e| match e {
-                ViewEntry::Line(l) => (l.kind(), l.body().to_string()),
+                ViewEntry::Line(l) => {
+                    assert!(!l.is_comment(), "a disk line is never a comment: {l:?}");
+                    (l.kind(), l.body().to_string())
+                }
                 ViewEntry::CollapsedThinking { .. } => panic!("the wrapper never folds: {e:?}"),
             })
             .collect();
         let via_proto = classify_stream_json(jsonl);
         assert_eq!(via_wrapper, via_proto);
-        // Every lane of the taxonomy is exercised, so a lane silently dropped
-        // by either side would not compare equal by being absent from both.
         for kind in [
             MessageKind::Agent,
             MessageKind::Thinking,
