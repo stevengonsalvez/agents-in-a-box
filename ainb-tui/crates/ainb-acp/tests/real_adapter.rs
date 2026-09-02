@@ -191,7 +191,8 @@ fn permission_sink() -> tokio::sync::mpsc::UnboundedSender<ainb_acp::client::Per
 /// an assertion of either: it drives one turn, logs every `session/update` and
 /// every permission request raw (to stderr, and to `AINB_ACP_PROBE_LOG` when
 /// set), answers any permission (the option named "blue" when offered, else
-/// the first) so the turn can finish, and prints one `A0 VERDICT:` line:
+/// the one-shot allow, never always-allow) so the turn can finish, and prints
+/// one `A0 VERDICT:` line:
 /// `REQUEST_PERMISSION` / `TOOL CALL ONLY` / `NOT OFFERED`, with the agent's
 /// own reply as evidence. It only fails when the turn cannot run to
 /// completion, because that is the "could not run" outcome.
@@ -273,12 +274,16 @@ async fn claude_agent_acp_ask_user_question_probe() {
                 }
                 let options = permission.options_wire();
                 log.push(format!("request_permission tool_call={tool_call} options={options:?}"));
-                // Prefer the option that is NOT the first one offered, so the
-                // final reply proves the agent acted on the pick rather than on
-                // a highlighted default (defect 26's bug class).
+                // If the question's own options arrived, pick the one that is
+                // NOT first, so the reply proves the agent acted on the pick
+                // rather than on a highlighted default (defect 26's bug class).
+                // Otherwise this is an ordinary tool permission against a real
+                // credentialed agent: grant the narrowest one-shot allow, never
+                // "always", and take the first option only if there is none.
                 let pick = options
                     .iter()
                     .find(|o| o["name"].as_str().is_some_and(|n| n.to_lowercase().contains("blue")))
+                    .or_else(|| options.iter().find(|o| o["kind"] == "allow_once"))
                     .or_else(|| options.first())
                     .and_then(|o| o["optionId"].as_str().map(str::to_string));
                 match pick {
