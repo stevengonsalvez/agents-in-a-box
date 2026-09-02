@@ -287,7 +287,58 @@ impl PullService {
             .map(|r| Ok((r.try_get("board_id")?, r.try_get("column_id")?)))
             .collect()
     }
+
+    /// Whether `issue_id`'s card still has a ROLE-GATED stage left to run.
+    ///
+    /// `true` when a gated column sits to the RIGHT of the card, or when the
+    /// card sits IN a gated column whose stage has not yet produced a `done`
+    /// task in the current generation. The current column counts because the
+    /// issue-lifecycle hook runs AFTER [`advance_after_stage`](Self::advance_after_stage)
+    /// moved the card: when Review finishes the card is already in QA, and QA
+    /// is a real stage whose task has not run. Counting only columns strictly
+    /// to the right marked the issue `done` at that moment, and [`PULL_SQL`]
+    /// excludes done issues, so the last gated stage of every pipeline could
+    /// never be pulled. The "not yet done here" clause mirrors the pull's
+    /// finished-stage guard, so a card parked in its last gated column with that
+    /// stage complete (auto-move off) still lets the issue finish.
+    ///
+    /// `false` for an issue on no board, a board with no gated columns, and a
+    /// card that reached the terminal (ungated) column.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn stages_remain(pool: &SqlitePool, issue_id: &str) -> Result<bool, sqlx::Error> {
+        let found: Option<i64> = sqlx::query_scalar(STAGES_REMAIN_SQL)
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await?;
+        Ok(found.is_some())
+    }
 }
+
+/// The predicate behind [`PullService::stages_remain`]. `?1` = `issue_id`.
+/// `pub` for the same reason [`ADVANCE_SQL`] is: `tests/pipeline_advance.rs`
+/// pins each clause.
+pub const STAGES_REMAIN_SQL: &str = "\
+SELECT 1 FROM board_card AS bc \
+  JOIN board_column AS cur ON cur.id = bc.column_id \
+ WHERE bc.issue_id = ?1 \
+   AND EXISTS ( \
+        SELECT 1 FROM board_column AS n \
+         WHERE n.board_id = bc.board_id \
+           AND n.services_role IS NOT NULL \
+           AND ( n.ord > cur.ord \
+              OR ( n.id = cur.id AND NOT EXISTS ( \
+                   SELECT 1 FROM agent_task_queue AS f \
+                    WHERE f.issue_id = bc.issue_id \
+                      AND f.status = 'done' \
+                      AND f.board_column_id = cur.id \
+                      AND f.generation = (SELECT MAX(g.generation) FROM agent_task_queue AS g \
+                                           WHERE g.issue_id = bc.issue_id) \
+                 ) ) ) \
+       ) \
+ LIMIT 1";
 
 /// Move a finished card one column to the right.
 ///
