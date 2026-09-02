@@ -66,8 +66,6 @@ pub fn classify_stream_json(jsonl: &str) -> Vec<(MessageKind, String)> {
 /// instance, in order.
 #[derive(Debug, Default)]
 pub struct StreamJsonClassifier {
-    /// Lines produced by the current [`Self::classify_line`] call.
-    out: Vec<(MessageKind, String)>,
     /// `tool_use_id` → the tool name, so a later tool_result can name its tool.
     tool_names: HashMap<String, String>,
     /// `tool_use_id` → the tool_use line's timestamp (epoch ms), so a tool_result
@@ -92,50 +90,43 @@ impl StreamJsonClassifier {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
-        self.fold(&v);
-        std::mem::take(&mut self.out)
+        let mut out = Vec::new();
+        self.fold(&v, &mut out);
+        out
     }
 
-    /// Fold one decoded JSONL line into the output.
-    fn fold(&mut self, v: &Value) {
+    /// Fold one decoded JSONL line into `out`.
+    fn fold(&mut self, v: &Value, out: &mut Vec<(MessageKind, String)>) {
         // Codex envelope: `{"msg":{"type":…}}`, unwrap to the inner event.
         if let Some(msg) = v.get("msg").filter(|m| m.is_object()) {
-            self.fold_codex_msg(msg);
+            fold_codex_msg(msg, out);
             return;
         }
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
-            "system" => self.fold_system(v),
-            "assistant" => self.fold_message(v, ts_of(v)),
-            "user" => self.fold_message(v, ts_of(v)),
-            "result" => self.fold_result(v),
+            "system" => fold_system(v, out),
+            "assistant" => self.fold_message(v, ts_of(v), out),
+            "user" => self.fold_message(v, ts_of(v), out),
+            "result" => fold_result(v, out),
             // An explicit error line (some providers emit one) → the error lane.
             "error" => {
                 if let Some(text) = v.get("error").and_then(value_text) {
-                    push_lines(&mut self.out, MessageKind::Error, &text);
+                    push_lines(out, MessageKind::Error, &text);
                 }
             }
             _ => {}
         }
     }
 
-    /// A `system` line marks a run boundary: surface it as a slate status line
-    /// so the session id / subtype reads without inventing a taxonomy lane.
-    fn fold_system(&mut self, v: &Value) {
-        let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("system");
-        let session = v.get("session_id").and_then(Value::as_str).map(short_id).unwrap_or_default();
-        let body = if session.is_empty() {
-            format!("· {subtype}")
-        } else {
-            format!("· {subtype} · session {session}")
-        };
-        self.out.push((MessageKind::ToolResult, body));
-    }
-
     /// An `assistant` / `user` line carries a `message.content` block array. Each
     /// block maps to a lane: text → agent prose, thinking → the thinking lane,
     /// tool_use → a tool call (name + compact input), tool_result → a tool result
     /// (named + a per-tool duration when both timestamps are known).
-    fn fold_message(&mut self, v: &Value, line_ts: Option<i64>) {
+    fn fold_message(
+        &mut self,
+        v: &Value,
+        line_ts: Option<i64>,
+        out: &mut Vec<(MessageKind, String)>,
+    ) {
         let content = v.get("message").and_then(|m| m.get("content")).and_then(Value::as_array);
         let Some(blocks) = content else {
             return;
@@ -144,16 +135,16 @@ impl StreamJsonClassifier {
             match block.get("type").and_then(Value::as_str).unwrap_or("") {
                 "text" => {
                     if let Some(t) = block.get("text").and_then(Value::as_str) {
-                        push_lines(&mut self.out, MessageKind::Agent, t);
+                        push_lines(out, MessageKind::Agent, t);
                     }
                 }
                 "thinking" => {
                     if let Some(t) = block.get("thinking").and_then(Value::as_str) {
-                        push_lines(&mut self.out, MessageKind::Thinking, t);
+                        push_lines(out, MessageKind::Thinking, t);
                     }
                 }
-                "tool_use" => self.fold_tool_use(block, line_ts),
-                "tool_result" => self.fold_tool_result(block, line_ts),
+                "tool_use" => self.fold_tool_use(block, line_ts, out),
+                "tool_result" => self.fold_tool_result(block, line_ts, out),
                 _ => {}
             }
         }
@@ -161,7 +152,12 @@ impl StreamJsonClassifier {
 
     /// A `tool_use` block: emit a blue tool-call line (`<name>  <compact input>`)
     /// and remember the tool's name + start timestamp for its result.
-    fn fold_tool_use(&mut self, block: &Value, line_ts: Option<i64>) {
+    fn fold_tool_use(
+        &mut self,
+        block: &Value,
+        line_ts: Option<i64>,
+        out: &mut Vec<(MessageKind, String)>,
+    ) {
         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
         let summary = compact_input(block.get("input"));
         let body = if summary.is_empty() {
@@ -169,7 +165,7 @@ impl StreamJsonClassifier {
         } else {
             format!("{name}  {summary}")
         };
-        self.out.push((MessageKind::ToolCall, body));
+        out.push((MessageKind::ToolCall, body));
         if let Some(id) = block.get("id").and_then(Value::as_str) {
             self.tool_names.insert(id.to_string(), name.to_string());
             if let Some(ts) = line_ts {
@@ -181,7 +177,12 @@ impl StreamJsonClassifier {
     /// A `tool_result` block: emit a slate result line naming its tool (resolved
     /// from the matching tool_use) and, when both carry a timestamp, its duration.
     /// An `is_error` result renders in the red error lane instead.
-    fn fold_tool_result(&mut self, block: &Value, line_ts: Option<i64>) {
+    fn fold_tool_result(
+        &mut self,
+        block: &Value,
+        line_ts: Option<i64>,
+        out: &mut Vec<(MessageKind, String)>,
+    ) {
         let id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
         let name = self.tool_names.get(id).map_or("tool", String::as_str);
         let snippet = block
@@ -203,53 +204,66 @@ impl StreamJsonClassifier {
         } else {
             MessageKind::ToolResult
         };
-        self.out.push((lane, body));
+        out.push((lane, body));
     }
+}
 
-    /// The terminal `result` line: the LAST REPLY block (the final assistant text)
-    /// plus a slate run-status transition (subtype · cost · wall-clock duration).
-    fn fold_result(&mut self, v: &Value) {
-        let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("result");
-        let mut status = format!("· {subtype}");
-        if let Some(cost) = v.get("total_cost_usd").and_then(Value::as_f64) {
-            if cost > 0.0 {
-                status.push_str(&format!(" · ${cost:.4}"));
-            }
-        }
-        if let Some(dur) = v.get("duration_ms").and_then(Value::as_i64) {
-            status.push_str(&format!(" · {}", fmt_dur(dur)));
-        }
-        let lane = if subtype.contains("error") {
-            MessageKind::Error
-        } else {
-            MessageKind::ToolResult
-        };
-        self.out.push((lane, status));
-        if let Some(reply) = v.get("result").and_then(value_text) {
-            if !reply.trim().is_empty() {
-                self.out.push((MessageKind::Agent, "LAST REPLY".to_string()));
-                push_lines(&mut self.out, MessageKind::Agent, &reply);
-            }
+/// A `system` line marks a run boundary: surface it as a slate status line
+/// so the session id / subtype reads without inventing a taxonomy lane.
+fn fold_system(v: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("system");
+    let session = v.get("session_id").and_then(Value::as_str).map(short_id).unwrap_or_default();
+    let body = if session.is_empty() {
+        format!("· {subtype}")
+    } else {
+        format!("· {subtype} · session {session}")
+    };
+    out.push((MessageKind::ToolResult, body));
+}
+
+/// The terminal `result` line: the LAST REPLY block (the final assistant text)
+/// plus a slate run-status transition (subtype · cost · wall-clock duration).
+fn fold_result(v: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("result");
+    let mut status = format!("· {subtype}");
+    if let Some(cost) = v.get("total_cost_usd").and_then(Value::as_f64) {
+        if cost > 0.0 {
+            status.push_str(&format!(" · ${cost:.4}"));
         }
     }
-
-    /// Best-effort codex `{"msg":{…}}` handling: an `agent_message` is prose, an
-    /// `error` is the error lane; other codex event types are skipped (never
-    /// mis-rendered as another provider's shape).
-    fn fold_codex_msg(&mut self, msg: &Value) {
-        match msg.get("type").and_then(Value::as_str).unwrap_or("") {
-            "agent_message" | "agent_message_delta" => {
-                if let Some(t) = msg.get("message").and_then(Value::as_str) {
-                    push_lines(&mut self.out, MessageKind::Agent, t);
-                }
-            }
-            "error" => {
-                if let Some(t) = msg.get("message").and_then(value_text) {
-                    push_lines(&mut self.out, MessageKind::Error, &t);
-                }
-            }
-            _ => {}
+    if let Some(dur) = v.get("duration_ms").and_then(Value::as_i64) {
+        status.push_str(&format!(" · {}", fmt_dur(dur)));
+    }
+    let lane = if subtype.contains("error") {
+        MessageKind::Error
+    } else {
+        MessageKind::ToolResult
+    };
+    out.push((lane, status));
+    if let Some(reply) = v.get("result").and_then(value_text) {
+        if !reply.trim().is_empty() {
+            out.push((MessageKind::Agent, "LAST REPLY".to_string()));
+            push_lines(out, MessageKind::Agent, &reply);
         }
+    }
+}
+
+/// Best-effort codex `{"msg":{…}}` handling: an `agent_message` is prose, an
+/// `error` is the error lane; other codex event types are skipped (never
+/// mis-rendered as another provider's shape).
+fn fold_codex_msg(msg: &Value, out: &mut Vec<(MessageKind, String)>) {
+    match msg.get("type").and_then(Value::as_str).unwrap_or("") {
+        "agent_message" | "agent_message_delta" => {
+            if let Some(t) = msg.get("message").and_then(Value::as_str) {
+                push_lines(out, MessageKind::Agent, t);
+            }
+        }
+        "error" => {
+            if let Some(t) = msg.get("message").and_then(value_text) {
+                push_lines(out, MessageKind::Error, &t);
+            }
+        }
+        _ => {}
     }
 }
 
