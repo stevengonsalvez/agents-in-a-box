@@ -306,3 +306,53 @@ async fn a_card_at_the_end_of_the_pipeline_does_render_done() {
         "the card walked the whole pipeline, so the issue is Done"
     );
 }
+
+/// The LAST gated column is not the end of the pipeline: a card parked in QA
+/// whose finishing task belongs to an earlier stage (or to no stage: a plain
+/// `Run`) still has QA itself to complete, so the issue stays `in_progress`.
+/// Only once a task stamped with the QA column reaches `done` does the same
+/// seam advance the issue. Guards the `n.id = cur.id` clause of
+/// `STAGES_REMAIN_SQL`: without it the card rendered Done the moment it
+/// ENTERED the final stage.
+#[tokio::test]
+async fn a_card_in_the_last_gated_column_waits_for_that_stage_to_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+    let pool = store.pool();
+    park_issue1_in_pipeline(pool, "QA").await;
+
+    // task-1 carries no stage stamp: it is the Review run that moved the card.
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+    set_task1_status(pool, "done").await;
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+    assert_eq!(
+        issue1_state(pool).await,
+        "in_progress",
+        "QA has not run: entering the last gated column is not finishing it"
+    );
+
+    // The QA stage's own task finishes: stamped with the QA column, done.
+    let qa_column: String = sqlx::query_scalar(
+        "SELECT c.id FROM board_column AS c JOIN board AS b ON b.id = c.board_id \
+          WHERE b.workspace_id = ?1 AND c.name = 'QA'",
+    )
+    .bind(WS_ID)
+    .fetch_one(pool)
+    .await
+    .expect("the QA column exists");
+    sqlx::query("UPDATE agent_task_queue SET board_column_id = ?1 WHERE id = 'task-1'")
+        .bind(&qa_column)
+        .execute(pool)
+        .await
+        .expect("stamp the QA stage on the task");
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+    assert_eq!(
+        issue1_state(pool).await,
+        "done",
+        "the QA stage's own task is done and nothing is left after QA"
+    );
+}

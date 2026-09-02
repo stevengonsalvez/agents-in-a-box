@@ -33,6 +33,25 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// Every status, in lifecycle order, for tests that walk the whole enum.
+    /// The array length is hand-kept: a new variant does not fail to compile
+    /// here, it fails in the exhaustive matches (`as_str`, the plugin's
+    /// `from_wire_status`), which is where the enforcement lives.
+    pub const ALL: [Self; 6] = [
+        Self::Queued,
+        Self::Dispatched,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    /// The status a wire / store token names, `None` for an unknown token.
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.as_str() == token)
+    }
+
     /// The lowercase wire token stored in the `status` column.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

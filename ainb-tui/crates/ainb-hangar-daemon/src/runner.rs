@@ -278,6 +278,20 @@ const CLAUDE_MODEL_FLAG: &str = "--model";
 ///
 /// See [`Runner::claude_spec`] for the trust posture this implies.
 const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// `--settings <json>`: per-launch settings claude merges over the operator's
+/// `~/.claude/settings.json` for THIS process only (verified against Claude
+/// Code 2.1.257, whose usage lists `--settings <file-or-json>`).
+const CLAUDE_SETTINGS_FLAG: &str = "--settings";
+/// The per-launch settings an INTERACTIVE claude carries: Claude gates
+/// `--dangerously-skip-permissions` behind a one-time "Bypass Permissions"
+/// acceptance it records as `skipDangerousModePermissionPrompt` in user or
+/// local settings; without it the pane parks on that dialog with nobody there
+/// to accept (the daemon spawns the session detached). Passing the acceptance
+/// as flag settings scopes it to the one launch the operator explicitly chose as
+/// YOLO from `Run ▾` after the TUI's danger-full-access acknowledgement,
+/// instead of writing a machine-wide acceptance into the operator's config.
+/// Headless `-p` runs never show the dialog and do not carry it.
+const CLAUDE_INTERACTIVE_SETTINGS_JSON: &str = r#"{"skipDangerousModePermissionPrompt":true}"#;
 /// The claude flag selecting the machine-readable event stream (bead 48c). Under
 /// `--print`, `--output-format stream-json` makes claude emit one JSON event per
 /// line — a `system` line carrying `session_id`, per-turn `assistant` lines, and
@@ -1222,7 +1236,7 @@ impl Runner {
     }
 
     /// The `claude` provider spec: claude log file + `[-p]
-    /// --dangerously-skip-permissions [--model <model>] [<cli_args>…] -- <prompt>`.
+    /// --dangerously-skip-permissions [--settings <json>] [--model <model>] [<cli_args>…] -- <prompt>`.
     ///
     /// Verified against Claude Code 2.1.210, whose usage is
     /// `claude [options] [command] [prompt]`:
@@ -1232,7 +1246,9 @@ impl Runner {
     ///   nothing.
     /// * [`Mode::Interactive`] OMITS it: the brief is still delivered (as the same
     ///   trailing positional), but claude starts the real session the operator
-    ///   attaches to. `-p` here would print and exit into an empty pane.
+    ///   attaches to. `-p` here would print and exit into an empty pane. It
+    ///   carries [`CLAUDE_INTERACTIVE_SETTINGS_JSON`] instead, so the detached
+    ///   pane does not park on the bypass-permissions acceptance dialog.
     ///
     /// The prompt is a POSITIONAL either way — `-p` is a boolean and never takes
     /// it — and rides last, after [`ARG_SEPARATOR`], so a `-`-leading brief cannot
@@ -1282,6 +1298,10 @@ impl Runner {
             argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
         argv.push(CLAUDE_SKIP_PERMISSIONS_FLAG.to_string());
+        if mode == Mode::Interactive {
+            argv.push(CLAUDE_SETTINGS_FLAG.to_string());
+            argv.push(CLAUDE_INTERACTIVE_SETTINGS_JSON.to_string());
+        }
         if mode == Mode::Headless {
             // bead 48c: emit the structured event stream so the runner can pin
             // session_id + usage and finalize on claude's OWN reported outcome,

@@ -33,10 +33,13 @@ pub const ROUTER_KEYS: [char; 18] = [
 
 /// Chars the HOST swallows before the plugin ever sees them.
 ///
-/// The `?` / `H` help toggle, while the plugin is not capturing text
-/// (`ainb-core`'s `is_host_reserved_key`). `Ctrl+C` is a chord, not a bare char,
-/// so it is not listed.
-pub const HOST_RESERVED_KEYS: [char; 2] = ['?', 'H'];
+/// Empty since `ainb-core` lists `hangar-tui` in `PLUGINS_WITH_OWN_HELP`: the
+/// host forwards `?` and `H` to this plugin whatever the capture flag says (the
+/// `?` overlay is ours, and `H` is a screen key: fleet history, board hint).
+/// `Ctrl+C` is a chord, not a bare char, so it is not listed. Kept as the seam
+/// the reserved-key invariant test unions with [`ROUTER_KEYS`], so a host that
+/// starts claiming a char again has one place to declare it.
+pub const HOST_RESERVED_KEYS: [char; 0] = [];
 
 /// Whether the routing layer claims `ch` (drives `routing_event` in the plugin).
 #[must_use]
@@ -70,7 +73,7 @@ pub const fn is_router_key(ch: char) -> bool {
 /// so an advertised hint on it lies to the user (issue #450).
 #[must_use]
 pub const fn is_reserved_key(ch: char) -> bool {
-    is_router_key(ch) || matches!(ch, '?' | 'H')
+    is_router_key(ch)
 }
 
 /// Fold one [`AppEvent`] into `state`, returning the next state and any

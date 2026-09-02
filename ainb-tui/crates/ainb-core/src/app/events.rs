@@ -1582,18 +1582,30 @@ impl EventHandler {
         // pasted text containing `H` to be partially swallowed because
         // `H` toggled the help overlay mid-paste (e.g. `SHOTClubhouse/SHOTid`
         // → `SOTid`). The single `in_text_input` predicate replaces all
-        // those lists. It now gates *three* places: (a) the explicit
-        // `?`/`H` and `W` globals immediately below, (b) the help-visible
-        // swallow guard (so the field still consumes keys if help is
-        // somehow open inside a text input), and (c) the SessionList
-        // fallthrough match later in this function (defense-in-depth
-        // for future text-input views that forget an early-return
-        // handler).
+        // those lists. It gates the SessionList fallthrough match later in
+        // this function (defense-in-depth for future text-input views that
+        // forget an early-return handler); `host_globals_suppressed` below
+        // extends it for (a) the explicit `?`/`H` and `W` globals and (b) the
+        // help-visible swallow guard (so the field still consumes keys if
+        // help is somehow open inside a text input).
         let in_text_input = Self::is_text_input_context(state);
+        // The printable host globals (`?`/`H` help, `W` statusline) are also
+        // off on a plugin screen whose plugin renders its OWN help, whatever the
+        // per-frame `captures_text` flag says: that flag is refreshed from the
+        // previous render, so the first ~70ms after such a plugin opens a text
+        // field report `false`, and a typed `H`/`?`/`W` was hijacked by the
+        // host. Worse, once `H` opened help the swallow branch below dropped
+        // every later key until Esc, which read as "the wizard lost my input".
+        // This is deliberately NOT folded into `in_text_input`: that predicate
+        // also short-circuits the fallthrough at the end of this function,
+        // and folding it in turned an unavailable plugin's placeholder into a
+        // screen where Ctrl+C, Esc and q all died (the PR #249 trap).
+        let host_globals_suppressed =
+            in_text_input || crate::app::screens::builtin::plugin_owns_help_keys(state);
 
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
-            if !in_text_input {
+            if !host_globals_suppressed {
                 match key_event.code {
                     KeyCode::Char('?' | 'H') | KeyCode::Esc => {
                         tracing::info!("Toggling help off via {:?}", key_event.code);
@@ -1618,7 +1630,7 @@ impl EventHandler {
             }
         }
 
-        if !in_text_input {
+        if !host_globals_suppressed {
             // Session-list-specific intercept for `H`: downgrade Headroom
             // routing on the selected running session. Must be checked before
             // the global `H` → ToggleHelp handler below because the global
@@ -10087,22 +10099,49 @@ mod text_input_guard_tests {
     /// boards-specific special case.
     #[test]
     fn plugin_text_capture_flag_flips_text_input_context() {
-        // Baseline: a focused plugin screen with NO capture flag is navigable —
-        // `H`/`?` still toggle help (this is the pre-fix behaviour that swallowed
-        // characters typed into a plugin overlay).
+        // A focused plugin screen with NO capture flag is NOT text-input (the
+        // fallthrough short-circuit must stay off so Ctrl+C / Esc / q keep
+        // working when the plugin is unavailable)...
         let mut state = AppState::default();
         state.current_screen = screen_ids::HANGAR.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "plugin screen without the capture flag must NOT be text-input"
         );
-        // The host would eat `H` as the help toggle here — the 8hx bug.
+        // ...but `H` is still not a host help toggle there: hangar renders its
+        // own help, and the capture flag lags a frame, so the host owning `H`
+        // stole the first keystrokes into every hangar text field.
         assert!(
-            matches!(
+            !matches!(
                 EventHandler::handle_key_event(char_key('H'), &mut state),
                 Some(AppEvent::ToggleHelp)
             ),
-            "precondition: without capture, H toggles help on a plugin screen"
+            "H never toggles host help on a plugin screen that owns its help"
+        );
+        // Esc / q / Ctrl+C still reach the host fallthrough on that screen
+        // (the plugin runtime is absent in this test, exactly the unavailable-
+        // plugin placeholder case).
+        assert!(
+            EventHandler::handle_key_event(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut state
+            )
+            .is_some(),
+            "Esc must not be swallowed on a plugin screen"
+        );
+        assert!(
+            matches!(
+                EventHandler::handle_key_event(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    &mut state
+                ),
+                Some(AppEvent::Quit)
+            ),
+            "Ctrl+C must still quit from a plugin screen"
+        );
+        assert!(
+            EventHandler::handle_key_event(char_key('q'), &mut state).is_some(),
+            "q must still reach the host fallthrough on a plugin screen"
         );
 
         // Declare text-capture (as the plugin's frame would via
