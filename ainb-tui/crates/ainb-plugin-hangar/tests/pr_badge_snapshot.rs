@@ -269,7 +269,7 @@ fn unknown_status_shows_muted_ci_and_no_mergeable() {
 fn applying_refresh_reply_updates_the_open_badge() {
     let task = TaskId::from_str("task-1").unwrap();
     let mut states = ScreenStates::default();
-    states.open_task_detail(task, issue_with_pr(Some("https://example.com/pr/1")), None);
+    states.open_task_detail(task, issue_with_pr(Some("https://example.com/pr/1")), None, None);
 
     // Before the reply: muted unknown CI, no mergeable token.
     let before = states.task_detail.as_ref().unwrap();
