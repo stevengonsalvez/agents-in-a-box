@@ -154,13 +154,13 @@ pub fn focused_plugin_captures_text(state: &AppState) -> bool {
 /// The reservation list is deliberately small:
 ///
 /// - `Ctrl+C` → host quit (ALWAYS reserved — never relaxed).
-///
-/// `?` / `H` are NOT reserved. They used to toggle host help unless the
-/// plugin's per-frame `captures_text` flag was set (8hx), but that flag lags a
-/// render behind, so the first keystrokes into a freshly opened plugin text
-/// field still reached the host help toggle, which then swallowed every later
-/// key until Esc. A plugin screen owns its printable keys outright and renders
-/// its own help.
+/// - `?` / `H` → host help toggle, reserved only for a plugin that does NOT
+///   render its own help ([`PLUGINS_WITH_OWN_HELP`]) and only while it is not
+///   capturing text. A plugin that owns its help (hangar) keeps `?`/`H`
+///   outright: the capture flag lags a render behind, so gating on it (8hx)
+///   still let the first keystrokes into a freshly opened plugin text field
+///   reach the host help toggle, which then swallowed every later key until
+///   Esc.
 ///
 /// `Esc` is plugin-owned (it used to be host-reserved): it pops one
 /// internal level (detail drawer, search overlay, zoom, filter chip)
@@ -180,24 +180,32 @@ pub fn focused_plugin_captures_text(state: &AppState) -> bool {
 /// toggles. Letting the host swallow them would make the screen
 /// uninteractive.
 #[must_use]
-pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
+pub fn is_host_reserved_key(
+    key: &crossterm::event::KeyEvent,
+    plugin_owns_help: bool,
+    capturing: bool,
+) -> bool {
     use crossterm::event::{KeyCode as CtKey, KeyModifiers as CtMods};
-    // Only the emergency quit is host-owned on a plugin screen. `?`/`H` used
-    // to be reserved unless the plugin's per-frame `captures_text` flag was
-    // set, but that flag lags one render behind, so the first keystrokes into a
-    // freshly opened plugin text field were stolen for the host help overlay,
-    // which then swallowed every later key until Esc. Plugins render their own
-    // help, so the host has no claim on `?`/`H` while a plugin owns the screen.
-    matches!(key.code, CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL))
+    match key.code {
+        CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
+        CtKey::Char('?' | 'H') => !plugin_owns_help && !capturing,
+        _ => false,
+    }
 }
 
-/// `true` when a plugin owns the focused screen, whatever its text-capture
-/// state. The host's printable-key globals (`?`/`H` help, `W` statusline) are
-/// suppressed on such screens; see [`is_host_reserved_key`] for why the
-/// per-frame `captures_text` flag alone is not a safe gate.
+/// Plugins that render their own `?` help overlay. On their screens the host
+/// never claims `?`/`H` (or the `W` statusline global), whatever the per-frame
+/// `captures_text` flag says. Every other plugin keeps the host help toggle.
+pub const PLUGINS_WITH_OWN_HELP: &[&str] = &["hangar-tui"];
+
+/// `true` when the focused screen belongs to a plugin in
+/// [`PLUGINS_WITH_OWN_HELP`]. The host's printable-key globals (`?`/`H` help,
+/// `W` statusline) are suppressed there; see [`is_host_reserved_key`] for why
+/// the per-frame `captures_text` flag alone is not a safe gate.
 #[must_use]
-pub fn plugin_owns_focused_screen(state: &AppState) -> bool {
-    plugin_id_for_screen(&state.current_screen).is_some()
+pub fn plugin_owns_help_keys(state: &AppState) -> bool {
+    plugin_id_for_screen(&state.current_screen)
+        .is_some_and(|id| PLUGINS_WITH_OWN_HELP.contains(&id))
 }
 
 /// Try to forward `key` to the plugin owning `current_screen`. Returns
@@ -212,7 +220,8 @@ pub fn forward_key_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
         return EventOutcome::NotHandled;
     };
-    if is_host_reserved_key(key) {
+    let capturing = focused_plugin_captures_text(state);
+    if is_host_reserved_key(key, plugin_owns_help_keys(state), capturing) {
         // Host claims this key — let the central dispatch in
         // `events.rs` resolve it to Quit / ToggleHelp / etc.
         return EventOutcome::NotHandled;
@@ -1249,26 +1258,21 @@ mod tests {
             state: KeyEventState::empty(),
         };
 
-        // Reserved: only the emergency quit.
-        assert!(is_host_reserved_key(&mk(
-            CtKey::Char('c'),
-            KeyModifiers::CONTROL
-        )));
-        // `?`/`H` belong to the plugin on its own screen: reserving them off the
-        // lagging per-frame capture flag stole the first keystrokes typed into
-        // a plugin text field and then swallowed everything until Esc.
-        assert!(!is_host_reserved_key(&mk(
-            CtKey::Char('?'),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_host_reserved_key(&mk(
-            CtKey::Char('H'),
-            KeyModifiers::NONE
-        )));
+        // Reserved on any plugin screen: the emergency quit.
+        assert!(is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL), false, false));
+        // A plugin WITHOUT its own help keeps the host toggle while not capturing.
+        assert!(is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE), false, false));
+        assert!(is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), false, false));
+        assert!(!is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), false, true));
+        // A plugin WITH its own help owns `?`/`H` outright: reserving them off
+        // the lagging per-frame capture flag stole the first keystrokes typed
+        // into a plugin text field and then swallowed everything until Esc.
+        assert!(!is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE), true, false));
+        assert!(!is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), true, false));
         // Esc is plugin-owned (overlay-panels redesign): the plugin pops
         // one internal level per press and publishes `ui.close_request`
         // at its root — see the doc on `is_host_reserved_key`.
-        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
+        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE), false, false));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
@@ -1283,13 +1287,13 @@ mod tests {
             CtKey::BackTab,
         ] {
             assert!(
-                !is_host_reserved_key(&mk(k, KeyModifiers::NONE)),
+                !is_host_reserved_key(&mk(k, KeyModifiers::NONE), false, false),
                 "host must not reserve {k:?} — plugin owns it"
             );
         }
 
         assert!(
-            is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL)),
+            is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL), true, true),
             "Ctrl+C stays reserved even while the plugin captures text"
         );
     }
@@ -1397,10 +1401,7 @@ mod tests {
             !focused_plugin_captures_text(&state),
             "precondition: the capture stash is empty"
         );
-        assert!(
-            plugin_owns_focused_screen(&state),
-            "hangar is a plugin-owned screen"
-        );
+        assert!(plugin_owns_help_keys(&state), "hangar renders its own help");
         assert!(
             matches!(fwd(&mut state, 'H'), EventOutcome::Handled),
             "H is forwarded to the plugin even before its capture frame lands"
