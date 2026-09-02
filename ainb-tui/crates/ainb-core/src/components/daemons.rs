@@ -1119,7 +1119,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(" start / restart / stop  ", Style::default().fg(MUTED_GRAY)),
+            // Not "start / restart / stop": the entries a row offers depend on
+            // its state, so naming three of them in a fixed list goes stale the
+            // moment a row offers a fourth.
+            Span::styled(" actions  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
             Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
