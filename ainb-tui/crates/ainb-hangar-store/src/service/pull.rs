@@ -95,6 +95,7 @@
 //! containing `%` or `_` cannot act as a wildcard and silently over-match.
 
 use ainb_hangar_core::clock::HangarClock;
+use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::idgen::IdGen;
 use sqlx::{Row, SqlitePool};
 
@@ -302,6 +303,11 @@ impl PullService {
     /// finished-stage guard, so a card parked in its last gated column with that
     /// stage complete (auto-move off) still lets the issue finish.
     ///
+    /// The "current generation" is the newest among the issue's STAGE tasks
+    /// (rows carrying a `board_column_id`), so a later push-path run, chat task
+    /// or infra retry on the same issue cannot un-finish a completed stage.
+    /// Only the card on a board of the issue's own workspace counts.
+    ///
     /// `false` for an issue on no board, a board with no gated columns, and a
     /// card that reached the terminal (ungated) column.
     ///
@@ -323,7 +329,10 @@ impl PullService {
 pub const STAGES_REMAIN_SQL: &str = "\
 SELECT 1 FROM board_card AS bc \
   JOIN board_column AS cur ON cur.id = bc.column_id \
+  JOIN board AS bd ON bd.id = bc.board_id \
+  JOIN issue AS i ON i.id = bc.issue_id \
  WHERE bc.issue_id = ?1 \
+   AND bd.workspace_id = i.workspace_id \
    AND EXISTS ( \
         SELECT 1 FROM board_column AS n \
          WHERE n.board_id = bc.board_id \
@@ -335,10 +344,41 @@ SELECT 1 FROM board_card AS bc \
                       AND f.status = 'done' \
                       AND f.board_column_id = cur.id \
                       AND f.generation = (SELECT MAX(g.generation) FROM agent_task_queue AS g \
-                                           WHERE g.issue_id = bc.issue_id) \
+                                           WHERE g.issue_id = bc.issue_id \
+                                             AND g.board_column_id IS NOT NULL) \
                  ) ) ) \
        ) \
  LIMIT 1";
+
+/// The gated column `issue_id`'s card sits in right now within `workspace`,
+/// or `None` when the card is not in a role-gated stage (no card, an ungated
+/// column, a board of another workspace). A single-agent `Run` on such a card
+/// stamps the task with it, so the push path leaves the same stage record the
+/// pull path does and [`PullService::stages_remain`] can see that stage finish.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn current_gated_column(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    issue_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT bc.column_id FROM board_card AS bc \
+           JOIN board_column AS col ON col.id = bc.column_id \
+           JOIN board AS bd ON bd.id = bc.board_id \
+          WHERE bc.issue_id = ?1 \
+            AND bd.workspace_id = ?2 \
+            AND col.services_role IS NOT NULL \
+          ORDER BY col.ord, col.id \
+          LIMIT 1",
+    )
+    .bind(issue_id)
+    .bind(workspace.as_str())
+    .fetch_optional(pool)
+    .await
+}
 
 /// Move a finished card one column to the right.
 ///
