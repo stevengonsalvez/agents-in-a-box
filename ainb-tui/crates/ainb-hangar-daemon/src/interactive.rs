@@ -118,8 +118,9 @@ static CLAUDE_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// forever at the "Is this a project you trust?" dialog (no human is at the pane
 /// when the daemon spawns it; the run then dies on the deadline as `timeout`).
 ///
-/// Merges `projects[<workdir>] = { hasTrustDialogAccepted, hasTrustDialogHooksAccepted }`
-/// into `<HOME>/.claude.json`, where `HOME` is the one in `child_env` (the
+/// Merges `projects[<workdir>].hasTrustDialogAccepted = true` (the one key the
+/// dialog reads; Claude Code 2.1.258 carries no hooks-trust key) into
+/// `<HOME>/.claude.json`, where `HOME` is the one in `child_env` (the
 /// deny-by-default env the child actually inherits). The write is scoped to
 /// that ONE project key; the machine-wide bypass-permissions acceptance is
 /// passed per launch as `--settings` instead (see `runner::claude_spec`), so
@@ -172,10 +173,6 @@ pub(crate) fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: 
     };
     obj.insert(
         "hasTrustDialogAccepted".into(),
-        serde_json::Value::Bool(true),
-    );
-    obj.insert(
-        "hasTrustDialogHooksAccepted".into(),
         serde_json::Value::Bool(true),
     );
 
@@ -652,8 +649,9 @@ mod tests {
             true
         );
         assert_eq!(
-            v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"],
-            true
+            v["projects"]["/srv/worktrees/task-1"].as_object().map(serde_json::Map::len),
+            Some(1),
+            "exactly the one key the dialog reads, nothing speculative"
         );
         assert!(
             v.get("bypassPermissionsModeAccepted").is_none(),
