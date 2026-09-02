@@ -427,6 +427,16 @@ pub struct HangarPlugin {
     /// Last redial attempt inside the window — throttles dials to ~1/s while
     /// `wants_redraw` keeps frames coming.
     daemon_start_last_redial: Option<std::time::Instant>,
+    /// When an ESTABLISHED link dropped (EOF / socket error after `Connected`),
+    /// or `None` while the link is up or was never up. Drives the automatic
+    /// reconnect in [`Self::pump_reconnect`]: the daemon used to idle-close a
+    /// quiet subscribed connection after ten minutes, and the plugin then sat
+    /// on "daemon offline" until restarted, with the daemon perfectly healthy.
+    link_lost_at: Option<std::time::Instant>,
+    /// Last automatic reconnect attempt, for the backoff.
+    link_last_redial: Option<std::time::Instant>,
+    /// Consecutive failed automatic reconnects (backoff exponent).
+    link_redial_attempts: u32,
     /// The in-flight `[s]` start's late-arriving verdict. `DaemonStarter::start`
     /// returns immediately and reports here; `render` polls it with `try_recv`.
     /// Waiting on it inline is exactly what used to wedge `q`/`Esc` for three
@@ -638,6 +648,9 @@ impl Default for HangarPlugin {
             daemon_start_error: None,
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
+            link_lost_at: None,
+            link_last_redial: None,
+            link_redial_attempts: 0,
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
             mouse_fsm: crate::mouse::MouseFsm::default(),
@@ -952,11 +965,69 @@ impl HangarPlugin {
                     Err(e) => self.conn.on_error(format!("frame decode: {e}")),
                 }
             }
-            UnixSocketEventKind::Eof => self.conn.on_eof(),
+            UnixSocketEventKind::Eof => {
+                self.note_link_lost();
+                self.conn.on_eof();
+            }
             UnixSocketEventKind::Error => {
                 let msg = event.error.clone().unwrap_or_else(|| "socket error".into());
+                self.note_link_lost();
                 self.conn.on_error(msg);
             }
+        }
+    }
+
+    /// Remember that a live link just dropped so [`Self::pump_reconnect`] dials
+    /// again. Only an established link counts: a failed first dial is the
+    /// offline empty state's business (`[s]` start), not a reconnect.
+    fn note_link_lost(&mut self) {
+        if matches!(self.conn.state(), ConnState::Connected | ConnState::Handshake)
+            && self.link_lost_at.is_none()
+        {
+            self.link_lost_at = Some(std::time::Instant::now());
+            self.link_last_redial = None;
+            self.link_redial_attempts = 0;
+        }
+    }
+
+    /// Longest pause between two automatic reconnect attempts.
+    const RECONNECT_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Re-dial a link that dropped after it was up (called from `render`, where
+    /// host IO is safe), with exponential backoff from 2s to
+    /// [`Self::RECONNECT_MAX_GAP`], for as long as the link stays down. Stands
+    /// aside while an `[s]` daemon-start window owns the dialing.
+    async fn pump_reconnect(&mut self, host: &HostClient) {
+        let Some(lost_at) = self.link_lost_at else {
+            return;
+        };
+        match self.conn.state() {
+            ConnState::Connected => {
+                let _ = host
+                    .log_info(format!(
+                        "hangar: link restored after {:?} ({} redial(s))",
+                        lost_at.elapsed(),
+                        self.link_redial_attempts
+                    ))
+                    .await;
+                self.link_lost_at = None;
+                self.link_last_redial = None;
+                self.link_redial_attempts = 0;
+                return;
+            }
+            ConnState::Dialing | ConnState::Handshake => return,
+            ConnState::Disconnected | ConnState::Error(_) => {}
+        }
+        if self.daemon_start_redial_until.is_some() {
+            return;
+        }
+        let gap = std::time::Duration::from_secs(2u64 << self.link_redial_attempts.min(4))
+            .min(Self::RECONNECT_MAX_GAP);
+        let due = self.link_last_redial.is_none_or(|last| last.elapsed() >= gap);
+        if due {
+            self.link_last_redial = Some(std::time::Instant::now());
+            self.link_redial_attempts = self.link_redial_attempts.saturating_add(1);
+            self.connect(host).await;
         }
     }
 
@@ -5413,6 +5484,8 @@ impl Plugin for HangarPlugin {
             // input — renders were the only place host IO is safe, and with no
             // frames the daemon coming up was never noticed.
             || self.daemon_start_redial_until.is_some()
+            // A dropped link keeps frames coming so the reconnect pump runs.
+            || self.link_lost_at.is_some()
             // Phase 5: a wizard dispatch armed by the `issue_create` reply needs a
             // render to fire its `issue_update` + `issue_run` (host IO is only
             // safe there). Consumed (taken) by that render, so not level-held.
@@ -5676,6 +5749,8 @@ impl Plugin for HangarPlugin {
         // Keep re-dialing after a `[s]` start until the daemon binds or the
         // window expires (`wants_redraw` keeps frames coming meanwhile).
         self.pump_start_redial(host).await;
+        // And re-dial on our own after an established link drops.
+        self.pump_reconnect(host).await;
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
         // skips the warning. An IO fault is logged, not fatal.
@@ -6004,6 +6079,25 @@ mod tests {
         };
         p.on_socket_event(&eof);
         assert_eq!(*p.conn.state(), ConnState::Disconnected);
+        // ...and arms the automatic reconnect (the daemon idle-closed quiet
+        // subscribed links for months; the plugin must dial again by itself).
+        assert!(p.link_lost_at.is_some(), "an established link dropping arms the reconnect");
+        assert!(p.wants_redraw(), "frames keep coming so the reconnect pump runs");
+    }
+
+    /// A first dial that never came up is the offline empty state's business
+    /// (`[s]` start), not a reconnect: EOF before `Connected` arms nothing.
+    #[test]
+    fn socket_eof_before_connected_does_not_arm_reconnect() {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        let eof = UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        };
+        p.on_socket_event(&eof);
+        assert!(p.link_lost_at.is_none());
     }
 
     // ----- e38.36: offline empty-state + [s] start-daemon -----
