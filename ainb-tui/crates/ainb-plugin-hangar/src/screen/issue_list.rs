@@ -1146,6 +1146,18 @@ impl IssueListState {
         }
     }
 
+    /// Replace the cached rows from a fresh `hangar/issues_list` snapshot while
+    /// keeping every piece of operator state alive across the refresh: the open
+    /// create wizard, filter text, facets, selection, transient note, repo and
+    /// agent rosters. Rebuilding through [`with_rows`](Self::with_rows) wiped all
+    /// of it, so a background refresh landing mid-typing silently destroyed the
+    /// wizard (the Boards screen already guards this via `adopt_context`).
+    pub fn replace_rows(&mut self, rows: Vec<IssueRow>) {
+        self.rows = rows;
+        let visible = self.visible_rows().count();
+        self.selected = self.selected.min(visible.saturating_sub(1));
+    }
+
     /// Every cached row, UNFILTERED: the raw `hangar/issues_list` snapshot, which
     /// enumerates every issue state in the workspace.
     ///
@@ -4864,6 +4876,32 @@ mod tests {
         assert_eq!(out.intent, None);
         assert_eq!(out.state.mode(), IssueListMode::Normal, "no confirm opens");
         assert!(out.state.confirm_delete().is_none());
+    }
+
+    /// A background `issues_list` refresh landing while the create wizard is open
+    /// must NOT destroy it: `replace_rows` swaps only the row cache and keeps the
+    /// wizard (and its typed text), the mode, and the selection clamp intact.
+    #[test]
+    fn replace_rows_keeps_the_open_wizard_and_its_text() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        let mut wizard = reduce_issue_list(&s, IssueListEvent::Key('c')).state;
+        for c in ['a', 'b', 'c'] {
+            wizard = reduce_issue_list(&wizard, IssueListEvent::Key(c)).state;
+        }
+        assert_eq!(wizard.mode(), IssueListMode::CreateInput);
+        let typed_before = wizard.wizard.as_ref().map(|w| w.title.clone());
+        assert_eq!(typed_before.as_deref(), Some("abc"));
+
+        wizard.replace_rows(vec![row("i9", "open", None)]);
+
+        assert_eq!(wizard.mode(), IssueListMode::CreateInput, "refresh kept the wizard open");
+        assert_eq!(
+            wizard.wizard.as_ref().map(|w| w.title.clone()).as_deref(),
+            Some("abc"),
+            "refresh kept the typed title"
+        );
+        assert_eq!(wizard.all_rows().len(), 1, "rows were replaced");
+        assert_eq!(wizard.selected, 0, "selection clamped to the new row count");
     }
 
     /// `x` does NOT open the confirm while the create wizard is open — the wizard
