@@ -154,12 +154,19 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     println!("hook script:   {}", record.hook_script.display());
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+        println!("note: {}", crate::install::CODEX_TRUST_NOTE);
     }
     if let Some(p) = &record.copilot_hooks_json {
         println!("copilot hooks: {}", p.display());
     }
     if let Some(p) = &record.antigravity_hooks_json {
         println!("antigravity hooks: {}", p.display());
+    }
+    // A per-agent install failure is isolated, so the only signal at this level
+    // is the agent missing from the record. Say which, rather than reporting a
+    // clean install of something that did not happen.
+    for agent in agents.iter().filter(|a| !record.agents.contains(a)) {
+        println!("{}: FAILED — see the log for the cause", agent.name());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
