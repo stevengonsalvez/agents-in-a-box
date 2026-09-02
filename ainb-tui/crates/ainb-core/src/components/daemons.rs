@@ -110,8 +110,12 @@ pub struct DaemonsState {
         tokio::sync::mpsc::UnboundedReceiver<String>,
         std::time::Instant,
     )>,
-    /// What the last hook action reported, shown in the Hooks box.
-    hooks_status: Option<String>,
+    /// What the last hook action reported, and the collect clock it was
+    /// recorded against. Dropped once a LATER collect lands: the panel replaces
+    /// the live issue line while a status is set, so a status that never
+    /// expires would hide every fault found after it for the rest of the
+    /// process (this state is app-level and outlives leaving the screen).
+    hooks_status: Option<(String, i64)>,
     /// A tmux session the screen wants attached. Drained by the key handler,
     /// which owns the app-level pending-action slot; the component itself must
     /// not reach into `AppState`.
@@ -170,7 +174,10 @@ impl ActionMenu {
             .filter(|action| self.offers(*action))
             .map(MenuEntry::Act)
             .collect();
-        if self.kind == DaemonKind::Atc {
+        // Same rule as `offers`: with nothing provisioned there is no tmux
+        // session, so attaching could only fail. `provision` is the entry that
+        // gets you one.
+        if self.kind == DaemonKind::Atc && !self.row.unprovisioned {
             entries.push(MenuEntry::OpenMissionControl);
         }
         if has_error {
@@ -428,13 +435,14 @@ impl DaemonsState {
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.hooks_inflight = Some((rx, std::time::Instant::now()));
-        self.hooks_status = Some(
+        self.hooks_status = Some((
             match intent {
                 BinaryIntent::Install => "installing hooks…",
                 BinaryIntent::PinRunning => "pinning the running binary…",
             }
             .to_string(),
-        );
+            i64::MAX,
+        ));
         std::thread::spawn(move || {
             let _ = tx.send(run_hook_action(intent));
         });
@@ -442,20 +450,32 @@ impl DaemonsState {
 
     /// Drain a finished hook action. A channel poll, not I/O — same reasoning
     /// as [`DaemonsState::poll_actions`].
-    fn poll_hooks(&mut self) {
+    fn poll_hooks(&mut self, collected_at_ms: i64) {
         let Some((rx, started)) = self.hooks_inflight.as_mut() else {
             return;
         };
         if let Ok(line) = rx.try_recv() {
-            self.hooks_status = Some(line);
+            self.hooks_status = Some((line, collected_at_ms));
             self.hooks_inflight = None;
         } else if started.elapsed() > ACTION_TIMEOUT {
-            self.hooks_status = Some(format!(
-                "hook repair did not finish within {}s",
-                ACTION_TIMEOUT.as_secs()
+            self.hooks_status = Some((
+                format!(
+                    "hook repair did not finish within {}s",
+                    ACTION_TIMEOUT.as_secs()
+                ),
+                collected_at_ms,
             ));
             self.hooks_inflight = None;
         }
+    }
+
+    /// The hook status to paint, if it is still newer than the health beside
+    /// it. `i64::MAX` marks an action that is still running, which always wins.
+    fn live_hooks_status(&self, collected_at_ms: i64) -> Option<&str> {
+        self.hooks_status
+            .as_ref()
+            .filter(|(_, at)| *at >= collected_at_ms)
+            .map(|(line, _)| line.as_str())
     }
 
     /// Read the latest published snapshot. Off the render path this is a pure
@@ -471,33 +491,55 @@ impl DaemonsState {
     }
 }
 
-/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
-///
-/// Runs on a throwaway thread. The captured argv, exit status, and output are
-/// what the row's error view shows verbatim — the operator sees the actual
-/// failure, not our summary of it.
 /// Run one hook install/repair in-process and report it in one line.
 ///
 /// In-process, not shelled: unlike a daemon lifecycle verb there is no separate
-/// process to talk to, and the repair is exactly the library call `ainb doctor
-/// --fix-hooks` would make.
+/// process to talk to, and the repair is exactly the library call
+/// `repair_or_install_hooks` performs.
 fn run_hook_action(intent: BinaryIntent) -> String {
+    // The row's one-outstanding guard is released on ACTION_TIMEOUT while the
+    // thread is still alive, so a wedged install can be joined by a second one.
+    // Unlike a row action these run IN-PROCESS and both write install.json and
+    // hooks/ainb-bin, so they are serialised here rather than left to race.
+    static HOOK_WRITES: Mutex<()> = Mutex::new(());
+    let _serialised = HOOK_WRITES.lock().unwrap_or_else(|p| p.into_inner());
+
     let paths = match ainb_plugin_notifyd::Paths::from_home() {
         Ok(paths) => paths,
         Err(error) => return format!("hook repair failed: {error:#}"),
     };
     match intent {
         BinaryIntent::Install => match ainb_plugin_notifyd::repair_or_install_hooks(&paths) {
-            Ok(report) => format!(
-                "hooks installed for {}",
-                report
+            Ok(report) => {
+                let agents = report
                     .record
                     .agents
                     .iter()
                     .map(|agent| agent.name())
                     .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                    .join(", ");
+                // Claude is wired through its marketplace, which can fail on
+                // its own while the record still lists Claude. Reporting a
+                // clean install then is how hooks that never fire look fine.
+                let mut line = match &report.claude {
+                    Some(ainb_plugin_notifyd::ClaudeRegister::Failed(error)) => {
+                        format!("hooks installed for {agents}, but Claude plugin FAILED: {error}")
+                    }
+                    Some(ainb_plugin_notifyd::ClaudeRegister::ClaudeCliMissing) => {
+                        format!(
+                            "hooks installed for {agents}; Claude plugin skipped (no claude on \
+                             PATH)"
+                        )
+                    }
+                    _ => format!("hooks installed for {agents}"),
+                };
+                // `agents` is the cumulative record, so an agent that failed
+                // THIS run is still in it. Name the failures explicitly.
+                for (agent, error) in &report.failures {
+                    line.push_str(&format!("; {} FAILED: {error}", agent.name()));
+                }
+                line
+            }
             Err(error) => format!("hook repair failed: {error:#}"),
         },
         BinaryIntent::PinRunning => {
@@ -509,6 +551,11 @@ fn run_hook_action(intent: BinaryIntent) -> String {
     }
 }
 
+/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
+///
+/// Runs on a throwaway thread. The captured argv, exit status, and output are
+/// what the row's error view shows verbatim — the operator sees the actual
+/// failure, not our summary of it.
 fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome {
     let argv = format!("ainb daemon {kind_id} {verb}");
     // Never self-exec a test harness: under `cargo test` current_exe() is the
@@ -634,8 +681,8 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: Arc<AtomicBool>) {
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
 pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     state.poll_actions();
-    state.poll_hooks();
     let snapshot = state.snapshot();
+    state.poll_hooks(snapshot.collected_at_ms);
     // Clamp before painting: the collector can shrink the table under us.
     state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
 
@@ -682,7 +729,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
-            state.hooks_status.as_deref(),
+            state.live_hooks_status(snapshot.collected_at_ms),
             snapshot.collected_at_ms > 0,
         );
     } else {
@@ -1241,6 +1288,7 @@ mod tests {
             hook_binary_mode: Some(HookBinaryMode::Release),
             hook_binary_ready: true,
             running_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_is_running_binary: true,
             agents: vec![
                 HookAgentHealth {
                     agent: "claude".to_string(),
@@ -1531,9 +1579,6 @@ mod tests {
         assert_eq!(state.selected, 1);
     }
 
-    /// A failure belongs to the daemon it happened to. The row shows a badge
-    /// plus the way to read the rest, and the full text is one Enter away.
-    #[test]
     /// The reported complaint: an ATC with no instance offered start, restart
     /// and stop, all three of which bail before they read the verb, and the
     /// only real fix was a CLI command quoted in the error.
@@ -1559,9 +1604,12 @@ mod tests {
             entries.contains(&MenuEntry::Act(Action::RemoveOrphan)),
             "the orphan timer must be removable: {entries:?}"
         );
+        // Mission control is a tmux session that provisioning creates, so with
+        // nothing provisioned there is nothing to attach and the entry would
+        // only fail.
         assert!(
-            entries.contains(&MenuEntry::OpenMissionControl),
-            "mission control must be reachable: {entries:?}"
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "there is no session to open yet: {entries:?}"
         );
         for dead in [Action::Start, Action::Restart, Action::Stop] {
             assert!(
@@ -1588,10 +1636,13 @@ mod tests {
         let entries = state.menu.as_ref().expect("menu opened").entries(false);
 
         assert!(entries.contains(&MenuEntry::Act(Action::Restart)));
+        assert!(entries.contains(&MenuEntry::OpenMissionControl));
         assert!(!entries.contains(&MenuEntry::Act(Action::Provision)));
         assert!(!entries.contains(&MenuEntry::Act(Action::RemoveOrphan)));
     }
 
+    /// A failure belongs to the daemon it happened to. The row shows a badge
+    /// plus the way to read the rest, and the full text is one Enter away.
     #[test]
     fn a_failed_action_badges_its_own_row_and_its_detail_is_readable() {
         let mut state = seeded_state(vec![status(
@@ -1761,7 +1812,6 @@ mod tests {
         assert!(!state.has_overlay(), "and the screen is free to pop");
     }
 
-    #[test]
     /// The reported failure was a pointer aimed at a deleted worktree while a
     /// perfectly good ainb was running. The panel has to show BOTH paths, or
     /// the only way to see the mismatch is to go and read the pointer file.
@@ -1790,10 +1840,35 @@ mod tests {
         );
     }
 
+    /// A finished action's line must not outlive the health beside it. The
+    /// state is app-level, so a status that never expires would replace the
+    /// live issue line for the rest of the process, hiding every fault found
+    /// after the last repair.
+    #[test]
+    fn a_finished_hook_status_expires_when_a_newer_collect_lands() {
+        let mut state = DaemonsState::default();
+        state.hooks_status = Some(("hooks installed for claude".to_string(), 1_000));
+
+        assert_eq!(
+            state.live_hooks_status(1_000),
+            Some("hooks installed for claude"),
+            "the collect it was recorded against still shows it"
+        );
+        assert_eq!(
+            state.live_hooks_status(1_001),
+            None,
+            "a later collect must give the issue line back"
+        );
+
+        // An action still running outranks every collect until it finishes.
+        state.hooks_status = Some(("installing hooks…".to_string(), i64::MAX));
+        assert_eq!(state.live_hooks_status(9_999), Some("installing hooks…"));
+    }
+
     #[test]
     fn renders_hook_repair_progress_from_its_own_state() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        state.hooks_status = Some("hooks repaired for claude, codex".to_string());
+        state.hooks_status = Some(("hooks repaired for claude, codex".to_string(), i64::MAX));
         let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("I hooks repaired for claude, codex"),
