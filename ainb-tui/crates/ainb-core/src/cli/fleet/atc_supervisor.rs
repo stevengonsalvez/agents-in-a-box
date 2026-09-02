@@ -139,6 +139,24 @@ its next action, but neither controller was started or stopped"
         reconcile_controllers(&meta, previous_provider != provider).await
     };
 
+    // A reconcile that could not establish the new mode's safety property must
+    // not leave the fleet in that mode. Roll the persisted mode back, so the
+    // fleet keeps the owner whose invariants still hold.
+    if let Some(why) = reconcile.failed.clone() {
+        meta.mode = previous;
+        meta.provider.clone_from(&previous_provider);
+        match write_meta(&paths, &meta) {
+            Ok(()) => bail!("{why}. The instance was left in {} mode.", previous.id()),
+            Err(e) => bail!(
+                "{why}. WORSE: the rollback to {} mode also failed ({e}), so {} now records {} \
+with its safety handover unarmed. Fix that file before starting either controller.",
+                previous.id(),
+                paths.meta.display(),
+                target.id()
+            ),
+        }
+    }
+
     let summary = json!({
         "action": "mode",
         "name": meta.name,
@@ -210,6 +228,10 @@ fn report(meta: &AtcMeta, format: OutputFormat, extra: Option<&str>) -> Result<(
 /// What the reconcile step actually managed to do, reported rather than assumed.
 #[derive(Debug, Default)]
 struct Reconcile {
+    /// Set when reconcile hit something that makes the new mode unsafe to leave
+    /// in place. The caller ROLLS THE MODE BACK and fails, rather than reporting
+    /// a switch whose safety property does not hold.
+    failed: Option<String>,
     lite_stopped_pid: Option<u32>,
     lite_started: bool,
     scheduler_asserted: bool,
@@ -265,9 +287,14 @@ async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconc
 erroring session at the cap, so none of them restart their budget"
                             .to_string(),
                     ),
-                    Err(e) => out.notes.push(format!(
-                        "could not arm the retry-ledger handover ({e}); a session the daemon had \
-escalated may get a fresh budget in lite"
+                    // NOT a note. A note here would tell the operator the switch
+                    // succeeded while leaving the ledger in exactly the state the
+                    // handover exists to prevent — every session the daemon had
+                    // escalated holding a fresh budget. A guarantee that
+                    // degrades to a warning is not a guarantee.
+                    Err(e) => out.failed = Some(format!(
+                        "could not arm the retry-ledger handover: {e}. Refusing to leave the fleet \
+in lite mode with the daemon's spent budgets unreadable and unsealed"
                     )),
                 }
             }
