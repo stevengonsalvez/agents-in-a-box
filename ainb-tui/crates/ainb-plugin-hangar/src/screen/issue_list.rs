@@ -4894,7 +4894,11 @@ mod tests {
 
         wizard.replace_rows(vec![row("i9", "open", None)]);
 
-        assert_eq!(wizard.mode(), IssueListMode::CreateInput, "refresh kept the wizard open");
+        assert_eq!(
+            wizard.mode(),
+            IssueListMode::CreateInput,
+            "refresh kept the wizard open"
+        );
         assert_eq!(
             wizard.wizard.as_ref().map(|w| w.title.clone()).as_deref(),
             Some("abc"),
