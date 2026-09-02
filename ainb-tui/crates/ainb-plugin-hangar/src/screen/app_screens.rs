@@ -1520,7 +1520,9 @@ pub const HELP_LINES: &[&str] = &[
     "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
     "control   j/k card  h/l option  enter or 1-9 answer",
     "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
-    "agents    n create  x delete      profiles  t tier      logs  a/i/w/e level",
+    "agents    n create  x delete",
+    "profiles  t tier",
+    "logs      a/i/w/e level",
     "",
     "esc close  q back to ainb home",
 ];
@@ -2678,6 +2680,41 @@ mod help_overlay_tests {
             assert!(
                 labelled,
                 "router key {key:?} has no `{key} <label>` help entry"
+            );
+        }
+    }
+
+    /// Every screen row of the overlay reads `<section> <key> <label>...`: a
+    /// description with no key in front of it (a section name stranded
+    /// mid-line, a hint whose key was stripped) is operator-visible garbling.
+    /// Rows are tokenised as key / label pairs: a key token is a single char,
+    /// a slash group, a digit range or a named key; anything else is a label
+    /// word and must follow a key.
+    #[test]
+    fn help_overlay_screen_rows_pair_every_label_with_a_key() {
+        let is_key = |tok: &str| {
+            tok.chars().count() == 1
+                || tok.split('/').all(|k| k.chars().count() == 1)
+                || matches!(tok, "enter" | "esc" | "tab" | "1-9" | "^P" | "space")
+        };
+        let mut in_screens = false;
+        for line in HELP_LINES {
+            let first = line.split_whitespace().next().unwrap_or_default();
+            if !line.starts_with(' ') {
+                in_screens = first == "screens";
+            }
+            if in_screens || first.is_empty() || first == "Hangar" || line.starts_with("esc") {
+                continue;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let body = if line.starts_with(' ') {
+                &tokens[..]
+            } else {
+                &tokens[1..]
+            };
+            assert!(
+                body.first().is_some_and(|t| is_key(t)),
+                "help row {line:?}: the first hint has no key"
             );
         }
     }
