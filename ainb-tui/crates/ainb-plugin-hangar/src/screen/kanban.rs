@@ -593,8 +593,9 @@ fn elide(s: &str, cap: usize) -> String {
 }
 
 /// The short id rendered on a card: the last 6 chars of the id (char-safe), or
-/// the whole id when it is already short.
-fn short_id(id: &str) -> String {
+/// the whole id when it is already short. Crate-visible so the Inbox falls back
+/// to the same token for a task it cannot resolve (crisp B1).
+pub(crate) fn short_id(id: &str) -> String {
     let n = id.chars().count();
     if n <= 6 {
         return id.to_string();
@@ -836,7 +837,7 @@ pub fn render_kanban(
 /// A compact relative-age label (`5m` / `2h` / `3d`) from `created_at` to `now`.
 /// A future / zero delta reads `0m`; sub-hour is minutes, sub-day is hours, else
 /// days. (Char-cheap and deterministic for a fixed render clock.)
-fn age_label(created_at_ms: i64, now_ms: i64) -> String {
+pub(crate) fn age_label(created_at_ms: i64, now_ms: i64) -> String {
     let delta_ms = now_ms.saturating_sub(created_at_ms).max(0);
     let mins = delta_ms / 60_000;
     if mins < 60 {

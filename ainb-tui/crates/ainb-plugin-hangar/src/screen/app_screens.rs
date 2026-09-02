@@ -911,6 +911,53 @@ impl ScreenStates {
         self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
+    /// The names the inbox resolves its rows through (crisp B1), projected from
+    /// the cached tasks (agent label + parent issue) and issues (display id +
+    /// title) snapshots at render time, so whichever order they landed in the
+    /// rows read `impl-1 done  HGR-3 <title>` on the next paint. Cheap: a few
+    /// hundred map inserts per frame at most.
+    #[must_use]
+    pub fn inbox_lookup(&self, now_ms: i64) -> super::inbox::InboxLookup {
+        use super::inbox::{InboxIssueRef, InboxLookup, InboxTaskRef};
+        let tasks = self
+            .kanban
+            .columns()
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .map(|c| {
+                (
+                    c.task_id.clone(),
+                    InboxTaskRef {
+                        agent: c.agent_label.clone(),
+                        issue_id: c.issue_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let issues = self
+            .issue_list
+            .all_rows()
+            .iter()
+            .map(|r| {
+                (
+                    r.id.as_str().to_string(),
+                    InboxIssueRef {
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| super::kanban::short_id(r.id.as_str())),
+                        title: r.title.clone(),
+                    },
+                )
+            })
+            .collect();
+        InboxLookup {
+            tasks,
+            issues,
+            now_ms,
+        }
+    }
+
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
     pub const fn take_pending_inbox_mark_read(&mut self) -> bool {
         let pending = self.pending_inbox_mark_read;
@@ -1476,7 +1523,8 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Inbox => {
-            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox);
+            let lookup = states.inbox_lookup(now_ms());
+            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox, &lookup);
         }
         Screen::ControlCenter => {
             super::control_center::render_control_center(
