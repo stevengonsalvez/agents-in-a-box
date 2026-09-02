@@ -432,7 +432,7 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 /// components `RemoteRepoManager` keys its cache path on.
 ///
 /// Reads a bare `owner/repo` as a GitHub shorthand first (see
-/// [`github_shorthand`]), falls back to `from_input` for URL forms, and then
+/// [`crate::git::RepoSource::github_shorthand`]), falls back to `from_input` for URL forms, and then
 /// REJECTS anything that did not classify as a remote. `from_input` is used
 /// rather than smart-parse `parse_with` so an `owner/repo` value cannot be
 /// captured by a directory of that name under the cwd; both parsers have a
@@ -441,7 +441,7 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 /// `git clone`, so a value beginning with `-` would be read by git as an option
 /// rather than a repository. Local checkouts belong on `--repo`.
 fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
-    let source = match github_shorthand(remote) {
+    let source = match crate::git::RepoSource::github_shorthand(remote) {
         Some(source) => source,
         None =>
         {
@@ -459,32 +459,6 @@ fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git
         .parse_components()
         .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
     Ok((source, parsed))
-}
-
-/// Read `owner/repo` as a GitHub shorthand, which is what `--remote-repo`
-/// declares its bare values to be.
-///
-/// `from_input`'s own shorthand branch rejects a `.` anywhere in the value, so
-/// `mrdoob/three.js` fell through to its no-protocol-URL heuristic and became
-/// `https://mrdoob/three.js`, which has no owner segment to parse. The inline
-/// clone this replaced wrapped every bare value into
-/// `https://github.com/<value>.git`, so dotted repo names used to work.
-///
-/// Deliberately strict about what counts as a bare shorthand: a segment that
-/// carries a scheme, a host, a path, or a leading `-` is left to `from_input`,
-/// which classifies URLs, and to the `is_remote` gate, which rejects the rest.
-fn github_shorthand(remote: &str) -> Option<crate::git::RepoSource> {
-    let (owner, repo) = remote.split_once('/')?;
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    let bare = |segment: &str| {
-        !segment.is_empty()
-            && !segment.contains(['/', '\\', ':', ' ', '@'])
-            && !segment.starts_with(['-', '.', '~'])
-    };
-    (bare(owner) && bare(repo)).then(|| crate::git::RepoSource::GithubShorthand {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-    })
 }
 
 /// Clone (or fetch) a remote repository into AINB's shared clone cache.
@@ -793,6 +767,9 @@ mod tests {
             ("mrdoob/three.js", "mrdoob", "three.js"),
             ("chartjs/Chart.js", "chartjs", "Chart.js"),
             ("socketio/socket.io", "socketio", "socket.io"),
+            // Surrounding whitespace is trimmed rather than carried into the
+            // clone URL and the cache directory name.
+            (" mrdoob/three.js\n", "mrdoob", "three.js"),
         ] {
             let (_source, parsed) = parse_remote_repo(remote)
                 .unwrap_or_else(|e| panic!("{remote} must parse as a shorthand: {e}"));
@@ -847,6 +824,27 @@ mod tests {
             assert!(
                 parse_remote_repo(remote).is_err(),
                 "{remote} is not a remote and must not reach `git clone`"
+            );
+        }
+    }
+
+    /// A host-shaped `<host>/<repo>` is NOT a GitHub shorthand.
+    ///
+    /// Reading it as one turns a clean local parse error into a GitHub clone
+    /// attempt, which reports back as "Authentication failed - check your git
+    /// credentials" — the worst available answer for someone who typed a
+    /// GitLab path. The dot in the OWNER segment is what separates it from a
+    /// dotted repo NAME like `mrdoob/three.js`.
+    #[test]
+    fn remote_repo_does_not_read_a_host_path_as_a_shorthand() {
+        for remote in ["gitlab.com/repo", "git.example.com/repo"] {
+            assert!(
+                crate::git::RepoSource::github_shorthand(remote).is_none(),
+                "{remote} has a host-shaped owner and is not a shorthand"
+            );
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must fail locally, not as a GitHub credentials error"
             );
         }
     }
