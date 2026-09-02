@@ -185,16 +185,17 @@ impl RepoSource {
                 owner: safe_segment("owner", owner)?,
                 repo_name: safe_segment("repo", repo)?,
             }),
-            RepoSource::LocalPath(path) => {
-                let repo_name =
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
-                Ok(ParsedRepo {
-                    source: self.clone(),
-                    host: "local".to_string(),
-                    owner: String::new(),
-                    repo_name,
-                })
-            }
+            // A local checkout has no host/owner to key a clone cache on. This
+            // used to answer host="local", owner="" and the path basename,
+            // which `get_cache_path` joined into `<cache>/local//<basename>` —
+            // a path two unrelated checkouts of the same basename share. No
+            // caller wants that: every clone path is gated on a remote variant
+            // already, and the one consumer that reached here built a
+            // meaningless `/<basename>` shorthand out of it.
+            RepoSource::LocalPath(path) => Err(RepoSourceError::ParseError(format!(
+                "local checkout has no remote components: {}",
+                path.display()
+            ))),
             // SshSession is an interactive session, not a clone — no components
             // to extract. Filter is unparseable text and likewise has no
             // owner/repo to expose.
@@ -500,6 +501,20 @@ fn parse_ssh_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSource
 #[allow(deprecated)] // existing legacy `from_input` tests pre-date finding #14
 mod tests {
     use super::*;
+
+    /// A local checkout must not produce cache components.
+    ///
+    /// `get_cache_path` joins host/owner/repo onto the clone cache, and the
+    /// old `Ok` answer had an empty owner, so `~/a/api` and `~/b/api` collapsed
+    /// onto one `<cache>/local/api` clone.
+    #[test]
+    fn local_path_has_no_remote_components() {
+        let source = RepoSource::LocalPath("/home/foo/api".into());
+        assert!(
+            source.parse_components().is_err(),
+            "a local checkout is not a clone source"
+        );
+    }
 
     #[test]
     fn test_https_url_detection() {
