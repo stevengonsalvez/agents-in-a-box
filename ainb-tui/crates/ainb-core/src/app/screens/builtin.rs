@@ -1259,20 +1259,48 @@ mod tests {
         };
 
         // Reserved on any plugin screen: the emergency quit.
-        assert!(is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL), false, false));
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('c'), KeyModifiers::CONTROL),
+            false,
+            false
+        ));
         // A plugin WITHOUT its own help keeps the host toggle while not capturing.
-        assert!(is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE), false, false));
-        assert!(is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), false, false));
-        assert!(!is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), false, true));
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('?'), KeyModifiers::NONE),
+            false,
+            false
+        ));
+        assert!(is_host_reserved_key(
+            &mk(CtKey::Char('H'), KeyModifiers::NONE),
+            false,
+            false
+        ));
+        assert!(!is_host_reserved_key(
+            &mk(CtKey::Char('H'), KeyModifiers::NONE),
+            false,
+            true
+        ));
         // A plugin WITH its own help owns `?`/`H` outright: reserving them off
         // the lagging per-frame capture flag stole the first keystrokes typed
         // into a plugin text field and then swallowed everything until Esc.
-        assert!(!is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE), true, false));
-        assert!(!is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE), true, false));
+        assert!(!is_host_reserved_key(
+            &mk(CtKey::Char('?'), KeyModifiers::NONE),
+            true,
+            false
+        ));
+        assert!(!is_host_reserved_key(
+            &mk(CtKey::Char('H'), KeyModifiers::NONE),
+            true,
+            false
+        ));
         // Esc is plugin-owned (overlay-panels redesign): the plugin pops
         // one internal level per press and publishes `ui.close_request`
         // at its root — see the doc on `is_host_reserved_key`.
-        assert!(!is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE), false, false));
+        assert!(!is_host_reserved_key(
+            &mk(CtKey::Esc, KeyModifiers::NONE),
+            false,
+            false
+        ));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
