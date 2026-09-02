@@ -353,11 +353,26 @@ fn respawn_atc_session(name: &str) -> Result<String> {
 /// heartbeat was already aimed at. Falls back to `main`, which is what
 /// `fleet atc setup` has always defaulted to in practice.
 pub fn atc_target_name() -> Result<String> {
-    let root = crate::fleet::plumbing::paths::ainb_home()?.join("atc");
-    Ok(crate::fleet::atc::paths::list_instance_dirs_in(&root)
+    Ok(unprovisioned_atc_names()?
         .into_iter()
         .next()
         .unwrap_or_else(|| "main".to_string()))
+}
+
+/// Instance directories with no `meta.json`: leftovers, not instances.
+///
+/// The only names `provision` and `remove-orphan` may act on. Acting on a
+/// PROVISIONED name would reset a live instance's config or unload a heartbeat
+/// that is doing its job, and on a host with several instances the
+/// alphabetically-first directory is very likely to be one of those.
+fn unprovisioned_atc_names() -> Result<Vec<String>> {
+    use crate::fleet::atc::paths::{list_instance_dirs_in, list_instance_names_in};
+    let root = crate::fleet::plumbing::paths::ainb_home()?.join("atc");
+    let provisioned = list_instance_names_in(&root);
+    Ok(list_instance_dirs_in(&root)
+        .into_iter()
+        .filter(|name| !provisioned.contains(name))
+        .collect())
 }
 
 fn atc(action: Action) -> Result<String> {
@@ -370,14 +385,31 @@ fn atc(action: Action) -> Result<String> {
             // instance that already exists silently resets a deliberately
             // tuned interval or a disabled heartbeat. Restart is the verb for
             // an existing instance; it preserves that config.
-            if let Ok(existing) = atc_instance() {
-                bail!("ATC '{existing}' is already provisioned; use restart instead");
+            // NOT `atc_instance()`: that returns Err for two-or-more
+            // instances as well as for none, so it would wave the clobber
+            // through on exactly the host with the most to lose.
+            let provisioned = crate::fleet::atc::paths::list_instance_names_in(
+                &crate::fleet::plumbing::paths::ainb_home()?.join("atc"),
+            );
+            if !provisioned.is_empty() {
+                bail!(
+                    "ATC already provisioned ({}); use restart instead",
+                    provisioned.join(", ")
+                );
             }
             let name = atc_target_name()?;
             return delegate(&["fleet", "atc", "setup", &name]);
         }
         Action::RemoveOrphan => {
-            let name = atc_target_name()?;
+            // Only ever an UNPROVISIONED name. Tearing the timer off a live
+            // instance would silently stop its heartbeat, and the leftover
+            // directory the operator meant would survive.
+            let Some(name) = unprovisioned_atc_names()?
+                .into_iter()
+                .find(|name| crate::fleet::atc::timer::is_installed(name))
+            else {
+                return Ok("no orphaned heartbeat timer to remove".to_string());
+            };
             let removed = crate::fleet::atc::timer::teardown(&name)
                 .with_context(|| format!("removing the heartbeat timer for '{name}'"))?;
             return Ok(if removed.is_empty() {
@@ -564,11 +596,6 @@ fn detach(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    /// `pair` is offered only by the daemon that owns the Codex transport.
-    ///
-    /// Every other daemon would be advertising an action that cannot mean
-    /// anything there, and the CLI would accept a verb its handler rejects.
-    #[test]
     /// Provisioning and orphan removal only mean something for ATC, and every
     /// other daemon has to refuse them rather than silently matching a
     /// lifecycle arm.
@@ -589,6 +616,10 @@ mod tests {
         }
     }
 
+    /// `pair` is offered only by the daemon that owns the Codex transport.
+    ///
+    /// Every other daemon would be advertising an action that cannot mean
+    /// anything there, and the CLI would accept a verb its handler rejects.
     #[test]
     fn pair_is_offered_only_by_the_hangar_daemon() {
         for kind in super::CONTROLLABLE {
