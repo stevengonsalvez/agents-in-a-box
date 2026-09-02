@@ -1622,8 +1622,8 @@ impl EventHandler {
         // also short-circuits the fallthrough at the end of this function,
         // and folding it in turned an unavailable plugin's placeholder into a
         // screen where Ctrl+C, Esc and q all died (the PR #249 trap).
-        let host_globals_suppressed = in_text_input
-            || crate::app::screens::builtin::plugin_owns_help_keys(state);
+        let host_globals_suppressed =
+            in_text_input || crate::app::screens::builtin::plugin_owns_help_keys(state);
 
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
