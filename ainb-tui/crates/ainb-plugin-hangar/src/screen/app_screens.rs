@@ -1503,16 +1503,33 @@ fn render_prior(buf: &mut WireBuffer, w: u16, h: u16, prior: &Screen, states: &S
 }
 
 /// Render the help overlay (a simple centred hint list).
+/// The help overlay's lines: every screen the router reaches plus the keys an
+/// operator reaches for most on each. Kept as data so a test can pin it against
+/// the router's key set, and so a new screen shows up here or fails the build.
+pub const HELP_LINES: &[&str] = &[
+    "Hangar — keys",
+    "",
+    "screens   1 issues  2 task  3 skills  4 autopilots  K kanban  B boards",
+    "          C control  F fleet  S squads  P profiles  A agents  D daemon",
+    "          U usage  L logs  I inbox  , settings  ^P search",
+    "",
+    "issues    j/k move  enter open  c create  s sub-issue  a assign  d done",
+    "          x delete  y timeline  / filter  f facets  tab chips",
+    "task      R retry (operator override)  X cancel  c comment  a/t criteria  o open PR",
+    "boards    c card  enter run ▾ (headless / interactive)  a attach  X cancel",
+    "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
+    "control   j/k card  h/l option  enter or 1-9 answer",
+    "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
+    "agents    n create  x delete      profiles  t tier      logs  a/i/w/e level",
+    "",
+    "esc close  q back to ainb home",
+];
+
 fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const GOLD: Color = Color::rgb(255, 215, 0);
-    let lines = [
-        "Hangar — keys",
-        "1 issues  2 task  3 skills  , settings",
-        "a assign  c create  / filter",
-        "esc close  q quit",
-    ];
-    let y0 = h / 2 - 2;
+    let lines = HELP_LINES;
+    let y0 = h.saturating_sub(u16::try_from(lines.len()).unwrap_or(0)) / 2;
     for (i, line) in lines.iter().enumerate() {
         let y = y0 + u16::try_from(i).unwrap_or(0);
         let line_w = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
@@ -2624,6 +2641,33 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
         Some(NavIntent::CloseModal)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod help_overlay_tests {
+    use super::HELP_LINES;
+    use crate::screen::router::ROUTER_KEYS;
+
+    /// Every router key names its screen on the help overlay, so a screen added
+    /// to the router without a help line fails here instead of staying hidden
+    /// (the overlay listed 8 of ~40 keys for months).
+    #[test]
+    fn help_overlay_names_every_router_key() {
+        let text = HELP_LINES.join(" ");
+        for key in ROUTER_KEYS {
+            let needle = match key {
+                // `?` IS the overlay; it needs no line about itself.
+                '?' => continue,
+                'q' => "q back".to_string(),
+                ',' => ", settings".to_string(),
+                k => format!(" {k} "),
+            };
+            assert!(
+                text.contains(&needle),
+                "router key {key:?} has no help line (looked for {needle:?})"
+            );
+        }
     }
 }
 
