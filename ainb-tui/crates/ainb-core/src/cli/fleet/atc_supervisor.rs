@@ -116,39 +116,10 @@ pub async fn mode(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     let previous_provider = meta.provider.clone();
     let unchanged = previous == target && previous_provider == provider;
 
-    // PRE-FLIGHT, and the ordering is the whole point. The ledger handover used
-    // to be armed inside reconcile, AFTER both schedulers had been torn down; a
-    // failure there set a flag, fell through to starting the scanner, and then
-    // rolled the mode back to full — leaving no timer, no cron, and a scanner
-    // that reads mode=full and exits. Zero controllers, under an error message
-    // saying the instance was left in full mode.
-    //
-    // Arming first makes a failure free: nothing has been persisted and nothing
-    // torn down, so bailing here leaves the fleet exactly as it was.
-    if !unchanged && !no_reconcile && target == SupervisorMode::Lite {
-        // Ownership from the LOCAL, non-destructive signal only. `setup`
-        // installs the local unit ONLY when daemon registration failed, and
-        // `repair` guarantees exactly one scheduler, so a full instance with no
-        // local unit was being scheduled — and therefore counted — by the
-        // daemon. Asking the daemon instead would mean unregistering it first,
-        // which is a teardown, which is what this ordering exists to avoid.
-        if !timer::is_installed(&meta.name) {
-            arm_daemon_handoff(&meta.name).with_context(|| {
-                format!(
-                    "refusing to switch ATC '{}' to lite: the daemon's spent retry budgets are \
-unreadable from here, and the handover that seals them could not be armed. Nothing was changed",
-                    meta.name
-                )
-            })?;
-        }
-    }
-    // Switching AWAY from lite: drop any handover that never got consumed, so it
-    // cannot fire during an unrelated later switch and seal budgets the local
-    // ledger was tracking accurately.
-    if !unchanged && !no_reconcile && target == SupervisorMode::Full {
-        if let Err(e) = disarm_daemon_handoff(&meta.name) {
-            tracing::warn!(error = %e, "atc mode: could not clear a pending ledger handover");
-        }
+    // PRE-FLIGHT: see `prepare_handover`. Runs before ANYTHING is persisted or
+    // torn down, so a failure here leaves the fleet exactly as it was.
+    if !unchanged && !no_reconcile {
+        prepare_handover(&meta, target)?;
     }
 
     // 1. Persist first — this alone stands the outgoing controller down, because
@@ -215,6 +186,45 @@ its next action, but neither controller was started or stopped"
         println!("{}", serde_json::to_string_pretty(&summary)?);
     }
     Ok(())
+}
+
+/// Get the retry-ledger handover into the right state for `target`, before the
+/// switch touches anything.
+///
+/// The ordering is the whole point. Arming used to happen inside reconcile,
+/// AFTER both schedulers had been torn down; a failure there fell through to
+/// starting the scanner and then rolled the mode back, leaving no timer, no
+/// cron, and a scanner that reads mode=full and exits. Zero controllers.
+///
+/// Here, a failure is free: nothing is persisted and nothing is dismantled, so
+/// the `?` leaves the fleet as it was.
+fn prepare_handover(meta: &AtcMeta, target: SupervisorMode) -> Result<()> {
+    match target {
+        // Ownership from the LOCAL, non-destructive signal only. `setup`
+        // installs the local unit ONLY when daemon registration failed, and
+        // `repair` guarantees exactly one scheduler, so a full instance with no
+        // local unit was being scheduled — and therefore counted — by the
+        // daemon. Asking the daemon instead would mean unregistering it first,
+        // which is a teardown, which is what this ordering exists to avoid.
+        SupervisorMode::Lite if !timer::is_installed(&meta.name) => arm_daemon_handoff(&meta.name)
+            .with_context(|| {
+                format!(
+                    "refusing to switch ATC '{}' to lite: the daemon's spent retry budgets are \
+unreadable from here, and the handover that seals them could not be armed. Nothing was changed",
+                    meta.name
+                )
+            }),
+        SupervisorMode::Lite => Ok(()),
+        // Switching AWAY from lite: drop a handover that never got consumed, so
+        // it cannot fire during an unrelated later switch and seal budgets the
+        // local ledger was tracking accurately.
+        SupervisorMode::Full => {
+            if let Err(e) = disarm_daemon_handoff(&meta.name) {
+                tracing::warn!(error = %e, "atc mode: could not clear a pending ledger handover");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Print the current mode without touching anything.
@@ -437,29 +447,6 @@ async fn unregister_daemon_cron(name: &str) -> CronOwnership {
         Ok(r) if r.disabled => CronOwnership::Disabled,
         Ok(_) => CronOwnership::NotRegistered,
         Err(_) => CronOwnership::Unknown,
-    }
-}
-
-/// Did the DAEMON own this instance's retry ledger before the switch?
-///
-/// It owns the ledger exactly when it scheduled the beat, because that is when
-/// the beat runs with `--exhausted` and counts nothing locally. When the daemon
-/// answers, it tells us directly. When it does not answer, the local timer is a
-/// reliable proxy for the same fact: `setup` installs that unit ONLY when daemon
-/// registration failed, and `repair` guarantees exactly one scheduler is ever
-/// active. So a full instance with no local unit was being scheduled by the
-/// daemon. `had_local_timer` must be sampled BEFORE the teardown that precedes
-/// this call, or the answer is always "the daemon owned it".
-///
-/// Unknown-and-no-local-timer therefore resolves to "the daemon owned it", which
-/// is also the fail-closed direction: sealing a ledger that did not need it costs
-/// a session its remaining retries, while skipping one that did resurrects a
-/// session the daemon had already escalated.
-const fn daemon_owned_the_ledger(cron: CronOwnership, had_local_timer: bool) -> bool {
-    match cron {
-        CronOwnership::Disabled => true,
-        CronOwnership::NotRegistered => false,
-        CronOwnership::Unknown => !had_local_timer,
     }
 }
 
@@ -1214,34 +1201,6 @@ mod tests {
         }
         assert!(!path.exists(), "the guard must unlink on drop");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn only_a_definitive_answer_from_the_daemon_skips_the_ledger_seal() {
-        // The bug this pins: `unregister_daemon_cron` returned a bool, which
-        // conflated "the daemon says it held nothing" with "we could not reach
-        // the daemon". A switch to lite while the daemon was DOWN therefore
-        // skipped the seal and handed every escalated session a fresh budget —
-        // the original double-spend, surviving on the path nobody tested.
-        assert!(
-            daemon_owned_the_ledger(CronOwnership::Disabled, false),
-            "the daemon answered that it held the cron"
-        );
-        assert!(
-            !daemon_owned_the_ledger(CronOwnership::NotRegistered, true),
-            "a definitive no is the only thing that skips the seal"
-        );
-        // Unreachable: fall back to which scheduler was actually installed.
-        // `setup` installs the local unit ONLY when daemon registration failed,
-        // so no unit means the daemon was scheduling — and therefore counting.
-        assert!(
-            daemon_owned_the_ledger(CronOwnership::Unknown, false),
-            "unreachable daemon + no local timer must seal (fail closed)"
-        );
-        assert!(
-            !daemon_owned_the_ledger(CronOwnership::Unknown, true),
-            "a local timer proves the beat counted locally; sealing would burn budget"
-        );
     }
 
     #[test]
