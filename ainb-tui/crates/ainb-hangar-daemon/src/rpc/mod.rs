@@ -243,27 +243,29 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Accept connections forever, serving each on its own task.
-///
-/// `broker` is the daemon-global event broker: each connection that subscribes
-/// a workspace gets a scoped forwarder onto it (e38.2).
-///
-/// Never returns under normal operation; the caller runs it as a background
-/// task alongside the claim loop. A single accept error is logged and the loop
-/// continues (one bad connection must not down the listener).
 /// Idle read bound for a request/response connection (no live subscription).
 const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Idle read bound for a connection holding a live subscription: long enough
 /// that a quiet operator never trips it, finite so a wedged peer is reclaimed.
 const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24 * 3600);
-/// Test override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
+/// Longest a fresh connection may sit silent before its `auth/hello`: a peer
+/// that connects and never authenticates holds a task and an fd for this long
+/// at most (capped further by the idle window when that is shorter).
+const AUTH_FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Concurrent connections served at once; an accept past this is closed at
+/// once instead of spawning another task (an operator box has a handful of
+/// TUIs and CLIs, so this is a runaway-client guard, not a capacity plan).
+const MAX_CONNECTIONS: usize = 256;
+/// Operator override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
 const IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_IDLE_MS";
-/// Test override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
+/// Operator override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
 const SUBSCRIBED_IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_SUBSCRIBED_IDLE_MS";
 
-/// `var` as a millisecond duration, else `default`. Tests shrink the windows
-/// to hundreds of milliseconds; production never sets these.
+/// `var` as a millisecond duration, else `default`. A supported knob: the
+/// integration tests shrink both windows to hundreds of milliseconds, and an
+/// operator may tune them the same way; an unset, empty, non-numeric or zero
+/// value keeps the default.
 fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::Duration {
     std::env::var(var)
         .ok()
@@ -272,19 +274,37 @@ fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::
         .map_or(default, std::time::Duration::from_millis)
 }
 
+/// Accept connections forever, serving each on its own task.
+///
+/// `broker` is the daemon-global event broker: each connection that subscribes
+/// a workspace gets a scoped forwarder onto it (e38.2).
+///
+/// Never returns under normal operation; the caller runs it as a background
+/// task alongside the claim loop. A single accept error is logged and the loop
+/// continues (one bad connection must not down the listener).
 pub async fn serve(
     listener: UnixListener,
     pool: SqlitePool,
     health: DaemonHealth,
     broker: EventBroker,
 ) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    tracing::warn!(
+                        max = MAX_CONNECTIONS,
+                        "hangar rpc: connection cap reached; closing new connection"
+                    );
+                    drop(stream);
+                    continue;
+                };
                 let pool = pool.clone();
                 let health = health.clone();
                 let broker = broker.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Err(e) = serve_conn(stream, pool, health, broker).await {
                         tracing::debug!(error = %e, "hangar rpc connection closed");
                     }
@@ -338,8 +358,24 @@ async fn serve_conn(
     // valid `auth/hello`. Unauthenticated or wrong-token connections get an
     // UNAUTHORIZED error envelope back, then the connection closes — no
     // `hangar/*` method is dispatched and no event forwarder ever exists.
+    // The first frame is read under a short bound: a peer that connects and
+    // says nothing is closed like one that closed on us, so an unauthenticated
+    // connection can never sit on the idle window.
+    let idle_timeout = idle_timeout_from_env(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT);
     let authed = async {
-        let Some(first) = read_frame(&mut reader).await? else {
+        let first = match tokio::time::timeout(
+            idle_timeout.min(AUTH_FIRST_FRAME_TIMEOUT),
+            read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(frame) => frame?,
+            Err(_elapsed) => {
+                tracing::debug!("hangar rpc: no auth/hello within the first-frame window");
+                None
+            }
+        };
+        let Some(first) = first else {
             // A peer that closes before sending its first frame is
             // unauthenticated, same as a rejected one: no caller identity.
             return Ok(None);
@@ -403,7 +439,6 @@ async fn serve_conn(
     // therefore gets the long bound instead (a wedged peer that never closes is
     // still reclaimed, just not a quiet one), and a forwarder that has already
     // exited no longer counts as a subscription.
-    let idle_timeout = idle_timeout_from_env(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT);
     let subscribed_idle_timeout =
         idle_timeout_from_env(SUBSCRIBED_IDLE_TIMEOUT_ENV, DEFAULT_SUBSCRIBED_IDLE_TIMEOUT);
     let served: std::io::Result<()> = async {
@@ -7057,6 +7092,7 @@ async fn handle_issue_create(
             title: &params.title,
             description: params.description.as_deref(),
             creator: &creator,
+            assignee: None,
             external_ref,
             parent_issue_id,
             stage: params.stage,
@@ -9301,10 +9337,9 @@ async fn handle_board_card_create(
     events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
-    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_core::idgen::SystemIdGen;
     use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_store::repo::board::BoardRepo;
-    use ainb_hangar_store::repo::issue::IssueRepo;
 
     let params: ainb_hangar_proto::snapshots::BoardCardCreateParams = parse_params(
         req,
@@ -9342,10 +9377,14 @@ async fn handle_board_card_create(
     let creator = ActorRef::new(ActorKind::Member, "me")
         .map_err(|e| internal(&format!("build creator ref: {e}")))?;
     // Mint the issue through the SAME helper `issue_create` uses, so a card-made
-    // issue gets the workspace's issue prefix, its `Created` activity row, its
-    // `manual` origin stamp and the list-shaped row every other create emits.
-    // (Card titles are the run prompt, so a card carries no description.)
-    let row = snapshots::issue_create(
+    // issue gets the workspace's issue prefix, its `manual` origin stamp and the
+    // same row shape `issue_create` answers and pushes (the `Created` activity
+    // row is recorded below, as `handle_issue_create` does after its create).
+    // The prefix lands on the stored title, which is the brief of EVERY run of
+    // any issue (`run_loop` builds the brief from `issue.title`), so a card in a
+    // prefixed workspace briefs its agent exactly as a wizard issue would. Card
+    // titles are the whole brief, so a card carries no description.
+    let mut row = snapshots::issue_create(
         pool,
         &SystemIdGen,
         &SystemClock,
@@ -9354,6 +9393,7 @@ async fn handle_board_card_create(
             title: &params.title,
             description: None,
             creator: &creator,
+            assignee: assignee.as_ref(),
             external_ref: None,
             parent_issue_id: None,
             stage: None,
@@ -9379,19 +9419,6 @@ async fn handle_board_card_create(
         serde_json::json!({}),
     )
     .await;
-    if assignee.is_some() {
-        IssueRepo::update_fields(
-            pool,
-            ws.as_str(),
-            &issue_id,
-            &ainb_hangar_store::repo::issue::IssueFieldUpdate {
-                assignee: Some(assignee),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| store_err(&e))?;
-    }
 
     BoardRepo::card_add(
         pool,
@@ -9433,16 +9460,15 @@ async fn handle_board_card_create(
         )
         .await
         .map_err(|e| store_err(&e))?;
+        row.repo_ref.clone_from(&resolved_repo_ref);
+        row.agent = agent.map(|a| a.as_str().to_string());
     }
     // A card create inserts a real issue row, so announce it exactly like
-    // `issue_create` does: without this push the issue list, Kanban titles and
-    // inbox never learn the issue exists until a full snapshot refresh.
-    if let Some(row) = snapshots::issue_row(pool, ws.as_str(), &issue_id)
-        .await
-        .map_err(|e| store_err(&e))?
-    {
-        events.emit(ws.as_str(), HangarEvent::IssueCreated(row));
-    }
+    // `issue_create` does, with the row the create returned (list-shaped, the
+    // two card-parity fields patched in above): without this push the issue
+    // list, Kanban titles and inbox never learn the issue exists until a full
+    // snapshot refresh.
+    events.emit(ws.as_str(), HangarEvent::IssueCreated(row));
     boards_list_value(pool, &ws).await
 }
 
@@ -10357,7 +10383,7 @@ async fn run_card_inner(
     // as finished when the task completes (otherwise the issue-lifecycle gate
     // sees an unrun current stage forever and never promotes the issue).
     if let Some(column_id) =
-        ainb_hangar_store::service::pull::current_gated_column(pool, ws, issue_id)
+        ainb_hangar_store::service::pull::current_gated_column(&mut *tx, ws, issue_id)
             .await
             .map_err(CardRunError::Db)?
     {
