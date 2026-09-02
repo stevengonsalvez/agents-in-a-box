@@ -5,6 +5,7 @@
 // render. Follows the ainb-tui style guide: rounded borders, gold title,
 // cornflower-blue panel, green for healthy.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,6 +43,10 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How finely the collector's sleep is chopped so an explicit `r` refresh does
+/// not have to wait out the rest of [`COLLECT_INTERVAL`].
+const WAKE_SLICE: Duration = Duration::from_millis(200);
+
 /// How long a lifecycle action may run before the row gives up on it. Generous:
 /// a real restart genuinely takes seconds. The point is only that a wedged
 /// action cannot hold its row's one-outstanding guard forever.
@@ -75,6 +80,8 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
+    /// Set to ask the collector to re-collect now rather than finish its sleep.
+    wake: Arc<AtomicBool>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     selected: usize,
     /// The open per-row action menu, if any.
@@ -216,9 +223,16 @@ impl DaemonsState {
             return Arc::clone(shared);
         }
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        spawn_collector(Arc::clone(&shared));
+        spawn_collector(Arc::clone(&shared), Arc::clone(&self.wake));
         self.shared = Some(Arc::clone(&shared));
         shared
+    }
+
+    /// Ask the collector to re-collect now. The table free-runs anyway, so this
+    /// only shortens the wait; it never collects on the UI thread.
+    pub fn force_collect(&mut self) {
+        self.arm();
+        self.wake.store(true, Ordering::Relaxed);
     }
 
     /// Arm the background collector without rendering — called on navigation INTO
@@ -247,11 +261,6 @@ impl DaemonsState {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
         guard.rows.len()
-    }
-
-    /// The daemon the selection is on, if the snapshot has landed.
-    fn selected_kind(&mut self) -> Option<DaemonKind> {
-        self.selected_status().map(|status| status.kind)
     }
 
     /// The whole selected row, so a caller can read more than its kind.
@@ -595,13 +604,24 @@ fn collect_into(shared: &Mutex<Snapshot>) {
 /// Spawn the detached background collector: one immediate collect, then a collect
 /// every [`COLLECT_INTERVAL`] forever. Keeps ALL disk I/O / socket connects off
 /// the UI render thread (H-D2).
-fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
+fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("ainb-daemons-collect".into())
         .spawn(move || {
             loop {
                 collect_into(&shared);
-                std::thread::sleep(COLLECT_INTERVAL);
+                // Sleep in slices so an explicit refresh lands promptly instead
+                // of waiting out the remainder of the interval. Cheap: the
+                // check is an atomic load, the collect still runs at most once
+                // per slice boundary.
+                let mut slept = Duration::ZERO;
+                while slept < COLLECT_INTERVAL {
+                    if wake.swap(false, Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(WAKE_SLICE);
+                    slept += WAKE_SLICE;
+                }
             }
         })
         // A failure to spawn the collector must not crash the app: the screen
@@ -1318,8 +1338,10 @@ mod tests {
             state.selected = 0;
             state.move_selection(want as isize);
 
-            let target =
-                state.selected_kind().expect("a populated table always has a selected row");
+            let target = state
+                .selected_status()
+                .expect("a populated table always has a selected row")
+                .kind;
 
             let lines = render_to_lines(&mut state, 160, 30);
             let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
