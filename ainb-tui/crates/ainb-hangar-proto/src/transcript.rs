@@ -39,6 +39,10 @@ use crate::events::MessageKind;
 /// Clip a one-line summary / snippet to this many display chars (char-safe).
 const SUMMARY_MAX: usize = 84;
 
+/// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
+/// issues a handful per message; this is a leak backstop, not a working limit.
+const MAX_PENDING_TOOLS: usize = 256;
+
 /// Classify a whole provider `stream-json` transcript into `(kind, body)` lines
 /// in stream order.
 ///
@@ -167,6 +171,14 @@ impl StreamJsonClassifier {
         };
         out.push((MessageKind::ToolCall, body));
         if let Some(id) = block.get("id").and_then(Value::as_str) {
+            // ponytail: a tool_use whose result never arrives (cancelled run,
+            // malformed log) would pin its entry forever in a long-lived
+            // classifier; past this many in flight, forget them all rather
+            // than track age. Raise the cap before adding an LRU.
+            if self.tool_names.len() >= MAX_PENDING_TOOLS {
+                self.tool_names.clear();
+                self.tool_starts.clear();
+            }
             self.tool_names.insert(id.to_string(), name.to_string());
             if let Some(ts) = line_ts {
                 self.tool_starts.insert(id.to_string(), ts);
@@ -176,7 +188,8 @@ impl StreamJsonClassifier {
 
     /// A `tool_result` block: emit a slate result line naming its tool (resolved
     /// from the matching tool_use) and, when both carry a timestamp, its duration.
-    /// An `is_error` result renders in the red error lane instead.
+    /// An `is_error` result renders in the red error lane instead. The tool's
+    /// entry is consumed here, so a live classifier does not grow per tool call.
     fn fold_tool_result(
         &mut self,
         block: &Value,
@@ -184,13 +197,17 @@ impl StreamJsonClassifier {
         out: &mut Vec<(MessageKind, String)>,
     ) {
         let id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-        let name = self.tool_names.get(id).map_or("tool", String::as_str);
+        let name = self.tool_names.remove(id).unwrap_or_else(|| "tool".to_string());
         let snippet = block
             .get("content")
             .and_then(value_text)
             .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
             .unwrap_or_default();
-        let dur = self.tool_starts.get(id).zip(line_ts).map(|(start, end)| fmt_dur(end - start));
+        let dur = self
+            .tool_starts
+            .remove(id)
+            .zip(line_ts)
+            .map(|(start, end)| fmt_dur(end - start));
         let mut body = match (snippet.is_empty(), &dur) {
             (true, Some(d)) => format!("{name}  ({d})"),
             (true, None) => name.to_string(),
@@ -388,5 +405,48 @@ fn short_id(id: &str) -> String {
         id.to_string()
     } else {
         id.chars().skip(n - 8).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live classifier lives for a whole run, so a resolved tool must leave
+    /// both maps, and unresolved ones must not pile up past the backstop.
+    #[test]
+    fn tool_entries_are_consumed_by_their_result_and_capped_without_one() {
+        let mut c = StreamJsonClassifier::default();
+        let _ = c.classify_line(
+            r#"{"type":"assistant","timestamp":1000,"message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+        );
+        assert_eq!((c.tool_names.len(), c.tool_starts.len()), (1, 1));
+        let lines = c.classify_line(
+            r#"{"type":"user","timestamp":1500,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        );
+        assert_eq!(
+            lines,
+            vec![(MessageKind::ToolResult, "Bash  ok  (500ms)".to_string())]
+        );
+        assert!(
+            c.tool_names.is_empty() && c.tool_starts.is_empty(),
+            "resolved id evicted"
+        );
+
+        for i in 0..(MAX_PENDING_TOOLS * 2) {
+            let _ = c.classify_line(&format!(
+                r#"{{"type":"assistant","timestamp":1,"message":{{"content":[{{"type":"tool_use","id":"u{i}","name":"Read","input":{{}}}}]}}}}"#
+            ));
+        }
+        assert!(
+            c.tool_names.len() <= MAX_PENDING_TOOLS,
+            "{}",
+            c.tool_names.len()
+        );
+        assert!(
+            c.tool_starts.len() <= MAX_PENDING_TOOLS,
+            "{}",
+            c.tool_starts.len()
+        );
     }
 }
