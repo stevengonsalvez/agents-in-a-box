@@ -33,8 +33,10 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    /// Every status, in lifecycle order. Drives exhaustive display-mapping tests
-    /// (a new variant that is not added here fails to compile in `as_str`).
+    /// Every status, in lifecycle order, for tests that walk the whole enum.
+    /// The array length is hand-kept: a new variant does not fail to compile
+    /// here, it fails in the exhaustive matches (`as_str`, the plugin's
+    /// `from_wire_status`), which is where the enforcement lives.
     pub const ALL: [Self; 6] = [
         Self::Queued,
         Self::Dispatched,
