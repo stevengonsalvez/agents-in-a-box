@@ -86,6 +86,70 @@ pub struct TmuxRun {
     max_runtime: Duration,
 }
 
+/// Pre-trust `workdir` in the Claude config the child will read, so an
+/// interactive `claude` launched in a freshly provisioned worktree does not park
+/// forever at the "Is this a project you trust?" dialog (no human is at the pane
+/// when the daemon spawns it; the run then dies on the deadline as `timeout`).
+///
+/// Mirrors the host's `ainb run` worktree path (`worktree_manager::add_claude_trust`):
+/// merge `projects[<workdir>] = { hasTrustDialogAccepted, hasTrustDialogHooksAccepted }`
+/// into `<HOME>/.claude.json`, where `HOME` is the one in `child_env` (the
+/// deny-by-default env the child actually inherits), preserving everything else
+/// in the file. Best-effort: a missing HOME or an unparseable file is logged and
+/// skipped rather than failing the launch, which then surfaces the dialog exactly
+/// as before.
+pub fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) {
+    let Some(home) = child_env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| PathBuf::from(v))
+    else {
+        tracing::warn!("interactive: no HOME in the child env; cannot pre-trust the workdir");
+        return;
+    };
+    let path = home.join(".claude.json");
+    let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "interactive: .claude.json unparseable; leaving it alone");
+                return;
+            }
+        },
+        Err(_) => serde_json::json!({}),
+    };
+    if !config.is_object() {
+        tracing::warn!(path = %path.display(), "interactive: .claude.json is not an object; leaving it alone");
+        return;
+    }
+    let projects = config
+        .as_object_mut()
+        .expect("checked is_object")
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}));
+    if !projects.is_object() {
+        *projects = serde_json::json!({});
+    }
+    let key = workdir.to_string_lossy().to_string();
+    let entry = projects
+        .as_object_mut()
+        .expect("projects is an object")
+        .entry(key.clone())
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+        obj.insert("hasTrustDialogHooksAccepted".into(), serde_json::Value::Bool(true));
+    }
+    match serde_json::to_string_pretty(&config) {
+        Ok(bytes) => {
+            let tmp = path.with_extension("json.hangar-tmp");
+            let wrote = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path));
+            match wrote {
+                Ok(()) => tracing::info!(workdir = %key, "interactive: pre-trusted workdir in .claude.json"),
+                Err(e) => tracing::warn!(error = %e, "interactive: failed to write .claude.json trust"),
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "interactive: failed to serialize .claude.json"),
+    }
+}
+
 /// Spawn `program` (with `argv`) inside a detached tmux session named
 /// `session_name`, running in `workdir` with the deny-by-default `child_env`,
 /// and return a [`TmuxRun`] to await its completion.
@@ -495,5 +559,46 @@ mod tests {
             script.contains(r#"printf '%s' "$?" > '/tmp/x.exit'"#),
             "exit code is recorded after the provider returns: {script}"
         );
+    }
+
+    /// The trust merge targets the HOME the CHILD sees (from the deny-by-default
+    /// env, not the daemon's), creates the file when absent, and preserves every
+    /// unrelated key and project on a second call.
+    #[test]
+    fn pre_trust_merges_the_workdir_into_the_child_homes_claude_json() {
+        let home = tempfile::tempdir().unwrap();
+        let env = vec![("HOME".to_string(), home.path().to_string_lossy().to_string())];
+        let wd = Path::new("/srv/worktrees/task-1");
+
+        pre_trust_claude_workdir(&env, wd);
+        let path = home.path().join(".claude.json");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"], true);
+
+        // Seed unrelated state and a second project, then re-trust: nothing lost.
+        let seeded = serde_json::json!({
+            "oauthAccount": {"emailAddress": "x@y"},
+            "projects": {
+                "/other": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": false},
+                "/srv/worktrees/task-1": {"allowedTools": ["Read"]}
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&seeded).unwrap()).unwrap();
+        pre_trust_claude_workdir(&env, wd);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["oauthAccount"]["emailAddress"], "x@y", "unrelated keys survive");
+        assert_eq!(v["projects"]["/other"]["hasTrustDialogAccepted"], false, "other projects untouched");
+        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["allowedTools"][0], "Read", "existing project keys kept");
+        assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
+    }
+
+    /// No HOME in the child env means nothing to write: the launch proceeds and
+    /// the dialog surfaces as before rather than a stray file appearing.
+    #[test]
+    fn pre_trust_without_home_is_a_no_op() {
+        let home = tempfile::tempdir().unwrap();
+        pre_trust_claude_workdir(&[], Path::new("/srv/x"));
+        assert!(!home.path().join(".claude.json").exists());
     }
 }
