@@ -227,13 +227,25 @@ async fn reconcile_controllers(meta: &AtcMeta, provider_changed: bool) -> Reconc
             // now stands down, so nothing would be sent — but a scheduler firing
             // into a refusal every few minutes is noise an operator has to
             // explain, and the point of the toggle is that the other half is off.
+            // Read the local unit BEFORE tearing it down: it is the proxy
+            // `daemon_owned_the_ledger` falls back on, and after the teardown it
+            // is gone, so every switch would conclude the daemon owned the
+            // ledger and seal budgets that never needed sealing.
+            let had_local_timer = timer::is_installed(&meta.name);
             match timer::teardown(&meta.name) {
                 Ok(_) => out.scheduler_removed = true,
                 Err(e) => out.notes.push(format!("local heartbeat timer not removed: {e}")),
             }
-            let daemon_owned = unregister_daemon_cron(&meta.name).await;
-            if daemon_owned {
+            let cron = unregister_daemon_cron(&meta.name).await;
+            if cron == CronOwnership::Disabled {
                 out.scheduler_removed = true;
+            } else if cron == CronOwnership::Unknown {
+                out.notes.push(
+                    "daemon heartbeat cron not unregistered (daemon down?); the beat stands down on its own"
+                        .to_string(),
+                );
+            }
+            if daemon_owned_the_ledger(cron, had_local_timer) {
                 // THE LEDGER HANDOFF. While the daemon scheduled the beat it also
                 // OWNED the retry ledger: the beat ran with `--exhausted` and
                 // counted nothing locally, so `continue_counts` is empty while
@@ -261,11 +273,6 @@ at the cap, so lite escalates them instead of restarting their budget"
 had escalated may get a fresh budget in lite"
                     )),
                 }
-            } else {
-                out.notes.push(
-                    "daemon heartbeat cron not unregistered (daemon down?); the beat stands down on its own"
-                        .to_string(),
-                );
             }
             if provider_changed {
                 out.notes.push(format!(
@@ -384,19 +391,61 @@ async fn seal_ledger_for_handoff(meta: &AtcMeta) -> Result<usize> {
     Ok(sealed)
 }
 
-async fn unregister_daemon_cron(name: &str) -> bool {
+/// What the daemon said about the cron it may have been scheduling.
+///
+/// Three outcomes, kept apart because only ONE of them is evidence the daemon
+/// did not own the retry ledger. Collapsing them to a bool is what let the
+/// ledger double-spend survive on the daemon-down path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CronOwnership {
+    /// The daemon answered and disabled a registration it held.
+    Disabled,
+    /// The daemon answered and held no registration for this instance.
+    NotRegistered,
+    /// We could not ask (no token, dial refused, RPC error). Says nothing.
+    Unknown,
+}
+
+async fn unregister_daemon_cron(name: &str) -> CronOwnership {
     use crate::fleet::bridge::daemon::DaemonClient;
     use ainb_hangar_proto::snapshots::AtcUnregisterParams;
     let Ok(client) = DaemonClient::from_env() else {
-        return false;
+        return CronOwnership::Unknown;
     };
-    client
+    match client
         .atc_unregister(AtcUnregisterParams {
             name: name.to_string(),
             expected_generation: None,
         })
         .await
-        .is_ok_and(|r| r.disabled)
+    {
+        Ok(r) if r.disabled => CronOwnership::Disabled,
+        Ok(_) => CronOwnership::NotRegistered,
+        Err(_) => CronOwnership::Unknown,
+    }
+}
+
+/// Did the DAEMON own this instance's retry ledger before the switch?
+///
+/// It owns the ledger exactly when it scheduled the beat, because that is when
+/// the beat runs with `--exhausted` and counts nothing locally. When the daemon
+/// answers, it tells us directly. When it does not answer, the local timer is a
+/// reliable proxy for the same fact: `setup` installs that unit ONLY when daemon
+/// registration failed, and `repair` guarantees exactly one scheduler is ever
+/// active. So a full instance with no local unit was being scheduled by the
+/// daemon. `had_local_timer` must be sampled BEFORE the teardown that precedes
+/// this call, or the answer is always "the daemon owned it".
+///
+/// Unknown-and-no-local-timer therefore resolves to "the daemon owned it", which
+/// is also the fail-closed direction: sealing a ledger that did not need it costs
+/// a session its remaining retries, while skipping one that did resurrects a
+/// session the daemon had already escalated.
+const fn daemon_owned_the_ledger(cron: CronOwnership, had_local_timer: bool) -> bool {
+    match cron {
+        CronOwnership::Disabled => true,
+        CronOwnership::NotRegistered => false,
+        CronOwnership::Unknown => !had_local_timer,
+    }
 }
 
 // ── The lite supervisor process ─────────────────────────────────────────────
@@ -937,6 +986,34 @@ mod tests {
         assert_eq!(report.reported, 3);
         assert_eq!(report.err, 0);
         assert!(state.continue_counts.is_empty(), "no budget is spent");
+    }
+
+    #[test]
+    fn only_a_definitive_answer_from_the_daemon_skips_the_ledger_seal() {
+        // The bug this pins: `unregister_daemon_cron` returned a bool, which
+        // conflated "the daemon says it held nothing" with "we could not reach
+        // the daemon". A switch to lite while the daemon was DOWN therefore
+        // skipped the seal and handed every escalated session a fresh budget —
+        // the original double-spend, surviving on the path nobody tested.
+        assert!(
+            daemon_owned_the_ledger(CronOwnership::Disabled, false),
+            "the daemon answered that it held the cron"
+        );
+        assert!(
+            !daemon_owned_the_ledger(CronOwnership::NotRegistered, true),
+            "a definitive no is the only thing that skips the seal"
+        );
+        // Unreachable: fall back to which scheduler was actually installed.
+        // `setup` installs the local unit ONLY when daemon registration failed,
+        // so no unit means the daemon was scheduling — and therefore counting.
+        assert!(
+            daemon_owned_the_ledger(CronOwnership::Unknown, false),
+            "unreachable daemon + no local timer must seal (fail closed)"
+        );
+        assert!(
+            !daemon_owned_the_ledger(CronOwnership::Unknown, true),
+            "a local timer proves the beat counted locally; sealing would burn budget"
+        );
     }
 
     #[test]
