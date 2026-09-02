@@ -10351,6 +10351,22 @@ async fn run_card_inner(
             .await
             .map_err(CardRunError::Db)?;
     }
+    // A single-agent Run on a card that sits in a role-gated stage IS that
+    // stage's run: stamp the column the way the pull does, so the stage counts
+    // as finished when the task completes (otherwise the issue-lifecycle gate
+    // sees an unrun current stage forever and never promotes the issue).
+    if let Some(column_id) =
+        ainb_hangar_store::service::pull::current_gated_column(pool, ws, issue_id)
+            .await
+            .map_err(CardRunError::Db)?
+    {
+        sqlx::query("UPDATE agent_task_queue SET board_column_id = ?1 WHERE id = ?2")
+            .bind(&column_id)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CardRunError::Db)?;
+    }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
         .await
         .map_err(CardRunError::Db)?;
