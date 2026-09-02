@@ -127,9 +127,6 @@ pub fn list_instance_names() -> Result<Vec<String>> {
     Ok(list_instance_names_in(&atc_root()?))
 }
 
-/// Pure variant of [`list_instance_names`] over an explicit root — the I/O is a
-/// directory scan with no global state, so it is unit-testable against a tempdir.
-#[must_use]
 /// Every directory under `root`, provisioned or not.
 ///
 /// A superset of [`list_instance_names_in`]: a dir with no `meta.json` is not
@@ -149,6 +146,9 @@ pub fn list_instance_dirs_in(root: &Path) -> Vec<String> {
     names
 }
 
+/// Pure variant of [`list_instance_names`] over an explicit root — the I/O is a
+/// directory scan with no global state, so it is unit-testable against a tempdir.
+#[must_use]
 pub fn list_instance_names_in(root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
