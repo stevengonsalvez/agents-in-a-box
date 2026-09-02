@@ -283,24 +283,16 @@ fn homebrew_launcher(exe: &Path) -> Option<PathBuf> {
 /// Every prefix an installed `ainb` is expected to live under, most specific
 /// first. Order is the preference order when several are populated.
 fn launcher_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/opt/homebrew/bin/ainb"),
-        PathBuf::from("/usr/local/bin/ainb"),
-    ];
+    let mut candidates = Vec::new();
+    // User-owned prefixes first: they are what the current installer writes,
+    // and a system-wide path is more often the stale one left behind.
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join(".local/bin/ainb"));
         candidates.push(home.join(".cargo/bin/ainb"));
     }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/ainb"));
+    candidates.push(PathBuf::from("/usr/local/bin/ainb"));
     candidates
-}
-
-fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
-    if let Some(launcher) = homebrew_launcher(exe) {
-        return Some(launcher);
-    }
-    launcher_candidates()
-        .into_iter()
-        .find(|candidate| is_executable(candidate) && canonical_eq(candidate, exe))
 }
 
 /// The installed `ainb` a hook should invoke, given the one that is running.
@@ -312,29 +304,38 @@ fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
 /// first: two prefixes can hold two different versions, and repointing hooks at
 /// the other one would silently run the wrong ainb.
 fn installed_launcher(exe: &Path) -> Option<(PathBuf, HookBinaryMode)> {
+    installed_launcher_among(exe, &launcher_candidates())
+}
+
+/// [`installed_launcher`] over an explicit candidate list, so the choice is
+/// testable without a machine that happens to have two ainbs installed.
+fn installed_launcher_among(
+    exe: &Path,
+    candidates: &[PathBuf],
+) -> Option<(PathBuf, HookBinaryMode)> {
     // A Homebrew install resolves to its OWN launcher, which is stable across
     // upgrades in a way the versioned Cellar path is not.
     if let Some(launcher) = homebrew_launcher(exe) {
         return Some((launcher, HookBinaryMode::Release));
     }
-    let installed = |candidate: &Path| is_executable(candidate);
-    if let Some(same) = launcher_candidates()
-        .into_iter()
-        .find(|candidate| installed(candidate) && canonical_eq(candidate, exe))
+    if let Some(same) = candidates
+        .iter()
+        .find(|candidate| is_executable(candidate) && canonical_eq(candidate, exe))
     {
-        let mode = launcher_mode(&same);
-        return Some((same, mode));
+        let mode = launcher_mode(same);
+        return Some((same.clone(), mode));
     }
     if !is_dev_binary(exe) {
         return None;
     }
-    launcher_candidates()
-        .into_iter()
-        .find(|candidate| installed(candidate))
-        .map(|candidate| {
-            let mode = launcher_mode(&candidate);
-            (candidate, mode)
-        })
+    // A `target/` build belongs to no prefix, so there is no "its own" launcher
+    // to prefer and the order below is the whole answer. It puts the prefixes a
+    // user installs into ahead of the system-wide ones, because a stale
+    // /usr/local/bin/ainb left by an old installer is the likelier leftover.
+    candidates.iter().find(|candidate| is_executable(candidate)).map(|candidate| {
+        let mode = launcher_mode(candidate);
+        (candidate.clone(), mode)
+    })
 }
 
 fn launcher_mode(path: &Path) -> HookBinaryMode {
@@ -362,7 +363,7 @@ pub enum BinaryIntent {
     /// Install / repair. Points hooks at the installed ainb so the pointer
     /// survives the deletion of whatever tree the running binary was built in.
     Install,
-    /// Pin the binary running right now — deliberate dev testing.
+    /// Pin the binary running right now, for deliberate dev testing.
     PinRunning,
 }
 
@@ -408,9 +409,12 @@ fn resolve_hook_binary(
             return HookBinaryTarget { path, mode };
         }
     }
-    if let Some(path) = stable_launcher_for(&exe) {
+    // Pinning still normalises a Cellar path to its launcher: the versioned
+    // path stops existing on the next `brew upgrade`, which is not something
+    // anyone means to pin.
+    if let Some(launcher) = homebrew_launcher(&exe) {
         return HookBinaryTarget {
-            path,
+            path: launcher,
             mode: HookBinaryMode::Release,
         };
     }
@@ -449,7 +453,7 @@ pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
 /// Point the hooks at the binary running RIGHT NOW, installed or not.
 ///
 /// The deliberate opposite of [`extract_hook_bin`]: for testing a local build's
-/// hooks. The pointer dies with the tree, which is the point — it is an
+/// hooks. The pointer dies with the tree, which is the point: it is an
 /// explicit choice rather than the accident of having installed from a
 /// worktree.
 pub fn pin_running_hook_binary(paths: &Paths) -> Result<HookBinaryTarget> {
@@ -745,7 +749,7 @@ pub fn install_under_home(
                     // Writing hooks.json is only half a Codex install: Codex
                     // pins every hook by `trusted_hash` and SILENTLY skips any
                     // it has not trusted. `cmd_install` says so on the terminal
-                    // — a library that writes to stderr paints over whatever
+                    // a library that writes to stderr paints over whatever
                     // TUI called it (this ran inside the Daemons screen and
                     // corrupted the frame).
                     tracing::warn!("{CODEX_TRUST_NOTE}");
@@ -1337,7 +1341,7 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
             // A dead dev pointer is the common case (the build tree it named
             // was deleted) and repair now reaches past it to the installed
             // ainb, so the fix is the same keypress as every other pointer
-            // fault — not a lecture about rebuilding a tree that is gone.
+            // fault, not a lecture about rebuilding a tree that is gone.
             let repair =
                 "ainb doctor --fix-hooks, or press I in Daemons, to repoint at the installed ainb"
                     .to_string();
@@ -1656,7 +1660,7 @@ mod tests {
     }
 
     /// Pinning is the escape hatch, so it must NOT consult the installed
-    /// search — otherwise there would be no way to test a local build's hooks.
+    /// search, or there would be no way to test a local build's hooks.
     #[test]
     fn pinning_keeps_the_running_binary_even_when_one_is_installed() {
         let dev = PathBuf::from("/w/tree/target/debug/ainb");
@@ -1716,18 +1720,47 @@ mod tests {
             std::fs::set_permissions(path, permissions).unwrap();
         }
 
-        // Neither path is a `target/` build, so the search must decline to
-        // move the pointer at all rather than pick `other`. (Both live under a
-        // temp home, so neither canonical-matches a real install prefix; what
-        // is being pinned is that a non-dev running binary is never traded for
-        // whichever candidate is searched first.)
-        assert_eq!(installed_launcher(&mine), None);
-        assert_eq!(installed_launcher(&other), None);
+        let candidates = vec![other.clone(), mine.clone()];
+
+        // Neither is a `target/` build. The running binary is itself installed,
+        // so it keeps its own launcher and is never traded for `other`, which
+        // the search would otherwise reach first.
+        assert_eq!(
+            installed_launcher_among(&mine, &candidates).map(|(path, _)| path),
+            Some(mine.clone())
+        );
+        // And a non-dev binary that is not on the list at all moves nowhere.
+        assert_eq!(
+            installed_launcher_among(&dir.path().join("elsewhere/ainb"), &candidates),
+            None
+        );
+
+        // A `target/` build has no launcher of its own, so it takes the first
+        // candidate in preference order.
+        let dev = dir.path().join("tree/target/debug/ainb");
+        assert_eq!(
+            installed_launcher_among(&dev, &candidates).map(|(path, _)| path),
+            Some(other)
+        );
+    }
+
+    /// The order matters on the dev arm, where there is nothing to match
+    /// against: a user-owned prefix is what the current installer writes, and a
+    /// system-wide path is more often a stale leftover.
+    #[test]
+    fn user_prefixes_are_searched_before_system_ones() {
+        let candidates = launcher_candidates();
+        let index = |needle: &str| candidates.iter().position(|p| p.ends_with(needle));
+
+        if let (Some(user), Some(system)) = (index(".local/bin/ainb"), index("usr/local/bin/ainb"))
+        {
+            assert!(user < system, "user prefixes must be searched first");
+        }
     }
 
     /// `~/.local/bin` is a first-class install prefix (it is where `ainb`
     /// installs itself on a machine with no Homebrew), so a binary there is a
-    /// stable launcher — not an unclassified `Direct` path that repair treats
+    /// stable launcher, not an unclassified `Direct` path that repair treats
     /// as no better than a worktree build.
     #[test]
     fn local_bin_launcher_is_release_mode() {
