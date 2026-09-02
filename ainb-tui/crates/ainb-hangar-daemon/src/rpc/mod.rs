@@ -9271,8 +9271,8 @@ async fn handle_board_card_create(
     events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
-    use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_store::repo::board::BoardRepo;
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
