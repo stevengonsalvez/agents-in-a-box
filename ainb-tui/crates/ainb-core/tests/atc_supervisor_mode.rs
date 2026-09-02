@@ -5,7 +5,11 @@
 //! `--no-spawn --no-heartbeat` so nothing touches launchd/systemd, tmux, or a
 //! provider CLI. The lite scanner is always driven `--once --dry-run`: a real
 //! scan reads the HOST's live sessions, and a test that sends `continue` into
-//! whatever the developer happens to be running is not a test.
+//! whatever the developer happens to be running is not a test. For the same
+//! reason every `--set` here passes `--no-reconcile`: without it the switch
+//! DETACHES a real, infinite lite scanner that outlives the test, inherits the
+//! about-to-be-deleted `AINB_HOME`, and keeps scanning forever. That leaked 15
+//! orphan processes before it was caught.
 //!
 //! What is asserted is deliberately the OBSERVABLE contract, not the internals
 //! the unit tests already cover:
@@ -116,7 +120,15 @@ fn the_mode_survives_the_process_that_set_it() {
     let out = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "mode",
+            &name,
+            "--set",
+            "lite",
+            "--no-reconcile",
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
@@ -242,7 +254,15 @@ fn exactly_one_controller_is_permitted_in_either_mode() {
             run(
                 &home,
                 &[
-                    "--format", "json", "fleet", "atc", "mode", &name, "--set", mode
+                    "--format",
+                    "json",
+                    "fleet",
+                    "atc",
+                    "mode",
+                    &name,
+                    "--set",
+                    mode,
+                    "--no-reconcile"
                 ],
             )
             .status
@@ -286,7 +306,15 @@ fn switching_reports_the_transition_and_is_idempotent() {
     let first = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "mode",
+            &name,
+            "--set",
+            "lite",
+            "--no-reconcile",
         ],
     );
     assert!(first.status.success(), "{}", stderr(&first));
@@ -300,7 +328,15 @@ fn switching_reports_the_transition_and_is_idempotent() {
     let again = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", &name, "--set", "lite",
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "mode",
+            &name,
+            "--set",
+            "lite",
+            "--no-reconcile",
         ],
     );
     assert!(again.status.success(), "{}", stderr(&again));
@@ -310,7 +346,15 @@ fn switching_reports_the_transition_and_is_idempotent() {
     let back = run(
         &home,
         &[
-            "--format", "json", "fleet", "atc", "mode", &name, "--set", "full",
+            "--format",
+            "json",
+            "fleet",
+            "atc",
+            "mode",
+            &name,
+            "--set",
+            "full",
+            "--no-reconcile",
         ],
     );
     assert!(back.status.success(), "{}", stderr(&back));
@@ -414,6 +458,7 @@ fn an_unsupported_provider_cannot_be_switched_into_full_mode() {
             &name,
             "--set",
             "full",
+            "--no-reconcile",
             "--provider",
             "copilot",
         ],
@@ -446,6 +491,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
             &name,
             "--set",
             "lite",
+            "--no-reconcile",
             "--provider",
             "codex",
         ],
@@ -462,6 +508,7 @@ fn lite_mode_is_available_regardless_of_provider_support() {
             &name,
             "--set",
             "lite",
+            "--no-reconcile",
             "--provider",
             "copilot",
         ],

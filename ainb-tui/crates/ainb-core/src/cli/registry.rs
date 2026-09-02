@@ -2871,6 +2871,15 @@ fn build_atc_command() -> Command {
                             "Full-mode brain (claude | codex). Remembered across a switch to lite, \
                              which runs no brain. A provider ainb cannot drive is refused, not faked",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("no-reconcile")
+                        .long("no-reconcile")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Persist the mode without starting or stopping either controller. The \
+                             old one still stands down on its next action",
+                        ),
                 ),
         )
         .subcommand(
