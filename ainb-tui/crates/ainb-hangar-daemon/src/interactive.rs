@@ -95,9 +95,13 @@ pub struct TmuxRun {
 /// merge `projects[<workdir>] = { hasTrustDialogAccepted, hasTrustDialogHooksAccepted }`
 /// into `<HOME>/.claude.json`, where `HOME` is the one in `child_env` (the
 /// deny-by-default env the child actually inherits), preserving everything else
-/// in the file. Best-effort: a missing HOME or an unparseable file is logged and
-/// skipped rather than failing the launch, which then surfaces the dialog exactly
-/// as before.
+/// in the file. The interactive launch is YOLO (`--dangerously-skip-permissions`),
+/// which Claude gates behind a second one-time "Bypass Permissions" acceptance
+/// (`bypassPermissionsModeAccepted`); the operator already acknowledged
+/// danger-full-access in the TUI's first-run modal, so that is accepted here too
+/// or the pane parks a second time. Best-effort: a missing HOME or an unparseable
+/// file is logged and skipped rather than failing the launch, which then
+/// surfaces the dialogs exactly as before.
 pub fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) {
     let Some(home) = child_env.iter().find(|(k, _)| k == "HOME").map(|(_, v)| PathBuf::from(v))
     else {
@@ -119,9 +123,9 @@ pub fn pre_trust_claude_workdir(child_env: &[(String, String)], workdir: &Path) 
         tracing::warn!(path = %path.display(), "interactive: .claude.json is not an object; leaving it alone");
         return;
     }
-    let projects = config
-        .as_object_mut()
-        .expect("checked is_object")
+    let root = config.as_object_mut().expect("checked is_object");
+    root.insert("bypassPermissionsModeAccepted".into(), serde_json::Value::Bool(true));
+    let projects = root
         .entry("projects")
         .or_insert_with(|| serde_json::json!({}));
     if !projects.is_object() {
@@ -575,6 +579,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogAccepted"], true);
         assert_eq!(v["projects"]["/srv/worktrees/task-1"]["hasTrustDialogHooksAccepted"], true);
+        assert_eq!(v["bypassPermissionsModeAccepted"], true, "YOLO acceptance is pre-recorded");
 
         // Seed unrelated state and a second project, then re-trust: nothing lost.
         let seeded = serde_json::json!({
