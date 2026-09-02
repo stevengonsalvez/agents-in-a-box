@@ -2253,7 +2253,7 @@ mod tests {
         assert_eq!(s.state, DaemonState::Stopped);
         assert_eq!(s.scheduler_orphan.as_deref(), Some("main"));
         assert!(
-            s.reason.contains("timer installed for 'main'"),
+            s.reason.contains("heartbeat timer for 'main'"),
             "the orphan timer must be named: {}",
             s.reason
         );
