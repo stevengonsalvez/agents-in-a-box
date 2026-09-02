@@ -1264,6 +1264,74 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A source string beginning with `-` must reach git as a repository, not
+    /// as an option.
+    ///
+    /// `git clone <url> <dest>` takes two positionals, so without a `--`
+    /// separator git reads the url as an option and the destination as the
+    /// repository: `git clone --upload-pack=<cmd> <repo>` runs `<cmd>`. Verified
+    /// against real git, and reachable from `ainb run --remote-repo` and from
+    /// any TUI source that survives to `to_clone_url`.
+    #[test]
+    fn a_source_that_looks_like_an_option_cannot_reach_git_as_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let probe = temp_dir.path().join("payload-ran");
+
+        // The destination `clone_repo` derives. A bare repo satisfies "exists
+        // but is not a warm cache" (no `.git` child), so the clone branch runs,
+        // and it is a real repository, which is what makes the payload fire
+        // when git is allowed to treat it as the clone source.
+        let manager = RemoteRepoManager::with_cache_dir(temp_dir.path().to_path_buf()).unwrap();
+        let parsed = ParsedRepo {
+            source: RepoSource::Filter(String::new()),
+            host: "h".to_string(),
+            owner: "o".to_string(),
+            repo_name: "payload-probe.git".to_string(),
+        };
+        let cache_path = manager.get_cache_path(&parsed);
+        std::fs::create_dir_all(&cache_path).unwrap();
+        let init = std::process::Command::new(crate::test_support::git_bin())
+            .args(["init", "-q", "--bare"])
+            .arg(&cache_path)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init --bare failed");
+        assert!(
+            !manager.is_cached(&parsed),
+            "precondition: destination is not a warm cache"
+        );
+
+        // `Filter` passes its string through `to_clone_url` untouched, which is
+        // exactly what an unsanitised remote value would do.
+        let source = RepoSource::Filter(format!("--upload-pack=touch {}", probe.display()));
+
+        let err = manager.clone_repo(&source, &parsed).expect_err("an option is not a repository");
+        assert!(
+            matches!(
+                err,
+                RemoteRepoError::NotFound(_) | RemoteRepoError::CloneFailed(_)
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        // `clone_repo` runs git in the test process's cwd, so a regression
+        // clones into `./payload-probe` there. Clear it before failing.
+        let leaked = std::path::Path::new("payload-probe");
+        let leaked_exists = leaked.exists();
+        if leaked_exists {
+            let _ = std::fs::remove_dir_all(leaked);
+        }
+
+        assert!(
+            !probe.exists(),
+            "git executed the source string as --upload-pack"
+        );
+        assert!(
+            !leaked_exists,
+            "git treated the destination as the clone source"
+        );
+    }
+
     /// A failed clone must leave the cache directory exactly as it found it.
     ///
     /// This behaviour has been flipped twice: 98c61245 added a `remove_dir_all`
