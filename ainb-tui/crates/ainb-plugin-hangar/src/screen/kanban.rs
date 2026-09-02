@@ -335,7 +335,7 @@ impl KanbanState {
     /// `#<short_id> · <issue>`, the two title lines carry
     /// `<agent> · <age> · <status>` plus the run's artifacts (so the bead's
     /// required id + title + state + age all read on the tile), the priority chip
-    /// comes from the row, and the assignee initial is the agent NAME's first char.
+    /// comes from the row, and the footer assignee is the agent NAME.
     /// The same geometry feeds `render_kanban` and the hit-map, so paint + hit-test
     /// never drift.
     #[must_use]
@@ -352,7 +352,7 @@ impl KanbanState {
                         display_id: card_id_line(c),
                         title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
-                        assignee_initial: c.agent_label.chars().next(),
+                        assignee: Some(c.agent_label.clone()),
                         linked: false,
                         subtasks: None,
                     })
@@ -997,9 +997,9 @@ mod tests {
             card.title
         );
         assert_eq!(
-            card.assignee_initial,
-            Some('c'),
-            "the assignee pip is the NAME's initial, not the ULID's"
+            card.assignee.as_deref(),
+            Some("claude"),
+            "the footer assignee is the NAME, not the ULID"
         );
     }
 

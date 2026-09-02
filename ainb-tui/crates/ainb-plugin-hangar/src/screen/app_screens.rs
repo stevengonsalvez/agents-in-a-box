@@ -1012,6 +1012,11 @@ impl ScreenStates {
             })
             .collect();
         self.issue_list.set_agents(named);
+        // Every actor (agents AND members) by ref, so a board card's footer names
+        // its assignee whichever kind it is (crisp B1, defect 8).
+        self.issue_list.set_actor_names(
+            actors.iter().map(|a| (a.actor_ref.clone(), a.display_name.clone())).collect(),
+        );
         // Rebuild the Agents roster screen from the same snapshot (agent actors
         // only), preserving the selection + any open create/delete overlay so a
         // background refresh mid-interaction does not wipe the user's input. A

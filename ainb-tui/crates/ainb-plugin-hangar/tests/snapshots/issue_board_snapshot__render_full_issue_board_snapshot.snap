@@ -10,7 +10,7 @@ expression: full
 ┃HGR-1                ┃││HGR-2                │││HGR-3                │││HGR-4                │││HGR-5                │││HGR-6                │││HGR-7                 │
 ┃Issue i-backlog      ┃││Issue i-todo         │││Issue i-prog         │││Issue i-review       │││Issue i-done         │││Issue i-blocked      │││Issue i-cancelled     │
 ┃                     ┃││                     │││                     │││                     │││                     │││                     │││                      │
-┃◇ None             ◔a┃││◆ Medium           ◔c│││◆ High             ◔g│││◆ Urgent           ◔b│││◇ None               │││◆ High             ◔a│││◇ None                │
+┃◇ None        ◔ alice┃││◆ Medium     ◔ claude│││◆ High          ◔ gpt│││◆ Urgent        ◔ bob│││◇ None               │││◆ High        ◔ alice│││◇ None                │
 ┗━━━━━━━━━━━━━━━━━━━━━┛│╰─────────────────────╯│╰─────────────────────╯│╰─────────────────────╯│╰─────────────────────╯│╰─────────────────────╯│╰──────────────────────╯
                        │                       │                       │                       │                       │                       │
                        │                       │                       │                       │                       │                       │

@@ -1075,6 +1075,11 @@ pub struct IssueListState {
     /// assign picker uses (agent actors only). Empty on a workspace with no named
     /// agents, in which case the Agent row falls back to the provider chips.
     agents: Vec<WizardAgent>,
+    /// The `actor_ref -> display_name` map for EVERY actor (agents and members)
+    /// from the cached `hangar/agents_list`, so a card's footer names its
+    /// assignee (crisp B1, defect 8) instead of painting the first char of a
+    /// ULID. An unknown ref falls back to a short id, never the full ULID.
+    actor_names: BTreeMap<String, String>,
     /// A transient status note (create/run dispatch feedback or failure),
     /// rendered on the bottom row and replaced by the next note / cleared when a
     /// new wizard opens. Errors surface HERE, never silently dropped.
@@ -1123,6 +1128,7 @@ impl Default for IssueListState {
             wizard: None,
             repos: Vec::new(),
             agents: Vec::new(),
+            actor_names: BTreeMap::new(),
             note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
@@ -1405,6 +1411,26 @@ impl IssueListState {
         &self.agents
     }
 
+    /// Inject the `actor_ref -> display_name` map the card footers resolve their
+    /// assignee through (crisp B1), from the glue's cached `hangar/agents_list`
+    /// (agents AND members: either can be assigned).
+    pub fn set_actor_names(&mut self, names: BTreeMap<String, String>) {
+        self.actor_names = names;
+    }
+
+    /// The footer label for an issue's assignee: the roster display name, or a
+    /// short id (last 6 chars of the ref's id part, the Kanban fallback) until
+    /// the roster lands. `None` when unassigned.
+    fn assignee_label(&self, assignee: Option<&str>) -> Option<String> {
+        let actor_ref = assignee?;
+        if let Some(name) = self.actor_names.get(actor_ref) {
+            return Some(name.clone());
+        }
+        let id = actor_ref.split_once(':').map_or(actor_ref, |(_, id)| id);
+        let n = id.chars().count();
+        Some(id.chars().skip(n.saturating_sub(6)).collect())
+    }
+
     /// The transient status note (dispatch feedback / failure), if any.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
@@ -1525,33 +1551,31 @@ impl IssueListState {
             .into_iter()
             .enumerate()
             .map(|(idx, column)| {
-                let cards =
-                    self.rows_in_column(column)
-                        .map(|r| BoardCard {
-                            issue_id: r.id.as_str().to_string(),
-                            display_id: r
-                                .display_id
-                                .clone()
-                                .unwrap_or_else(|| r.id.as_str().to_string()),
-                            title: r.title.clone(),
-                            priority: PriorityChip::from_priority(r.priority),
-                            assignee_initial: r.assignee.as_deref().and_then(|a| {
-                                a.split_once(':').map_or(a, |(_, id)| id).chars().next()
-                            }),
-                            linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
-                            // 0046: the sub-issue roll-up, so a PARENT card shows a
-                            // `⊟ done/total` badge that flips to gold `1/1` when its
-                            // last child completes. `None` for a childless issue.
-                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
-                            // multica parity #12: the card wears a ⚠ when its
-                            // newest dispatch attempt was declined, so "not
-                            // running, and why" is discoverable from the board.
-                            not_dispatched: r
-                                .last_dispatch_reason
-                                .as_deref()
-                                .is_some_and(|c| !c.trim().is_empty()),
-                        })
-                        .collect::<Vec<_>>();
+                let cards = self
+                    .rows_in_column(column)
+                    .map(|r| BoardCard {
+                        issue_id: r.id.as_str().to_string(),
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| r.id.as_str().to_string()),
+                        title: r.title.clone(),
+                        priority: PriorityChip::from_priority(r.priority),
+                        assignee: self.assignee_label(r.assignee.as_deref()),
+                        linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                        // 0046: the sub-issue roll-up, so a PARENT card shows a
+                        // `⊟ done/total` badge that flips to gold `1/1` when its
+                        // last child completes. `None` for a childless issue.
+                        subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
+                        // multica parity #12: the card wears a ⚠ when its
+                        // newest dispatch attempt was declined, so "not
+                        // running, and why" is discoverable from the board.
+                        not_dispatched: r
+                            .last_dispatch_reason
+                            .as_deref()
+                            .is_some_and(|c| !c.trim().is_empty()),
+                    })
+                    .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
                 // that shrank (a moved/deleted card) never scrolls past its last
                 // card into a blank body.

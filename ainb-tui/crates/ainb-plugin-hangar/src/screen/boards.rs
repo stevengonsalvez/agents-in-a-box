@@ -2945,7 +2945,10 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         display_id: format!("{marker}{}", c.display_id),
         title: card_title_with_t4_badges(c),
         priority: PriorityChip::from_priority(0),
-        assignee_initial: c.title.chars().next(),
+        // The Boards wire card carries no agent id to name (only the provider
+        // token + squad chips), so it wears no assignee glyph rather than the
+        // title's first char it used to (crisp B1); B2's run chip replaces it.
+        assignee: None,
         linked: false,
         subtasks: None,
     }
