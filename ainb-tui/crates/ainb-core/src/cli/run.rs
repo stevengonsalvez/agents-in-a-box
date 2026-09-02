@@ -29,7 +29,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     validate_provider_installed(&provider)?;
 
     // Step 1: Resolve repository path
-    let repo_path = resolve_repo_path(&args)?;
+    let repo_path = resolve_repo_path(&args).await?;
     info!("Using repository: {}", repo_path.display());
 
     // Step 2: Determine workspace name and working directory
@@ -394,7 +394,7 @@ fn setup_mcp_pool(work_dir: &std::path::Path, session_name: &str) {
 }
 
 /// Resolve the repository path from args or current directory
-fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
+async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
     // Priority: --repo > --remote-repo > current directory
     if let Some(ref repo) = args.repo {
         let path = if repo.is_absolute() {
@@ -412,7 +412,7 @@ fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
 
     if let Some(ref remote) = args.remote_repo {
         // Clone or fetch remote repository
-        return clone_remote_repo(remote);
+        return clone_remote_repo(remote).await;
     }
 
     // Use current directory
@@ -496,7 +496,7 @@ fn github_shorthand(remote: &str) -> Option<crate::git::RepoSource> {
 /// groups on a session's source repository path, so the same repo rendered as
 /// two identically-named rows depending on whether the session was spawned
 /// from the CLI or the TUI.
-fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
+async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     let (source, parsed) = parse_remote_repo(remote)?;
     let manager = crate::git::RemoteRepoManager::new()?;
 
@@ -506,13 +506,14 @@ fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     // probe would race a concurrent publish and `clone_repo` re-checks anyway.
     println!("Preparing {}...", source.to_clone_url());
 
-    // Blocking git under `#[tokio::main]`: `ainb run` resolves its repo as the
-    // second statement of `execute`, before anything is spawned onto the
-    // runtime, so there is no task to starve. This is narrower than the
-    // `Command::output().await` it replaced — the TUI's own call sites wrap the
-    // same manager in `spawn_blocking` because they run inside a live event
-    // loop. Anything that starts work before repo resolution must do the same.
-    manager.clone_repo(&source, &parsed).map_err(|e| anyhow::anyhow!(e))
+    // `RemoteRepoManager` shells out synchronously, and this replaced a
+    // `tokio::process::Command::output().await`, so hand it to a blocking
+    // thread rather than holding a runtime worker for the whole transfer. The
+    // TUI's own call sites do the same with this manager.
+    tokio::task::spawn_blocking(move || manager.clone_repo(&source, &parsed))
+        .await
+        .context("clone task panicked")?
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 // The current-branch lookup lives in `crate::git::current_branch_at`. It used
