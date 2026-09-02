@@ -361,9 +361,7 @@ fn highlighted_option(pane: &str) -> Option<usize> {
 fn echoed_option(pane: &str, labels: &[String]) -> Option<usize> {
     let echo = pane.lines().rev().find(|l| l.contains("→ "))?;
     let after = echo.split("→ ").last()?.trim();
-    labels
-        .iter()
-        .position(|l| after.starts_with(picker_probe(l)))
+    labels.iter().position(|l| after.starts_with(picker_probe(l)))
 }
 
 /// The leading slice of an option label a wrapped pane render still shows
@@ -453,7 +451,12 @@ pub(crate) enum Pick {
 /// discovery lists the session at its root: the most specific session whose
 /// root contains the raise cwd wins, and two sessions at that same depth are
 /// ambiguous (a merged session that aggregated 2+ sources counts as two).
-pub(crate) fn pick_target(ainb: &[Session], peers: &[Session], session_id: &str, cwd: &str) -> Pick {
+pub(crate) fn pick_target(
+    ainb: &[Session],
+    peers: &[Session],
+    session_id: &str,
+    cwd: &str,
+) -> Pick {
     let root_len = |s: &Session| {
         if session_owns_cwd(&s.cwd, cwd) {
             s.cwd.trim_end_matches('/').len()
@@ -509,10 +512,14 @@ async fn resolve_target(
     let (by_cwd, nested) = match pick_target(&ainb, &peers, session_id, cwd) {
         Pick::Exact(session) => return Target::Send(session),
         Pick::None => {
-            return Target::NoTarget("no live session matched (target may have exited)".to_string());
+            return Target::NoTarget(
+                "no live session matched (target may have exited)".to_string(),
+            );
         }
         Pick::Ambiguous(n) => {
-            return Target::Ambiguous(format!("ambiguous target — {label} ({n} sessions in this cwd)"));
+            return Target::Ambiguous(format!(
+                "ambiguous target — {label} ({n} sessions in this cwd)"
+            ));
         }
         Pick::ByCwd { session, nested } => (session, nested),
     };
@@ -605,12 +612,23 @@ mod tests {
     fn picker_position_resolves_label_and_digit_only() {
         let l = labels();
         assert_eq!(picker_position(&l, "api/app.db"), Some(1));
-        assert_eq!(picker_position(&l, "data/boxtrack.db (Recommended)"), Some(0));
+        assert_eq!(
+            picker_position(&l, "data/boxtrack.db (Recommended)"),
+            Some(0)
+        );
         assert_eq!(picker_position(&l, "API/APP.DB"), Some(1));
         assert_eq!(picker_position(&l, "2"), Some(1));
         assert_eq!(picker_position(&l, "1"), Some(0));
-        assert_eq!(picker_position(&l, "3"), None, "out of range digit is free text");
-        assert_eq!(picker_position(&l, "data/"), None, "a prefix is free text, never a pick");
+        assert_eq!(
+            picker_position(&l, "3"),
+            None,
+            "out of range digit is free text"
+        );
+        assert_eq!(
+            picker_position(&l, "data/"),
+            None,
+            "a prefix is free text, never a pick"
+        );
         assert_eq!(picker_position(&l, ""), None);
         assert_eq!(picker_position(&l, "   "), None);
         assert_eq!(picker_position(&l, "use postgres"), None);
@@ -625,10 +643,16 @@ mod tests {
         let multi = ASK_PAYLOAD.replace("\"multi_select\":false", "\"multi_select\":true");
         assert_eq!(picker_labels(&multi), None);
         assert_eq!(picker_labels(r#"{"kind":"ERR","context":{}}"#), None);
-        assert_eq!(picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#), None);
+        assert_eq!(
+            picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#),
+            None
+        );
         assert_eq!(
             labels(),
-            vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()]
+            vec![
+                "data/boxtrack.db (Recommended)".to_string(),
+                "api/app.db".to_string()
+            ]
         );
     }
 
@@ -637,7 +661,10 @@ mod tests {
     #[test]
     fn picker_probe_is_a_bounded_prefix() {
         assert_eq!(picker_probe("api/app.db"), "api/app.db");
-        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrac");
+        assert_eq!(
+            picker_probe("data/boxtrack.db (Recommended)"),
+            "data/boxtrac"
+        );
         assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééé");
     }
 
@@ -667,9 +694,18 @@ mod tests {
         assert!(picker_visible(&moved, &l));
         assert_eq!(highlighted_option(&moved), Some(1));
         assert!(!picker_visible(ANSWERED_PANE, &l));
-        assert!(!picker_visible("$ ls\n1. data/boxtrack.db\n2. api/app.db\n$ ", &l), "no cursor line");
-        assert!(!picker_visible("❯ 1. something else entirely\n  2. nope", &l), "wrong options");
-        assert!(!picker_visible("❯ 7. data/boxtrack.db", &l), "cursor beyond the option count");
+        assert!(
+            !picker_visible("$ ls\n1. data/boxtrack.db\n2. api/app.db\n$ ", &l),
+            "no cursor line"
+        );
+        assert!(
+            !picker_visible("❯ 1. something else entirely\n  2. nope", &l),
+            "wrong options"
+        );
+        assert!(
+            !picker_visible("❯ 7. data/boxtrack.db", &l),
+            "cursor beyond the option count"
+        );
     }
 
     /// The answered echo names the option the agent recorded, by probe.
@@ -689,20 +725,51 @@ mod tests {
     #[test]
     fn route_answer_table() {
         let l = labels();
-        assert_eq!(route_answer(None, Some(&l), "api/app.db"), Route::Text, "no pane");
-        assert_eq!(route_answer(Some(PICKER_PANE), None, "yes"), Route::Text, "free-text ASK");
-        assert_eq!(route_answer(Some("$ "), Some(&l), "prod"), Route::Text, "plain shell target");
-        assert_eq!(route_answer(Some(ANSWERED_PANE), Some(&l), "api/app.db"), Route::Text, "picker gone");
-        assert_eq!(route_answer(Some(PICKER_PANE), Some(&l), "api/app.db"), Route::Picker(1));
-        assert_eq!(route_answer(Some(PICKER_PANE), Some(&l), "2"), Route::Picker(1));
+        assert_eq!(
+            route_answer(None, Some(&l), "api/app.db"),
+            Route::Text,
+            "no pane"
+        );
+        assert_eq!(
+            route_answer(Some(PICKER_PANE), None, "yes"),
+            Route::Text,
+            "free-text ASK"
+        );
+        assert_eq!(
+            route_answer(Some("$ "), Some(&l), "prod"),
+            Route::Text,
+            "plain shell target"
+        );
+        assert_eq!(
+            route_answer(Some(ANSWERED_PANE), Some(&l), "api/app.db"),
+            Route::Text,
+            "picker gone"
+        );
+        assert_eq!(
+            route_answer(Some(PICKER_PANE), Some(&l), "api/app.db"),
+            Route::Picker(1)
+        );
+        assert_eq!(
+            route_answer(Some(PICKER_PANE), Some(&l), "2"),
+            Route::Picker(1)
+        );
         assert!(matches!(
             route_answer(Some(PICKER_PANE), Some(&l), "actually use postgres"),
             Route::Refuse(_)
         ));
         let many: Vec<String> = (1..=12).map(|i| format!("option {i}")).collect();
-        let pane = format!("❯ 1. option 1\n{}", (2..=12).map(|i| format!("  {i}. option {i}")).collect::<Vec<_>>().join("\n"));
-        assert!(matches!(route_answer(Some(&pane), Some(&many), "option 12"), Route::Refuse(_)));
-        assert_eq!(route_answer(Some(&pane), Some(&many), "option 9"), Route::Picker(8));
+        let pane = format!(
+            "❯ 1. option 1\n{}",
+            (2..=12).map(|i| format!("  {i}. option {i}")).collect::<Vec<_>>().join("\n")
+        );
+        assert!(matches!(
+            route_answer(Some(&pane), Some(&many), "option 12"),
+            Route::Refuse(_)
+        ));
+        assert_eq!(
+            route_answer(Some(&pane), Some(&many), "option 9"),
+            Route::Picker(8)
+        );
     }
 
     fn session(id: &str, cwd: &str, src: SessionSource) -> Session {
@@ -750,14 +817,20 @@ mod tests {
             session("a", "/work/x", SessionSource::Ainb),
             session("b", "/work/x", SessionSource::Ainb),
         ];
-        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/work/x"), Pick::Ambiguous(2)));
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-sid", "/work/x"),
+            Pick::Ambiguous(2)
+        ));
     }
 
     #[test]
     fn ambiguous_cwd_multi_source_merge_refuses() {
         let ainb = vec![session("a", "/work/x", SessionSource::Ainb)];
         let peers = vec![session("a", "/work/x", SessionSource::Peers)];
-        assert!(matches!(pick_target(&ainb, &peers, "hook-sid", "/work/x"), Pick::Ambiguous(2)));
+        assert!(matches!(
+            pick_target(&ainb, &peers, "hook-sid", "/work/x"),
+            Pick::Ambiguous(2)
+        ));
     }
 
     /// The hook's cwd drifted below the session root (the agent `cd`'d into
@@ -770,7 +843,10 @@ mod tests {
             pick_target(&raw, &[], "hook-sid", "/w/app/api"),
             Pick::ByCwd { session, nested: true } if session.id == "wt"
         ));
-        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/w/app2"), Pick::None), "sibling prefix");
+        assert!(
+            matches!(pick_target(&raw, &[], "hook-sid", "/w/app2"), Pick::None),
+            "sibling prefix"
+        );
     }
 
     /// A session with its own tmux identity, so two of them are two sessions to
@@ -798,7 +874,10 @@ mod tests {
             distinct_session("b", "/w/app/"),
         ];
         assert!(
-            matches!(pick_target(&twins, &[], "hook-sid", "/w/app/sub"), Pick::Ambiguous(2)),
+            matches!(
+                pick_target(&twins, &[], "hook-sid", "/w/app/sub"),
+                Pick::Ambiguous(2)
+            ),
             "same directory with and without the trailing slash is one depth"
         );
     }
@@ -866,7 +945,10 @@ mod tests {
     #[test]
     fn no_session_in_cwd_is_no_match_not_refuse() {
         let raw = vec![session("a", "/other", SessionSource::Ainb)];
-        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/work/x"), Pick::None));
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-sid", "/work/x"),
+            Pick::None
+        ));
     }
 
     #[test]
