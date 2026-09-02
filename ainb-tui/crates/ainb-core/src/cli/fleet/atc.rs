@@ -152,6 +152,24 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // tear down any timer a prior daemon-down `setup` left behind) so exactly one
     // mechanism fires. When the daemon is unreachable the local timer keeps the
     // heartbeat alive. `timer::install` is idempotent.
+    // A LITE instance must not leave a full-mode scheduler behind. Skipping the
+    // INSTALL is not enough when the instance was previously full: both
+    // schedulers stay registered and keep firing `atc heartbeat` every interval
+    // forever. Each beat now stands down, so nothing is sent — but it also
+    // reports `ledger_owner: "none"`, which trips the daemon's handoff gate and
+    // logs a warning on every beat, indefinitely. `mode --set lite` tears both
+    // down; this path has to agree with it.
+    if meta.mode == SupervisorMode::Lite {
+        if let Err(e) = timer::teardown(&meta.name) {
+            eprintln!("warning: lite mode but the local heartbeat timer was not removed: {e}");
+        }
+        if !unregister_heartbeat_with_daemon(&meta.name).await {
+            tracing::debug!(
+                "lite mode: no daemon heartbeat cron to unregister (or the daemon is down)"
+            );
+        }
+    }
+
     let mut timer_paths = Vec::new();
     if schedules_heartbeat {
         if daemon_registered {
