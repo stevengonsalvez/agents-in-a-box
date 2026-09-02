@@ -972,7 +972,7 @@ pub(crate) fn probe_atc_with(
             channel: Some(format!("{name} (every {interval_min}m)")),
             last_activity_at: hbs.last_active_ms,
             reason: format!(
-                "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; `ainb daemon atc start` respawns it"
+                "heartbeat firing every {interval_min}m but session {session} is GONE. Beats are landing nowhere; start respawns it"
             ),
             ..DaemonStatus::running(kind)
         };
@@ -1151,7 +1151,7 @@ pub(crate) fn hangar_status_for(
             channel: Some("unix socket".to_string()),
             reason: format!(
                 "socket is served by a daemon this home does not own ({} running \
-host-wide); `ainb hangar daemon restart` re-takes ownership",
+host-wide); restart re-takes ownership",
                 census()
             ),
             ..DaemonStatus::running(kind)
@@ -2337,7 +2337,7 @@ mod tests {
             s.reason
         );
         assert!(
-            s.reason.contains("ainb daemon atc start"),
+            s.reason.contains("start respawns it"),
             "reason must name the fix: {}",
             s.reason
         );
@@ -2361,7 +2361,7 @@ mod tests {
             s.reason
         );
         assert!(
-            s.reason.contains("hangar daemon restart"),
+            s.reason.contains("restart re-takes ownership"),
             "reason must name the fix: {}",
             s.reason
         );
