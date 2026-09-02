@@ -3020,6 +3020,12 @@ impl CliCommand for DaemonCommand {
                     crate::cli::daemon::Action::Pair => {
                         "Print a Codex remote-control pairing code for the phone app"
                     }
+                    crate::cli::daemon::Action::Provision => {
+                        "Provision the instance and bring it up, creating it if absent"
+                    }
+                    crate::cli::daemon::Action::RemoveOrphan => {
+                        "Remove a heartbeat timer whose instance does not exist"
+                    }
                 }));
             }
             cmd = cmd.subcommand(sub);

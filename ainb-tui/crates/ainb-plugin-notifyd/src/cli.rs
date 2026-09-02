@@ -154,12 +154,20 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     println!("hook script:   {}", record.hook_script.display());
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+        println!("note: {}", crate::install::CODEX_TRUST_NOTE);
     }
     if let Some(p) = &record.copilot_hooks_json {
         println!("copilot hooks: {}", p.display());
     }
     if let Some(p) = &record.antigravity_hooks_json {
         println!("antigravity hooks: {}", p.display());
+    }
+    // A per-agent install failure is isolated, so without this the command
+    // reports a clean install of something that did not happen. Read off the
+    // report, never off `record.agents`: that list is cumulative, so an agent
+    // wired yesterday and broken today is still in it.
+    for (agent, error) in &report.failures {
+        println!("{}: FAILED: {error}", agent.name());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
@@ -168,8 +176,17 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
         Some(ClaudeRegister::ClaudeCliMissing) => {
             println!("claude plugin: SKIPPED — `claude` CLI not found on PATH")
         }
-        Some(ClaudeRegister::Failed(e)) => println!("claude plugin: FAILED — {e}"),
+        Some(ClaudeRegister::Failed(e)) => println!("claude plugin: FAILED: {e}"),
         None => {}
+    }
+    // A partial install must not exit 0: a provisioning script or a `set -e`
+    // installer gating on the status would record hooks that never fire.
+    if !report.failures.is_empty() {
+        anyhow::bail!(
+            "{} of {} agents failed to install",
+            report.failures.len(),
+            agents.len()
+        );
     }
     Ok(())
 }

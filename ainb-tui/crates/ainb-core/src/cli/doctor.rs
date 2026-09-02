@@ -47,13 +47,15 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                     return Err(error).context("repairing legacy hook binary pointer");
                 }
                 let health = ainb_plugin_notifyd::hook_health(&paths);
-                // A dev target is intentionally exact. `doctor --fix-hooks`
-                // may migrate a recognisable old Cellar pointer, but it must
-                // never silently replace a vanished worktree binary with the
-                // global Ainb that happened to run Doctor.
-                let dev_target =
-                    health.hook_binary_mode == Some(ainb_plugin_notifyd::HookBinaryMode::Dev);
-                if !health.issues.is_empty() && !dev_target {
+                // A WORKING dev target is intentionally exact: a developer
+                // pointing hooks at their own build must keep it. A dev target
+                // whose binary is GONE is not a choice, it is a dead pointer,
+                // and refusing to repair it was how a deleted worktree left
+                // every hook broken with no route back from the CLI.
+                let live_dev_target = health.hook_binary_mode
+                    == Some(ainb_plugin_notifyd::HookBinaryMode::Dev)
+                    && health.hook_binary_ready;
+                if !health.issues.is_empty() && !live_dev_target {
                     ainb_plugin_notifyd::repair_hooks(&paths)
                         .context("repairing installed hooks")?;
                 }

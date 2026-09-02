@@ -280,21 +280,62 @@ fn homebrew_launcher(exe: &Path) -> Option<PathBuf> {
     is_executable(&launcher).then_some(launcher)
 }
 
-fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
-    if let Some(launcher) = homebrew_launcher(exe) {
-        return Some(launcher);
-    }
-
-    let mut candidates = vec![
-        PathBuf::from("/opt/homebrew/bin/ainb"),
-        PathBuf::from("/usr/local/bin/ainb"),
-    ];
+/// Every prefix an installed `ainb` is expected to live under, most specific
+/// first. Order is the preference order when several are populated.
+fn launcher_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // User-owned prefixes first: they are what the current installer writes,
+    // and a system-wide path is more often the stale one left behind.
     if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin/ainb"));
         candidates.push(home.join(".cargo/bin/ainb"));
     }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/ainb"));
+    candidates.push(PathBuf::from("/usr/local/bin/ainb"));
     candidates
-        .into_iter()
+}
+
+/// The installed `ainb` a hook should invoke, given the one that is running.
+///
+/// Reaching past the running binary to a DIFFERENT file is reserved for the
+/// case that motivates it: `exe` is a throwaway `target/` build, so pinning it
+/// would die with its tree. When the running binary is itself installed the
+/// answer is its own launcher, never whichever prefix happens to be searched
+/// first: two prefixes can hold two different versions, and repointing hooks at
+/// the other one would silently run the wrong ainb.
+fn installed_launcher(exe: &Path) -> Option<(PathBuf, HookBinaryMode)> {
+    installed_launcher_among(exe, &launcher_candidates())
+}
+
+/// [`installed_launcher`] over an explicit candidate list, so the choice is
+/// testable without a machine that happens to have two ainbs installed.
+fn installed_launcher_among(
+    exe: &Path,
+    candidates: &[PathBuf],
+) -> Option<(PathBuf, HookBinaryMode)> {
+    // A Homebrew install resolves to its OWN launcher, which is stable across
+    // upgrades in a way the versioned Cellar path is not.
+    if let Some(launcher) = homebrew_launcher(exe) {
+        return Some((launcher, HookBinaryMode::Release));
+    }
+    if let Some(same) = candidates
+        .iter()
         .find(|candidate| is_executable(candidate) && canonical_eq(candidate, exe))
+    {
+        let mode = launcher_mode(same);
+        return Some((same.clone(), mode));
+    }
+    if !is_dev_binary(exe) {
+        return None;
+    }
+    // A `target/` build belongs to no prefix, so there is no "its own" launcher
+    // to prefer and the order below is the whole answer. It puts the prefixes a
+    // user installs into ahead of the system-wide ones, because a stale
+    // /usr/local/bin/ainb left by an old installer is the likelier leftover.
+    candidates.iter().find(|candidate| is_executable(candidate)).map(|candidate| {
+        let mode = launcher_mode(candidate);
+        (candidate.clone(), mode)
+    })
 }
 
 fn launcher_mode(path: &Path) -> HookBinaryMode {
@@ -302,7 +343,9 @@ fn launcher_mode(path: &Path) -> HookBinaryMode {
         HookBinaryMode::Dev
     } else if path == Path::new("/opt/homebrew/bin/ainb")
         || path == Path::new("/usr/local/bin/ainb")
-        || path.parent().is_some_and(|parent| parent.ends_with(".cargo/bin"))
+        || path
+            .parent()
+            .is_some_and(|parent| parent.ends_with(".cargo/bin") || parent.ends_with(".local/bin"))
     {
         HookBinaryMode::Release
     } else {
@@ -310,7 +353,34 @@ fn launcher_mode(path: &Path) -> HookBinaryMode {
     }
 }
 
+/// Why a hook binary pointer is being written.
+///
+/// The two intents differ only in whether the INSTALLED ainb is preferred over
+/// the one doing the writing. That is a policy choice, not a new kind of
+/// binary, so it deliberately does not add a [`HookBinaryMode`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryIntent {
+    /// Install / repair. Points hooks at the installed ainb so the pointer
+    /// survives the deletion of whatever tree the running binary was built in.
+    Install,
+    /// Pin the binary running right now, for deliberate dev testing.
+    PinRunning,
+}
+
 fn hook_binary_target(exe: PathBuf, explicit: Option<&str>) -> HookBinaryTarget {
+    resolve_hook_binary(exe, explicit, BinaryIntent::Install, &installed_launcher)
+}
+
+/// Resolve the executable a hook should invoke.
+///
+/// `find_installed` is injected so the search is unit-testable without a real
+/// filesystem; production passes [`installed_launcher`].
+fn resolve_hook_binary(
+    exe: PathBuf,
+    explicit: Option<&str>,
+    intent: BinaryIntent,
+    find_installed: &dyn Fn(&Path) -> Option<(PathBuf, HookBinaryMode)>,
+) -> HookBinaryTarget {
     if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
         let path = PathBuf::from(path);
         let path = if path.is_absolute() {
@@ -332,9 +402,19 @@ fn hook_binary_target(exe: PathBuf, explicit: Option<&str>) -> HookBinaryTarget 
             path,
         };
     }
-    if let Some(path) = stable_launcher_for(&exe) {
+    // Install/repair prefers the installed ainb even when it is a DIFFERENT
+    // file from the one writing the pointer. Pinning deliberately does not.
+    if intent == BinaryIntent::Install {
+        if let Some((path, mode)) = find_installed(&exe) {
+            return HookBinaryTarget { path, mode };
+        }
+    }
+    // Pinning still normalises a Cellar path to its launcher: the versioned
+    // path stops existing on the next `brew upgrade`, which is not something
+    // anyone means to pin.
+    if let Some(launcher) = homebrew_launcher(&exe) {
         return HookBinaryTarget {
-            path,
+            path: launcher,
             mode: HookBinaryMode::Release,
         };
     }
@@ -368,6 +448,24 @@ pub fn extract_hook_bin(paths: &Paths) -> Result<PathBuf> {
     let bin = std::env::current_exe().context("resolving installing ainb binary")?;
     let target = hook_binary_target(bin, std::env::var("AINB_BIN").ok().as_deref());
     write_hook_binary_target(paths, &target)
+}
+
+/// Point the hooks at the binary running RIGHT NOW, installed or not.
+///
+/// The deliberate opposite of [`extract_hook_bin`]: for testing a local build's
+/// hooks. The pointer dies with the tree, which is the point: it is an
+/// explicit choice rather than the accident of having installed from a
+/// worktree.
+pub fn pin_running_hook_binary(paths: &Paths) -> Result<HookBinaryTarget> {
+    let bin = std::env::current_exe().context("resolving running ainb binary")?;
+    let target = resolve_hook_binary(
+        bin,
+        std::env::var("AINB_BIN").ok().as_deref(),
+        BinaryIntent::PinRunning,
+        &installed_launcher,
+    );
+    write_hook_binary_target(paths, &target)?;
+    Ok(target)
 }
 
 fn read_hook_binary_target(paths: &Paths) -> Option<HookBinaryTarget> {
@@ -473,6 +571,12 @@ pub struct InstallReport {
     pub record: InstallRecord,
     /// Claude marketplace-registration outcome, if Claude was targeted.
     pub claude: Option<ClaudeRegister>,
+    /// Agents THIS run failed to wire, with the reason.
+    ///
+    /// Carried rather than inferred from the record: the record is cumulative,
+    /// so an agent that succeeded yesterday and failed today is still listed in
+    /// it, and a caller comparing the two would report a clean install.
+    pub failures: Vec<(Agent, String)>,
 }
 
 /// First non-empty line of `stderr` (preferred) or `stdout`, trimmed and
@@ -554,9 +658,13 @@ fn unregister_claude_plugin() {
 /// and reports the outcome. Idempotent.
 pub fn install(paths: &Paths, agents: &[Agent]) -> Result<InstallReport> {
     let home = dirs::home_dir().context("resolving home dir")?;
-    let record = install_under_home(paths, &home, agents)?;
+    let (record, failures) = install_under_home(paths, &home, agents)?;
     let claude = agents.contains(&Agent::Claude).then(register_claude_plugin);
-    Ok(InstallReport { record, claude })
+    Ok(InstallReport {
+        record,
+        claude,
+        failures,
+    })
 }
 
 /// Rebuild every installed hook surface against this running Ainb binary.
@@ -585,9 +693,21 @@ pub fn repair_or_install_hooks(paths: &Paths) -> Result<InstallReport> {
     install(paths, &record.agents)
 }
 
+/// What a freshly wired Codex install still needs from the user.
+///
+/// Lives here beside the install that earns it, but is PRINTED by the CLI:
+/// writing it from the library painted over the TUI that called the install.
+pub const CODEX_TRUST_NOTE: &str = "Codex only runs hooks it has trusted. Start `codex` once and approve the startup hooks \
+     review, otherwise the ainb hooks (including the stall guard) are skipped silently. \
+     Non-interactive automation can pass --dangerously-bypass-hook-trust instead.";
+
 /// Install variant that takes an explicit `$HOME` root. Lets tests
 /// stay isolated without mutating the process-wide environment.
-pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Result<InstallRecord> {
+pub fn install_under_home(
+    paths: &Paths,
+    home: &Path,
+    agents: &[Agent],
+) -> Result<(InstallRecord, Vec<(Agent, String)>)> {
     if agents.is_empty() {
         bail!("install: must specify at least one agent");
     }
@@ -626,17 +746,13 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 Ok(hooks_json) => {
                     record.codex_hooks_json = Some(hooks_json);
                     push_unique(&mut record.agents, Agent::Codex);
-                    // Writing hooks.json is only half a Codex install. Codex
-                    // pins every hook in config.toml by `trusted_hash` and
-                    // SILENTLY skips any entry it has not trusted — no error,
-                    // no log line, the hook simply never runs. Say so, or the
-                    // install looks complete while doing nothing.
-                    eprintln!(
-                        "note: Codex only runs hooks it has trusted. Start `codex` once and \
-                         approve the startup hooks review, otherwise the ainb hooks (including \
-                         the stall guard) are skipped silently. Non-interactive automation can \
-                         pass --dangerously-bypass-hook-trust instead."
-                    );
+                    // Writing hooks.json is only half a Codex install: Codex
+                    // pins every hook by `trusted_hash` and SILENTLY skips any
+                    // it has not trusted. `cmd_install` says so on the terminal
+                    // a library that writes to stderr paints over whatever
+                    // TUI called it (this ran inside the Daemons screen and
+                    // corrupted the frame).
+                    tracing::warn!("{CODEX_TRUST_NOTE}");
                 }
                 Err(e) => failures.push((Agent::Codex, e)),
             },
@@ -660,12 +776,18 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
         }
     }
     record.save(paths)?;
-    for (agent, e) in &failures {
-        eprintln!(
-            "warning: notifyd hook install for {agent:?} failed (other agents unaffected): {e:#}"
-        );
-    }
-    Ok(record)
+    let failures: Vec<(Agent, String)> = failures
+        .into_iter()
+        .map(|(agent, e)| {
+            // Logged as well as returned: a caller that only prints the summary
+            // still leaves the cause somewhere findable.
+            tracing::warn!(
+                "notifyd hook install for {agent:?} failed (other agents unaffected): {e:#}"
+            );
+            (agent, format!("{e:#}"))
+        })
+        .collect();
+    Ok((record, failures))
 }
 
 /// The plugin manifest version baked into this binary — parsed from
@@ -1128,6 +1250,16 @@ pub struct HookHealth {
     pub hook_binary_mode: Option<HookBinaryMode>,
     /// Whether the hook binary pointer resolves to an executable file.
     pub hook_binary_ready: bool,
+    /// The `ainb` doing the reporting. Shown beside [`Self::hook_binary`] so a
+    /// pointer aimed somewhere other than the binary you are looking at is
+    /// visible rather than something you have to go and read off disk.
+    pub running_binary: Option<PathBuf>,
+    /// Whether [`Self::hook_binary`] and [`Self::running_binary`] resolve to
+    /// the same file. Compared HERE, where the probe already does I/O: a
+    /// symlinked install makes the two paths differ textually while naming one
+    /// binary, and `current_exe` resolves symlinks on Linux but not the
+    /// pointer, so a raw `==` marks every healthy install as a mismatch.
+    pub hook_binary_is_running_binary: bool,
     /// Per-agent installation and wiring state.
     pub agents: Vec<HookAgentHealth>,
     /// Whether notifyd's delivery socket accepted a connection now.
@@ -1160,6 +1292,11 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
     // pointer file.
     let hook_binary_ready =
         canonical_hook_bin(paths).is_file() && hook_binary.as_deref().is_some_and(is_executable);
+    let running_binary = std::env::current_exe().ok();
+    let hook_binary_is_running_binary = match (&hook_binary, &running_binary) {
+        (Some(pointer), Some(running)) => canonical_eq(pointer, running),
+        _ => false,
+    };
     let installed_any = !record.agents.is_empty();
     let version_current = record
         .plugin_version
@@ -1201,13 +1338,13 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
             });
         }
         if !hook_binary_ready {
-            let repair = match hook_binary_mode {
-                Some(HookBinaryMode::Dev) => {
-                    "restore dev build, then press I in Daemons or run `AINB_BIN=/path/to/target/debug/ainb ainb notifyd install --all`"
-                        .to_string()
-                }
-                _ => "ainb doctor --fix-hooks".to_string(),
-            };
+            // A dead dev pointer is the common case (the build tree it named
+            // was deleted) and repair now reaches past it to the installed
+            // ainb, so the fix is the same keypress as every other pointer
+            // fault, not a lecture about rebuilding a tree that is gone.
+            let repair =
+                "ainb doctor --fix-hooks, or press I in Daemons, to repoint at the installed ainb"
+                    .to_string();
             issues.push(HookHealthIssue {
                 component: "hook binary".to_string(),
                 message: hook_binary.as_ref().map_or_else(
@@ -1242,6 +1379,8 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
         hook_binary,
         hook_binary_mode,
         hook_binary_ready,
+        running_binary,
+        hook_binary_is_running_binary,
         agents,
         notify_socket_live: socket_live(&paths.socket),
         approve_socket_live: socket_live(&paths.approve_socket),
@@ -1502,6 +1641,145 @@ mod tests {
         assert_eq!(cellar_target.path, launcher);
     }
 
+    /// The reported bug: hooks installed while running a worktree
+    /// `target/debug/ainb` stamped that doomed path into the pointer, and it
+    /// stayed there after the worktree was deleted. Install intent must reach
+    /// past the running binary to the installed one.
+    #[test]
+    fn install_prefers_the_installed_launcher_over_a_dev_build() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+        let found = installed.clone();
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::Install, &|_| {
+            Some((found.clone(), HookBinaryMode::Release))
+        });
+
+        assert_eq!(target.path, installed);
+        assert_eq!(target.mode, HookBinaryMode::Release);
+    }
+
+    /// Pinning is the escape hatch, so it must NOT consult the installed
+    /// search, or there would be no way to test a local build's hooks.
+    #[test]
+    fn pinning_keeps_the_running_binary_even_when_one_is_installed() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::PinRunning, &|_| {
+            Some((installed.clone(), HookBinaryMode::Release))
+        });
+
+        assert_eq!(target.path, dev);
+        assert_eq!(target.mode, HookBinaryMode::Dev);
+    }
+
+    /// With nothing installed there is nothing better to point at, so install
+    /// falls back to the running binary rather than writing a dead path.
+    #[test]
+    fn install_falls_back_to_the_running_binary_when_nothing_is_installed() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+
+        let target = resolve_hook_binary(dev.clone(), None, BinaryIntent::Install, &|_| None);
+
+        assert_eq!(target.path, dev);
+        assert_eq!(target.mode, HookBinaryMode::Dev);
+    }
+
+    /// An explicit `AINB_BIN` is the operator's stated intent and outranks both
+    /// policies.
+    #[test]
+    fn explicit_binary_wins_under_either_intent() {
+        let dev = PathBuf::from("/w/tree/target/debug/ainb");
+        let installed = PathBuf::from("/home/u/.local/bin/ainb");
+        let chosen = PathBuf::from("/opt/custom/ainb");
+
+        for intent in [BinaryIntent::Install, BinaryIntent::PinRunning] {
+            let target =
+                resolve_hook_binary(dev.clone(), Some("/opt/custom/ainb"), intent, &|_| {
+                    Some((installed.clone(), HookBinaryMode::Release))
+                });
+            assert_eq!(target.path, chosen, "intent {intent:?} ignored AINB_BIN");
+        }
+    }
+
+    /// Reaching past the running binary is only for a throwaway build. A host
+    /// with two install prefixes holding two versions must keep the one that is
+    /// actually running, or every install silently repoints the hooks at the
+    /// other version.
+    #[test]
+    fn a_non_dev_running_binary_is_never_traded_for_another_prefix() {
+        let dir = fake_home();
+        let mine = dir.path().join(".local/bin/ainb");
+        let other = dir.path().join("other/bin/ainb");
+        for path in [&mine, &other] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "#!/bin/sh\n").unwrap();
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let candidates = vec![other.clone(), mine.clone()];
+
+        // Neither is a `target/` build. The running binary is itself installed,
+        // so it keeps its own launcher and is never traded for `other`, which
+        // the search would otherwise reach first.
+        assert_eq!(
+            installed_launcher_among(&mine, &candidates).map(|(path, _)| path),
+            Some(mine.clone())
+        );
+        // And a non-dev binary that is not on the list at all moves nowhere.
+        assert_eq!(
+            installed_launcher_among(&dir.path().join("elsewhere/ainb"), &candidates),
+            None
+        );
+
+        // A `target/` build has no launcher of its own, so it takes the first
+        // candidate in preference order.
+        let dev = dir.path().join("tree/target/debug/ainb");
+        assert_eq!(
+            installed_launcher_among(&dev, &candidates).map(|(path, _)| path),
+            Some(other)
+        );
+    }
+
+    /// The order matters on the dev arm, where there is nothing to match
+    /// against: a user-owned prefix is what the current installer writes, and a
+    /// system-wide path is more often a stale leftover.
+    #[test]
+    fn user_prefixes_are_searched_before_system_ones() {
+        let candidates = launcher_candidates();
+        let index = |needle: &str| candidates.iter().position(|p| p.ends_with(needle));
+
+        if let (Some(user), Some(system)) = (index(".local/bin/ainb"), index("usr/local/bin/ainb"))
+        {
+            assert!(user < system, "user prefixes must be searched first");
+        }
+    }
+
+    /// `~/.local/bin` is a first-class install prefix (it is where `ainb`
+    /// installs itself on a machine with no Homebrew), so a binary there is a
+    /// stable launcher, not an unclassified `Direct` path that repair treats
+    /// as no better than a worktree build.
+    #[test]
+    fn local_bin_launcher_is_release_mode() {
+        let dir = fake_home();
+        let launcher = dir.path().join(".local/bin/ainb");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, permissions).unwrap();
+
+        let target = hook_binary_target(
+            PathBuf::from("/unused/ainb"),
+            Some(launcher.to_str().expect("UTF-8 temporary path")),
+        );
+        assert_eq!(target.mode, HookBinaryMode::Release);
+        assert_eq!(target.path, launcher);
+    }
+
     #[test]
     fn legacy_cellar_pointer_migrates_but_missing_dev_pointer_does_not() {
         let dir = fake_home();
@@ -1540,7 +1818,7 @@ mod tests {
         // under ~/.claude/plugins/.
         let dir = fake_home();
         let p = paths_under_home(dir.path());
-        let record = install_under_home(&p, dir.path(), &[Agent::Claude]).unwrap();
+        let (record, _) = install_under_home(&p, dir.path(), &[Agent::Claude]).unwrap();
         assert!(record.agents.contains(&Agent::Claude));
         assert!(
             record.claude_plugin_dir.is_none(),
@@ -1570,7 +1848,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let record = install_under_home(&p, dir.path(), &[Agent::Codex]).unwrap();
+        let (record, _) = install_under_home(&p, dir.path(), &[Agent::Codex]).unwrap();
         assert!(record.codex_hooks_json.is_some());
         let text = std::fs::read_to_string(&hooks_json_path).unwrap();
         assert!(text.contains("echo user-hook"), "user hook lost: {text}");
@@ -1742,7 +2020,7 @@ mod tests {
         // and AINB_AGENT=copilot with the placeholder substituted away.
         let dir = fake_home();
         let p = paths_under_home(dir.path());
-        let record = install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
+        let (record, _) = install_under_home(&p, dir.path(), &[Agent::Copilot]).unwrap();
 
         let dropin = dir.path().join(".copilot/hooks/ainb.json");
         assert_eq!(record.copilot_hooks_json.as_deref(), Some(dropin.as_path()));
@@ -1867,7 +2145,7 @@ mod tests {
     fn install_antigravity_writes_native_dropin_file() {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
-        let record = install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
+        let (record, _) = install_under_home(&p, dir.path(), &[Agent::Antigravity]).unwrap();
 
         let dropin = dir.path().join(".gemini/antigravity-cli/hooks/ainb.json");
         assert_eq!(

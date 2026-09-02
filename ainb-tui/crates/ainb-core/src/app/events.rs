@@ -52,18 +52,13 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    // Daemons runtime snapshot (MCP pool + Headroom + repair actions)
-    DaemonsOverlayOpen,
-    DaemonsOverlayClose,
-    DaemonsOverlayRefresh,
-    /// Move the overlay's row selection by a signed step (saturating).
-    DaemonsOverlaySelect(isize),
-    /// Restart whichever daemon row is selected in the overlay.
-    DaemonsOverlayRestartSelected,
+    // Daemons screen
+    /// Re-collect the daemon table now instead of waiting out the interval.
+    DaemonsRefresh,
+    /// Install or repair the hooks, pointing them at the installed ainb.
     DaemonsRepairHooks,
-    DaemonsOverlayStartHangar,
-    DaemonsStartMcp,
-    DaemonsStartHeadroom,
+    /// Point the hooks at the binary running right now, for dev testing.
+    DaemonsPinHookBinary,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -1514,23 +1509,6 @@ impl EventHandler {
                 KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
                 KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
                 KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
-                _ => None,
-            };
-        }
-
-        // Legacy popup captures keys only outside the unified Daemons screen.
-        // The screen itself owns r/R/S so controls remain visible beside data.
-        if state.daemons_overlay.is_some() && state.current_screen != screen_ids::DAEMONS {
-            return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
-                    Some(AppEvent::DaemonsOverlayClose)
-                }
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
-                KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
-                KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
-                KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
                 _ => None,
             };
         }
@@ -3101,6 +3079,13 @@ impl EventHandler {
             KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
             KeyCode::Enter if daemons.has_overlay() => {
                 daemons.confirm_menu();
+                // The component cannot reach into AppState, so an entry that
+                // needs to leave the TUI (attaching to the ATC session) parks
+                // the request and the handler, which owns the slot, drains it.
+                if let Some(session) = daemons.take_attach_request() {
+                    state.pending_async_action =
+                        Some(crate::app::state::AsyncAction::AttachToOtherTmux(session));
+                }
                 return None;
             }
             KeyCode::Enter => {
@@ -3127,8 +3112,12 @@ impl EventHandler {
         }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+            KeyCode::Char('r') => Some(AppEvent::DaemonsRefresh),
+            // Routed as events rather than applied inline: this dispatcher is
+            // pure by contract (its tests call it just to read the routing) and
+            // both of these really do write into the user's home.
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
+            KeyCode::Char('B') => Some(AppEvent::DaemonsPinHookBinary),
             // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
             // (headroom) and `S` (hangar) wrote status fields whose only
             // renderer was the System services panel, so after that panel was
@@ -3925,16 +3914,10 @@ impl EventHandler {
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
-                let leaving_daemons = state.current_screen == screen_ids::DAEMONS;
                 let target =
                     state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
                 state.current_screen = target;
-                // The unified screen owns this runtime snapshot. Drop it on
-                // exit so no obsolete popup appears over the destination.
-                if leaving_daemons {
-                    state.close_daemons_overlay();
-                }
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -3985,30 +3968,14 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
-            AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
-            AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
-            AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
-            AppEvent::DaemonsOverlaySelect(delta) => {
-                if let Some(o) = state.daemons_overlay.as_mut() {
-                    o.selected = o.selected.step(delta);
-                }
-            }
-            // `DaemonsSelect` / `DaemonsRestartSelected` are gone. They moved the
-            // cursor and restarted ONLY notifyd, refusing every other daemon
-            // with "has no TUI restart; use its own CLI verb" — including ATC,
-            // the row this work exists to make restartable. Selection and the
-            // per-row start/restart/stop menu are handled inline in
-            // `handle_daemons_keys` now, against `ainb daemon <kind> <verb>`,
-            // which every daemon actually implements.
-            AppEvent::DaemonsOverlayRestartSelected => {
-                if let Some(kind) = state.daemons_overlay.as_ref().map(|o| o.selected) {
-                    state.spawn_daemon_restart(kind);
-                }
-            }
-            AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
-            AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
-            AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
-            AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
+            AppEvent::DaemonsRefresh => state.daemons_state.force_collect(),
+            // Kept next to the two hook events it belongs with.
+            AppEvent::DaemonsRepairHooks => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
+            AppEvent::DaemonsPinHookBinary => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
@@ -6610,17 +6577,9 @@ impl EventHandler {
                 // Arm the background collector on entry (H-D2): collection runs
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
+                // MCP, Headroom, Hangar and notifyd are rows in that same
+                // collect, so there is nothing else to arm.
                 state.daemons_state.arm();
-                // MCP, Headroom, Hangar, and notifyd are collected by the
-                // existing non-blocking runtime probe and rendered on this
-                // screen as one system-services table.
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    if state.daemons_overlay.is_none() {
-                        state.toggle_daemons_overlay();
-                    } else {
-                        state.spawn_daemons_fetch();
-                    }
-                }
             }
             AppEvent::GoToFleetPanel => {
                 tracing::info!("Navigating to Fleet panel");
@@ -9118,10 +9077,6 @@ mod panel_back_tests {
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
-        assert!(
-            state.daemons_overlay.is_none(),
-            "leaving Daemons must not leave the old popup behind"
-        );
     }
 
     /// `q` on the Daemons screen behaves identically to Esc.
@@ -9135,80 +9090,6 @@ mod panel_back_tests {
 
         let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Char('q')), &mut state);
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
-    }
-
-    /// `R` restarts the SELECTED daemon, and the selection is movable.
-    ///
-    /// The overlay previously hardcoded `R` to notifyd and had no cursor, so an
-    /// already-running daemon on a stale binary — the state a `brew upgrade`
-    /// leaves behind — could not be cycled from the TUI at all. Selection
-    /// saturates rather than wraps, so holding a direction parks at an end
-    /// instead of silently cycling past it.
-    #[test]
-    fn daemons_overlay_restarts_the_selected_row() {
-        use crate::app::state::DaemonRow;
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-
-        let selected = |s: &AppState| s.daemons_overlay.as_ref().map(|o| o.selected);
-        assert_eq!(
-            selected(&state),
-            Some(DaemonRow::ORDER[0]),
-            "selection starts on the first row"
-        );
-
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Headroom));
-
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
-
-        // Saturates at the top rather than wrapping to the bottom.
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
-
-        // ...and at the bottom.
-        for _ in 0..10 {
-            EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
-        }
-        assert_eq!(selected(&state), Some(DaemonRow::Notifyd));
-
-        // Key routing is NOT asserted here: `GoToDaemons` opens the Daemons
-        // SCREEN, whose arrows drive that screen's cursor, not this overlay's.
-        // `daemons_screen_keys_drive_the_screen_cursor_not_the_overlay` owns
-        // that contract — conflating the two is what shipped a cursor nobody
-        // could reach.
-    }
-
-    /// Every row is labelled, and the labels are distinct.
-    ///
-    /// Deliberately does NOT call `spawn_daemon_restart`: each arm performs
-    /// REAL daemon lifecycle work (SIGTERM the running owner, respawn, poll a
-    /// socket). Driving that from a unit test kills the daemons on whatever
-    /// machine runs the suite and hangs CI — which is exactly what it did, so
-    /// the dispatch itself is covered by the compiler instead. The match in
-    /// `spawn_daemon_restart` is exhaustive over `DaemonRow`, so a new row
-    /// cannot be added without giving it an arm.
-    #[test]
-    fn every_daemon_row_is_labelled_distinctly() {
-        use crate::app::state::DaemonRow;
-        use std::collections::HashSet;
-
-        let mut seen = HashSet::new();
-        for row in DaemonRow::ORDER {
-            let label = row.label();
-            assert!(!label.is_empty(), "{row:?} needs a label");
-            assert!(
-                seen.insert(label),
-                "{row:?} reuses the label {label:?}; the restart status line \
-                 would then name the wrong daemon"
-            );
-        }
-        assert_eq!(seen.len(), DaemonRow::ORDER.len());
     }
 
     /// `d` reaches the Daemons SCREEN, and its keys drive that screen's cursor.
@@ -9254,17 +9135,8 @@ mod panel_back_tests {
     fn daemons_repair_key_routing() {
         use crossterm::event::{KeyCode, KeyEvent};
 
-        // Opening the unified screen fires the first lazy fetch, so this test
-        // needs a live reactor.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-
         let mut state = AppState::default();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-        assert!(
-            state.daemons_overlay.is_some(),
-            "runtime probe must be armed"
-        );
 
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
@@ -9273,8 +9145,12 @@ mod panel_back_tests {
             Some(AppEvent::DaemonsRepairHooks)
         ));
         assert!(matches!(
+            route(&mut state, KeyCode::Char('B')),
+            Some(AppEvent::DaemonsPinHookBinary)
+        ));
+        assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::DaemonsOverlayRefresh)
+            Some(AppEvent::DaemonsRefresh)
         ));
         // The one-key-per-daemon actions are gone. `M` (mcp), `P` (headroom)
         // and `S` (hangar) wrote status fields whose only renderer was the

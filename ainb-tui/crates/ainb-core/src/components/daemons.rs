@@ -15,11 +15,11 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
 };
 
-use crate::app::state::DaemonsOverlayState;
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
+use ainb_plugin_notifyd::install::BinaryIntent;
 use ainb_plugin_notifyd::{HookHealth, Paths};
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -46,6 +46,11 @@ const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
 /// a real restart genuinely takes seconds. The point is only that a wedged
 /// action cannot hold its row's one-outstanding guard forever.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a finished hook action's line stays on screen before the live issue
+/// line comes back. Long enough to read a failure, short enough that it cannot
+/// mask a fault that appears afterwards.
+const STATUS_LINGER: Duration = Duration::from_secs(20);
 
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
@@ -75,6 +80,9 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
+    /// Wakes the collector for an immediate re-collect. `None` until the
+    /// collector is armed.
+    wake: Option<std::sync::mpsc::Sender<()>>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     selected: usize,
     /// The open per-row action menu, if any.
@@ -96,6 +104,26 @@ pub struct DaemonsState {
             std::time::Instant,
         ),
     >,
+    /// The in-flight hook install/repair, if one is running. Same shape and
+    /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
+    /// box is a panel rather than a row, so it needs its own slot.
+    hooks_inflight: Option<(
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        std::time::Instant,
+    )>,
+    /// What the last hook action reported, and when it may stop being shown.
+    ///
+    /// It has to expire: the panel replaces the live issue line while a status
+    /// is set, and this state is app-level, so a status that never expired
+    /// would hide every fault found after it for the rest of the process. It
+    /// also has to be READABLE, and the collector republishes every two
+    /// seconds, so expiry is a wall clock the reader can keep up with rather
+    /// than the next collect.
+    hooks_status: Option<(String, std::time::Instant)>,
+    /// A tmux session the screen wants attached. Drained by the key handler,
+    /// which owns the app-level pending-action slot; the component itself must
+    /// not reach into `AppState`.
+    attach_request: Option<String>,
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
@@ -104,6 +132,35 @@ struct ActionMenu {
     kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
     cursor: usize,
+    /// The row's state when the menu opened, NOT re-read while it is open: the
+    /// background collector republishes every two seconds, and a menu whose
+    /// entries move under the cursor mid-keystroke acts on the wrong one.
+    row: RowFacts,
+}
+
+/// The parts of a row's status that decide which entries its menu offers.
+#[derive(Debug, Clone, Default)]
+struct RowFacts {
+    /// The provisioned ATC instance, when there is one. `None` means every
+    /// lifecycle verb would bail. Read from a typed field, never inferred from
+    /// the reason sentence: which actions the row offers, and which tmux
+    /// session it attaches, must not change when someone rewords a message.
+    instance: Option<String>,
+    /// ATC has an OS timer installed for an instance that does not exist.
+    orphan: bool,
+}
+
+impl RowFacts {
+    fn of(status: &DaemonStatus) -> Self {
+        Self {
+            instance: status.atc_instance.clone(),
+            orphan: status.scheduler_orphan.is_some(),
+        }
+    }
+
+    fn unprovisioned(&self) -> bool {
+        self.instance.is_none()
+    }
 }
 
 /// One entry in the action menu.
@@ -111,6 +168,8 @@ struct ActionMenu {
 enum MenuEntry {
     /// A lifecycle verb.
     Act(Action),
+    /// Attach to the ATC mission-control tmux session.
+    OpenMissionControl,
     /// Show the full error of this row's last failed action.
     ViewError,
 }
@@ -121,12 +180,38 @@ impl ActionMenu {
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
         // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
         // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> =
-            Action::for_kind(self.kind).into_iter().map(MenuEntry::Act).collect();
+        let mut entries: Vec<MenuEntry> = Action::for_kind(self.kind)
+            .into_iter()
+            .filter(|action| self.offers(*action))
+            .map(MenuEntry::Act)
+            .collect();
+        // Same rule as `offers`: with nothing provisioned there is no tmux
+        // session, so attaching could only fail. `provision` is the entry that
+        // gets you one.
+        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
+            entries.push(MenuEntry::OpenMissionControl);
+        }
         if has_error {
             entries.push(MenuEntry::ViewError);
         }
         entries
+    }
+
+    /// Whether this row can act on `action` right now.
+    ///
+    /// An entry that is guaranteed to fail is worse than no entry: it reads as
+    /// the fix and is not one. With no instance provisioned every lifecycle
+    /// verb bails before it looks at the verb, and removing a timer that is
+    /// not orphaned would tear down a live instance's heartbeat.
+    fn offers(&self, action: Action) -> bool {
+        if self.kind != DaemonKind::Atc {
+            return true;
+        }
+        match action {
+            Action::Provision => self.row.unprovisioned(),
+            Action::RemoveOrphan => self.row.orphan,
+            _ => !self.row.unprovisioned(),
+        }
     }
 }
 
@@ -156,9 +241,20 @@ impl DaemonsState {
             return Arc::clone(shared);
         }
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        spawn_collector(Arc::clone(&shared));
+        let (wake, wake_rx) = std::sync::mpsc::channel();
+        spawn_collector(Arc::clone(&shared), wake_rx);
+        self.wake = Some(wake);
         self.shared = Some(Arc::clone(&shared));
         shared
+    }
+
+    /// Ask the collector to re-collect now. The table free-runs anyway, so this
+    /// only shortens the wait; it never collects on the UI thread.
+    pub fn force_collect(&mut self) {
+        self.arm();
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(());
+        }
     }
 
     /// Arm the background collector without rendering — called on navigation INTO
@@ -189,11 +285,11 @@ impl DaemonsState {
         guard.rows.len()
     }
 
-    /// The daemon the selection is on, if the snapshot has landed.
-    fn selected_kind(&mut self) -> Option<DaemonKind> {
+    /// The whole selected row, so a caller can read more than its kind.
+    fn selected_status(&mut self) -> Option<DaemonStatus> {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-        guard.rows.get(self.selected).map(|r| r.kind)
+        guard.rows.get(self.selected).cloned()
     }
 
     // ── Action menu ─────────────────────────────────────────────────────────
@@ -208,8 +304,12 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
-        if let Some(kind) = self.selected_kind() {
-            self.menu = Some(ActionMenu { kind, cursor: 0 });
+        if let Some(status) = self.selected_status() {
+            self.menu = Some(ActionMenu {
+                kind: status.kind,
+                cursor: 0,
+                row: RowFacts::of(&status),
+            });
         }
     }
 
@@ -253,12 +353,24 @@ impl DaemonsState {
             return;
         };
         let kind = menu.kind;
+        let menu_instance = menu.row.instance.clone();
         let entries = menu.entries(self.has_error_for(kind));
         let Some(entry) = entries.get(menu.cursor).copied() else {
             return;
         };
         match entry {
             MenuEntry::ViewError => self.error_open = Some(kind),
+            MenuEntry::OpenMissionControl => {
+                self.error_open = None;
+                self.menu = None;
+                // The name comes off THIS row. Re-deriving it would resolve a
+                // leftover or a default rather than the instance the row is
+                // reporting, and attach a session that does not exist.
+                if let Some(name) = menu_instance {
+                    self.attach_request =
+                        Some(crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session());
+                }
+            }
             MenuEntry::Act(action) => {
                 // BOTH overlays close. Clearing only `menu` left `error_open`
                 // set with nothing to render it: the screen painted normally but
@@ -323,6 +435,66 @@ impl DaemonsState {
         }
     }
 
+    /// Take the pending tmux attach, if the menu asked for one.
+    pub fn take_attach_request(&mut self) -> Option<String> {
+        self.attach_request.take()
+    }
+
+    /// Install or repair the hooks off the UI thread.
+    ///
+    /// [`BinaryIntent::Install`] repoints at the INSTALLED ainb, which is what
+    /// rescues a pointer left aimed at a deleted worktree build.
+    /// [`BinaryIntent::PinRunning`] deliberately aims at the binary running
+    /// now, for testing a local build's hooks.
+    pub fn dispatch_hooks(&mut self, intent: BinaryIntent) {
+        if self.hooks_inflight.is_some() {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.hooks_inflight = Some((rx, std::time::Instant::now()));
+        self.hooks_status = Some((
+            match intent {
+                BinaryIntent::Install => "installing hooks…",
+                BinaryIntent::PinRunning => "pinning the running binary…",
+            }
+            .to_string(),
+            // A running action outlives every clock until it finishes.
+            std::time::Instant::now() + ACTION_TIMEOUT + STATUS_LINGER,
+        ));
+        std::thread::spawn(move || {
+            let _ = tx.send(run_hook_action(intent));
+        });
+    }
+
+    /// Drain a finished hook action. A channel poll, not I/O, same reasoning
+    /// as [`DaemonsState::poll_actions`].
+    fn poll_hooks(&mut self) {
+        let Some((rx, started)) = self.hooks_inflight.as_mut() else {
+            return;
+        };
+        if let Ok(line) = rx.try_recv() {
+            self.hooks_status = Some((line, std::time::Instant::now() + STATUS_LINGER));
+            self.hooks_inflight = None;
+        } else if started.elapsed() > ACTION_TIMEOUT {
+            self.hooks_status = Some((
+                format!(
+                    "hook repair did not finish within {}s",
+                    ACTION_TIMEOUT.as_secs()
+                ),
+                std::time::Instant::now() + STATUS_LINGER,
+            ));
+            self.hooks_inflight = None;
+        }
+    }
+
+    /// The hook status to paint, until it expires and the issue line returns.
+    fn live_hooks_status(&self) -> Option<&str> {
+        self.hooks_status
+            .as_ref()
+            .filter(|(_, until)| std::time::Instant::now() < *until)
+            .map(|(line, _)| line.as_str())
+    }
+
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
     pub fn snapshot(&mut self) -> Snapshot {
@@ -332,6 +504,66 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+        }
+    }
+}
+
+/// Run one hook install/repair in-process and report it in one line.
+///
+/// In-process, not shelled: unlike a daemon lifecycle verb there is no separate
+/// process to talk to, and the repair is exactly the library call
+/// `repair_or_install_hooks` performs.
+fn run_hook_action(intent: BinaryIntent) -> String {
+    // The row's one-outstanding guard is released on ACTION_TIMEOUT while the
+    // thread is still alive, so a wedged install can be joined by a second one.
+    // Unlike a row action these run IN-PROCESS and both write install.json and
+    // hooks/ainb-bin, so they are serialised here rather than left to race.
+    static HOOK_WRITES: Mutex<()> = Mutex::new(());
+    let _serialised = HOOK_WRITES.lock().unwrap_or_else(|p| p.into_inner());
+
+    let paths = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => paths,
+        Err(error) => return format!("hook repair failed: {error:#}"),
+    };
+    match intent {
+        BinaryIntent::Install => match ainb_plugin_notifyd::repair_or_install_hooks(&paths) {
+            Ok(report) => {
+                let agents = report
+                    .record
+                    .agents
+                    .iter()
+                    .map(|agent| agent.name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // Claude is wired through its marketplace, which can fail on
+                // its own while the record still lists Claude. Reporting a
+                // clean install then is how hooks that never fire look fine.
+                let mut line = match &report.claude {
+                    Some(ainb_plugin_notifyd::ClaudeRegister::Failed(error)) => {
+                        format!("hooks installed for {agents}, but Claude plugin FAILED: {error}")
+                    }
+                    Some(ainb_plugin_notifyd::ClaudeRegister::ClaudeCliMissing) => {
+                        format!(
+                            "hooks installed for {agents}; Claude plugin skipped (no claude on \
+                             PATH)"
+                        )
+                    }
+                    _ => format!("hooks installed for {agents}"),
+                };
+                // `agents` is the cumulative record, so an agent that failed
+                // THIS run is still in it. Name the failures explicitly.
+                for (agent, error) in &report.failures {
+                    line.push_str(&format!("; {} FAILED: {error}", agent.name()));
+                }
+                line
+            }
+            Err(error) => format!("hook repair failed: {error:#}"),
+        },
+        BinaryIntent::PinRunning => {
+            match ainb_plugin_notifyd::install::pin_running_hook_binary(&paths) {
+                Ok(target) => format!("hooks pinned to {}", target.path.display()),
+                Err(error) => format!("pinning the running binary failed: {error:#}"),
+            }
         }
     }
 }
@@ -436,13 +668,22 @@ fn collect_into(shared: &Mutex<Snapshot>) {
 /// Spawn the detached background collector: one immediate collect, then a collect
 /// every [`COLLECT_INTERVAL`] forever. Keeps ALL disk I/O / socket connects off
 /// the UI render thread (H-D2).
-fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
+fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: std::sync::mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("ainb-daemons-collect".into())
         .spawn(move || {
             loop {
                 collect_into(&shared);
-                std::thread::sleep(COLLECT_INTERVAL);
+                // Blocks for the whole interval and returns the INSTANT `r` is
+                // pressed. Polling a flag on a short timer would wake this
+                // detached thread several times a second for the life of the
+                // process to answer a question that is almost always "no".
+                match wake.recv_timeout(COLLECT_INTERVAL) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    // The screen's state was dropped; nothing will read another
+                    // snapshot.
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                }
             }
         })
         // A failure to spawn the collector must not crash the app: the screen
@@ -453,13 +694,9 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut DaemonsState,
-    runtime: Option<&DaemonsOverlayState>,
-) {
+pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     state.poll_actions();
+    state.poll_hooks();
     let snapshot = state.snapshot();
     // Clamp before painting: the collector can shrink the table under us.
     state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
@@ -507,7 +744,7 @@ pub fn render(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
-            runtime,
+            state.live_hooks_status(),
             snapshot.collected_at_ms > 0,
         );
     } else {
@@ -553,6 +790,7 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     for (i, entry) in entries.iter().enumerate() {
         let label = match entry {
             MenuEntry::Act(a) => a.id(),
+            MenuEntry::OpenMissionControl => "open mission control",
             MenuEntry::ViewError => "view last error",
         };
         let selected = i == menu.cursor;
@@ -649,7 +887,7 @@ fn render_hook_section(
     frame: &mut Frame,
     area: Rect,
     health: Option<&HookHealth>,
-    runtime: Option<&DaemonsOverlayState>,
+    status: Option<&str>,
     collected: bool,
 ) {
     let block = Block::default()
@@ -665,6 +903,11 @@ fn render_hook_section(
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" install / repair", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "  B",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" pin running", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -704,21 +947,32 @@ fn render_hook_section(
                 })
                 .collect::<Vec<_>>()
                 .join("   ");
-            let issue =
-                runtime.and_then(|runtime| runtime.hooks_repair_status.as_deref()).map_or_else(
-                    || {
-                        health.issues.first().map_or_else(
-                            || "✓ wiring healthy".to_string(),
-                            |issue| {
-                                format!(
-                                    "! {}: {} — {}",
-                                    issue.component, issue.message, issue.repair
-                                )
-                            },
-                        )
-                    },
-                    |status| format!("I {status}"),
-                );
+            let issue = status.map_or_else(
+                || {
+                    health.issues.first().map_or_else(
+                        || "✓ wiring healthy".to_string(),
+                        |issue| {
+                            format!("! {}: {}: {}", issue.component, issue.message, issue.repair)
+                        },
+                    )
+                },
+                |status| format!("I {status}"),
+            );
+            // The pointer and the binary you are looking at are separate facts,
+            // and the failure being diagnosed here is precisely them being
+            // different. One combined line hid that; two lines cannot.
+            let pointer = health
+                .hook_binary
+                .as_ref()
+                .map_or_else(|| "(no pointer)".to_string(), |p| p.display().to_string());
+            let running = health
+                .running_binary
+                .as_ref()
+                .map_or_else(|| "(unknown)".to_string(), |p| p.display().to_string());
+            // Decided by the probe with `canonical_eq`: current_exe resolves
+            // symlinks and the pointer does not, so comparing the paths here
+            // would gold-flag every healthy Homebrew install.
+            let pointer_matches_running = health.hook_binary_is_running_binary;
             vec![
                 Line::from(vec![
                     Span::styled("version ", Style::default().fg(MUTED_GRAY)),
@@ -729,7 +983,7 @@ fn render_hook_section(
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "script {}  ·  ainb binary {} ({}){}",
+                        "script {}  ·  hooks {} ({}) → {pointer}",
                         if health.script_ready { "✓" } else { "✗" },
                         if health.hook_binary_ready {
                             "✓"
@@ -737,10 +991,6 @@ fn render_hook_section(
                             "✗"
                         },
                         health.hook_binary_mode.map(|mode| mode.label()).unwrap_or("unknown"),
-                        health
-                            .hook_binary
-                            .as_ref()
-                            .map_or_else(String::new, |target| format!(" · {}", target.display()),),
                     ),
                     Style::default().fg(if health.script_ready && health.hook_binary_ready {
                         HEALTHY_GREEN
@@ -748,23 +998,19 @@ fn render_hook_section(
                         STOPPED_RED
                     }),
                 )),
-                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
                 Line::from(Span::styled(
-                    format!(
-                        "notifyd {}  ·  approval broker {}",
-                        if health.notify_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                        if health.approve_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                    ),
-                    Style::default().fg(MUTED_GRAY),
+                    format!("running → {running}"),
+                    Style::default().fg(if pointer_matches_running {
+                        MUTED_GRAY
+                    } else {
+                        GOLD
+                    }),
                 )),
+                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
+                // notifyd and the approve broker had a line here when they had
+                // no row of their own. They are first-class rows in the table
+                // above now, so this only restated it, and the line it costs is
+                // what made the whole panel vanish on a short terminal.
                 Line::from(Span::styled(
                     issue,
                     Style::default().fg(if health.issues.is_empty() {
@@ -942,7 +1188,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(" start / restart / stop  ", Style::default().fg(MUTED_GRAY)),
+            // Not "start / restart / stop": the entries a row offers depend on
+            // its state, so naming three of them in a fixed list goes stale the
+            // moment a row offers a fourth.
+            Span::styled(" actions  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
             Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
@@ -986,6 +1235,12 @@ mod tests {
             inbound_expected: 0,
             inbound_live: 0,
             last_inbound_error: None,
+            scheduler_orphan: None,
+            // A real ATC row names its instance whenever one is provisioned,
+            // and the menu reads that rather than the reason text. A fixture
+            // that left it None would be an UNPROVISIONED row.
+            atc_instance: (kind == DaemonKind::Atc)
+                .then(|| channel.map_or_else(|| "main".to_string(), ToString::to_string)),
             reason: if connected {
                 "running + connected".to_string()
             } else {
@@ -1039,6 +1294,8 @@ mod tests {
             hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
             hook_binary_mode: Some(HookBinaryMode::Release),
             hook_binary_ready: true,
+            running_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_is_running_binary: true,
             agents: vec![
                 HookAgentHealth {
                     agent: "claude".to_string(),
@@ -1084,30 +1341,20 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
-    fn render_to_string(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> String {
+    fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
     /// Render and return the buffer as LINES, so a test can ask which row the
     /// cursor is drawn on rather than only whether a glyph exists somewhere.
-    fn render_to_lines(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> Vec<String> {
+    fn render_to_lines(state: &mut DaemonsState, w: u16, h: u16) -> Vec<String> {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
             .map(|y| {
@@ -1146,10 +1393,12 @@ mod tests {
             state.selected = 0;
             state.move_selection(want as isize);
 
-            let target =
-                state.selected_kind().expect("a populated table always has a selected row");
+            let target = state
+                .selected_status()
+                .expect("a populated table always has a selected row")
+                .kind;
 
-            let lines = render_to_lines(&mut state, None, 160, 30);
+            let lines = render_to_lines(&mut state, 160, 30);
             let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
             assert_eq!(
                 marked.len(),
@@ -1162,40 +1411,6 @@ mod tests {
                 marked[0].trim(),
                 target.display_name()
             );
-        }
-    }
-
-    fn system_runtime() -> DaemonsOverlayState {
-        DaemonsOverlayState {
-            selected: crate::app::state::DaemonRow::ORDER[0],
-            mcp_alive: true,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: ProxyStatus {
-                running: true,
-                port: 8787,
-                pid: Some(42),
-                tokens_saved: Some(9),
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: true,
-            approve_reason: "serving".to_string(),
-            hangar_running: true,
-            hangar_reason: "running".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            loading: false,
-            last_refreshed: None,
-            fetch_rx: None,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
         }
     }
 
@@ -1226,7 +1441,7 @@ mod tests {
             ),
             status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
         ]);
-        let out = render_to_string(&mut state, None, 120, 12);
+        let out = render_to_string(&mut state, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
         assert!(out.contains("HEALTH"), "header missing");
@@ -1252,7 +1467,7 @@ mod tests {
             true,
             Some("Telegram (@seam)"),
         )]);
-        let out = render_to_string(&mut state, None, 120, 8);
+        let out = render_to_string(&mut state, 120, 8);
         assert!(
             out.contains("Telegram (@seam)"),
             "seeded row missing: {out}"
@@ -1276,8 +1491,7 @@ mod tests {
             )],
             hook_health(),
         );
-        let runtime = system_runtime();
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         // The System services panel is gone on purpose: everything it listed is
         // a real table row now, so a second panel would show strictly less.
         assert!(
@@ -1323,7 +1537,7 @@ mod tests {
             ),
         ]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(out.contains("start"), "menu must offer start: {out}");
         assert!(out.contains("restart"), "menu must offer restart: {out}");
         assert!(out.contains("stop"), "menu must offer stop: {out}");
@@ -1372,6 +1586,70 @@ mod tests {
         assert_eq!(state.selected, 1);
     }
 
+    /// The reported complaint: an ATC with no instance offered start, restart
+    /// and stop, all three of which bail before they read the verb, and the
+    /// only real fix was a CLI command quoted in the error.
+    #[test]
+    fn an_unprovisioned_atc_offers_provisioning_instead_of_dead_verbs() {
+        let mut row = status(DaemonKind::Atc, DaemonState::Stopped, false, None);
+        // No instance: what the probe reports when nothing is provisioned.
+        row.atc_instance = None;
+        row.reason = format!(
+            "{}, but a heartbeat timer for 'main' is installed and failing every interval",
+            crate::fleet::daemons::probe::ATC_UNPROVISIONED
+        );
+        row.scheduler_orphan = Some("main".to_string());
+        let mut state = seeded_state(vec![row]);
+
+        state.open_menu();
+        let menu = state.menu.as_ref().expect("menu opened");
+        let entries = menu.entries(false);
+
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::Provision)),
+            "provisioning must be offered: {entries:?}"
+        );
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::RemoveOrphan)),
+            "the orphan timer must be removable: {entries:?}"
+        );
+        // Mission control is a tmux session that provisioning creates, so with
+        // nothing provisioned there is nothing to attach and the entry would
+        // only fail.
+        assert!(
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "there is no session to open yet: {entries:?}"
+        );
+        for dead in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                !entries.contains(&MenuEntry::Act(dead)),
+                "{} would bail on an unprovisioned ATC: {entries:?}",
+                dead.id()
+            );
+        }
+    }
+
+    /// The mirror image: a provisioned ATC must not be offered a `provision`
+    /// that would reset its meta, nor a teardown of a timer that is doing its
+    /// job.
+    #[test]
+    fn a_provisioned_atc_keeps_the_lifecycle_verbs_and_hides_provisioning() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Running,
+            true,
+            Some("main"),
+        )]);
+
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opened").entries(false);
+
+        assert!(entries.contains(&MenuEntry::Act(Action::Restart)));
+        assert!(entries.contains(&MenuEntry::OpenMissionControl));
+        assert!(!entries.contains(&MenuEntry::Act(Action::Provision)));
+        assert!(!entries.contains(&MenuEntry::Act(Action::RemoveOrphan)));
+    }
+
     /// A failure belongs to the daemon it happened to. The row shows a badge
     /// plus the way to read the rest, and the full text is one Enter away.
     #[test]
@@ -1391,7 +1669,7 @@ mod tests {
                 detail: "cmd: ainb daemon atc start\nexit: exit status: 1\n\nstderr:\nsocket already bound by pid 4412".to_string(),
             },
         );
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("✗ failed"),
             "row must badge the failure: {out}"
@@ -1402,11 +1680,13 @@ mod tests {
         );
 
         state.open_menu();
-        // start, restart, stop, then `view last error` — the entry only exists
-        // because this row HAS an error.
-        state.move_menu(3);
+        // `view last error` is always last, and it exists only because this row
+        // HAS an error. Saturating to the end rather than counting entries: the
+        // count moves whenever a row gains an action, and this test is about
+        // the error view, not the menu's length.
+        state.move_menu(isize::MAX);
         state.confirm_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("socket already bound by pid 4412"),
             "the error view must show the real stderr: {out}"
@@ -1427,7 +1707,7 @@ mod tests {
             Some("sock"),
         )]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             !out.contains("view last error"),
             "nothing failed here, so there is nothing to view: {out}"
@@ -1541,12 +1821,69 @@ mod tests {
         assert!(!state.has_overlay(), "and the screen is free to pop");
     }
 
+    /// The reported failure was a pointer aimed at a deleted worktree while a
+    /// perfectly good ainb was running. The panel has to show BOTH paths, or
+    /// the only way to see the mismatch is to go and read the pointer file.
     #[test]
-    fn renders_hook_repair_progress_from_runtime_state() {
+    fn hook_panel_shows_the_pointer_and_the_running_binary() {
+        let mut health = hook_health();
+        health.hook_binary = Some(PathBuf::from("/gone/worktree/target/debug/ainb"));
+        health.hook_binary_ready = false;
+        health.hook_binary_mode = Some(HookBinaryMode::Dev);
+        health.running_binary = Some(PathBuf::from("/home/u/.local/bin/ainb"));
+        let mut state = seeded_state_with_hook(Vec::new(), health);
+
+        let out = render_to_string(&mut state, 160, 30);
+
+        assert!(
+            out.contains("/gone/worktree/target/debug/ainb"),
+            "the hook pointer must be visible: {out}"
+        );
+        assert!(
+            out.contains("/home/u/.local/bin/ainb"),
+            "the running binary must be visible beside it: {out}"
+        );
+        assert!(
+            out.contains("B pin running"),
+            "the pin-running action must be advertised: {out}"
+        );
+    }
+
+    /// A finished action's line must not outlive the health beside it. The
+    /// state is app-level, so a status that never expires would replace the
+    /// live issue line for the rest of the process, hiding every fault found
+    /// after the last repair.
+    #[test]
+    fn a_finished_hook_status_expires_and_gives_the_issue_line_back() {
+        let mut state = DaemonsState::default();
+        let now = std::time::Instant::now();
+
+        state.hooks_status = Some((
+            "hooks installed for claude".to_string(),
+            now + STATUS_LINGER,
+        ));
+        assert_eq!(
+            state.live_hooks_status(),
+            Some("hooks installed for claude"),
+            "a fresh result must be readable, not gone on the next collect"
+        );
+
+        state.hooks_status = Some(("hooks installed for claude".to_string(), now));
+        assert_eq!(
+            state.live_hooks_status(),
+            None,
+            "once expired the live issue line must come back"
+        );
+    }
+
+    #[test]
+    fn renders_hook_repair_progress_from_its_own_state() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        let mut runtime = system_runtime();
-        runtime.hooks_repair_status = Some("hooks repaired for claude, codex".to_string());
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        state.hooks_status = Some((
+            "hooks repaired for claude, codex".to_string(),
+            std::time::Instant::now() + STATUS_LINGER,
+        ));
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("I hooks repaired for claude, codex"),
             "hook repair status missing: {out}"
@@ -1577,7 +1914,7 @@ mod tests {
         // sees an empty snapshot (the collector hasn't published yet) and must
         // render an empty table without panicking.
         let mut state = DaemonsState::default();
-        let _ = render_to_string(&mut state, None, 100, 10);
+        let _ = render_to_string(&mut state, 100, 10);
         // The collector handle is now installed (spawned lazily on first render).
         assert!(
             state.shared.is_some(),

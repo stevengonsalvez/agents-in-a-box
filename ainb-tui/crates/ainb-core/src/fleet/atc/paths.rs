@@ -127,6 +127,25 @@ pub fn list_instance_names() -> Result<Vec<String>> {
     Ok(list_instance_names_in(&atc_root()?))
 }
 
+/// Every directory under `root`, provisioned or not.
+///
+/// A superset of [`list_instance_names_in`]: a dir with no `meta.json` is not
+/// an instance, but it IS evidence that one was provisioned here once, and the
+/// heartbeat log it accumulates is where an orphaned timer's errors land. The
+/// name is what a repair needs in order to name the unit it tears down.
+#[must_use]
+pub fn list_instance_dirs_in(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
 /// Pure variant of [`list_instance_names`] over an explicit root — the I/O is a
 /// directory scan with no global state, so it is unit-testable against a tempdir.
 #[must_use]
