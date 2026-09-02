@@ -386,7 +386,10 @@ async fn board_card_create_announces_the_minted_issue() {
             serde_json::json!({ "workspace_id": seed::WS_SLUG, "name": "Pipeline" }),
         )
         .await;
-    assert!(created["error"].is_null(), "board_create must ack: {created}");
+    assert!(
+        created["error"].is_null(),
+        "board_create must ack: {created}"
+    );
     let board_id = created["result"]["boards"][0]["id"]
         .as_str()
         .unwrap_or_else(|| panic!("board id in boards_list result: {created}"))
@@ -401,7 +404,10 @@ async fn board_card_create_announces_the_minted_issue() {
             }),
         )
         .await;
-    assert!(carded["error"].is_null(), "board_card_create must ack: {carded}");
+    assert!(
+        carded["error"].is_null(),
+        "board_card_create must ack: {carded}"
+    );
 
     // The minted issue's IssueCreated must land durably (replayable), exactly
     // like an issue_create would.
