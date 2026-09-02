@@ -61,6 +61,7 @@ pub enum AppEvent {
     /// Restart whichever daemon row is selected in the overlay.
     DaemonsOverlayRestartSelected,
     DaemonsRepairHooks,
+    DaemonsPinHookBinary,
     DaemonsOverlayStartHangar,
     DaemonsStartMcp,
     DaemonsStartHeadroom,
@@ -3144,22 +3145,16 @@ impl EventHandler {
                 }
                 return None;
             }
-            // Hook actions belong to the Hooks panel, which owns its own
-            // in-flight state, so they are applied here like the menu keys
-            // rather than routed through an AppEvent into app state.
-            KeyCode::Char('I') => {
-                daemons.dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install);
-                return None;
-            }
-            KeyCode::Char('B') => {
-                daemons.dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning);
-                return None;
-            }
             _ => {}
         }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+            // Routed as events rather than applied inline: this dispatcher is
+            // pure by contract (its tests call it just to read the routing) and
+            // both of these really do write into the user's home.
+            KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
+            KeyCode::Char('B') => Some(AppEvent::DaemonsPinHookBinary),
             // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
             // (headroom) and `S` (hangar) wrote status fields whose only
             // renderer was the System services panel, so after that panel was
@@ -4036,7 +4031,12 @@ impl EventHandler {
                     state.spawn_daemon_restart(kind);
                 }
             }
-            AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
+            AppEvent::DaemonsRepairHooks => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
+            AppEvent::DaemonsPinHookBinary => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning),
             AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
             AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
             AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
@@ -9290,6 +9290,10 @@ mod panel_back_tests {
         assert!(matches!(
             route(&mut state, KeyCode::Char('I')),
             Some(AppEvent::DaemonsRepairHooks)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('B')),
+            Some(AppEvent::DaemonsPinHookBinary)
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
