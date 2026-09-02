@@ -182,7 +182,9 @@ fn ready_to_create() -> IssueListState {
 }
 
 /// `c` opens the create wizard as a fresh single form focused on Title, with the
-/// branches prefilled `main`, no repo picked, and the default agent. No intent.
+/// branches prefilled `main`, no repo picked, and the default agent. The only
+/// intent is the repo-roster refresh (crisp B1, defect 6), so a repo added since
+/// connect is pickable in this very wizard.
 #[test]
 fn c_opens_wizard_focused_on_title() {
     let s = seeded_state();
@@ -198,7 +200,7 @@ fn c_opens_wizard_focused_on_title() {
     assert_eq!(w.source_branch(), "main");
     assert_eq!(w.target_branch(), "main");
     assert_eq!(w.agent_cursor(), 0);
-    assert!(out.intent.is_none());
+    assert_eq!(out.intent, Some(IssueListIntent::RefreshRepos));
 }
 
 /// ↓ / Tab advance the focused row, ↑ / Shift+Tab retreat, both wrapping around
@@ -871,7 +873,11 @@ fn s_key_opens_subissue_wizard_with_parent_prebound() {
 
     let out = reduce_issue_list(&s, IssueListEvent::Key('s'));
 
-    assert!(out.intent.is_none(), "opening the wizard raises no intent");
+    assert_eq!(
+        out.intent,
+        Some(IssueListIntent::RefreshRepos),
+        "opening the wizard only re-pulls the repo roster"
+    );
     assert_eq!(out.state.mode(), IssueListMode::CreateInput);
     let w = out.state.wizard().expect("wizard is open");
     assert_eq!(

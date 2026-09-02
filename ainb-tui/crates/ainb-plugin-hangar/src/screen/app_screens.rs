@@ -742,6 +742,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire `hangar/inbox_mark_read` over the daemon
     /// socket. Drained by the `render` pass. `false` when idle.
     pub pending_inbox_mark_read: bool,
+    /// Set when the Issues create wizard opened (crisp B1, defect 6), awaiting the
+    /// `render` pass to re-fire `hangar/repo_list` so a repo added since connect
+    /// is pickable. Drained by the `render` pass. `false` when idle.
+    pub pending_repo_refresh: bool,
     /// An `attention/answer` raised by the control-center screen (Enter / a number
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
@@ -911,6 +915,14 @@ impl ScreenStates {
     pub const fn take_pending_inbox_mark_read(&mut self) -> bool {
         let pending = self.pending_inbox_mark_read;
         self.pending_inbox_mark_read = false;
+        pending
+    }
+
+    /// Take the pending repo-roster refresh (the create wizard opened), if any
+    /// (crisp B1, defect 6).
+    pub const fn take_pending_repo_refresh(&mut self) -> bool {
+        let pending = self.pending_repo_refresh;
+        self.pending_repo_refresh = false;
         pending
     }
 
@@ -2014,6 +2026,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // reply the plugin retries the delete (cancel commits before delete).
         Some(IssueListIntent::CancelAndDeleteIssue(id)) => {
             states.pending_cancel_delete_action = Some(id);
+            None
+        }
+        // Crisp B1 (defect 6): a wizard open re-pulls the repo roster in `render`.
+        Some(IssueListIntent::RefreshRepos) => {
+            states.pending_repo_refresh = true;
             None
         }
         None => None,

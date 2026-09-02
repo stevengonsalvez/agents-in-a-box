@@ -1938,6 +1938,12 @@ pub enum IssueListIntent {
     /// its success reply, retries `hangar/issue_delete` (cancel commits before the
     /// delete).
     CancelAndDeleteIssue(IssueId),
+    /// Re-pull the `@` repo roster (`hangar/repo_list`), raised whenever the
+    /// create wizard opens (crisp B1, defect 6): the roster was fetched once at
+    /// connect and a repo added since (the CLI writes the store with no event)
+    /// was unpickable until a restart. The reply lands through the same
+    /// `set_repos` seam, so an open wizard simply sees more candidates.
+    RefreshRepos,
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -2102,7 +2108,7 @@ fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Open the create wizard as an "add sub-issue" (`s`, 0046): identical to the
@@ -2126,7 +2132,7 @@ fn enter_create_subissue_mode(state: &IssueListState) -> IssueListReduction {
     next.mode = IssueListMode::CreateInput;
     next.wizard = Some(wizard);
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Swap the open wizard for `wizard`, emitting no intent (a stage edit /

@@ -2078,6 +2078,26 @@ impl HangarPlugin {
         }
     }
 
+    /// Re-fire the host-scoped `hangar/repo_list` (crisp B1, defect 6) under the
+    /// connect-time handler id, so the reply folds into the cached roster exactly
+    /// as the first fetch did. A send failure is logged, not fatal: the wizard
+    /// keeps the roster it has.
+    async fn refresh_repo_list(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Ok(body) = encode_request(
+            REPO_LIST_REQ_ID,
+            daemon_methods::HANGAR_REPO_LIST,
+            serde_json::json!({}),
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: repo list refresh send failed: {e}")).await;
+        }
+    }
+
     /// Fire a deferred `attention/answer` raised by the control-center screen
     /// (P2): deliver the picked option label to the raising session of
     /// `attention_id`, framed over the socket cap. `answered_by = "tui"` tags the
@@ -5869,6 +5889,13 @@ impl Plugin for HangarPlugin {
         // re-fetches the snapshots, so the unread badge drops to zero next render.
         if self.screens.take_pending_inbox_mark_read() {
             self.mark_inbox_read(host).await;
+        }
+        // Crisp B1 (defect 6): drain a deferred repo-roster refresh (the Issues
+        // create wizard opened) and re-fire `hangar/repo_list`; the reply lands
+        // through `apply_repos` like the connect-time fetch, so a repo added since
+        // connect is pickable without a restart.
+        if self.screens.take_pending_repo_refresh() {
+            self.refresh_repo_list(host).await;
         }
         // P2: drain a deferred `attention/answer` (Enter / a number key on an ASK
         // in the control center) and fire it over the daemon socket. The daemon
