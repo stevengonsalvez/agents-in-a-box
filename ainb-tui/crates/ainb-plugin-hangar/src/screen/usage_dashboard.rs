@@ -11,6 +11,8 @@
 //! the wire [`UsageRollupResult`] the daemon hands back, and the renderer is a
 //! pure width-aware paint over it (`project_ainb_tui_width_aware_panels`).
 
+use std::collections::BTreeMap;
+
 use ainb_hangar_proto::snapshots::{
     AgentUsageRow, RunHistoryResult, RunHistoryRow, UsageRollupResult,
 };
@@ -65,6 +67,11 @@ pub struct UsageState {
     agents: Vec<AgentUsageRow>,
     /// The recent-runs timeline rows, newest finished first (P10 / D19).
     runs: Vec<RunHistoryRow>,
+    /// The `agent_id -> display_name` roster from the cached `hangar/agents_list`
+    /// (crisp B1, defect 8), so the per-agent rows read `impl-1`, not a ULID.
+    /// Host-cached rather than per-workspace: it survives [`Self::enter_ws`]
+    /// because the roster refresh arrives on its own reply.
+    agent_names: BTreeMap<String, String>,
 }
 
 impl UsageState {
@@ -86,9 +93,17 @@ impl UsageState {
         if self.ws.as_deref() != Some(ws) {
             *self = Self {
                 ws: Some(ws.to_string()),
+                agent_names: std::mem::take(&mut self.agent_names),
                 ..Self::default()
             };
         }
+    }
+
+    /// Replace the `agent_id -> display_name` roster the per-agent rows label
+    /// themselves from (crisp B1). Idempotent; the glue calls it whenever the
+    /// `hangar/agents_list` snapshot lands, whichever side of the rollup reply.
+    pub fn set_agent_names(&mut self, names: BTreeMap<String, String>) {
+        self.agent_names = names;
     }
 
     /// Update the rollup-derived fields (totals + per-agent) for workspace `ws`.
@@ -202,7 +217,11 @@ pub fn render_usage(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, st
             if row > bottom {
                 return;
             }
-            render_agent_row(buf, row, area_w, agent);
+            let name = state
+                .agent_names
+                .get(&agent.agent_id)
+                .map_or(agent.agent_id.as_str(), String::as_str);
+            render_agent_row(buf, row, area_w, name, agent);
             row += 1;
         }
     }
@@ -300,9 +319,16 @@ fn fmt_duration(started_at: Option<i64>, finished_at: i64) -> String {
     }
 }
 
-/// Render one per-agent row: `<agent>  <in> in  <out> out  <cost>  <runs> runs`.
-fn render_agent_row(buf: &mut WireBuffer, row: u16, area_w: u16, agent: &AgentUsageRow) {
-    let mut x = put_str(buf, 0, row, &agent.agent_id, SOFT_WHITE, area_w);
+/// Render one per-agent row: `<agent>  <in> in  <out> out  <cost>  <runs> runs`,
+/// `name` being the roster display name (or the raw id until the roster lands).
+fn render_agent_row(
+    buf: &mut WireBuffer,
+    row: u16,
+    area_w: u16,
+    name: &str,
+    agent: &AgentUsageRow,
+) {
+    let mut x = put_str(buf, 0, row, name, SOFT_WHITE, area_w);
     x += 2;
     x = put_str(
         buf,
@@ -458,6 +484,48 @@ mod tests {
         assert!(a0.contains("10 runs"), "agent row 0 runs: {a0}");
         let a1 = row_text(&buf, 6, 80);
         assert!(a1.contains("codex-agent"), "agent row 1: {a1}");
+    }
+
+    /// Crisp B1 (defect 8): the per-agent rows paint the roster display name
+    /// over the raw agent id, and the roster survives a workspace switch (it
+    /// arrives on its own reply, not with the rollup).
+    #[test]
+    fn per_agent_rows_resolve_names_and_keep_them_across_workspaces() {
+        let ulid = "01M1FHM2YSRSXZQFR29ZAYF56V";
+        let mut state = UsageState::from_rollup(
+            "ws-a",
+            UsageRollupResult {
+                total_input_tokens: 10,
+                total_output_tokens: 5,
+                total_cost_usd: 0.001,
+                total_runs: 1,
+                agents: vec![agent(ulid, 10, 5, 0.001, 1)],
+            },
+        );
+        state.set_agent_names(BTreeMap::from([(ulid.to_string(), "impl-1".to_string())]));
+        let mut buf = WireBuffer::new(80, 24);
+        render_usage(&mut buf, 80, 0, 20, &state);
+        let a0 = row_text(&buf, 5, 80);
+        assert!(a0.starts_with("impl-1"), "roster name painted: {a0}");
+        assert!(!a0.contains(ulid), "raw ULID gone: {a0}");
+
+        // A rollup for another workspace resets the totals but not the roster.
+        state.apply_rollup(
+            "ws-b",
+            UsageRollupResult {
+                total_input_tokens: 1,
+                total_output_tokens: 1,
+                total_cost_usd: 0.5,
+                total_runs: 1,
+                agents: vec![agent(ulid, 1, 1, 0.5, 1)],
+            },
+        );
+        let mut buf = WireBuffer::new(80, 24);
+        render_usage(&mut buf, 80, 0, 20, &state);
+        assert!(
+            row_text(&buf, 5, 80).starts_with("impl-1"),
+            "roster kept across ws switch"
+        );
     }
 
     #[test]

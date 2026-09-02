@@ -1030,7 +1030,11 @@ impl ScreenStates {
         // Re-label any Kanban card already on the board: the tasks snapshot may
         // have landed before this roster did, in which case its cards are still
         // on the short-id fallback.
-        self.kanban.set_agent_names(&agent_names(&self.actors));
+        let names = agent_names(&self.actors);
+        self.kanban.set_agent_names(&names);
+        // The usage dashboard's per-agent rows label themselves from the same
+        // roster (crisp B1, defect 8); it keeps the map across workspace resets.
+        self.usage.set_agent_names(names);
         self.resolve_task_detail_names();
     }
 
