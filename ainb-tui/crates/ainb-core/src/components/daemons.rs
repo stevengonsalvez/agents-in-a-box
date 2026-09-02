@@ -582,27 +582,43 @@ pub fn render(
     // `render` below draws the Hooks section only when the table chunk still has
     // 14 rows, so that is the number the help has to respect.
     const HOOKS_NEEDS: u16 = 14;
+    const TABLE_MIN: u16 = 7;
     const FOOTER: u16 = 1;
+    // The first attempt at this budget fixed the silent eviction by making the
+    // help almost never appear: it required `inner.height >= wanted + 15`, so on
+    // a standard 80x24 terminal (inner 78x22, wanted 12 after wrapping) the
+    // screen whose stated purpose is to inform a mode switch showed nothing at
+    // all. Hiding the thing is not a fix for hiding the wrong thing.
+    //
+    // What was actually wrong in round one was that the hooks panel vanished
+    // SILENTLY. So the help renders whenever the table stays usable, and when it
+    // costs the operator the hooks panel it SAYS so, on a line it pays for out
+    // of its own budget.
     let without_help = inner.height.saturating_sub(FOOTER);
+    let hooks_fit_without_help = without_help >= HOOKS_NEEDS;
+    let displaces_hooks = wanted > 0
+        && hooks_fit_without_help
+        && inner.height.saturating_sub(wanted + FOOTER) < HOOKS_NEEDS;
+    let atc_help = if displaces_hooks {
+        let mut lines = atc_help;
+        lines.push("(hook health hidden at this height — move off this row to see it)".to_string());
+        lines
+    } else {
+        atc_help
+    };
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
     let with_help = inner.height.saturating_sub(wanted + FOOTER);
-    // One rule, not three. An earlier version had a middle band for "the Hooks
-    // box was not going to fit anyway, so show the help": it is unreachable.
-    // That band needs `without_help < 14` (height < 15) and `with_help >= 7`
-    // (height >= wanted + 8) at once, and `wanted` is never below the seven
-    // lines `mode_help` returns — so it asks for a height that is both under and
-    // over 15. Dead code in a size calculation is worse than none: it reads as a
-    // case somebody handled.
-    let help_height = if wanted > 0 && with_help >= HOOKS_NEEDS {
+    let help_height = if wanted > 0 && with_help >= TABLE_MIN {
         wanted
     } else {
-        // Either there is no help, or showing it would cost the operator a panel
-        // of real state. The footer still names the CLI verb that prints the
+        // No help, or showing it would squeeze the table itself — and the table
+        // is the screen. The footer still names the CLI verb that prints the
         // same text.
         0
     };
     debug_assert!(
-        help_height == 0 || without_help >= HOOKS_NEEDS,
-        "the help must never be what evicts the hooks panel"
+        help_height == 0 || inner.height.saturating_sub(help_height + FOOTER) >= TABLE_MIN,
+        "the help must never squeeze the table below a usable size"
     );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1490,25 +1506,38 @@ mod tests {
     }
 
     #[test]
-    fn a_mid_size_terminal_keeps_the_hooks_panel_when_the_atc_row_is_selected() {
-        // 22 rows: tall enough for the Hooks box, not for Hooks + 7 help lines.
-        // The help must yield, because it is context and the hook health is
-        // state — and a panel that silently vanished when the cursor moved is
-        // worse than no help.
+    fn the_help_renders_on_a_standard_eighty_by_twentyfour_terminal() {
+        // The regression an over-cautious budget introduced: suppressing the
+        // help whenever it would cost the hooks panel meant it needed a 29-row
+        // terminal, so the screen whose purpose is to inform a mode switch
+        // showed nothing at the commonest size. Hiding the thing is not a fix
+        // for hiding the wrong thing.
         let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
-        let text = render_to_string(&mut state, None, 100, 22);
+        let text = render_to_string(&mut state, None, 80, 24);
         assert!(
-            text.contains("Hooks"),
-            "the hook panel must survive: {text}"
+            text.contains("never answers an ASK"),
+            "the mode help must render at 80x24: {text}"
         );
     }
 
     #[test]
-    fn the_help_never_evicts_the_hooks_panel_at_any_height() {
-        // A sweep rather than one band: the budget is a size calculation, and
-        // the property is the invariant, not any single terminal size. At every
-        // height where the Hooks box would have been drawn without the help, it
-        // must still be drawn with it.
+    fn the_help_never_squeezes_the_table_itself() {
+        // The one thing that outranks both help and hooks: the rows ARE the
+        // screen.
+        for height in 8..40_u16 {
+            let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            let text = render_to_string(&mut state, None, 100, height);
+            assert!(
+                text.contains("ATC"),
+                "height {height}: the daemon row was squeezed out"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hooks_panel_never_disappears_without_saying_so() {
+        // A sweep rather than one band: the budget is a size calculation, so the
+        // property is the invariant, not any single terminal size.
         for height in 8..40_u16 {
             let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
             // Selection defaults to the ATC row (index 0) in both, so the only
@@ -1525,10 +1554,12 @@ mod tests {
             other.move_selection(1); // off the ATC row: no help
             let without_help = render_to_string(&mut other, None, 100, height);
 
-            if without_help.contains("Hooks") {
+            // The panel may yield to the help. What it may never do is vanish
+            // in silence, which was the actual complaint.
+            if without_help.contains("Hooks") && !with_atc_selected.contains("Hooks") {
                 assert!(
-                    with_atc_selected.contains("Hooks"),
-                    "height {height}: selecting the ATC row deleted the hooks panel"
+                    with_atc_selected.contains("hook health hidden"),
+                    "height {height}: the hooks panel vanished with nothing to say so"
                 );
             }
         }
