@@ -372,20 +372,35 @@ async fn serve_conn(
     let mut notification_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
-    // this per-connection task (and its fd) forever. The RPC is request/response
-    // and clients reconnect per request, so a generous idle window only reclaims
-    // dead connections — it never interrupts an in-flight exchange.
+    // this per-connection task (and its fd) forever. Request/response clients
+    // reconnect per request, so a generous idle window only reclaims dead
+    // connections. A connection holding a SUBSCRIPTION is a live push channel,
+    // not a request/response one: the TUI plugin subscribes once and then may
+    // legitimately send nothing for an hour while the operator watches a run.
+    // Idle-closing it made the plugin read EOF and paint "daemon offline" ten
+    // minutes into every quiet run, with the daemon perfectly healthy. A
+    // subscribed connection is therefore never idle-closed; a dead peer is
+    // still detected by the forwarders' write errors.
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let served: std::io::Result<()> = async {
-        while let Some(body) =
-            match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
-                Ok(frame_result) => frame_result?,
-                Err(_elapsed) => {
-                    tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
-                    None
+        while let Some(body) = {
+            let subscribed = forwarder.is_some()
+                || attention_forwarder.is_some()
+                || fleet_forwarder.is_some()
+                || message_forwarder.is_some()
+                || transcript_forwarder.is_some();
+            if subscribed {
+                read_frame(&mut reader).await?
+            } else {
+                match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
+                    Ok(frame_result) => frame_result?,
+                    Err(_elapsed) => {
+                        tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
+                        None
+                    }
                 }
             }
-        {
+        } {
             let req = serde_json::from_slice::<RpcRequest>(&body);
             // Subscribe before dispatch reads the snapshot. Events raised while
             // the snapshot query runs stay buffered in this receiver and are
