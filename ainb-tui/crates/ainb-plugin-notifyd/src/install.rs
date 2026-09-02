@@ -666,6 +666,14 @@ pub fn repair_or_install_hooks(paths: &Paths) -> Result<InstallReport> {
     install(paths, &record.agents)
 }
 
+/// What a freshly wired Codex install still needs from the user.
+///
+/// Lives here beside the install that earns it, but is PRINTED by the CLI:
+/// writing it from the library painted over the TUI that called the install.
+pub const CODEX_TRUST_NOTE: &str = "Codex only runs hooks it has trusted. Start `codex` once and approve the startup hooks \
+     review, otherwise the ainb hooks (including the stall guard) are skipped silently. \
+     Non-interactive automation can pass --dangerously-bypass-hook-trust instead.";
+
 /// Install variant that takes an explicit `$HOME` root. Lets tests
 /// stay isolated without mutating the process-wide environment.
 pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Result<InstallRecord> {
@@ -707,17 +715,13 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
                 Ok(hooks_json) => {
                     record.codex_hooks_json = Some(hooks_json);
                     push_unique(&mut record.agents, Agent::Codex);
-                    // Writing hooks.json is only half a Codex install. Codex
-                    // pins every hook in config.toml by `trusted_hash` and
-                    // SILENTLY skips any entry it has not trusted — no error,
-                    // no log line, the hook simply never runs. Say so, or the
-                    // install looks complete while doing nothing.
-                    eprintln!(
-                        "note: Codex only runs hooks it has trusted. Start `codex` once and \
-                         approve the startup hooks review, otherwise the ainb hooks (including \
-                         the stall guard) are skipped silently. Non-interactive automation can \
-                         pass --dangerously-bypass-hook-trust instead."
-                    );
+                    // Writing hooks.json is only half a Codex install: Codex
+                    // pins every hook by `trusted_hash` and SILENTLY skips any
+                    // it has not trusted. `cmd_install` says so on the terminal
+                    // — a library that writes to stderr paints over whatever
+                    // TUI called it (this ran inside the Daemons screen and
+                    // corrupted the frame).
+                    tracing::warn!("{CODEX_TRUST_NOTE}");
                 }
                 Err(e) => failures.push((Agent::Codex, e)),
             },
@@ -742,8 +746,10 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
     }
     record.save(paths)?;
     for (agent, e) in &failures {
-        eprintln!(
-            "warning: notifyd hook install for {agent:?} failed (other agents unaffected): {e:#}"
+        // Logged, not printed, for the same reason as the Codex note above.
+        // Callers see the failure as the agent's absence from `record.agents`.
+        tracing::warn!(
+            "notifyd hook install for {agent:?} failed (other agents unaffected): {e:#}"
         );
     }
     Ok(record)
