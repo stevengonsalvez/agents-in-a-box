@@ -28,7 +28,7 @@ pub struct StatusOutput {
 /// Check if a tmux session exists
 fn tmux_session_exists(tmux_session_name: &str) -> bool {
     Command::new("tmux")
-        .args(["has-session", "-t", tmux_session_name])
+        .args(["has-session", "-t", &format!("={tmux_session_name}")])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -160,7 +160,13 @@ pub async fn kill(args: KillArgs) -> Result<()> {
     println!("Killing tmux session '{}'...", session.tmux_session_name);
 
     let output = Command::new("tmux")
-        .args(["kill-session", "-t", &session.tmux_session_name])
+        // Exact target: a bare `-t` resolves exact, then prefix, so this could
+        // otherwise kill a different, live session whose name starts the same.
+        .args([
+            "kill-session",
+            "-t",
+            &format!("={}", session.tmux_session_name),
+        ])
         .output()
         .context("Failed to execute tmux kill-session")?;
 

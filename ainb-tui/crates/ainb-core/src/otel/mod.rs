@@ -490,7 +490,7 @@ pub fn alloy_session_running() -> bool {
     // `tmux has-session` writes "can't find session" to stderr on a miss —
     // silence it; the exit status is the signal we care about.
     Command::new("tmux")
-        .args(["has-session", "-t", ALLOY_TMUX_SESSION])
+        .args(["has-session", "-t", &format!("={ALLOY_TMUX_SESSION}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

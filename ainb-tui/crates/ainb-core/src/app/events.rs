@@ -2191,21 +2191,14 @@ impl EventHandler {
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // Enter starts every selected resumable session, not just the
                 // highlighted one.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("Enter".to_string()))
                     } else {
@@ -2221,20 +2214,13 @@ impl EventHandler {
                 // moved to 'A' so the menu bar's `r resume` hint matches what
                 // the key actually does (one key, one meaning). Pressing 'r'
                 // on a non-resumable selection is a no-op.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // 'r' resumes every selected resumable session.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("r".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
@@ -4458,13 +4444,12 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else if managed_count > 0 {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    // Checked rows get the SAME tri-option dialog as a single
+                    // row: bulk delete used to fire immediately here, which
+                    // destroyed every selected worktree (and any uncommitted
+                    // work in it) with no way back.
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 // Check if we're in the SSH Sessions section
                 } else if state.is_ssh_session_selected() {
                     if let Some(ssh_session) = state.selected_ssh_session() {
@@ -4518,15 +4503,7 @@ impl EventHandler {
                     // tri-option Stop / Delete / Cancel dialog so the user can
                     // soft-stop without losing the worktree. Boss/Docker, SSH,
                     // and Shell sessions stick with the binary delete flow.
-                    use crate::models::{SessionAgentType, SessionMode};
-                    let is_interactive_agent = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive_agent = crate::app::state::is_stoppable_interactive(session);
                     let session_id = session.id;
                     if is_interactive_agent {
                         state.show_delete_or_stop_confirmation(session_id);
@@ -4561,7 +4538,7 @@ impl EventHandler {
                 let other_count = other_names.len();
                 if managed_count == 0 && other_count == 0 {
                     state.add_warning_notification(
-                        "No sessions selected. Use Space to select sessions first.".to_string(),
+                        crate::app::state::NOTHING_SELECTED_WARNING.to_string(),
                     );
                 } else if managed_count > 0 && other_count > 0 {
                     state.add_warning_notification(
@@ -4570,13 +4547,8 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 }
             }
             AppEvent::ResumeSession(trigger) => {
@@ -4731,6 +4703,32 @@ impl EventHandler {
                             crate::app::state::ConfirmAction::StopSession(session_id) => {
                                 state.pending_async_action =
                                     Some(AsyncAction::StopSession(session_id));
+                            }
+                            crate::app::state::ConfirmAction::BulkDeleteSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Deleting {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                // Only the rows being acted on lose their check.
+                                // A mixed selection's Stop covers a subset, and
+                                // silently dropping the rest would make the user
+                                // re-select them.
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkDeleteSessions(session_ids));
+                            }
+                            crate::app::state::ConfirmAction::BulkStopSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Stopping {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkStopSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
                                 state.pending_async_action =
@@ -9589,7 +9587,7 @@ mod panel_back_tests {
         impl Drop for SessionGuard {
             fn drop(&mut self) {
                 let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &self.0])
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
                     .status();
             }
         }
