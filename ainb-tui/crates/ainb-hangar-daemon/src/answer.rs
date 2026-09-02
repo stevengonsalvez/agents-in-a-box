@@ -44,6 +44,7 @@ use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
 use sqlx::SqlitePool;
 use std::time::{Duration, Instant};
 
+use crate::acp_pool::{PermissionAnswer, PermissionDecision};
 use crate::events::EventSink;
 
 /// The resolved delivery target for an answer, or a refusal.
@@ -197,13 +198,11 @@ async fn answer_acp(
     row: &AttentionRow,
     permission: &AcpPermission,
 ) -> Result<AnswerResult, sqlx::Error> {
-    use crate::acp_pool::{PermissionAnswer, PermissionDecision};
-
-    let Some(option_id) = permission.option_id(&params.answer) else {
+    let Some(decision) = permission.decision(&params.answer) else {
         let offered: Vec<&str> = permission.options.iter().map(|o| o.name.as_str()).collect();
         return Ok(AnswerResult::DeliveryFailed {
             reason: format!(
-                "the adapter expects one of its {} options ({}), by label, id or number; free text is not sent",
+                "the adapter expects one of its {} options ({}), by label, id or number, or deny; free text is not sent",
                 offered.len(),
                 offered.join(", ")
             ),
@@ -219,11 +218,7 @@ async fn answer_acp(
     }
 
     let outcome = acp
-        .answer_permission(
-            &permission.session_key,
-            &permission.fingerprint,
-            PermissionDecision::Option(option_id.clone()),
-        )
+        .answer_permission(&permission.session_key, &permission.fingerprint, decision)
         .await;
     let reason = match outcome {
         PermissionAnswer::Delivered(option) => {
@@ -234,7 +229,7 @@ async fn answer_acp(
         }
         PermissionAnswer::UnknownOption => {
             reopen_on_failed_delivery(pool, events, row, params, now_ms).await?;
-            format!("the adapter never offered option {option_id}")
+            format!("the adapter never offered option {}", params.answer.trim())
         }
         PermissionAnswer::NotWaiting => {
             "the ACP permission is no longer waiting (answered elsewhere, or the adapter moved on)"
@@ -296,6 +291,21 @@ impl AcpPermission {
             }
             _ => None,
         }
+    }
+
+    /// What `answer` asks the pool to do: one of the adapter's options
+    /// ([`Self::option_id`]), else `Deny` for the reserved words `deny` and
+    /// `cancel`. `Deny` takes the adapter's first reject-flavoured option and,
+    /// against an adapter that offers none, answers `Cancelled` (the refusal
+    /// ACP defines), which is the only way an inbox can decline such an ask.
+    /// An option the adapter labelled "Deny" wins over the reserved word.
+    fn decision(&self, answer: &str) -> Option<PermissionDecision> {
+        if let Some(id) = self.option_id(answer) {
+            return Some(PermissionDecision::Option(id));
+        }
+        let wanted = answer.trim();
+        (wanted.eq_ignore_ascii_case("deny") || wanted.eq_ignore_ascii_case("cancel"))
+            .then_some(PermissionDecision::Deny)
     }
 }
 
@@ -1116,6 +1126,32 @@ mod tests {
         .unwrap();
         assert_eq!(blank_id.option_id(""), None);
         assert_eq!(blank_id.option_id("  "), None);
+    }
+
+    /// `deny` / `cancel` decline without naming an option (the pool takes the
+    /// first reject option, or answers Cancelled when there is none); an
+    /// option the adapter actually labelled "Deny" wins over the reserved
+    /// word, and anything else is still no decision.
+    #[test]
+    fn acp_decision_maps_the_reserved_words_to_deny() {
+        let p = acp_permission_from_payload(ACP_PAYLOAD).unwrap();
+        assert_eq!(
+            p.decision("Reject"),
+            Some(PermissionDecision::Option("reject-once".into()))
+        );
+        assert_eq!(p.decision("deny"), Some(PermissionDecision::Deny));
+        assert_eq!(p.decision(" CANCEL "), Some(PermissionDecision::Deny));
+        assert_eq!(p.decision("no"), None);
+        assert_eq!(p.decision(""), None);
+
+        let labelled = acp_permission_from_payload(
+            r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"go","name":"Allow","kind":"allow_once"},{"optionId":"stop","name":"Deny","kind":"reject_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            labelled.decision("deny"),
+            Some(PermissionDecision::Option("stop".into()))
+        );
     }
 
     /// A multi-select or non-ASK payload never routes by position (the caller

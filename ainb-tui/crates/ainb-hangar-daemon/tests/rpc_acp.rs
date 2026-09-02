@@ -1188,6 +1188,45 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         "no spent row reached the adapter"
     );
 
+    // The reserved word: a second turn raises a second ask, and `deny` (no
+    // option is labelled that) declines it through the adapter's own reject
+    // option, so an inbox can refuse without knowing the adapter's labels.
+    let sent = client
+        .call(
+            methods::FLEET_MESSAGE_SEND,
+            serde_json::json!({
+                "targets": [session_key],
+                "text": "rm -rf /tmp/fixture again",
+                "request_id": "req-acp-attention-deny",
+            }),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent}");
+    let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
+    let (second_id, _) = harness.await_open_attention(&session_key).await;
+    let denied = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": second_id,
+                "answer": "deny",
+                "answered_by": "tui",
+            }),
+        )
+        .await;
+    assert_eq!(denied["result"]["outcome"], "delivered", "{denied}");
+    assert!(
+        denied["result"]["via"].as_str().unwrap_or_default().contains("reject-once"),
+        "deny took the adapter's reject option: {denied}"
+    );
+    harness.await_delivered(&message_id, &session_key).await;
+    let text = harness.transcript_text(&session_key).await;
+    assert_eq!(
+        text.matches("permission:selected:reject-once").count(),
+        2,
+        "the second ask was rejected on the wire too: {text}"
+    );
+
     harness.finish().await;
 }
 
