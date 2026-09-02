@@ -1209,6 +1209,10 @@ pub struct HookHealth {
     pub hook_binary_mode: Option<HookBinaryMode>,
     /// Whether the hook binary pointer resolves to an executable file.
     pub hook_binary_ready: bool,
+    /// The `ainb` doing the reporting. Shown beside [`Self::hook_binary`] so a
+    /// pointer aimed somewhere other than the binary you are looking at is
+    /// visible rather than something you have to go and read off disk.
+    pub running_binary: Option<PathBuf>,
     /// Per-agent installation and wiring state.
     pub agents: Vec<HookAgentHealth>,
     /// Whether notifyd's delivery socket accepted a connection now.
@@ -1282,13 +1286,11 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
             });
         }
         if !hook_binary_ready {
-            let repair = match hook_binary_mode {
-                Some(HookBinaryMode::Dev) => {
-                    "restore dev build, then press I in Daemons or run `AINB_BIN=/path/to/target/debug/ainb ainb notifyd install --all`"
-                        .to_string()
-                }
-                _ => "ainb doctor --fix-hooks".to_string(),
-            };
+            // A dead dev pointer is the common case (the build tree it named
+            // was deleted) and repair now reaches past it to the installed
+            // ainb, so the fix is the same keypress as every other pointer
+            // fault — not a lecture about rebuilding a tree that is gone.
+            let repair = "press I in Daemons to repoint at the installed ainb".to_string();
             issues.push(HookHealthIssue {
                 component: "hook binary".to_string(),
                 message: hook_binary.as_ref().map_or_else(
@@ -1323,6 +1325,7 @@ pub fn hook_health(paths: &Paths) -> HookHealth {
         hook_binary,
         hook_binary_mode,
         hook_binary_ready,
+        running_binary: std::env::current_exe().ok(),
         agents,
         notify_socket_live: socket_live(&paths.socket),
         approve_socket_live: socket_live(&paths.approve_socket),
