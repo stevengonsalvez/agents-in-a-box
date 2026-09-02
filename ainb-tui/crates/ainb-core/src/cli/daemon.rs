@@ -460,12 +460,20 @@ fn atc(action: Action) -> Result<String> {
                         bail!(unverified_stop_message("lite scanner", pid))
                     }
                     stopped => {
-                        crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
-                        Ok(match stopped {
-                            StopOutcome::Signalled(pid) => {
+                        // `restart_lite`, not `ensure_lite_running`: the signalled
+                        // process is still alive for a moment, and starting into
+                        // that window early-returns "already running" and then
+                        // leaves the fleet with nothing.
+                        let signalled = match stopped {
+                            StopOutcome::Signalled(pid) => Some(pid),
+                            _ => None,
+                        };
+                        crate::cli::fleet::atc_supervisor::restart_lite(&name, signalled)?;
+                        Ok(match signalled {
+                            Some(pid) => {
                                 format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
                             }
-                            _ => format!("ATC '{name}' lite scanner started"),
+                            None => format!("ATC '{name}' lite scanner started"),
                         })
                     }
                 }

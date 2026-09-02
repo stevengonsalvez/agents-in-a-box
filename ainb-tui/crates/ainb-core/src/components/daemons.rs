@@ -601,7 +601,13 @@ pub fn render(
         && inner.height.saturating_sub(wanted + FOOTER) < HOOKS_NEEDS;
     let atc_help = if displaces_hooks {
         let mut lines = atc_help;
-        lines.push("(hook health hidden at this height — move off this row to see it)".to_string());
+        // Wrapped like every other line. Pushing it AFTER `wrap_help` left it
+        // the one line in the block that could be clipped mid-sentence, and it
+        // is the line explaining why a panel is missing.
+        lines.extend(wrap_help(
+            &["(hook health hidden at this height — move off this row to see it)".to_string()],
+            inner.width,
+        ));
         lines
     } else {
         atc_help
