@@ -118,7 +118,7 @@ pub async fn answer(
             // the still-blocked agent's request stays in the inbox and remains
             // answerable, rather than leaving the feed forever on a transient
             // tmux/broker miss.
-            match send(&session, &params.answer).await {
+            match deliver(&session, &row, &params.answer).await {
                 Ok(SendOutcome::Tmux { tmux_session }) => {
                     emit_answered(events, params);
                     Ok(AnswerResult::Delivered {
@@ -144,6 +144,137 @@ pub async fn answer(
             }
         }
     }
+}
+
+/// Deliver `answer` into `session`, picker-aware.
+///
+/// An `AskUserQuestion` ASK leaves a real option PICKER open in the agent's
+/// pane, and that picker does not read typed text: typing the chosen label and
+/// pressing Enter accepted whatever option was HIGHLIGHTED (the first one), so
+/// the store recorded the operator's pick while the agent acted on the default.
+/// When the row's payload names options and the pane still shows that picker,
+/// the answer is routed by POSITION (`Down` x index, then `Enter`) and the pane
+/// is re-read to confirm the picker closed. A free-text ASK, a non-option answer,
+/// or a picker that has already gone falls through to the text send unchanged.
+async fn deliver(
+    session: &Session,
+    row: &AttentionRow,
+    answer: &str,
+) -> anyhow::Result<SendOutcome> {
+    if let (Some(target), Some(position), Some(labels)) = (
+        session.tmux_session.as_deref(),
+        picker_position(&row.payload, answer),
+        picker_labels(&row.payload),
+    ) {
+        if let Some(outcome) = deliver_picker(target, position, &labels).await {
+            return Ok(outcome);
+        }
+    }
+    send(session, answer).await
+}
+
+/// The option labels an ASK payload offers, in display order, or `None` for a
+/// payload that is not a single-question option picker.
+fn picker_labels(payload: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if v.get("kind").and_then(|k| k.as_str()) != Some("ASK") {
+        return None;
+    }
+    let ctx = v.get("context")?;
+    if ctx.get("multi_select").and_then(|m| m.as_bool()) == Some(true) {
+        return None;
+    }
+    let labels: Vec<String> = ctx
+        .get("options")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| o.get("label").and_then(|l| l.as_str()).map(str::to_string))
+        .collect();
+    (!labels.is_empty()).then_some(labels)
+}
+
+/// The zero-based position `answer` names among the payload's options: the
+/// label verbatim, the label case-insensitively, a 1-based digit, or a unique
+/// label prefix. `None` when the answer is not one of the options (free text).
+fn picker_position(payload: &str, answer: &str) -> Option<usize> {
+    let labels = picker_labels(payload)?;
+    let wanted = answer.trim();
+    if let Some(i) = labels.iter().position(|l| l == wanted) {
+        return Some(i);
+    }
+    if let Some(i) = labels.iter().position(|l| l.eq_ignore_ascii_case(wanted)) {
+        return Some(i);
+    }
+    if let Ok(n) = wanted.parse::<usize>() {
+        if (1..=labels.len()).contains(&n) {
+            return Some(n - 1);
+        }
+    }
+    let prefixed: Vec<usize> = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.to_ascii_lowercase().starts_with(&wanted.to_ascii_lowercase()))
+        .map(|(i, _)| i)
+        .collect();
+    match prefixed.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Route a picker answer by position into `target`. `None` when the pane does
+/// not currently show the picker (caller falls back to the text send).
+async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> Option<SendOutcome> {
+    use ainb_fleet_core::read::capture_pane;
+    use ainb_fleet_core::send::tmux_send_picker_key;
+    use std::time::Duration;
+
+    let pane = capture_pane(target, 0).await.ok()?;
+    let visible = labels.iter().all(|l| pane.contains(picker_probe(l)));
+    if !visible {
+        return None;
+    }
+    for _ in 0..position {
+        if let Err(e) = tmux_send_picker_key(target, "Down").await {
+            return Some(SendOutcome::Failed {
+                reason: format!("picker Down key failed: {e:#}"),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    if let Err(e) = tmux_send_picker_key(target, "Enter").await {
+        return Some(SendOutcome::Failed {
+            reason: format!("picker Enter key failed: {e:#}"),
+        });
+    }
+    // Confirm the picker actually closed; a pane still showing every option
+    // means the keys did not land, and the row must reopen rather than read as
+    // answered while the agent stays blocked.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if let Ok(after) = capture_pane(target, 0).await {
+            let still_open = labels.iter().all(|l| after.contains(picker_probe(l)));
+            if !still_open {
+                return Some(SendOutcome::Tmux {
+                    tmux_session: target.to_string(),
+                });
+            }
+        }
+    }
+    Some(SendOutcome::Failed {
+        reason: "picker still open after routing the answer by position".to_string(),
+    })
+}
+
+/// The part of an option label a pane render must contain to count as
+/// "this option is on screen": the picker wraps and truncates long labels, so
+/// probe the first 24 characters rather than the whole string.
+fn picker_probe(label: &str) -> &str {
+    let mut end = label.len().min(24);
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    &label[..end]
 }
 
 /// Emit the `AttentionAnswered` nudge on the fleet-wide attention stream.
@@ -285,6 +416,47 @@ fn transcript_still_owns_cwd(cwd: &str, raise_transcript: &str) -> bool {
 mod tests {
     use super::*;
     use ainb_fleet_core::types::SessionSource;
+
+    /// The payload shape the hook ingest stores for a real `AskUserQuestion`
+    /// (captured live from Claude Code 2.1.257).
+    const ASK_PAYLOAD: &str = r#"{"kind":"ASK","context":{"question":"Where should Boxtrack's sqlite file live by default?","header":"DB path","options":[{"label":"data/boxtrack.db (Recommended)","description":"Repo-root data/ dir"},{"label":"api/app.db","description":"Beside the api"}],"multi_select":false}}"#;
+
+    /// Option answers resolve to their PICKER POSITION by label, digit, or unique
+    /// prefix, case-insensitively; anything else is free text (no position).
+    #[test]
+    fn picker_position_resolves_label_digit_and_prefix() {
+        assert_eq!(picker_position(ASK_PAYLOAD, "api/app.db"), Some(1));
+        assert_eq!(picker_position(ASK_PAYLOAD, "data/boxtrack.db (Recommended)"), Some(0));
+        assert_eq!(picker_position(ASK_PAYLOAD, "API/APP.DB"), Some(1));
+        assert_eq!(picker_position(ASK_PAYLOAD, "2"), Some(1));
+        assert_eq!(picker_position(ASK_PAYLOAD, "1"), Some(0));
+        assert_eq!(picker_position(ASK_PAYLOAD, "data/"), Some(0));
+        assert_eq!(picker_position(ASK_PAYLOAD, "3"), None, "out of range digit is free text");
+        assert_eq!(picker_position(ASK_PAYLOAD, "use postgres"), None);
+    }
+
+    /// A multi-select or non-ASK payload never routes by position (the caller
+    /// keeps the text send), and a free-text ASK has no labels at all.
+    #[test]
+    fn picker_labels_rejects_non_picker_payloads() {
+        let multi = ASK_PAYLOAD.replace("\"multi_select\":false", "\"multi_select\":true");
+        assert_eq!(picker_labels(&multi), None);
+        assert_eq!(picker_labels(r#"{"kind":"ERR","context":{}}"#), None);
+        assert_eq!(picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#), None);
+        assert_eq!(
+            picker_labels(ASK_PAYLOAD).unwrap(),
+            vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()]
+        );
+    }
+
+    /// Probes are the first 24 chars, cut on a char boundary, so a wrapped or
+    /// truncated pane render of a long label still matches.
+    #[test]
+    fn picker_probe_is_a_bounded_prefix() {
+        assert_eq!(picker_probe("api/app.db"), "api/app.db");
+        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrack.db (Recomm");
+        assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééééééééé");
+    }
     use ainb_hangar_store::Store;
     use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
 
