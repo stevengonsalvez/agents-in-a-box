@@ -251,6 +251,26 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
 /// Never returns under normal operation; the caller runs it as a background
 /// task alongside the claim loop. A single accept error is logged and the loop
 /// continues (one bad connection must not down the listener).
+/// Idle read bound for a request/response connection (no live subscription).
+const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Idle read bound for a connection holding a live subscription: long enough
+/// that a quiet operator never trips it, finite so a wedged peer is reclaimed.
+const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// Test override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
+const IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_IDLE_MS";
+/// Test override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
+const SUBSCRIBED_IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_SUBSCRIBED_IDLE_MS";
+
+/// `var` as a millisecond duration, else `default`. Tests shrink the windows
+/// to hundreds of milliseconds; production never sets these.
+fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(default, std::time::Duration::from_millis)
+}
+
 pub async fn serve(
     listener: UnixListener,
     pool: SqlitePool,
@@ -374,30 +394,37 @@ async fn serve_conn(
     // Idle read timeout so an abandoned / half-open client connection cannot pin
     // this per-connection task (and its fd) forever. Request/response clients
     // reconnect per request, so a generous idle window only reclaims dead
-    // connections. A connection holding a SUBSCRIPTION is a live push channel,
+    // connections. A connection holding a LIVE subscription is a push channel,
     // not a request/response one: the TUI plugin subscribes once and then may
     // legitimately send nothing for an hour while the operator watches a run.
-    // Idle-closing it made the plugin read EOF and paint "daemon offline" ten
-    // minutes into every quiet run, with the daemon perfectly healthy. A
-    // subscribed connection is therefore never idle-closed; a dead peer is
-    // still detected by the forwarders' write errors.
-    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    // Idle-closing it after ten quiet minutes made the plugin read EOF and paint
+    // "daemon offline" with the daemon perfectly healthy. A subscribed connection
+    // therefore gets the long bound instead (a wedged peer that never closes is
+    // still reclaimed, just not a quiet one), and a forwarder that has already
+    // exited no longer counts as a subscription.
+    let idle_timeout = idle_timeout_from_env(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT);
+    let subscribed_idle_timeout =
+        idle_timeout_from_env(SUBSCRIBED_IDLE_TIMEOUT_ENV, DEFAULT_SUBSCRIBED_IDLE_TIMEOUT);
     let served: std::io::Result<()> = async {
         while let Some(body) = {
-            let subscribed = forwarder.is_some()
-                || attention_forwarder.is_some()
-                || fleet_forwarder.is_some()
-                || message_forwarder.is_some()
-                || transcript_forwarder.is_some();
-            if subscribed {
-                read_frame(&mut reader).await?
+            let live = |h: &Option<tokio::task::JoinHandle<()>>| {
+                h.as_ref().is_some_and(|h| !h.is_finished())
+            };
+            let subscribed = live(&forwarder)
+                || live(&attention_forwarder)
+                || live(&fleet_forwarder)
+                || live(&message_forwarder)
+                || live(&transcript_forwarder);
+            let window = if subscribed {
+                subscribed_idle_timeout
             } else {
-                match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
-                    Ok(frame_result) => frame_result?,
-                    Err(_elapsed) => {
-                        tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
-                        None
-                    }
+                idle_timeout
+            };
+            match tokio::time::timeout(window, read_frame(&mut reader)).await {
+                Ok(frame_result) => frame_result?,
+                Err(_elapsed) => {
+                    tracing::debug!(subscribed, "rpc connection idle {window:?}; closing");
+                    None
                 }
             }
         } {
@@ -9276,7 +9303,7 @@ async fn handle_board_card_create(
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_store::repo::board::BoardRepo;
-    use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+    use ainb_hangar_store::repo::issue::IssueRepo;
 
     let params: ainb_hangar_proto::snapshots::BoardCardCreateParams = parse_params(
         req,
@@ -9313,39 +9340,57 @@ async fn handle_board_card_create(
     // The TUI user owns cards it creates — mirror the plugin's `SELF_AUTHOR_REF`.
     let creator = ActorRef::new(ActorKind::Member, "me")
         .map_err(|e| internal(&format!("build creator ref: {e}")))?;
-    let issue_id = SystemIdGen.new_ulid();
-    IssueRepo::insert(
+    // Mint the issue through the SAME helper `issue_create` uses, so a card-made
+    // issue gets the workspace's issue prefix, its `Created` activity row, its
+    // `manual` origin stamp and the list-shaped row every other create emits.
+    // (Card titles are the run prompt, so a card carries no description.)
+    let row = snapshots::issue_create(
         pool,
-        &NewIssue {
-            id: issue_id.clone(),
-            workspace_id: ws.as_str().to_string(),
-            title: params.title.clone(),
+        &SystemIdGen,
+        &SystemClock,
+        &snapshots::IssueCreateInput {
+            workspace_id: ws.as_str(),
+            title: &params.title,
             description: None,
-            state: "open".to_string(),
-            assignee,
-            creator,
-            created_at: SystemClock.now_ms(),
-            priority: 0,
-            due_date: None,
-            labels: Vec::new(),
-            acceptance_criteria: Vec::new(),
-            context_refs: Vec::new(),
+            creator: &creator,
+            external_ref: None,
             parent_issue_id: None,
             stage: None,
+            acceptance_criteria: &[],
+            context_refs: &[],
+            priority: 0,
+            due_date: None,
+            labels: &[],
+            origin: Some(&ainb_hangar_core::origin::IssueOrigin::manual()),
         },
     )
     .await
     .map_err(|e| store_err(&e))?;
-    // 0056: a board card is authored by the TUI user, so its provenance is
-    // `manual` (stamped explicitly, never left NULL — see migration 0056).
-    IssueRepo::set_origin(
+    let issue_id = row.id.as_str().to_string();
+    ActivityService::record(
         pool,
+        &SystemIdGen,
+        &SystemClock,
         ws.as_str(),
         &issue_id,
-        &ainb_hangar_core::origin::IssueOrigin::manual(),
+        &ActivityActor::Actor(creator.clone()),
+        ActivityAction::Created,
+        serde_json::json!({}),
     )
-    .await
-    .map_err(|e| store_err(&e))?;
+    .await;
+    if assignee.is_some() {
+        IssueRepo::update_fields(
+            pool,
+            ws.as_str(),
+            &issue_id,
+            &ainb_hangar_store::repo::issue::IssueFieldUpdate {
+                assignee: Some(assignee),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
+    }
 
     BoardRepo::card_add(
         pool,
