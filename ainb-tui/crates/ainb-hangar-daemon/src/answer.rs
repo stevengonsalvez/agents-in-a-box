@@ -266,15 +266,36 @@ struct AcpOption {
 
 impl AcpPermission {
     /// The id of the option `answer` names: an option id verbatim, else the
-    /// label verbatim, case-insensitively, or a 1-based digit (the same rules
-    /// as [`picker_position`]). Anything else is refused by the caller.
+    /// label verbatim, case-insensitively, or a 1-based digit (the rules of
+    /// [`picker_position`]). Anything else is refused by the caller, and so is
+    /// a label two options share: the tmux path reads the pane echo to catch
+    /// a wrong pick, nothing here can, and an adapter offering "Allow" for
+    /// both `allow_once` and `allow_always` must not hand out the broader
+    /// grant by list order.
     fn option_id(&self, answer: &str) -> Option<String> {
         let wanted = answer.trim();
-        if let Some(option) = self.options.iter().find(|o| o.option_id == wanted) {
-            return Some(option.option_id.clone());
+        if wanted.is_empty() {
+            return None;
         }
-        let names: Vec<String> = self.options.iter().map(|o| o.name.clone()).collect();
-        picker_position(&names, wanted).map(|i| self.options[i].option_id.clone())
+        let rules: [&dyn Fn(&AcpOption) -> bool; 3] = [
+            &|o| o.option_id == wanted,
+            &|o| o.name.trim() == wanted,
+            &|o| o.name.trim().eq_ignore_ascii_case(wanted),
+        ];
+        for rule in rules {
+            let mut hits = self.options.iter().filter(|o| rule(o));
+            match (hits.next(), hits.next()) {
+                (Some(only), None) => return Some(only.option_id.clone()),
+                (Some(_), Some(_)) => return None,
+                (None, _) => {}
+            }
+        }
+        match wanted.parse::<usize>() {
+            Ok(n) if (1..=self.options.len()).contains(&n) => {
+                Some(self.options[n - 1].option_id.clone())
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1046,6 +1067,48 @@ mod tests {
         assert_eq!(p.option_id(""), None);
         assert_eq!(p.option_id("   "), None);
         assert_eq!(p.option_id("yes"), None);
+    }
+
+    /// A label two options share is refused by label (no pane echo can catch
+    /// a wrong pick here); the same options stay answerable by id or digit.
+    /// A blank answer never selects an option, even one whose id is blank.
+    #[test]
+    fn acp_option_id_refuses_shared_labels_and_blank_answers() {
+        let shared = acp_permission_from_payload(
+            r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"allow-always","name":"allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            shared.option_id("Allow").as_deref(),
+            Some("allow-once"),
+            "one exact hit wins"
+        );
+        assert_eq!(
+            shared.option_id("ALLOW"),
+            None,
+            "two case-insensitive hits: refused"
+        );
+        assert_eq!(
+            shared.option_id("allow-always").as_deref(),
+            Some("allow-always")
+        );
+        assert_eq!(shared.option_id("2").as_deref(), Some("allow-always"));
+        assert_eq!(shared.option_id("Reject").as_deref(), Some("reject-once"));
+
+        let twins = acp_permission_from_payload(
+            r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"a","name":"Allow","kind":"allow_once"},{"optionId":"b","name":"Allow","kind":"allow_always"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(twins.option_id("Allow"), None, "two exact hits: refused");
+        assert_eq!(twins.option_id("b").as_deref(), Some("b"));
+        assert_eq!(twins.option_id("1").as_deref(), Some("a"));
+
+        let blank_id = acp_permission_from_payload(
+            r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"","name":"","kind":"allow_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(blank_id.option_id(""), None);
+        assert_eq!(blank_id.option_id("  "), None);
     }
 
     /// A multi-select or non-ASK payload never routes by position (the caller
