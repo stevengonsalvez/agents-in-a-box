@@ -326,6 +326,13 @@ impl PullService {
 /// The predicate behind [`PullService::stages_remain`]. `?1` = `issue_id`.
 /// `pub` for the same reason [`ADVANCE_SQL`] is: `tests/pipeline_advance.rs`
 /// pins each clause.
+///
+/// Evaluated per card: an issue carded on two boards of its workspace has
+/// stages remaining while EITHER pipeline does, and each board's current stage
+/// is judged against the newest stage task of THAT board's columns, so a
+/// finished stage on one board is never un-finished by a newer run on the
+/// other. Only stage tasks (a stamped `board_column_id`) set the generation; a
+/// push-path retry or a chat task never does.
 pub const STAGES_REMAIN_SQL: &str = "\
 SELECT 1 FROM board_card AS bc \
   JOIN board_column AS cur ON cur.id = bc.column_id \
@@ -344,8 +351,9 @@ SELECT 1 FROM board_card AS bc \
                       AND f.status = 'done' \
                       AND f.board_column_id = cur.id \
                       AND f.generation = (SELECT MAX(g.generation) FROM agent_task_queue AS g \
+                                             JOIN board_column AS gc ON gc.id = g.board_column_id \
                                            WHERE g.issue_id = bc.issue_id \
-                                             AND g.board_column_id IS NOT NULL) \
+                                             AND gc.board_id = bc.board_id) \
                  ) ) ) \
        ) \
  LIMIT 1";
@@ -356,14 +364,21 @@ SELECT 1 FROM board_card AS bc \
 /// stamps the task with it, so the push path leaves the same stage record the
 /// pull path does and [`PullService::stages_remain`] can see that stage finish.
 ///
+/// Takes any executor so the run path reads inside its own write transaction
+/// (the stamp is decided in the same unit of work that inserts the task) while
+/// a plain read passes the pool.
+///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] on a store fault.
-pub async fn current_gated_column(
-    pool: &SqlitePool,
+pub async fn current_gated_column<'e, E>(
+    executor: E,
     workspace: &WorkspaceId,
     issue_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_scalar(
         "SELECT bc.column_id FROM board_card AS bc \
            JOIN board_column AS col ON col.id = bc.column_id \
@@ -376,7 +391,7 @@ pub async fn current_gated_column(
     )
     .bind(issue_id)
     .bind(workspace.as_str())
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
