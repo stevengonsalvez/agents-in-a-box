@@ -1446,7 +1446,12 @@ mod tests {
     #[test]
     fn answer_note_renders_on_the_title_row_until_cleared() {
         let mut state = ControlCenterState::default();
-        state.set_attention(&[row("a1", "ask_user_question", 1, &ask_payload("q?", &["x", "y"]))]);
+        state.set_attention(&[row(
+            "a1",
+            "ask_user_question",
+            1,
+            &ask_payload("q?", &["x", "y"]),
+        )]);
         state.set_note("not delivered (no live session): target exited");
         let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
         render_control_center(&mut buf, 140, 0, 19, &state, 1_000);
@@ -1460,7 +1465,10 @@ mod tests {
         let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
         render_control_center(&mut buf, 140, 0, 19, &state, 1_000);
         let title = title_row_text(&buf);
-        assert!(!title.contains("not delivered"), "a delivered answer clears the note");
+        assert!(
+            !title.contains("not delivered"),
+            "a delivered answer clears the note"
+        );
     }
 
     #[test]
