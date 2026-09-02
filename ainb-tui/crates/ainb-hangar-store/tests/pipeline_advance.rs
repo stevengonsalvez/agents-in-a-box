@@ -792,6 +792,23 @@ async fn stages_remain_judges_each_board_by_its_own_stage_tasks() {
         .await
         .expect("reopen B's stage");
     assert!(PullService::stages_remain(pool, "i-two").await.unwrap());
+
+    // The run path stamps the stage of the board the run was launched from;
+    // the board-agnostic seam takes the earliest gated stage on any board.
+    let ws = WorkspaceId::from_str("ws-1").unwrap();
+    assert_eq!(
+        current_gated_column(pool, &ws, Some("b-2"), "i-two").await.unwrap().as_deref(),
+        Some("c2-impl")
+    );
+    assert_eq!(
+        current_gated_column(pool, &ws, Some("b-1"), "i-two").await.unwrap().as_deref(),
+        Some("col-review")
+    );
+    assert_eq!(
+        current_gated_column(pool, &ws, None, "i-two").await.unwrap().as_deref(),
+        Some("c2-impl"),
+        "board-agnostic: the lowest ord across boards"
+    );
 }
 
 /// A push-path Run on a card in a gated column is that stage's run: the helper
@@ -805,17 +822,17 @@ async fn current_gated_column_names_the_cards_stage() {
     let ws = WorkspaceId::from_str("ws-1").unwrap();
     add_card(pool, "i-impl", Some("col-impl")).await;
     assert_eq!(
-        current_gated_column(pool, &ws, "i-impl").await.unwrap().as_deref(),
+        current_gated_column(pool, &ws, None, "i-impl").await.unwrap().as_deref(),
         Some("col-impl")
     );
     add_card(pool, "i-backlog", Some("col-backlog")).await;
     assert_eq!(
-        current_gated_column(pool, &ws, "i-backlog").await.unwrap(),
+        current_gated_column(pool, &ws, None, "i-backlog").await.unwrap(),
         None
     );
     let other = WorkspaceId::from_str("ws-other").unwrap();
     assert_eq!(
-        current_gated_column(pool, &other, "i-impl").await.unwrap(),
+        current_gated_column(pool, &other, None, "i-impl").await.unwrap(),
         None
     );
 }
