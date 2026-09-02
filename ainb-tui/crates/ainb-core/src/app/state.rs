@@ -10055,7 +10055,7 @@ impl AppState {
                 .await?;
 
             if codex_remote.as_ref().is_some_and(|remote| remote.thread_id.is_none()) {
-codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
+                codex_remote = crate::interactive::session_manager::claim_codex_remote_thread(
                     metadata.session_id,
                     &metadata.worktree_path,
                     model.as_deref(),
