@@ -346,13 +346,13 @@ fn respawn_atc_session(name: &str) -> Result<String> {
     delegate(&argv)
 }
 
-/// The name to provision under when nothing is provisioned yet.
+/// The ATC instance the screen and the provisioning verbs act on.
 ///
 /// A leftover instance directory names itself, and reusing that name is what
 /// keeps an existing task-log and state file attached to the instance the
 /// heartbeat was already aimed at. Falls back to `main`, which is what
 /// `fleet atc setup` has always defaulted to in practice.
-fn atc_provision_name() -> Result<String> {
+pub fn atc_target_name() -> Result<String> {
     let root = crate::fleet::plumbing::paths::ainb_home()?.join("atc");
     Ok(crate::fleet::atc::paths::list_instance_dirs_in(&root)
         .into_iter()
@@ -366,11 +366,18 @@ fn atc(action: Action) -> Result<String> {
     // through `atc_instance`, which exists to refuse exactly that case.
     match action {
         Action::Provision => {
-            let name = atc_provision_name()?;
+            // A bare `setup` rebuilds meta from defaults, so running it on an
+            // instance that already exists silently resets a deliberately
+            // tuned interval or a disabled heartbeat. Restart is the verb for
+            // an existing instance; it preserves that config.
+            if let Ok(existing) = atc_instance() {
+                bail!("ATC '{existing}' is already provisioned; use restart instead");
+            }
+            let name = atc_target_name()?;
             return delegate(&["fleet", "atc", "setup", &name]);
         }
         Action::RemoveOrphan => {
-            let name = atc_provision_name()?;
+            let name = atc_target_name()?;
             let removed = crate::fleet::atc::timer::teardown(&name)
                 .with_context(|| format!("removing the heartbeat timer for '{name}'"))?;
             return Ok(if removed.is_empty() {
