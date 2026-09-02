@@ -1148,14 +1148,46 @@ impl IssueListState {
 
     /// Replace the cached rows from a fresh `hangar/issues_list` snapshot while
     /// keeping every piece of operator state alive across the refresh: the open
-    /// create wizard, filter text, facets, selection, transient note, repo and
-    /// agent rosters. Rebuilding through [`with_rows`](Self::with_rows) wiped all
-    /// of it, so a background refresh landing mid-typing silently destroyed the
+    /// create wizard, filter text, facets, transient note, repo and agent
+    /// rosters. Rebuilding through [`with_rows`](Self::with_rows) wiped all of
+    /// it, so a background refresh landing mid-typing silently destroyed the
     /// wizard (the Boards screen already guards this via `adopt_context`).
+    ///
+    /// The selection follows the ROW, not the index: rows reorder and vanish
+    /// between snapshots, and an index carried across that silently retargets
+    /// `d` / `a` / `x` onto a different issue. A delete confirm whose target
+    /// left the snapshot is dropped, so Enter cannot fire at an issue that is
+    /// already gone.
     pub fn replace_rows(&mut self, rows: Vec<IssueRow>) {
+        let selected_id = self.selected_row().map(|r| r.id.clone());
         self.rows = rows;
         let visible = self.visible_rows().count();
-        self.selected = self.selected.min(visible.saturating_sub(1));
+        self.selected = selected_id
+            .and_then(|id| self.visible_rows().position(|r| r.id == id))
+            .unwrap_or(self.selected)
+            .min(visible.saturating_sub(1));
+        let still_present = |pending: &Option<PendingDelete>| {
+            pending.as_ref().is_none_or(|p| self.rows.iter().any(|r| r.id == p.id))
+        };
+        if !still_present(&self.confirm_delete) {
+            self.confirm_delete = None;
+            if self.mode == IssueListMode::ConfirmDelete {
+                self.mode = IssueListMode::Normal;
+            }
+        }
+        if !still_present(&self.confirm_cancel_delete) {
+            self.confirm_cancel_delete = None;
+            if self.mode == IssueListMode::ConfirmCancelDelete {
+                self.mode = IssueListMode::Normal;
+            }
+        }
+        if self
+            .hovered_id
+            .as_ref()
+            .is_some_and(|h| !self.rows.iter().any(|r| r.id.as_str() == h))
+        {
+            self.hovered_id = None;
+        }
     }
 
     /// Every cached row, UNFILTERED: the raw `hangar/issues_list` snapshot, which
@@ -4880,7 +4912,7 @@ mod tests {
 
     /// A background `issues_list` refresh landing while the create wizard is open
     /// must NOT destroy it: `replace_rows` swaps only the row cache and keeps the
-    /// wizard (and its typed text), the mode, and the selection clamp intact.
+    /// wizard (and its typed text) and the mode intact.
     #[test]
     fn replace_rows_keeps_the_open_wizard_and_its_text() {
         let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
@@ -4889,8 +4921,10 @@ mod tests {
             wizard = reduce_issue_list(&wizard, IssueListEvent::Key(c)).state;
         }
         assert_eq!(wizard.mode(), IssueListMode::CreateInput);
-        let typed_before = wizard.wizard.as_ref().map(|w| w.title.clone());
-        assert_eq!(typed_before.as_deref(), Some("abc"));
+        assert_eq!(
+            wizard.wizard.as_ref().map(|w| w.title.clone()).as_deref(),
+            Some("abc")
+        );
 
         wizard.replace_rows(vec![row("i9", "open", None)]);
 
@@ -4905,7 +4939,60 @@ mod tests {
             "refresh kept the typed title"
         );
         assert_eq!(wizard.all_rows().len(), 1, "rows were replaced");
-        assert_eq!(wizard.selected, 0, "selection clamped to the new row count");
+    }
+
+    /// The selection follows the selected ROW across a refresh that reorders or
+    /// drops rows (an index would silently retarget the next `d`/`a`/`x`), and
+    /// clamps when the row is gone.
+    #[test]
+    fn replace_rows_follows_the_selected_row_and_clamps() {
+        let mut s = IssueListState::with_rows(vec![
+            row("i1", "open", None),
+            row("i2", "open", None),
+            row("i3", "open", None),
+        ]);
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+
+        // Reordered: i3 now first. The cursor follows it.
+        s.replace_rows(vec![
+            row("i3", "open", None),
+            row("i1", "open", None),
+            row("i2", "open", None),
+        ]);
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+        assert_eq!(s.selected, 0);
+
+        // Gone: the cursor clamps onto the last remaining row, never past the end.
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i2"));
+        s.replace_rows(vec![row("i3", "open", None)]);
+        assert_eq!(s.selected, 0);
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+
+        // Empty snapshot: nothing selected, no panic.
+        s.replace_rows(Vec::new());
+        assert!(s.selected_row().is_none());
+    }
+
+    /// A refresh that drops the issue under an open `x` confirm closes the
+    /// confirm instead of leaving Enter armed at an issue that no longer exists.
+    #[test]
+    fn replace_rows_drops_a_delete_confirm_whose_target_vanished() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        let mut confirm = reduce_issue_list(&s, IssueListEvent::Key('x')).state;
+        assert_eq!(confirm.mode(), IssueListMode::ConfirmDelete);
+
+        // i1 (the confirm target) survives: the confirm stays.
+        confirm.replace_rows(vec![row("i1", "open", None)]);
+        assert_eq!(confirm.mode(), IssueListMode::ConfirmDelete);
+
+        // i1 is gone: the confirm is dropped and Enter is a plain open again.
+        confirm.replace_rows(vec![row("i2", "open", None)]);
+        assert_eq!(confirm.mode(), IssueListMode::Normal);
+        assert!(confirm.confirm_delete.is_none());
     }
 
     /// `x` does NOT open the confirm while the create wizard is open — the wizard
