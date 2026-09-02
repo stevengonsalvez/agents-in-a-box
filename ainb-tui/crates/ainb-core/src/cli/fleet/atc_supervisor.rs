@@ -82,6 +82,13 @@ pub async fn mode(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
         ),
     };
     let requested_provider = matches.get_one::<String>("provider").cloned();
+    // Persist the mode WITHOUT touching either controller.
+    //
+    // The mode is the safety property; the controllers are machinery. This flag
+    // exists for the tests, which must be able to exercise the persisted rule
+    // without spawning a real scan loop against the developer's live fleet, and
+    // for an operator reconciling by hand after a partial failure.
+    let no_reconcile = matches.get_flag("no-reconcile");
 
     // Read-only report. `mode <name>` with no --set never mutates: switching a
     // fleet's controller is not something to do by accident while looking.
@@ -118,8 +125,16 @@ pub async fn mode(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     // 2/3/4. Reconcile the machinery: stop the outgoing scheduler, start the
     //        incoming one. Best-effort and reported, never fatal — the safety
     //        property is already held by the write above.
-    let reconcile = if unchanged {
-        Reconcile::default()
+    let reconcile = if unchanged || no_reconcile {
+        let mut out = Reconcile::default();
+        if no_reconcile && !unchanged {
+            out.notes.push(
+                "--no-reconcile: the mode is persisted and the old controller will stand down on \
+its next action, but neither controller was started or stopped"
+                    .to_string(),
+            );
+        }
+        out
     } else {
         reconcile_controllers(&meta).await
     };
@@ -308,22 +323,33 @@ pub fn stop_lite(name: &str) -> Option<u32> {
 /// is already running, and a second would be the double-controller this whole
 /// design exists to prevent.
 fn start_lite_supervisor(name: &str) -> Result<()> {
-    use crate::fleet::daemons::heartbeat::DaemonHeartbeat;
-    if let Some(hb) = DaemonHeartbeat::read(&lite_heartbeat_id(name)) {
-        if crate::fleet::daemons::is_pid_alive(hb.pid) {
-            return Ok(());
-        }
+    if live_lite_pid(name).is_some() {
+        return Ok(());
     }
     detach(&["fleet", "atc", "supervise", name])
 }
 
-/// SIGTERM the lite scanner's own recorded pid, if it is still alive.
+/// The pid of a lite scanner that is provably still running for `name`.
+///
+/// Identity, not liveness: a recycled pid is a tombstone, not a running
+/// scanner, and treating it as one would leave the fleet with no controller
+/// while reporting that it has one.
+fn live_lite_pid(name: &str) -> Option<u32> {
+    use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
+    let hb = DaemonHeartbeat::read(&lite_heartbeat_id(name))?;
+    (pid_identity(hb.pid, hb.started_at) == PidCheck::Matched).then_some(hb.pid)
+}
+
+/// SIGTERM the lite scanner, but only when the recorded pid is provably still
+/// the process that recorded it.
+///
+/// Shares [`crate::cli::daemon::stop_by_heartbeat_pid`], which does the
+/// pid-identity check. A recorded pid that merely happens to be ALIVE is not
+/// evidence: the OS recycles pids, so a scanner that was SIGKILLed leaves a
+/// tombstone that would otherwise make us signal a stranger's process and report
+/// a successful stop.
 fn stop_lite_supervisor(name: &str) -> Option<u32> {
-    use crate::fleet::daemons::heartbeat::DaemonHeartbeat;
-    let pid = DaemonHeartbeat::read(&lite_heartbeat_id(name))?.pid;
-    let target = nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?);
-    nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).ok()?;
-    Some(pid)
+    crate::cli::daemon::stop_by_heartbeat_pid(&lite_heartbeat_id(name))
 }
 
 /// `ainb fleet atc supervise <name>` — the LITE controller.
@@ -352,10 +378,34 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
         bail!("{}", stand_down_reason(meta.mode, Controller::LiteScanner));
     }
 
+    // A dry run must not touch the record the live scanner owns, so it never
+    // registers itself at all — see the heartbeat block below.
+    let hb_id = lite_heartbeat_id(&name);
+
+    // THE second-scanner guard, and the reason it lives HERE rather than only in
+    // `start_lite_supervisor`: that check-then-detach is a TOCTOU. Two callers
+    // inside the ~100ms it takes a child to boot both see no live pid and both
+    // detach. The child itself is the only place that can refuse authoritatively,
+    // because by the time it runs, any earlier sibling has already registered.
+    if !dry_run {
+        if let Some(pid) = live_lite_pid(&name) {
+            bail!(
+                "a lite scanner already owns ATC '{name}' (pid {pid}); refusing to start a \
+second one. Two scanners double-spend the retry budget and send `continue` twice \
+into the same pane. Stop it with `ainb daemon atc stop`."
+            );
+        }
+    }
+
     let mut heartbeat = crate::fleet::daemons::DaemonHeartbeat::starting();
     heartbeat.set_connected(true, Some(format!("{name} · lite scan")));
-    let hb_id = lite_heartbeat_id(&name);
-    let _ = heartbeat.write(&hb_id);
+    // A dry run leaves the record alone: overwriting it would point `stop_lite`,
+    // `probe_atc_lite` and `start_lite_supervisor` at a pid that exits in
+    // milliseconds — killing the wrong process, reporting the live scanner as
+    // crashed, and then starting a second one.
+    if !dry_run {
+        let _ = heartbeat.write(&hb_id);
+    }
 
     loop {
         // Re-read the mode EVERY tick, from disk. The switch persists before it
@@ -373,7 +423,9 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
         };
         if !may_act(current, Controller::LiteScanner) {
             let reason = stand_down_reason(current, Controller::LiteScanner);
-            let _ = crate::fleet::daemons::DaemonHeartbeat::clear(&hb_id);
+            if !dry_run {
+                let _ = crate::fleet::daemons::DaemonHeartbeat::clear(&hb_id);
+            }
             if matches!(format, OutputFormat::Text) {
                 println!("[atc/{name}] {reason}");
             }
@@ -408,7 +460,9 @@ pub async fn supervise(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
                 heartbeat.record_error(e.to_string());
             }
         }
-        let _ = heartbeat.write(&hb_id);
+        if !dry_run {
+            let _ = heartbeat.write(&hb_id);
+        }
 
         if once {
             return Ok(());
@@ -653,17 +707,15 @@ fn delegate(argv: &[&str]) -> Result<String> {
         .to_string())
 }
 
-/// Spawn `ainb <argv>` detached, so it outlives the invoking command.
+/// Spawn `ainb <argv>` detached.
+///
+/// Delegates to [`crate::cli::daemon::detach`] rather than rolling its own: that
+/// one puts the child in its OWN process group (so a Ctrl-C aimed at the
+/// launching terminal never kills the fleet's only controller) and points its
+/// output at the daemon log instead of `/dev/null` (so the scan lines, the hook
+/// issues and the stand-down message survive). A local copy silently lost both.
 fn detach(argv: &[&str]) -> Result<()> {
-    use std::process::Stdio;
-    std::process::Command::new(ainb_bin()?)
-        .args(argv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawning `ainb {}`", argv.join(" ")))?;
-    Ok(())
+    crate::cli::daemon::detach(argv)
 }
 
 #[cfg(test)]
