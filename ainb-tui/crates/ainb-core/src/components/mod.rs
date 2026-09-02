@@ -11,7 +11,6 @@ pub mod config_popup;
 pub mod config_screen;
 pub mod confirmation_dialog;
 pub mod daemons;
-pub mod daemons_overlay;
 pub mod fleet_panel;
 pub mod fuzzy_file_finder;
 pub mod git_view;
