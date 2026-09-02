@@ -433,9 +433,17 @@ pub struct HangarPlugin {
     /// quiet subscribed connection after ten minutes, and the plugin then sat
     /// on "daemon offline" until restarted, with the daemon perfectly healthy.
     link_lost_at: Option<std::time::Instant>,
-    /// The attention row whose `attention/answer` is in flight, so the verdict
-    /// is filed against THAT card even if the cursor moved before the reply.
+    /// The attention row whose `attention/answer` reply is being applied, so
+    /// the verdict is filed against THAT card even if the cursor moved before
+    /// the reply. Set from [`Self::answers_in_flight`] as the reply arrives.
     answer_in_flight: Option<String>,
+    /// Every `attention/answer` still awaiting its reply, by the negative wire
+    /// id it was sent under (one per answer, so two answers dispatched before
+    /// the first reply each file their own verdict).
+    answers_in_flight: BTreeMap<i64, String>,
+    /// Wire id for the next `attention/answer`: counts down from -1, a space
+    /// no snapshot generation can reach.
+    next_answer_wire_id: i64,
     /// Last automatic reconnect attempt, for the backoff.
     link_last_redial: Option<std::time::Instant>,
     /// Consecutive failed automatic reconnects (backoff exponent).
@@ -653,6 +661,8 @@ impl Default for HangarPlugin {
             daemon_start_last_redial: None,
             link_lost_at: None,
             answer_in_flight: None,
+            answers_in_flight: BTreeMap::new(),
+            next_answer_wire_id: -1,
             link_last_redial: None,
             link_redial_attempts: 0,
             daemon_start_verdict: None,
@@ -1206,6 +1216,15 @@ impl HangarPlugin {
             if let Some(handler_id) = self.snapshot_response_ids.remove(&wire_id) {
                 let mut normalized = resp.clone();
                 normalized.id = RpcId::Number(handler_id);
+                self.on_daemon_response(&normalized);
+                return;
+            }
+            // An answer reply: remember which card it was for, then dispatch it
+            // under the handler id like any other answer verdict.
+            if let Some(attention_id) = self.answers_in_flight.remove(&wire_id) {
+                self.answer_in_flight = Some(attention_id);
+                let mut normalized = resp.clone();
+                normalized.id = RpcId::Number(ATTENTION_ANSWER_REQ_ID);
                 self.on_daemon_response(&normalized);
                 return;
             }
@@ -2055,7 +2074,7 @@ impl HangarPlugin {
     /// mutating reply re-fetches the fleet-wide attention list so the answered card
     /// drops off the board. A send failure is logged but non-fatal.
     async fn answer_attention(
-        &self,
+        &mut self,
         host: &HostClient,
         action: crate::screen::AttentionAnswerAction,
     ) {
@@ -2068,15 +2087,19 @@ impl HangarPlugin {
             "answered_by": "tui",
             "is_answer": true,
         });
-        let Ok(body) = encode_request(
-            ATTENTION_ANSWER_REQ_ID,
-            daemon_methods::ATTENTION_ANSWER,
-            params,
-        ) else {
+        // One wire id per answer, so each reply finds its own card.
+        let wire_id = self.next_answer_wire_id;
+        self.next_answer_wire_id = self.next_answer_wire_id.saturating_sub(1);
+        let Ok(body) = encode_request(wire_id, daemon_methods::ATTENTION_ANSWER, params) else {
             return;
         };
-        if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host.log_info(format!("hangar: attention answer send failed: {e}")).await;
+        match host.unix_socket_send(stream_id, body).await {
+            Ok(()) => {
+                self.answers_in_flight.insert(wire_id, action.attention_id);
+            }
+            Err(e) => {
+                let _ = host.log_info(format!("hangar: attention answer send failed: {e}")).await;
+            }
         }
     }
 
@@ -5772,7 +5795,6 @@ impl Plugin for HangarPlugin {
         // raising session; its reply re-fetches the fleet-wide attention list so
         // the answered card drops off the board.
         if let Some(action) = self.screens.take_pending_answer_action() {
-            self.answer_in_flight = Some(action.attention_id.clone());
             self.answer_attention(host, action).await;
         }
         // P5: drain a deferred `profile/get` (selection moved to an un-loaded row
@@ -9102,14 +9124,15 @@ mod answer_verdict_tests {
     fn a_verdict_is_filed_against_the_card_that_was_answered() {
         let mut p = plugin_with_open_card();
         p.screens.set_attention(&[ask_row("a1"), ask_row("a2")]);
-        p.answer_in_flight = Some("a1".to_string());
-        p.screens.control_center.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        // a1's answer went out under wire id -1 (as `answer_attention` records).
+        p.answers_in_flight.insert(-1, "a1".to_string());
         // Cursor moves on before the reply.
         p.screens.control_center.select_next();
         assert_eq!(p.screens.control_center.selected_id(), Some("a2"));
-        p.on_daemon_response(&answer_reply(
-            serde_json::json!({ "outcome": "no_target", "reason": "exited" }),
-        ));
+        let mut reply =
+            answer_reply(serde_json::json!({ "outcome": "no_target", "reason": "exited" }));
+        reply.id = RpcId::Number(-1);
+        p.on_daemon_response(&reply);
         assert!(p.screens.control_center.note().is_some());
         p.screens.set_attention(&[ask_row("a2")]);
         assert!(
@@ -9117,6 +9140,31 @@ mod answer_verdict_tests {
             "the note belonged to a1: it leaves with a1"
         );
         assert!(p.answer_in_flight.is_none(), "consumed by the reply");
+        assert!(p.answers_in_flight.is_empty(), "the wire id is retired");
+    }
+
+    /// Two answers in flight at once each file their own verdict: the replies
+    /// come back under their own wire ids, so a2's refusal is not parked on a1.
+    #[test]
+    fn concurrent_answers_file_their_own_verdicts() {
+        let mut p = plugin_with_open_card();
+        p.screens.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        p.answers_in_flight.insert(-1, "a1".to_string());
+        p.answers_in_flight.insert(-2, "a2".to_string());
+        // a1 delivered (no note), a2 refused: the note must be a2's.
+        let mut ok = answer_reply(serde_json::json!({ "outcome": "delivered", "via": "tmux (s)" }));
+        ok.id = RpcId::Number(-1);
+        p.on_daemon_response(&ok);
+        let mut refused =
+            answer_reply(serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }));
+        refused.id = RpcId::Number(-2);
+        p.on_daemon_response(&refused);
+        assert!(p.screens.control_center.note().is_some());
+        p.screens.set_attention(&[ask_row("a1")]);
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "a2's note left with a2"
+        );
     }
 
     #[test]
