@@ -972,6 +972,22 @@ pub(crate) fn probe_atc_with(
         let heartbeat_enabled = meta.as_ref().map_or(true, |m| m.heartbeat_enabled);
         let interval_min = meta.as_ref().map_or(15, |m| m.heartbeat_interval_min.max(1));
         let provider = meta.as_ref().map_or_else(|| "claude".to_string(), |m| m.provider.clone());
+        // A LITE instance can only ever be described by `probe_atc_lite`, which
+        // already had its chance above. It must not compete here, because on
+        // every signal this loop reads it looks like a full instance and wins:
+        // `setup --mode lite` leaves `heartbeat_enabled` true (that flag is about
+        // the OS timer, which lite simply does not use), and the lite scanner
+        // stamps `last_heartbeat_ms` into the SAME heartbeat-state.json on every
+        // tick. A lite instance whose scanner had died therefore reached the
+        // full-mode branch below and was reported as
+        // "tower · FULL(claude) · every 15m — session ainb-atc-tower is GONE",
+        // naming a tmux session lite never creates and sending the operator to
+        // respawn a brain the fleet does not have. Wrong mode, wrong diagnosis,
+        // wrong fix. No test caught it because every fixture passes
+        // `--no-heartbeat`, which is the one setting that keeps lite out of here.
+        if meta.as_ref().is_some_and(|m| m.mode == SupervisorMode::Lite) {
+            continue;
+        }
         if !heartbeat_enabled {
             // Disabled instances are never a running-source. Skip before reading
             // the heartbeat state so a stale beat can't promote it.
@@ -2340,6 +2356,96 @@ mod tests {
         let s = probe_atc_with(home.path(), 0, &|_| Some(true));
         assert_eq!(s.state, DaemonState::Stopped);
         assert!(s.reason.contains("no ATC instance"));
+    }
+
+    /// Write a lite instance the way `setup --mode lite` really writes one:
+    /// `heartbeat_enabled` stays TRUE (that flag is about the OS timer, which
+    /// lite does not use) and the scanner stamps the SAME heartbeat-state.json.
+    ///
+    /// Every earlier fixture passed `--no-heartbeat`, which is precisely the one
+    /// setting that keeps a lite instance out of the full-mode selection loop —
+    /// which is why a whole class of mis-reporting went unnoticed.
+    fn write_lite_instance(home: &std::path::Path, name: &str, beat_ms: i64) {
+        let dir = home.join("atc").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            format!(
+                r#"{{"name":"{name}","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60,"mode":"lite","provider":"claude"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("heartbeat-state.json"),
+            format!(r#"{{"last_heartbeat_ms":{beat_ms},"last_active_ms":{beat_ms},"continue_counts":{{}}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_lite_instance_is_never_reported_as_a_full_one() {
+        // The regression: a lite instance whose scanner has died looks like a
+        // healthy full instance on every signal this loop reads, so it was
+        // reported as "FULL(claude) · every 15m — session ainb-atc-tower is
+        // GONE" — a tmux session lite never creates, and a remediation that
+        // respawns a brain the fleet does not have.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        write_lite_instance(home.path(), "tower", now - 1000);
+
+        // `Some(true)` for session liveness: even with a session present, a lite
+        // instance must not borrow the full-mode vocabulary.
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        let channel = s.channel.clone().unwrap_or_default();
+        assert!(
+            channel.contains("LITE"),
+            "a lite instance must report as lite, got {channel:?} / {}",
+            s.reason
+        );
+        assert!(
+            !channel.contains("FULL"),
+            "lite must never be labelled full: {channel:?}"
+        );
+        assert!(
+            !s.reason.contains("respawns it"),
+            "must not send the operator to respawn a brain lite has no use for: {}",
+            s.reason
+        );
+    }
+
+    #[test]
+    fn a_dead_lite_instance_does_not_hide_a_healthy_full_one() {
+        // The other half: selection. A stale lite instance sorting first must not
+        // claim the row from an actively-beating full instance.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        // "alpha" sorts before "tower" — the directory order that used to decide.
+        write_lite_instance(home.path(), "alpha", now - 90 * 86_400_000);
+
+        let full = home.path().join("atc").join("tower");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(
+            full.join("meta.json"),
+            r#"{"name":"tower","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60,"mode":"full","provider":"claude"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            full.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 1000
+            ),
+        )
+        .unwrap();
+
+        let s = probe_atc_with(home.path(), now, &|_| Some(true));
+        assert_eq!(s.state, DaemonState::Running, "reason: {}", s.reason);
+        let channel = s.channel.clone().unwrap_or_default();
+        assert!(
+            channel.contains("tower"),
+            "the healthy full instance must own the row, got {channel:?}"
+        );
     }
 
     #[test]
