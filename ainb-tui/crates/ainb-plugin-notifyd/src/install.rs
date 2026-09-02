@@ -290,6 +290,7 @@ fn stable_launcher_for(exe: &Path) -> Option<PathBuf> {
         PathBuf::from("/usr/local/bin/ainb"),
     ];
     if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin/ainb"));
         candidates.push(home.join(".cargo/bin/ainb"));
     }
     candidates
@@ -302,7 +303,9 @@ fn launcher_mode(path: &Path) -> HookBinaryMode {
         HookBinaryMode::Dev
     } else if path == Path::new("/opt/homebrew/bin/ainb")
         || path == Path::new("/usr/local/bin/ainb")
-        || path.parent().is_some_and(|parent| parent.ends_with(".cargo/bin"))
+        || path.parent().is_some_and(|parent| {
+            parent.ends_with(".cargo/bin") || parent.ends_with(".local/bin")
+        })
     {
         HookBinaryMode::Release
     } else {
@@ -1500,6 +1503,28 @@ mod tests {
         );
         assert_eq!(cellar_target.mode, HookBinaryMode::Release);
         assert_eq!(cellar_target.path, launcher);
+    }
+
+    /// `~/.local/bin` is a first-class install prefix (it is where `ainb`
+    /// installs itself on a machine with no Homebrew), so a binary there is a
+    /// stable launcher — not an unclassified `Direct` path that repair treats
+    /// as no better than a worktree build.
+    #[test]
+    fn local_bin_launcher_is_release_mode() {
+        let dir = fake_home();
+        let launcher = dir.path().join(".local/bin/ainb");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, permissions).unwrap();
+
+        let target = hook_binary_target(
+            PathBuf::from("/unused/ainb"),
+            Some(launcher.to_str().expect("UTF-8 temporary path")),
+        );
+        assert_eq!(target.mode, HookBinaryMode::Release);
+        assert_eq!(target.path, launcher);
     }
 
     #[test]
