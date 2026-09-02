@@ -1611,7 +1611,16 @@ impl EventHandler {
         // fallthrough match later in this function (defense-in-depth
         // for future text-input views that forget an early-return
         // handler).
-        let in_text_input = Self::is_text_input_context(state);
+        // A plugin-owned screen owns EVERY printable key, not only while its
+        // per-frame `captures_text` flag says so: that flag is refreshed from the
+        // previous render, so the first ~70ms after a plugin opens a text field
+        // (or after a snapshot rebuilt its state) report `false`, and a typed
+        // `H`/`?`/`W` was hijacked by the host. Worse, once `H` opened help the
+        // swallow branch below dropped every later key until Esc, which read
+        // as "the wizard lost my input". Plugins ship their own `?` help, so
+        // on their screens these host globals are simply not host keys.
+        let in_text_input = Self::is_text_input_context(state)
+            || crate::app::screens::builtin::plugin_owns_focused_screen(state);
 
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
