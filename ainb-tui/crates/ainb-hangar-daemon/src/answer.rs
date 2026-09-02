@@ -146,33 +146,81 @@ pub async fn answer(
     }
 }
 
-/// Deliver `answer` into `session`, picker-aware.
+/// How an answer reaches the agent, decided by [`route_answer`] from the row's
+/// payload, the answer text, and what the target pane shows RIGHT NOW.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// Drive the agent's option picker by position (zero-based).
+    Picker(usize),
+    /// Type the answer into the session ([`send`]): a free-text ASK, a target
+    /// with no picker on screen (a plain shell, a non-Claude render, a picker
+    /// the agent already dismissed), or a broker-first transport.
+    Text,
+    /// Deliver nothing and reopen the row: the pane shows an option picker and
+    /// this answer cannot be routed into it.
+    Refuse(String),
+}
+
+/// Pick the [`Route`] for `answer`. `pane` is the target's current screen when
+/// tmux delivery is preferred and the capture succeeded, else `None`.
 ///
 /// An `AskUserQuestion` ASK leaves a real option PICKER open in the agent's
 /// pane, and that picker does not read typed text: typing the chosen label and
-/// pressing Enter accepted whatever option was HIGHLIGHTED (the first one), so
-/// the store recorded the operator's pick while the agent acted on the default.
-/// When the row's payload names options and the pane still shows that picker,
-/// the answer is routed by POSITION (`Down` x index, then `Enter`) and the pane
-/// is re-read to confirm the picker closed. A free-text ASK, a non-option answer,
-/// or a picker that has already gone falls through to the text send unchanged.
+/// pressing Enter accepted whatever option was HIGHLIGHTED, so the store
+/// recorded the operator's pick while the agent acted on the default. So while
+/// the picker is on screen, an option answer is routed by position and anything
+/// else is refused rather than typed. Without a picker on screen the answer is
+/// text, exactly as before: that is the plain-shell delivery target the
+/// converged harness pins (CC01) and every non-Claude render.
+pub(crate) fn route_answer(pane: Option<&str>, labels: Option<&[String]>, answer: &str) -> Route {
+    let (Some(pane), Some(labels)) = (pane, labels) else {
+        return Route::Text;
+    };
+    if !picker_visible(pane, labels) {
+        return Route::Text;
+    }
+    match picker_position(labels, answer) {
+        Some(position) if position < 9 => Route::Picker(position),
+        Some(position) => Route::Refuse(format!(
+            "option {} cannot be routed by key (pickers beyond 9 options are not supported)",
+            position + 1
+        )),
+        None => Route::Refuse(format!(
+            "the agent's picker expects one of its {} options; free text is not typed into it",
+            labels.len()
+        )),
+    }
+}
+
+/// Deliver `answer` into `session` along the [`Route`] the pane dictates.
 async fn deliver(
     session: &Session,
     row: &AttentionRow,
     answer: &str,
 ) -> anyhow::Result<SendOutcome> {
-    if let (Some(target), Some(position), Some(labels)) = (
-        session.tmux_session.as_deref(),
-        picker_position(&row.payload, answer),
-        picker_labels(&row.payload),
-    ) {
-        // An option answer to an option picker is NEVER typed as text: if the
-        // picker is not on screen the keys would land in the composer (or, worse,
-        // Enter would accept the highlighted default), so the row reopens with
-        // the reason instead.
-        return Ok(deliver_picker(target, position, &labels).await);
+    use ainb_fleet_core::read::capture_pane;
+    use ainb_fleet_core::send::tmux_delivery_preferred;
+
+    let labels = picker_labels(&row.payload);
+    let target = session.tmux_session.as_deref().filter(|_| tmux_delivery_preferred());
+    let pane = match (target, labels.as_deref()) {
+        (Some(t), Some(_)) => capture_pane(t, 0).await.ok(),
+        _ => None,
+    };
+    match route_answer(pane.as_deref(), labels.as_deref(), answer) {
+        Route::Text => send(session, answer).await,
+        Route::Refuse(reason) => Ok(SendOutcome::Failed { reason }),
+        Route::Picker(position) => {
+            let labels = labels.unwrap_or_default();
+            // `route_answer` only yields Picker when a target pane was captured.
+            let Some(target) = target else {
+                return Ok(SendOutcome::Failed {
+                    reason: "picker route without a tmux target".to_string(),
+                });
+            };
+            Ok(deliver_picker(target, position, &labels).await)
+        }
     }
-    send(session, answer).await
 }
 
 /// The option labels an ASK payload offers, in display order, or `None` for a
@@ -195,96 +243,127 @@ fn picker_labels(payload: &str) -> Option<Vec<String>> {
     (!labels.is_empty()).then_some(labels)
 }
 
-/// The zero-based position `answer` names among the payload's options: the
-/// label verbatim, the label case-insensitively, a 1-based digit, or a unique
-/// label prefix. `None` when the answer is not one of the options (free text).
-fn picker_position(payload: &str, answer: &str) -> Option<usize> {
-    let labels = picker_labels(payload)?;
+/// The zero-based position `answer` names among `labels`: the label verbatim,
+/// the label case-insensitively, or a 1-based digit (the bridge's "reply N"
+/// contract). Anything else, prefixes included, is free text: coercing a
+/// prefix into a pick turned a deliberate free-text answer into a selection.
+fn picker_position(labels: &[String], answer: &str) -> Option<usize> {
     let wanted = answer.trim();
-    if let Some(i) = labels.iter().position(|l| l == wanted) {
+    if wanted.is_empty() {
+        return None;
+    }
+    if let Some(i) = labels.iter().position(|l| l.trim() == wanted) {
         return Some(i);
     }
-    if let Some(i) = labels.iter().position(|l| l.eq_ignore_ascii_case(wanted)) {
+    if let Some(i) = labels.iter().position(|l| l.trim().eq_ignore_ascii_case(wanted)) {
         return Some(i);
     }
-    if let Ok(n) = wanted.parse::<usize>() {
-        if (1..=labels.len()).contains(&n) {
-            return Some(n - 1);
-        }
-    }
-    let prefixed: Vec<usize> = labels
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.to_ascii_lowercase().starts_with(&wanted.to_ascii_lowercase()))
-        .map(|(i, _)| i)
-        .collect();
-    match prefixed.as_slice() {
-        [only] => Some(*only),
+    match wanted.parse::<usize>() {
+        Ok(n) if (1..=labels.len()).contains(&n) => Some(n - 1),
         _ => None,
     }
 }
 
-/// Route a picker answer by position into `target`. A `Failed` outcome (picker
-/// not on screen, a key that did not land, a picker that stayed open) reopens
-/// the row through the caller's compensation path.
+/// Route a picker answer into `target`: press the option's DIGIT (which moves
+/// the highlight to that option absolutely, whatever it was on), confirm the
+/// highlight moved, press Enter, confirm the picker closed, and read back the
+/// answered echo when the pane shows one. Any `Failed` reopens the row through
+/// the caller's compensation path.
 async fn deliver_picker(target: &str, position: usize, labels: &[String]) -> SendOutcome {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_send_picker_key;
     use std::time::Duration;
 
-    let pane = match capture_pane(target, 0).await {
-        Ok(pane) => pane,
-        Err(e) => {
-            return SendOutcome::Failed {
-                reason: format!("cannot read the target pane: {e:#}"),
-            };
-        }
-    };
-    if !picker_visible(&pane, labels) {
+    let digit = (position + 1).to_string();
+    if let Err(e) = tmux_send_picker_key(target, &digit).await {
         return SendOutcome::Failed {
-            reason: "the option picker is not on the agent's screen (answer not typed)".to_string(),
+            reason: format!("picker key {digit} failed: {e:#}"),
         };
     }
-    for _ in 0..position {
-        if let Err(e) = tmux_send_picker_key(target, "Down").await {
-            return SendOutcome::Failed {
-                reason: format!("picker Down key failed: {e:#}"),
-            };
+    // The digit must have moved the highlight before Enter commits anything.
+    let mut highlighted = false;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(pane) = capture_pane(target, 0).await {
+            if highlighted_option(&pane) == Some(position) {
+                highlighted = true;
+                break;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    if !highlighted {
+        return SendOutcome::Failed {
+            reason: format!("picker highlight did not move to option {digit}; nothing confirmed"),
+        };
     }
     if let Err(e) = tmux_send_picker_key(target, "Enter").await {
         return SendOutcome::Failed {
             reason: format!("picker Enter key failed: {e:#}"),
         };
     }
-    // Confirm the picker actually closed; a pane still showing it means the
-    // keys did not land, and the row must reopen rather than read as answered
-    // while the agent stays blocked.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        if let Ok(after) = capture_pane(target, 0).await {
-            if !picker_visible(&after, labels) {
-                return SendOutcome::Tmux {
-                    tmux_session: target.to_string(),
+        let Ok(after) = capture_pane(target, 0).await else {
+            continue;
+        };
+        if picker_visible(&after, labels) {
+            continue;
+        }
+        // The picker closed. When the pane already echoes the recorded answer,
+        // it must name OUR option; a different label means the agent took
+        // another option and the row must not read as answered with ours.
+        if let Some(echoed) = echoed_option(&after, labels) {
+            if echoed != position {
+                return SendOutcome::Failed {
+                    reason: format!(
+                        "agent recorded option {} ({}) instead of option {digit}",
+                        echoed + 1,
+                        labels[echoed]
+                    ),
                 };
             }
         }
+        return SendOutcome::Tmux {
+            tmux_session: target.to_string(),
+        };
     }
     SendOutcome::Failed {
         reason: "picker still open after routing the answer by position".to_string(),
     }
 }
 
-/// Is the option picker for `labels` on screen? The picker paints each option
-/// as `N. <label>` in a column narrow enough to wrap long labels onto a second
-/// line, so probe every option's numbered prefix plus the first 12 characters
-/// of its label (a whole `(Recommended)` suffix is regularly wrapped away).
+/// Is the option picker for `labels` on screen? Requires the picker's live
+/// cursor line (`❯ N.` for an N within the option count) AND the first option's
+/// numbered probe, so a transcript that merely echoes numbered lines after the
+/// picker closed, or an agent printing look-alike lines, does not pass.
 fn picker_visible(pane: &str, labels: &[String]) -> bool {
+    let Some(first) = labels.first() else {
+        return false;
+    };
+    highlighted_option(pane).is_some_and(|i| i < labels.len())
+        && pane.contains(&format!("1. {}", picker_probe(first)))
+}
+
+/// The zero-based option the picker cursor `❯ N.` currently sits on, if a
+/// picker cursor line is on screen.
+fn highlighted_option(pane: &str) -> Option<usize> {
+    pane.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix('❯')?.trim_start();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || !rest[digits.len()..].starts_with('.') {
+            return None;
+        }
+        digits.parse::<usize>().ok()?.checked_sub(1)
+    })
+}
+
+/// The option the pane's "→ <label>" answered echo names, if any.
+fn echoed_option(pane: &str, labels: &[String]) -> Option<usize> {
+    let echo = pane.lines().rev().find(|l| l.contains("→ "))?;
+    let after = echo.split("→ ").last()?.trim();
     labels
         .iter()
-        .enumerate()
-        .all(|(i, l)| pane.contains(&format!("{}. {}", i + 1, picker_probe(l))))
+        .position(|l| after.starts_with(picker_probe(l)))
 }
 
 /// The leading slice of an option label a wrapped pane render still shows
@@ -352,29 +431,32 @@ async fn reopen_on_failed_delivery(
 ///      sources. Stale = the raising session's captured transcript is no longer
 ///      the newest in the cwd (a different agent took over the durable row's cwd
 ///      after the original exited). On ambiguity or staleness → refuse.
-async fn resolve_target(
-    session_id: &str,
-    cwd: &str,
-    raise_transcript: Option<&str>,
-    is_answer: bool,
-) -> Target {
-    let ainb_fut = discover_from_ainb();
-    let peers_fut = tokio::task::spawn_blocking(discover_from_peers);
-    let (ainb, peers_join) = tokio::join!(ainb_fut, peers_fut);
-    let ainb: Vec<Session> = ainb.unwrap_or_default();
-    let peers: Vec<Session> = peers_join.ok().and_then(Result::ok).unwrap_or_default();
+/// The C1 pick over discovered sessions, pure so the router and its tests share
+/// one implementation.
+#[derive(Debug)]
+pub(crate) enum Pick {
+    /// The hook's session id matched a discovered session outright.
+    Exact(Session),
+    /// One session's root is the raise cwd (`nested == false`) or its nearest
+    /// ancestor (`nested == true`).
+    ByCwd { session: Session, nested: bool },
+    /// More than one session claims the raise cwd at the same depth.
+    Ambiguous(usize),
+    /// No discovered session matched.
+    None,
+}
 
-    // Count raw (pre-merge) sessions sharing the target cwd across BOTH sources,
-    // so two distinct sessions in the same dir register as ambiguous even though
-    // `merge_sessions` would coalesce them onto one cwd-keyed row.
-    // The hook reports the agent's CURRENT cwd, which drifts below the session
-    // root as soon as the agent `cd`s into a subproject (`<worktree>/api`), while
-    // discovery lists the session at its root. Match a session whose root is
-    // the raise cwd or an ancestor of it, most specific root first, so a nested
-    // scratch dir under another session's root still resolves to the nearest.
+/// Resolve which discovered session an attention row belongs to.
+///
+/// Exact id first. Otherwise the hook's cwd, which drifts BELOW the session
+/// root as soon as the agent `cd`s into a subproject (`<worktree>/api`) while
+/// discovery lists the session at its root: the most specific session whose
+/// root contains the raise cwd wins, and two sessions at that same depth are
+/// ambiguous (a merged session that aggregated 2+ sources counts as two).
+pub(crate) fn pick_target(ainb: &[Session], peers: &[Session], session_id: &str, cwd: &str) -> Pick {
     let root_len = |s: &Session| {
         if session_owns_cwd(&s.cwd, cwd) {
-            s.cwd.len()
+            s.cwd.trim_end_matches('/').len()
         } else {
             0
         }
@@ -386,57 +468,81 @@ async fn resolve_target(
         ainb.iter().chain(peers.iter()).filter(|s| root_len(s) == deepest).count()
     };
 
-    let merged = merge_sessions(vec![ainb, peers]);
-
-    // 1. Exact session-id match is always unambiguous.
+    let merged = merge_sessions(vec![ainb.to_vec(), peers.to_vec()]);
     if let Some(session) = merged.iter().find(|s| s.id == session_id) {
-        return Target::Send(session.clone());
+        return Pick::Exact(session.clone());
     }
-
-    // 2. No exact match → cwd correlation, guarded by ambiguity.
     let Some(by_cwd) = merged
         .iter()
         .filter(|s| !cwd.is_empty() && session_owns_cwd(&s.cwd, cwd))
-        .max_by_key(|s| s.cwd.len())
+        .max_by_key(|s| s.cwd.trim_end_matches('/').len())
     else {
-        return Target::NoTarget("no live session matched (target may have exited)".to_string());
+        return Pick::None;
+    };
+    if raw_cwd_count > 1 || by_cwd.sources.len() > 1 {
+        return Pick::Ambiguous(raw_cwd_count.max(by_cwd.sources.len()));
+    }
+    let nested = by_cwd.cwd.trim_end_matches('/') != cwd.trim_end_matches('/');
+    Pick::ByCwd {
+        session: by_cwd.clone(),
+        nested,
+    }
+}
+
+async fn resolve_target(
+    session_id: &str,
+    cwd: &str,
+    raise_transcript: Option<&str>,
+    is_answer: bool,
+) -> Target {
+    let ainb_fut = discover_from_ainb();
+    let peers_fut = tokio::task::spawn_blocking(discover_from_peers);
+    let (ainb, peers_join) = tokio::join!(ainb_fut, peers_fut);
+    let ainb: Vec<Session> = ainb.unwrap_or_default();
+    let peers: Vec<Session> = peers_join.ok().and_then(Result::ok).unwrap_or_default();
+    let label = if is_answer {
+        "cannot safely answer"
+    } else {
+        "refusing to send"
     };
 
-    let ambiguous = raw_cwd_count > 1 || by_cwd.sources.len() > 1;
-    if ambiguous {
-        let label = if is_answer {
-            "cannot safely answer"
-        } else {
-            "refusing to send"
-        };
-        return Target::Ambiguous(format!(
-            "ambiguous target — {label} ({} sessions in this cwd)",
-            raw_cwd_count.max(by_cwd.sources.len())
-        ));
-    }
+    let (by_cwd, nested) = match pick_target(&ainb, &peers, session_id, cwd) {
+        Pick::Exact(session) => return Target::Send(session),
+        Pick::None => {
+            return Target::NoTarget("no live session matched (target may have exited)".to_string());
+        }
+        Pick::Ambiguous(n) => {
+            return Target::Ambiguous(format!("ambiguous target — {label} ({n} sessions in this cwd)"));
+        }
+        Pick::ByCwd { session, nested } => (session, nested),
+    };
 
-    // C1 temporal guard: attention rows are durable and outlive the raising
-    // agent, so a purely-cwd fallback can misroute the answer to a DIFFERENT
-    // agent that later occupied the same cwd. Bind delivery to the transcript
-    // captured at raise time — if it is no longer the newest transcript in the
-    // cwd, the occupant changed; refuse rather than answer an agent that never
-    // asked. (A row with no captured transcript keeps the prior behaviour.)
-    if let Some(raise_tx) = raise_transcript.filter(|t| !t.is_empty()) {
-        // Transcripts are keyed by the session's ROOT cwd, not the subdirectory
-        // the agent happened to be in when it asked.
-        if !transcript_still_owns_cwd(&by_cwd.cwd, raise_tx) {
-            let label = if is_answer {
-                "cannot safely answer"
-            } else {
-                "refusing to send"
-            };
+    // Attention rows are DURABLE and outlive the raising agent. If the original
+    // session has exited and a DIFFERENT agent now occupies the cwd (its
+    // transcript is newer), refuse rather than answer an agent that never asked.
+    // A NESTED match (session root above the raise cwd) is only ever accepted
+    // when the raise transcript confirms the owner: without that check a session
+    // rooted at a broad ancestor ($HOME, a repos root) would become the delivery
+    // target for every row raised anywhere beneath it.
+    match raise_transcript.filter(|t| !t.is_empty()) {
+        Some(raise_tx) => {
+            // Transcripts are keyed by the session's ROOT cwd, not the
+            // subdirectory the agent happened to be in when it asked.
+            if !transcript_still_owns_cwd(&by_cwd.cwd, raise_tx) {
+                return Target::Ambiguous(format!(
+                    "stale target — {label} (the raising session no longer owns this cwd)"
+                ));
+            }
+        }
+        None if nested => {
             return Target::Ambiguous(format!(
-                "stale target — {label} (the raising session no longer owns this cwd)"
+                "nested target — {label} (the raise cwd is below the session root and no raise transcript confirms the owner)"
             ));
         }
+        None => {}
     }
 
-    Target::Send(by_cwd.clone())
+    Target::Send(by_cwd)
 }
 
 /// Is `raise_cwd` the session root `root` itself, or a directory below it?
@@ -467,6 +573,8 @@ fn transcript_still_owns_cwd(cwd: &str, raise_transcript: &str) -> bool {
 mod tests {
     use super::*;
     use ainb_fleet_core::types::SessionSource;
+    use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
 
     /// The payload shape the hook ingest stores for a real `AskUserQuestion`
     /// (captured live from Claude Code 2.1.257).
@@ -486,25 +594,28 @@ mod tests {
         assert!(!session_owns_cwd("/w/app", ""));
     }
 
-    /// Option answers resolve to their PICKER POSITION by label, digit, or unique
-    /// prefix, case-insensitively; anything else is free text (no position).
+    fn labels() -> Vec<String> {
+        picker_labels(ASK_PAYLOAD).unwrap()
+    }
+
+    /// Option answers resolve to their PICKER POSITION by label (case-insensitive)
+    /// or 1-based digit; anything else, prefixes and blanks included, is free
+    /// text (no position).
     #[test]
-    fn picker_position_resolves_label_digit_and_prefix() {
-        assert_eq!(picker_position(ASK_PAYLOAD, "api/app.db"), Some(1));
-        assert_eq!(
-            picker_position(ASK_PAYLOAD, "data/boxtrack.db (Recommended)"),
-            Some(0)
-        );
-        assert_eq!(picker_position(ASK_PAYLOAD, "API/APP.DB"), Some(1));
-        assert_eq!(picker_position(ASK_PAYLOAD, "2"), Some(1));
-        assert_eq!(picker_position(ASK_PAYLOAD, "1"), Some(0));
-        assert_eq!(picker_position(ASK_PAYLOAD, "data/"), Some(0));
-        assert_eq!(
-            picker_position(ASK_PAYLOAD, "3"),
-            None,
-            "out of range digit is free text"
-        );
-        assert_eq!(picker_position(ASK_PAYLOAD, "use postgres"), None);
+    fn picker_position_resolves_label_and_digit_only() {
+        let l = labels();
+        assert_eq!(picker_position(&l, "api/app.db"), Some(1));
+        assert_eq!(picker_position(&l, "data/boxtrack.db (Recommended)"), Some(0));
+        assert_eq!(picker_position(&l, "API/APP.DB"), Some(1));
+        assert_eq!(picker_position(&l, "2"), Some(1));
+        assert_eq!(picker_position(&l, "1"), Some(0));
+        assert_eq!(picker_position(&l, "3"), None, "out of range digit is free text");
+        assert_eq!(picker_position(&l, "data/"), None, "a prefix is free text, never a pick");
+        assert_eq!(picker_position(&l, ""), None);
+        assert_eq!(picker_position(&l, "   "), None);
+        assert_eq!(picker_position(&l, "use postgres"), None);
+        let ambiguous = vec!["deploy now".to_string(), "deploy later".to_string()];
+        assert_eq!(picker_position(&ambiguous, "deploy"), None);
     }
 
     /// A multi-select or non-ASK payload never routes by position (the caller
@@ -514,16 +625,10 @@ mod tests {
         let multi = ASK_PAYLOAD.replace("\"multi_select\":false", "\"multi_select\":true");
         assert_eq!(picker_labels(&multi), None);
         assert_eq!(picker_labels(r#"{"kind":"ERR","context":{}}"#), None);
+        assert_eq!(picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#), None);
         assert_eq!(
-            picker_labels(r#"{"kind":"ASK","context":{"question":"why?"}}"#),
-            None
-        );
-        assert_eq!(
-            picker_labels(ASK_PAYLOAD).unwrap(),
-            vec![
-                "data/boxtrack.db (Recommended)".to_string(),
-                "api/app.db".to_string()
-            ]
+            labels(),
+            vec!["data/boxtrack.db (Recommended)".to_string(), "api/app.db".to_string()]
         );
     }
 
@@ -532,37 +637,73 @@ mod tests {
     #[test]
     fn picker_probe_is_a_bounded_prefix() {
         assert_eq!(picker_probe("api/app.db"), "api/app.db");
-        assert_eq!(
-            picker_probe("data/boxtrack.db (Recommended)"),
-            "data/boxtrac"
-        );
+        assert_eq!(picker_probe("data/boxtrack.db (Recommended)"), "data/boxtrac");
         assert_eq!(picker_probe("ééééééééééééééééééééééé long"), "éééééé");
     }
 
-    /// A real Claude Code 2.1 picker render wraps `(Recommended)` onto its own
-    /// line; the visibility probe must still see both numbered options, and must
-    /// NOT see a picker in a pane that only echoes the prompt text.
-    #[test]
-    fn picker_visible_matches_the_wrapped_pane_render() {
-        let labels = vec![
-            "data/boxtrack.db (Recommended)".to_string(),
-            "api/app.db".to_string(),
-        ];
-        let pane = "\
+    /// A real Claude Code 2.1 picker render (cursor on option 1, `(Recommended)`
+    /// wrapped onto its own line).
+    const PICKER_PANE: &str = "\
  Where should Boxtrack's sqlite file live by default?
  ❯ 1. data/boxtrack.db             ┌──────┐
      (Recommended)                 │ repo/│
    2. api/app.db                   │      │
  Enter to select · ↑/↓ to navigate · Esc to cancel";
-        assert!(picker_visible(pane, &labels));
-        let closed = "\
+    /// The same pane after the picker closed and the agent echoed its answer.
+    const ANSWERED_PANE: &str = "\
 ● User answered Claude's questions:
   ⎿  · Where should Boxtrack's sqlite file live by default? → api/app.db
 ❯ ";
-        assert!(!picker_visible(closed, &labels));
+
+    /// Visibility needs the live cursor line plus the first option: a transcript
+    /// that only echoes numbered lines, an echoed answer, or a plain shell is not
+    /// a picker.
+    #[test]
+    fn picker_visible_needs_the_cursor_and_the_first_option() {
+        let l = labels();
+        assert!(picker_visible(PICKER_PANE, &l));
+        assert_eq!(highlighted_option(PICKER_PANE), Some(0));
+        let moved = PICKER_PANE.replace(" ❯ 1.", "   1.").replace("   2. api", " ❯ 2. api");
+        assert!(picker_visible(&moved, &l));
+        assert_eq!(highlighted_option(&moved), Some(1));
+        assert!(!picker_visible(ANSWERED_PANE, &l));
+        assert!(!picker_visible("$ ls\n1. data/boxtrack.db\n2. api/app.db\n$ ", &l), "no cursor line");
+        assert!(!picker_visible("❯ 1. something else entirely\n  2. nope", &l), "wrong options");
+        assert!(!picker_visible("❯ 7. data/boxtrack.db", &l), "cursor beyond the option count");
     }
-    use ainb_hangar_store::Store;
-    use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
+
+    /// The answered echo names the option the agent recorded, by probe.
+    #[test]
+    fn echoed_option_reads_the_answer_echo() {
+        let l = labels();
+        assert_eq!(echoed_option(ANSWERED_PANE, &l), Some(1));
+        let first = ANSWERED_PANE.replace("→ api/app.db", "→ data/boxtrack.db (Recommended)");
+        assert_eq!(echoed_option(&first, &l), Some(0));
+        assert_eq!(echoed_option(PICKER_PANE, &l), None);
+    }
+
+    /// The routing table: no picker on screen (plain shell, closed picker, no
+    /// tmux target, broker transport) types the answer as before; a visible
+    /// picker routes an option by position and REFUSES free text or an option
+    /// past the digit keys, never typing into it.
+    #[test]
+    fn route_answer_table() {
+        let l = labels();
+        assert_eq!(route_answer(None, Some(&l), "api/app.db"), Route::Text, "no pane");
+        assert_eq!(route_answer(Some(PICKER_PANE), None, "yes"), Route::Text, "free-text ASK");
+        assert_eq!(route_answer(Some("$ "), Some(&l), "prod"), Route::Text, "plain shell target");
+        assert_eq!(route_answer(Some(ANSWERED_PANE), Some(&l), "api/app.db"), Route::Text, "picker gone");
+        assert_eq!(route_answer(Some(PICKER_PANE), Some(&l), "api/app.db"), Route::Picker(1));
+        assert_eq!(route_answer(Some(PICKER_PANE), Some(&l), "2"), Route::Picker(1));
+        assert!(matches!(
+            route_answer(Some(PICKER_PANE), Some(&l), "actually use postgres"),
+            Route::Refuse(_)
+        ));
+        let many: Vec<String> = (1..=12).map(|i| format!("option {i}")).collect();
+        let pane = format!("❯ 1. option 1\n{}", (2..=12).map(|i| format!("  {i}. option {i}")).collect::<Vec<_>>().join("\n"));
+        assert!(matches!(route_answer(Some(&pane), Some(&many), "option 12"), Route::Refuse(_)));
+        assert_eq!(route_answer(Some(&pane), Some(&many), "option 9"), Route::Picker(8));
+    }
 
     fn session(id: &str, cwd: &str, src: SessionSource) -> Session {
         Session {
@@ -582,55 +723,25 @@ mod tests {
         }
     }
 
-    /// The C1 resolution decision, isolated from `send()` I/O so it is
-    /// deterministically unit-testable — a verbatim mirror of `resolve_target`'s
-    /// steps 1+2 + the ambiguity guard (lifted from `fleet::control`).
-    #[derive(Debug, PartialEq)]
-    enum Decision {
-        Exact(String),
-        Cwd(String),
-        Refuse,
-        NoMatch,
-    }
-
-    fn resolve_decision(raw: &[Session], session_id: &str, cwd: &str) -> Decision {
-        let merged = merge_sessions(vec![raw.to_vec()]);
-        if let Some(s) = merged.iter().find(|s| s.id == session_id) {
-            return Decision::Exact(s.id.clone());
-        }
-        let raw_cwd_count = if cwd.is_empty() {
-            0
-        } else {
-            raw.iter().filter(|s| s.cwd == cwd).count()
-        };
-        let Some(by_cwd) = merged.iter().find(|s| !cwd.is_empty() && s.cwd == cwd) else {
-            return Decision::NoMatch;
-        };
-        if raw_cwd_count > 1 || by_cwd.sources.len() > 1 {
-            return Decision::Refuse;
-        }
-        Decision::Cwd(by_cwd.id.clone())
-    }
-
     #[test]
     fn exact_session_id_match_delivers() {
         let raw = vec![
             session("hook-sid", "/work/x", SessionSource::Ainb),
             session("other", "/work/x", SessionSource::Peers),
         ];
-        assert_eq!(
-            resolve_decision(&raw, "hook-sid", "/work/x"),
-            Decision::Exact("hook-sid".to_string())
-        );
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-sid", "/work/x"),
+            Pick::Exact(s) if s.id == "hook-sid"
+        ));
     }
 
     #[test]
     fn unambiguous_cwd_match_delivers() {
         let raw = vec![session("discovered-id", "/work/x", SessionSource::Ainb)];
-        assert_eq!(
-            resolve_decision(&raw, "hook-session-differs", "/work/x"),
-            Decision::Cwd("discovered-id".to_string())
-        );
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-session-differs", "/work/x"),
+            Pick::ByCwd { session, nested: false } if session.id == "discovered-id"
+        ));
     }
 
     #[test]
@@ -639,21 +750,56 @@ mod tests {
             session("a", "/work/x", SessionSource::Ainb),
             session("b", "/work/x", SessionSource::Ainb),
         ];
-        assert_eq!(
-            resolve_decision(&raw, "hook-sid", "/work/x"),
-            Decision::Refuse
-        );
+        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/work/x"), Pick::Ambiguous(2)));
     }
 
     #[test]
     fn ambiguous_cwd_multi_source_merge_refuses() {
+        let ainb = vec![session("a", "/work/x", SessionSource::Ainb)];
+        let peers = vec![session("a", "/work/x", SessionSource::Peers)];
+        assert!(matches!(pick_target(&ainb, &peers, "hook-sid", "/work/x"), Pick::Ambiguous(2)));
+    }
+
+    /// The hook's cwd drifted below the session root (the agent `cd`'d into
+    /// `api/`): the session still resolves, flagged nested so the router can
+    /// demand the raise transcript before trusting it.
+    #[test]
+    fn nested_cwd_resolves_to_the_session_root_as_nested() {
+        let raw = vec![session("wt", "/w/app", SessionSource::Ainb)];
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-sid", "/w/app/api"),
+            Pick::ByCwd { session, nested: true } if session.id == "wt"
+        ));
+        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/w/app2"), Pick::None), "sibling prefix");
+    }
+
+    /// A session with its own tmux identity, so two of them are two sessions to
+    /// `merge_sessions` (which folds sessions sharing a tmux target into one).
+    fn distinct_session(id: &str, cwd: &str) -> Session {
+        let mut s = session(id, cwd, SessionSource::Ainb);
+        s.tmux_session = Some(format!("tmux-{id}"));
+        s
+    }
+
+    /// Two ancestors: the most specific root wins outright (no ambiguity), and a
+    /// trailing slash on a discovered cwd changes neither depth nor the count.
+    #[test]
+    fn deepest_ancestor_wins_and_trailing_slash_is_ignored() {
         let raw = vec![
-            session("a", "/work/x", SessionSource::Ainb),
-            session("a", "/work/x", SessionSource::Peers),
+            distinct_session("broad", "/w"),
+            distinct_session("narrow", "/w/app/"),
         ];
-        assert_eq!(
-            resolve_decision(&raw, "hook-sid", "/work/x"),
-            Decision::Refuse
+        assert!(matches!(
+            pick_target(&raw, &[], "hook-sid", "/w/app/api"),
+            Pick::ByCwd { session, nested: true } if session.id == "narrow"
+        ));
+        let twins = vec![
+            distinct_session("a", "/w/app"),
+            distinct_session("b", "/w/app/"),
+        ];
+        assert!(
+            matches!(pick_target(&twins, &[], "hook-sid", "/w/app/sub"), Pick::Ambiguous(2)),
+            "same directory with and without the trailing slash is one depth"
         );
     }
 
@@ -720,16 +866,13 @@ mod tests {
     #[test]
     fn no_session_in_cwd_is_no_match_not_refuse() {
         let raw = vec![session("a", "/other", SessionSource::Ainb)];
-        assert_eq!(
-            resolve_decision(&raw, "hook-sid", "/work/x"),
-            Decision::NoMatch
-        );
+        assert!(matches!(pick_target(&raw, &[], "hook-sid", "/work/x"), Pick::None));
     }
 
     #[test]
     fn empty_cwd_without_exact_match_is_no_match() {
         let raw = vec![session("a", "", SessionSource::Ainb)];
-        assert_eq!(resolve_decision(&raw, "hook-sid", ""), Decision::NoMatch);
+        assert!(matches!(pick_target(&raw, &[], "hook-sid", ""), Pick::None));
     }
 
     // --- answer() store-integration paths that need no live discovery ---------
