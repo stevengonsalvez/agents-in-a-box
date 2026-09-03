@@ -243,6 +243,27 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Drop the `by-session/<uuid>` index entry WITHOUT touching the tree it
+    /// points at.
+    ///
+    /// The link is Ainb's own index, and `create_session_with_worktree` writes
+    /// one over a directory it was handed. A launch that fails there has to be
+    /// able to take back the link it made and leave the directory alone, which
+    /// [`Self::remove_worktree`] cannot do: it follows the link and deletes
+    /// whatever is on the other end.
+    ///
+    /// A missing link is success: the rollback runs on paths where the link was
+    /// never written.
+    pub fn remove_session_link(&self, session_id: Uuid) -> Result<(), WorktreeError> {
+        let session_path = self.base_worktree_dir.join("by-session").join(session_id.to_string());
+        if !session_path.is_symlink() && !session_path.exists() {
+            return Ok(());
+        }
+        std::fs::remove_file(&session_path)?;
+        info!("Removed session link: {}", session_path.display());
+        Ok(())
+    }
+
     pub fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
         let mut worktrees = Vec::new();
 

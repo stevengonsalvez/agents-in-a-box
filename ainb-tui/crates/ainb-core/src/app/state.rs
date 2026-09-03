@@ -9211,6 +9211,11 @@ impl AppState {
                     model.clone(),
                     headroom_enabled,
                     rtk_enabled,
+                    // `prepare_remote_worktree` cloned this tree into a path derived
+                    // from THIS session id moments ago, so a failed launch must remove
+                    // it rather than leave the directory, its checked-out cache branch
+                    // and its index entry behind.
+                    crate::interactive::session_manager::WorktreeOwner::ThisSession,
                 )
                 .await
         } else {

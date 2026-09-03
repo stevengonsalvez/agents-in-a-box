@@ -16,8 +16,9 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
-    discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
+    InteractiveSessionManager, ModelSource, SessionMetadata, SessionStore, WorktreeRollback,
+    claim_codex_remote_thread, discard_codex_remote_thread, ensure_codex_remote_thread,
+    rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -41,6 +42,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let work_dir: PathBuf;
     let branch_name: String;
+    // `Some` only when this run created a worktree, which is what makes it the
+    // tree a failed launch may delete.
     let worktree_manager: Option<WorktreeManager>;
     let session_id = Uuid::new_v4();
     // Set when the session ends up running directly in the user's checkout.
@@ -89,6 +92,14 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         }
     }
 
+    // `--worktree` created the tree above and nothing else did, so a failed
+    // launch either removes the tree this run made or removes nothing: the
+    // no-worktree path runs in the checkout the user pointed at.
+    let rollback_worktree = || match worktree_manager.as_ref() {
+        Some(manager) => WorktreeRollback::CreatedTree(manager),
+        None => WorktreeRollback::Nothing,
+    };
+
     // Step 4: Generate session name
     let session_name = args.name.clone().unwrap_or_else(|| {
         let short_id = &session_id.to_string()[..8];
@@ -130,8 +141,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             // without.
             Ok(remote) => remote,
             Err(error) => {
-                rollback_failed_interactive_launch(session_id, None, worktree_manager.as_ref())
-                    .await;
+                rollback_failed_interactive_launch(session_id, None, rollback_worktree()).await;
                 return Err(error)
                     .context("Codex failed to start; AINB ran failed-session cleanup");
             }
@@ -140,23 +150,30 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         None
     };
 
-    let claude_cmd = codex_remote
-        .as_ref()
-        .map(|remote| {
-            // Pre-launch, at the launch site rather than inside the builder:
-            // `-C` into a directory Codex has not seen shows a blocking trust
-            // modal, and under `--remote` no flag suppresses it. Kept out of
-            // `remote_codex_command` so that stays pure and its tests never
-            // write to the user's Codex config.
-            crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
-            remote_codex_command(
+    let claude_cmd = if provider == CliProvider::Codex {
+        // Pre-launch, at the launch site rather than inside the builders: a
+        // directory Codex has not seen shows a blocking trust modal, and no CLI
+        // flag suppresses it. Kept out of the builders so they stay pure and
+        // their tests never write to the user's Codex config.
+        crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
+        match codex_remote.as_ref() {
+            Some(remote) => remote_codex_command(
                 remote,
                 &work_dir,
                 model.as_deref(),
                 args.dangerously_skip_permissions,
-            )
-        })
-        .unwrap_or_else(|| build_agent_command(&args));
+            ),
+            // No shared thread (no daemon, or an ephemeral home). Everything
+            // that keeps the CLI off a blocking modal still applies, so this
+            // does NOT fall through to `build_agent_command`: that builder is
+            // provider-generic and emits neither the trust write above nor the
+            // hook-trust flag, and a modal STALLS the pane instead of failing,
+            // so the run reports success over a session that never started.
+            None => codex_local_command(model.as_deref(), args.dangerously_skip_permissions),
+        }
+    } else {
+        build_agent_command(&args)
+    };
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
     // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
@@ -191,12 +208,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         .with_env(session_env)
         .keeping_dead_pane(codex_remote.is_some());
     if let Err(error) = tmux.start(&work_dir).await {
-        rollback_failed_interactive_launch(
-            session_id,
-            Some(tmux.name()),
-            worktree_manager.as_ref(),
-        )
-        .await;
+        rollback_failed_interactive_launch(session_id, Some(tmux.name()), rollback_worktree())
+            .await;
         return Err(error).context("Failed to start tmux session");
     }
 
@@ -219,7 +232,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                 rollback_failed_interactive_launch(
                     session_id,
                     Some(&tmux_name),
-                    worktree_manager.as_ref(),
+                    rollback_worktree(),
                 )
                 .await;
                 return Err(error)
@@ -272,8 +285,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
     // this write must not lost-update the store.
     if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
-        rollback_failed_interactive_launch(session_id, Some(&tmux_name), worktree_manager.as_ref())
-            .await;
+        rollback_failed_interactive_launch(session_id, Some(&tmux_name), rollback_worktree()).await;
         if codex_thread_id.is_some() {
             if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {
                 warn!("Failed to discard claimed Codex thread for {session_id}: {cleanup_error:#}");
@@ -600,17 +612,48 @@ fn remote_codex_command(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> String {
-    crate::interactive::session_manager::codex_remote_command(
+    shell_join(&crate::interactive::session_manager::codex_remote_command(
         &crate::config::CliProvider::Codex,
         remote,
         cwd,
         model,
         skip_permissions,
-    )
-    .iter()
-    .map(|part| shell_escape::escape(part.into()).into_owned())
-    .collect::<Vec<_>>()
-    .join(" ")
+    ))
+}
+
+/// Shell-ready argv for a Codex session running WITHOUT a shared remote thread.
+///
+/// Delegates to the TUI's launch builder, like [`remote_codex_command`]
+/// delegates to the remote one, so the degraded CLI path and the degraded TUI
+/// path cannot drift. They already had: this path used to fall through to
+/// `build_agent_command`, which is provider-generic and emits neither
+/// `-c check_for_update_on_startup=false` nor `--dangerously-bypass-hook-trust`,
+/// so Codex parked on the update picker or the hooks-need-review modal. A modal
+/// STALLS the pane instead of failing, which is a launch that reports success.
+///
+/// The only Codex arguments this drops are the remote-specific ones
+/// (`--disable apps`, `--remote <endpoint>`, `-C <dir>`, `resume <thread_id>`),
+/// which is exactly what a session with no shared thread does not have.
+fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
+    shell_join(&InteractiveSessionManager::build_cli_cmd_parts(
+        &CliProvider::Codex,
+        SessionAgentType::Codex,
+        skip_permissions,
+        model,
+        // `ainb run` always starts a fresh session, and `has_history` gates
+        // Claude's `--continue` only.
+        false,
+        false,
+    ))
+}
+
+/// Join argv into the shell-ready string a tmux session is started with.
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| shell_escape::escape(part.into()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
@@ -1020,6 +1063,38 @@ mod tests {
             "codex -c check_for_update_on_startup=false --disable apps \
              --dangerously-bypass-hook-trust --remote \
              'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+        );
+    }
+
+    /// The degraded launch (no daemon, so no shared thread) keeps every flag
+    /// whose job is to reach a prompt, and drops only the remote ones.
+    ///
+    /// `build_agent_command` is what this path used to fall through to, and it
+    /// is provider-generic: it emits neither modal suppressor, nor the trust
+    /// write its caller does, so the pane parked on the update picker or the
+    /// hooks-need-review modal while `ainb run` reported a session created.
+    /// Sharing the TUI's builder is what keeps the two degraded paths equal.
+    #[test]
+    fn codex_local_command_keeps_the_flags_that_reach_a_prompt() {
+        let command = codex_local_command(Some("gpt-5.6-luna"), true);
+        assert_eq!(
+            command,
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false \
+             --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
+        );
+
+        let plain = codex_local_command(None, false);
+        assert_eq!(
+            plain,
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"
+        );
+        assert!(
+            !plain.contains("--remote"),
+            "a degraded session has no endpoint to join"
+        );
+        assert!(
+            !plain.contains("resume"),
+            "a degraded session has no thread to resume"
         );
     }
 

@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use crate::audit::{self, AuditResult, AuditTrigger};
-use crate::git::WorktreeManager;
+use crate::git::{WorktreeInfo, WorktreeManager};
 use crate::models::{
     CodexModel, Session, SessionAgentType, SessionMode, SessionStatus, is_default_model,
 };
@@ -167,6 +167,33 @@ fn resolved_hangar_home() -> String {
     )
 }
 
+/// Whether a daemon error means there is no daemon to talk to at all, as
+/// opposed to a daemon that answered and the exchange then went wrong.
+///
+/// Only the first class may degrade. `NoHome` and `Token` are what
+/// [`crate::fleet::bridge::daemon::DaemonClient::from_env`] reports when the
+/// home is unresolvable or the token file is absent, which is what a home no
+/// daemon has ever booted on looks like; `Connect` is the dial itself finding
+/// nothing listening. Everything else (`Rpc`, `Decode`, `Io`, `Timeout`) means
+/// the daemon IS there, so it stays a hard failure the user is told to act on.
+fn daemon_unreachable(error: &crate::fleet::bridge::daemon::DaemonError) -> bool {
+    use crate::fleet::bridge::daemon::DaemonError;
+    matches!(
+        error,
+        DaemonError::NoHome | DaemonError::Token(_) | DaemonError::Connect { .. }
+    )
+}
+
+/// What the user is told when no daemon answers, built here rather than inline
+/// in the `warn!` so the sentence naming what the session loses is a value a
+/// test can read.
+fn unreachable_daemon_warning(error: &crate::fleet::bridge::daemon::DaemonError) -> String {
+    format!(
+        "no Hangar daemon answered ({error}); launching this Codex session without shared \
+         remote control - the phone and any other app-server client cannot join its conversation"
+    )
+}
+
 /// Create or resume one exact shared Codex app-server thread for Interactive.
 ///
 /// `Ok(None)` is a successful launch WITHOUT shared remote control: the reason
@@ -187,6 +214,13 @@ pub(crate) async fn ensure_codex_remote_thread(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
+    let params = ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+        session_id: session_id.to_string(),
+        cwd: cwd.display().to_string(),
+        model: model.map(str::to_owned),
+        thread_id: existing_thread_id,
+        skip_permissions,
+    };
     ensure_codex_remote_thread_with(
         // Ephemeral: `ainb run` prints its summary and exits, while the daemon
         // has to keep serving the tmux session it just created.
@@ -196,40 +230,61 @@ pub(crate) async fn ensure_codex_remote_thread(
             )
         },
         resolved_hangar_home,
-        ainb_hangar_proto::fleet::CodexSessionEnsureParams {
-            session_id: session_id.to_string(),
-            cwd: cwd.display().to_string(),
-            model: model.map(str::to_owned),
-            thread_id: existing_thread_id,
-            skip_permissions,
+        || async move {
+            let client = crate::fleet::bridge::daemon::DaemonClient::from_env()?;
+            client.codex_session_ensure(params).await
         },
     )
     .await
 }
 
-/// [`ensure_codex_remote_thread`] with its two impure inputs passed in: the
-/// autostart outcome and the home to name when that outcome is a skip.
+/// [`ensure_codex_remote_thread`] with its three impure inputs passed in: the
+/// autostart outcome, the home to name when that outcome is a skip, and the
+/// daemon exchange itself.
 ///
 /// The seam is what makes the degrade testable at all. The ephemeral branch
 /// returns BEFORE the daemon connect, and that ordering is the whole claim:
 /// checking [`shared_remote_control_available`] on its own would leave "and
 /// then the launch still succeeds" untested, which is how a degrade that is
-/// computed and then ignored still passes its suite.
-async fn ensure_codex_remote_thread_with(
+/// computed and then ignored still passes its suite. The same applies to the
+/// exchange: an unreachable daemon has to be shown yielding a LAUNCH, not just
+/// a classification.
+async fn ensure_codex_remote_thread_with<Ensure, Exchange>(
     autostart: impl FnOnce() -> crate::cli::hangar::DaemonAutostart,
     home: impl FnOnce() -> String,
-    params: ainb_hangar_proto::fleet::CodexSessionEnsureParams,
-) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
+    ensure: Ensure,
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>>
+where
+    Ensure: FnOnce() -> Exchange,
+    Exchange: std::future::Future<
+            Output = Result<
+                ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+                crate::fleet::bridge::daemon::DaemonError,
+            >,
+        >,
+{
     if !shared_remote_control_available(autostart(), home) {
         return Ok(None);
     }
-    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
-    client.codex_session_ensure(params).await.map(Some).map_err(|error| {
-        let message = format_codex_remote_control_failure(&error.to_string());
-        warn!(error = %error, "{message}");
-        anyhow::Error::msg(error.to_string()).context(message)
-    })
+    match ensure().await {
+        Ok(remote) => Ok(Some(remote)),
+        // No daemon answered: an unresolvable home, no token file, or nothing
+        // listening on the socket. The daemon is load-bearing for the SHARED
+        // thread and nothing else, so this costs the session exactly the same
+        // one feature an ephemeral home does and degrades the same way.
+        // Failing instead is how a stopped daemon turned `ainb run --tool
+        // codex` into a hard error whose cleanup deleted the worktree the run
+        // had just created.
+        Err(error) if daemon_unreachable(&error) => {
+            warn!("{}", unreachable_daemon_warning(&error));
+            Ok(None)
+        }
+        Err(error) => {
+            let message = format_codex_remote_control_failure(&error.to_string());
+            warn!(error = %error, "{message}");
+            Err(anyhow::Error::msg(error.to_string()).context(message))
+        }
+    }
 }
 
 /// Short actionable TUI message for a shared Codex bridge failure.
@@ -630,11 +685,50 @@ fn codex_models_cache_path() -> Option<PathBuf> {
     Some(home.join("models_cache.json"))
 }
 
+/// Who created the worktree an Interactive session is starting in.
+///
+/// Only the CALLER knows. [`WorktreeManager::remove_worktree`] resolves a tree
+/// by following `by-session/<uuid>`, and
+/// [`InteractiveSessionManager::create_session_with_worktree`] writes that
+/// symlink itself, so by the time a rollback runs the two cases look identical
+/// from the inside: a link pointing at a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorktreeOwner {
+    /// The tree was created FOR this session and is keyed by its id (the
+    /// remote-repo flow clones into `generate_worktree_path(session_id, ..)`
+    /// before handing the path over). A failed launch must take it away again,
+    /// or it leaks a directory, a checked-out cache branch that pushes the next
+    /// attempt onto a suffixed branch, and an index entry a later orphan sweep
+    /// resolves through anyway.
+    ThisSession,
+    /// The tree predates this session and belongs to the caller. A failed
+    /// launch must give it back untouched, and remove only the index entry it
+    /// wrote over it.
+    Caller,
+}
+
+/// What a failed launch is allowed to delete on its way out.
+///
+/// The rollback cannot work this out for itself: see [`WorktreeOwner`]. Every
+/// launch path states it, and the two destructive variants stay separate
+/// because "remove the tree" and "remove the link to the tree" differ by
+/// exactly one unrecoverable directory.
+#[derive(Clone, Copy)]
+pub(crate) enum WorktreeRollback<'a> {
+    /// Neither a tree nor an index entry was created for this session.
+    Nothing,
+    /// This launch created the tree: remove it, which also drops its link.
+    CreatedTree(&'a WorktreeManager),
+    /// This launch wrote only the `by-session` link, over somebody else's
+    /// directory: unlink it and leave the directory where it was found.
+    SessionLinkOnly(&'a WorktreeManager),
+}
+
 /// Roll back resources created before a fresh Interactive session is registered.
 pub(crate) async fn rollback_failed_interactive_launch(
     session_id: Uuid,
     exact_tmux_name: Option<&str>,
-    worktree_manager: Option<&WorktreeManager>,
+    worktree: WorktreeRollback<'_>,
 ) {
     if let Some(tmux_name) = exact_tmux_name {
         let exact_target = format!("={tmux_name}");
@@ -657,11 +751,20 @@ pub(crate) async fn rollback_failed_interactive_launch(
         }
     }
 
-    if let Some(worktree_manager) = worktree_manager {
-        match worktree_manager.remove_worktree(session_id) {
+    match worktree {
+        WorktreeRollback::Nothing => {}
+        WorktreeRollback::CreatedTree(manager) => match manager.remove_worktree(session_id) {
             Ok(()) => info!("Rolled back failed launch worktree: {session_id}"),
             Err(crate::git::WorktreeError::NotFound(_)) => {}
             Err(error) => warn!("Failed to roll back worktree for {session_id}: {error}"),
+        },
+        WorktreeRollback::SessionLinkOnly(manager) => {
+            match manager.remove_session_link(session_id) {
+                Ok(()) => info!("Rolled back failed launch session link: {session_id}"),
+                Err(error) => {
+                    warn!("Failed to roll back the session link for {session_id}: {error}")
+                }
+            }
         }
     }
 
@@ -1064,7 +1167,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         None,
-                        Some(&self.worktree_manager),
+                        WorktreeRollback::CreatedTree(&self.worktree_manager),
                     )
                     .await;
                     return Err(error
@@ -1086,7 +1189,7 @@ impl InteractiveSessionManager {
             rollback_failed_interactive_launch(
                 session_id,
                 Some(&tmux_session_name),
-                Some(&self.worktree_manager),
+                WorktreeRollback::CreatedTree(&self.worktree_manager),
             )
             .await;
             return Err(error);
@@ -1120,7 +1223,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        WorktreeRollback::CreatedTree(&self.worktree_manager),
                     )
                     .await;
                     return Err(error);
@@ -1147,7 +1250,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        WorktreeRollback::CreatedTree(&self.worktree_manager),
                     )
                     .await;
                     return Err(error
@@ -1230,6 +1333,8 @@ impl InteractiveSessionManager {
     /// * `skip_permissions` - Whether to skip permission prompts in claude CLI
     /// * `agent_type` - Type of agent (Claude, Shell, etc.)
     /// * `model` - Claude model to use (only for Claude agent)
+    /// * `worktree_owner` - whether the worktree was created for this session,
+    ///   which is what a failed launch is allowed to delete
     ///
     /// # Returns
     /// * `Result<InteractiveSession>` - The created session or an error
@@ -1245,6 +1350,7 @@ impl InteractiveSessionManager {
         model: Option<String>,
         headroom_enabled: bool,
         rtk_enabled: bool,
+        worktree_owner: WorktreeOwner,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?})",
@@ -1270,6 +1376,18 @@ impl InteractiveSessionManager {
             "Using existing worktree at: {}",
             existing_worktree_path.display()
         );
+
+        // What a failure here may undo, decided by the caller rather than
+        // guessed from the directory: the remote-repo flow clones into a path
+        // derived from THIS session id, so that tree is the session's and must
+        // go; a tree the caller already had must not.
+        let rollback_worktree = match worktree_owner {
+            WorktreeOwner::ThisSession => WorktreeRollback::CreatedTree(&self.worktree_manager),
+            // Still not nothing: the `by-session` link below is this launch's
+            // own, and pointing it at a session that never registered is what
+            // makes a later orphan sweep resolve through it.
+            WorktreeOwner::Caller => WorktreeRollback::SessionLinkOnly(&self.worktree_manager),
+        };
 
         // Create session-based symlink for easy lookup
         let session_path =
@@ -1307,12 +1425,7 @@ impl InteractiveSessionManager {
             {
                 Ok(remote) => remote,
                 Err(error) => {
-                    rollback_failed_interactive_launch(
-                        session_id,
-                        None,
-                        Some(&self.worktree_manager),
-                    )
-                    .await;
+                    rollback_failed_interactive_launch(session_id, None, rollback_worktree).await;
                     return Err(error
                         .context("Codex failed to start; AINB ran failed-session cleanup")
                         .into());
@@ -1334,7 +1447,7 @@ impl InteractiveSessionManager {
             rollback_failed_interactive_launch(
                 session_id,
                 Some(&tmux_session_name),
-                Some(&self.worktree_manager),
+                rollback_worktree,
             )
             .await;
             return Err(error);
@@ -1368,7 +1481,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        rollback_worktree,
                     )
                     .await;
                     return Err(error);
@@ -1395,7 +1508,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        rollback_worktree,
                     )
                     .await;
                     return Err(error
@@ -2345,6 +2458,23 @@ impl InteractiveSessionManager {
         let mut cmd_parts = vec![provider.command().to_string()];
         if agent_type == SessionAgentType::Codex {
             cmd_parts.extend([
+                // Ainb causes this stall itself: Codex pins each hook by
+                // POSITION and `ainb notifyd install` rewrites
+                // `~/.codex/hooks.json`, so our own installer invalidates those
+                // hashes and parks the launch on a blocking "Hooks need review"
+                // modal. It belongs to EVERY Codex launch, not just the ones
+                // holding a shared remote thread: the arm without one is what a
+                // session runs whenever the daemon is unreachable, and a modal
+                // stalls the pane instead of failing it, so the launch reports
+                // success over a session that never started.
+                //
+                // It goes FIRST, ahead of the config override, so the override
+                // stays adjacent to the `resume --last` below. Both are global
+                // flags and Codex does not care which order they arrive in, but
+                // `resume_command_tmux::codex_resume_launches_resume_last` pins
+                // that adjacency as its proof that global overrides precede the
+                // subcommand, and there is no reason to weaken it.
+                "--dangerously-bypass-hook-trust".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
             ]);
@@ -2509,6 +2639,15 @@ impl InteractiveSessionManager {
         // Build the CLI command with appropriate flags. Pure assembly lives in
         // `build_cli_cmd_parts` (unit-tested); `resume_transcript.is_some()` is
         // the "has prior history" guard for Claude's `--continue`.
+        // Codex asks "Do you trust the contents of this directory?" for any
+        // directory it has not seen, whichever way it is launched, and the modal
+        // blocks before a thread exists. Both arms below need it: the arm
+        // without a shared thread is what every session runs while the daemon is
+        // unreachable, and it stalled exactly like the remote one used to.
+        if agent_type == SessionAgentType::Codex {
+            trust_codex_project_dir(working_dir);
+        }
+
         let cmd_parts = if let Some(remote) = codex_remote {
             if agent_type != SessionAgentType::Codex {
                 return Err(InteractiveSessionError::Other(anyhow::anyhow!(
@@ -2531,10 +2670,6 @@ impl InteractiveSessionManager {
             // claim deadline reports "Codex failed to start". Ainb wrote those
             // hooks; re-confirming them from a detached tmux pane is not a
             // decision the user can act on.
-            // Trust the worktree before launching: `-C` into a directory Codex
-            // has not seen shows a blocking modal, and under `--remote` no flag
-            // suppresses it.
-            trust_codex_project_dir(working_dir);
             codex_remote_command(
                 &provider,
                 remote,
@@ -3293,8 +3428,12 @@ trust_level = "trusted"
         }
         store.save().expect("seed store");
 
-        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), Some(&worktree_manager))
-            .await;
+        rollback_failed_interactive_launch(
+            session_id,
+            Some(&failed_tmux),
+            WorktreeRollback::CreatedTree(&worktree_manager),
+        )
+        .await;
 
         assert!(!worktree.exists());
         assert!(std::fs::symlink_metadata(&session_link).is_err());
@@ -3323,7 +3462,12 @@ trust_level = "trusted"
                 .success()
         );
 
-        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), None).await;
+        rollback_failed_interactive_launch(
+            session_id,
+            Some(&failed_tmux),
+            WorktreeRollback::Nothing,
+        )
+        .await;
         assert!(
             std::process::Command::new("tmux")
                 .args(["has-session", "-t", &format!("={prefix_tmux}")])
@@ -3335,6 +3479,136 @@ trust_level = "trusted"
         let store = SessionStore::load();
         assert!(store.find_by_tmux_name(&failed_tmux).is_none());
         assert!(store.find_by_tmux_name(&sibling_tmux).is_some());
+    }
+
+    /// A failed launch must not delete a worktree the CALLER owns, and must
+    /// still take back the index entry it wrote over it.
+    ///
+    /// `create_session_with_worktree` writes the `by-session/<uuid>` symlink
+    /// that `remove_worktree` resolves, so with the wrong provenance the
+    /// rollback has a path straight into the caller's directory and takes it,
+    /// over failures as ordinary as an unreachable daemon. Leaving the link
+    /// instead only defers the delete: an orphan sweep resolves through it.
+    ///
+    /// Headroom forces the failure because it is the one that returns before
+    /// any daemon, tmux or network work; the assertion is about what the
+    /// rollback deletes, not about how the launch failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failed_launch_keeps_the_worktree_it_was_handed() {
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("temp home");
+        let prior_home = std::env::var_os("AINB_HOME");
+        std::env::set_var("AINB_HOME", home.path());
+
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => std::env::set_var("AINB_HOME", home),
+                    None => std::env::remove_var("AINB_HOME"),
+                }
+            }
+        }
+        let _restore_home = RestoreHome(prior_home);
+
+        let handed_in = home.path().join("caller-checkout");
+        std::fs::create_dir_all(&handed_in).expect("create handed-in worktree");
+        let unrecoverable = handed_in.join("work.txt");
+        std::fs::write(&unrecoverable, "the only copy").expect("seed the handed-in worktree");
+
+        let session_id = Uuid::new_v4();
+        let mut manager = InteractiveSessionManager::new().expect("manager");
+        let manager_base_dir = manager.worktree_manager.base_dir().to_path_buf();
+        let error = manager
+            .create_session_with_worktree(
+                session_id,
+                "caller".to_string(),
+                handed_in.clone(),
+                handed_in.clone(),
+                "main".to_string(),
+                false,
+                SessionAgentType::Codex,
+                None,
+                true,
+                false,
+                WorktreeOwner::Caller,
+            )
+            .await
+            .expect_err("Headroom with shared remote control must fail the launch");
+
+        assert!(
+            unrecoverable.exists(),
+            "the rollback deleted a worktree the caller owns: {error}"
+        );
+        let link = manager_base_dir.join("by-session").join(session_id.to_string());
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the rollback left its own index entry pointing at a session that never registered"
+        );
+    }
+
+    /// The other half of the same decision: a tree created FOR this session is
+    /// the launch's own, so a failure must take it away again.
+    ///
+    /// This is what the remote-repo flow does. `prepare_remote_worktree` clones
+    /// into a path derived from the session id and then hands the path over, so
+    /// treating that tree as the caller's would leak the directory, leave its
+    /// cache branch checked out (pushing the next attempt onto a suffixed
+    /// branch) and leave an index entry behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failed_launch_removes_the_worktree_made_for_this_session() {
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("temp home");
+        let prior_home = std::env::var_os("AINB_HOME");
+        std::env::set_var("AINB_HOME", home.path());
+
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => std::env::set_var("AINB_HOME", home),
+                    None => std::env::remove_var("AINB_HOME"),
+                }
+            }
+        }
+        let _restore_home = RestoreHome(prior_home);
+
+        let session_id = Uuid::new_v4();
+        let mut manager = InteractiveSessionManager::new().expect("manager");
+        let worktree = manager.worktree_manager.base_dir().join("by-name").join("remote-clone");
+        std::fs::create_dir_all(&worktree).expect("create the session's worktree");
+
+        let error = manager
+            .create_session_with_worktree(
+                session_id,
+                "remote".to_string(),
+                worktree.clone(),
+                worktree.clone(),
+                "main".to_string(),
+                false,
+                SessionAgentType::Codex,
+                None,
+                true,
+                false,
+                WorktreeOwner::ThisSession,
+            )
+            .await
+            .expect_err("Headroom with shared remote control must fail the launch");
+
+        assert!(
+            !worktree.exists(),
+            "a tree created for this session leaked when the launch failed: {error}"
+        );
     }
 
     #[test]
@@ -4431,6 +4705,7 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
                 "resume",
@@ -4454,6 +4729,7 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
                 "resume",
@@ -4465,6 +4741,10 @@ trust_level = "trusted"
         );
     }
 
+    /// Every Codex launch carries the two modal suppressors, with or without a
+    /// shared remote thread. The arm without one is what runs whenever the
+    /// daemon is unreachable, and a modal stalls the pane rather than failing
+    /// it, so a launch missing these reports success over a dead session.
     #[test]
     fn codex_fresh_launch_has_no_resume_subcommand() {
         let p = parts(
@@ -4479,6 +4759,7 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -4641,13 +4922,7 @@ trust_level = "trusted"
         let remote = super::ensure_codex_remote_thread_with(
             || DaemonAutostart::SkippedEphemeralHome,
             || "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string(),
-            ainb_hangar_proto::fleet::CodexSessionEnsureParams {
-                session_id: uuid::Uuid::new_v4().to_string(),
-                cwd: "/worktree".to_string(),
-                model: None,
-                thread_id: None,
-                skip_permissions: false,
-            },
+            must_not_dial,
         )
         .await
         .expect("an ephemeral home must not fail the launch");
@@ -4656,6 +4931,89 @@ trust_level = "trusted"
             remote.is_none(),
             "the session must launch with no shared remote thread, exactly as one with the \
              feature disabled does"
+        );
+    }
+
+    /// The exchange an ephemeral home must never reach.
+    async fn must_not_dial() -> Result<
+        ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+        crate::fleet::bridge::daemon::DaemonError,
+    > {
+        panic!("an ephemeral home must return before the daemon is dialled")
+    }
+
+    /// A daemon that is not there costs the session its shared thread and
+    /// nothing else, so the launch continues.
+    ///
+    /// This is the failure that hit a real machine: the daemon was stopped, the
+    /// dial was refused, and the connect error became "Codex remote control
+    /// unavailable", whose cleanup deleted the worktree. The degrade for an
+    /// ephemeral home could never fire here, because `~/.agents-in-a-box` is a
+    /// perfectly durable home; the only thing missing was a listener.
+    #[tokio::test]
+    async fn an_unreachable_daemon_launches_codex_without_a_remote_thread() {
+        use crate::cli::hangar::DaemonAutostart;
+        use crate::fleet::bridge::daemon::DaemonError;
+
+        for error in [
+            DaemonError::Connect {
+                path: "/Users/x/.agents-in-a-box/hangar.sock".to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "Connection refused (os error 61)",
+                ),
+            },
+            DaemonError::NoHome,
+            DaemonError::Token("No such file or directory (os error 2)".to_string()),
+        ] {
+            let warning = super::unreachable_daemon_warning(&error);
+            let remote = super::ensure_codex_remote_thread_with(
+                // A durable home, so the ephemeral degrade cannot be what
+                // rescues this launch.
+                || DaemonAutostart::Failed,
+                || panic!("a durable home must not be reported as ephemeral"),
+                || async { Err(error) },
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("{warning} must not fail the launch: {failure:#}"));
+
+            assert!(
+                remote.is_none(),
+                "the session must launch with no shared remote thread: {warning}"
+            );
+            assert!(
+                warning.contains("shared remote control"),
+                "the warning must name what the session loses: {warning}"
+            );
+        }
+    }
+
+    /// A daemon that ANSWERS and refuses is a real failure, not a degrade.
+    ///
+    /// The guard on the guard: widening the degrade to every daemon error would
+    /// launch a session whose shared thread silently never appears, which is
+    /// the bug the connect degrade is not allowed to become.
+    #[tokio::test]
+    async fn a_daemon_that_answers_with_an_error_still_fails_the_launch() {
+        use crate::cli::hangar::DaemonAutostart;
+        use crate::fleet::bridge::daemon::DaemonError;
+
+        let failure = super::ensure_codex_remote_thread_with(
+            || DaemonAutostart::Started,
+            || panic!("a durable home must not be reported as ephemeral"),
+            || async {
+                Err(DaemonError::Rpc {
+                    code: -32001,
+                    message: "cannot generate app-server schema".to_string(),
+                })
+            },
+        )
+        .await
+        .expect_err("a daemon that answers and refuses must fail the launch");
+
+        assert!(
+            failure.to_string().contains("Codex unavailable"),
+            "the user must get the short next action: {failure:#}"
         );
     }
 }
