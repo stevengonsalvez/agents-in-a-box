@@ -8282,10 +8282,19 @@ mod tests {
         }
         keys.sort_unstable();
         keys.dedup_by_key(|(ch, _)| *ch);
-        assert!(
-            keys.len() >= 10,
-            "the boards key advertisement went missing, found only {keys:?}"
-        );
+        // Every ASCII key the deleted sixteen-pair band advertised must still be
+        // advertised SOMEWHERE. A count floor does not prove that: dropping a
+        // hint and adding another keeps the number and loses the key, which is
+        // how `e` (edit card) shipped undiscoverable in the first place.
+        for key in [
+            'a', 'c', 'd', 'e', 'm', 'n', 'r', 's', 't', 'w', 'x', 'R', 'X',
+        ] {
+            assert!(
+                keys.iter().any(|(ch, _)| *ch == key),
+                "`{key}` was advertised by the old Boards hint band and is now \
+                 advertised nowhere; found {keys:?}"
+            );
+        }
         keys
     }
 

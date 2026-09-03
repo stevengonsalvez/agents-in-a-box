@@ -167,11 +167,12 @@ pub fn render_footer(buf: &mut WireBuffer, area_w: u16, area_h: u16, active: &Sc
 
 /// The contextual + global key hints for `active`, in render order.
 ///
-/// Grammar (crisp B2 §2.6): at most FIVE contextual hints, then exactly the three
-/// globals. One `key:verb` pair per hint, the verb a single lowercase word, and no
-/// two hints on a screen sharing a verb. Everything past five goes to the context
-/// menu and `?` — never to a second hint bar (the Boards screen carried 24 hints
-/// across two bars, which is how the audit found this).
+/// Grammar (crisp B2 §2.6): at most FIVE contextual hints, then the globals —
+/// `^P:search ?:help q:quit`, or the last two inside a modal, where `^P` would
+/// type a `p` into the query. One `key:verb` pair per hint, the verb a single
+/// lowercase word, and no two hints on a screen sharing a verb. Everything past
+/// five goes to `?` — never to a second hint bar (the Boards screen carried 24
+/// hints across two bars, which is how the audit found this).
 pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
     let mut hints: Vec<(&str, &str)> = match active {
         // Nine to five: `y` activity, `s` sub-issue, `d` done and `f` facets keep
@@ -186,9 +187,9 @@ pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)>
                 ("x", "delete"),
             ]
         }
-        // Five to four: `x` delete moves to `?`. `X` cancel and `x` delete sat
-        // next to each other on one bar, one keystroke apart, one of them
-        // irreversible.
+        // Five to four: `x` delete moves to the `task` row of `HELP_LINES`.
+        // `X` cancel and `x` delete sat next to each other on one bar, one
+        // keystroke apart, one of them irreversible.
         Screen::TaskDetail(_) => vec![
             ("R", "retry"),
             ("X", "cancel"),
