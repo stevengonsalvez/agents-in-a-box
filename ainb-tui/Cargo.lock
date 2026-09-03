@@ -213,6 +213,7 @@ dependencies = [
  "agent-client-protocol",
  "ainb-hangar-core",
  "ainb-hangar-proto",
+ "ainb-hangar-sandbox",
  "ainb-hangar-store",
  "rand 0.8.7",
  "serde_json",

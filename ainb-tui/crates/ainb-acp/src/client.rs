@@ -680,7 +680,28 @@ impl Drop for AdapterProcess {
 }
 
 fn spawn_child(config: &AdapterConfig) -> Result<Child, AcpError> {
-    let mut command = Command::new(&config.command);
+    let mut command = match config.sandbox.as_ref() {
+        // The confinement travels WITH the command (an inline Seatbelt profile
+        // on macOS, a `pre_exec` Landlock closure on Linux), so the tokio
+        // conversion preserves it and there is no guard to keep alive. An
+        // unsupported platform degrades to the bare program rather than
+        // refusing to spawn, exactly as the hangar runner's own wrapper does.
+        Some(policy) => {
+            let sandboxed = ainb_hangar_sandbox::sandboxed_command(&config.command, policy)
+                .map_err(|source| AcpError::Spawn {
+                    adapter: config.name.clone(),
+                    source: std::io::Error::other(format!("sandbox setup: {source}")),
+                })?;
+            if sandboxed.enforcement() == ainb_hangar_sandbox::Enforcement::None {
+                tracing::warn!(
+                    adapter = %config.name,
+                    "OS sandbox unavailable on this platform; the adapter runs unconfined"
+                );
+            }
+            Command::from(sandboxed.into_inner())
+        }
+        None => Command::new(&config.command),
+    };
     command
         .args(&config.args)
         // I13: the child starts from NOTHING and gets exactly the allowlist.

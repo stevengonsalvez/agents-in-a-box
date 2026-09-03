@@ -5949,6 +5949,21 @@ async fn handle_fleet_acp_session_create(
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
+    // `task:<id>` belongs to the task executor (`crate::acp_task`). A chat
+    // session minted there would make that task's later run fail `ScopeHeld`
+    // (terminal, `SpawnError`, no retry) and would make the pool stamp this
+    // session's approvals with the task's workspace. Refused at the door, which
+    // is the only untrusted caller of `acp_session::ensure`.
+    if params
+        .scope_key
+        .as_deref()
+        .is_some_and(|scope| scope.trim_start().starts_with(crate::acp_task::TASK_SCOPE_PREFIX))
+    {
+        return Err(invalid_params(&format!(
+            "scope_key {:?} is reserved for task runs",
+            crate::acp_task::TASK_SCOPE_PREFIX
+        )));
+    }
     let row = crate::acp_session::ensure(
         pool,
         events,

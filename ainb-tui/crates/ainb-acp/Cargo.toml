@@ -26,6 +26,11 @@ ainb-hangar-core = { path = "../ainb-hangar-core" }
 # Home of the re-primed untrusted-text envelope (`reprime`), shared with the
 # copilot's MCP tool server. Pure data crate, so it costs this crate nothing.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# The OS FS confinement a PER-TASK adapter child is spawned under. Only the
+# policy crosses this boundary: Landlock lives in a `pre_exec` closure on the
+# command, which no `(command, args)` recipe can carry, so the command has to be
+# built at spawn. Leaf crate (thiserror + landlock), so it costs this one little.
+ainb-hangar-sandbox = { path = "../ainb-hangar-sandbox" }
 tokio = { workspace = true }
 # `compat` bridges tokio's child stdio to the futures AsyncRead/AsyncWrite the
 # upstream `ByteStreams` transport wants.

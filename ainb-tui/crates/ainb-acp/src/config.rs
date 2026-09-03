@@ -22,7 +22,7 @@ pub const CODEX_ADAPTER: &str = "codex-acp";
 pub const BASE_ENV_ALLOWLIST: &[&str] = &["PATH", "HOME"];
 
 /// One adapter's static definition.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdapterConfig {
     /// Registry token, also the wire value of `fleet_acp_session.provider`.
     pub name: String,
@@ -54,6 +54,46 @@ pub struct AdapterConfig {
     /// Empty by default: part 1 ships no configured model or reasoning value,
     /// only the mechanism that keeps one from being silently lost on resume.
     pub config_options: Vec<(String, String)>,
+    /// OS-level FS confinement for this adapter's child, or `None` to spawn it
+    /// unconfined (the daemon-wide adapters, which serve every chat tenant).
+    ///
+    /// A POLICY rather than a wrapped command, because the two platforms
+    /// express confinement differently and only one of them is expressible as
+    /// `(command, args)`: macOS swaps the program for `/usr/bin/sandbox-exec`,
+    /// but Linux installs a Landlock ruleset in a `pre_exec` closure that lives
+    /// ON the command object. Carrying the policy and building the command at
+    /// spawn ([`crate::client`]) is the one shape that confines both.
+    ///
+    /// Set by the per-task adapter a hangar task registers, whose child is one
+    /// agent working in one worktree and so has a confinable blast radius.
+    pub sandbox: Option<ainb_hangar_sandbox::SandboxPolicy>,
+}
+
+/// Hand-written so `extra_env` VALUES never render.
+///
+/// A hangar task copies its agent's per-agent environment in here, and
+/// `AgentEnv` masks its values in `Debug` precisely because they are the one
+/// permitted plaintext secret escape. A derived `Debug` on this struct would
+/// undo that for the whole life of the run: the config is held in the pool's
+/// adapter registry, and one `{:?}` added later (a `tracing::debug!`, an
+/// `anyhow` context, a panic message) would print every value.
+impl std::fmt::Debug for AdapterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdapterConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("permission_mode", &self.permission_mode)
+            .field("env_passthrough", &self.env_passthrough)
+            // Names only. The names are diagnostic; the values are the secret.
+            .field(
+                "extra_env",
+                &self.extra_env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
+            .field("config_options", &self.config_options)
+            .field("sandbox", &self.sandbox)
+            .finish()
+    }
 }
 
 impl AdapterConfig {
@@ -69,6 +109,7 @@ impl AdapterConfig {
             env_passthrough: Vec::new(),
             extra_env: Vec::new(),
             config_options: Vec::new(),
+            sandbox: None,
         }
     }
 
@@ -97,6 +138,13 @@ impl AdapterConfig {
     #[must_use]
     pub fn config_options(mut self, options: Vec<(String, String)>) -> Self {
         self.config_options = options;
+        self
+    }
+
+    /// Confine this adapter's child to `policy` (see [`AdapterConfig::sandbox`]).
+    #[must_use]
+    pub fn sandbox(mut self, policy: ainb_hangar_sandbox::SandboxPolicy) -> Self {
+        self.sandbox = Some(policy);
         self
     }
 
@@ -201,6 +249,23 @@ mod tests {
             .extra_env(vec![("PATH".to_string(), "/opt/pinned".to_string())]);
         let env = allowlisted_env(&config, &fixed_env(&[("PATH", "/usr/bin")]));
         assert_eq!(env, vec![("PATH".to_string(), "/opt/pinned".to_string())]);
+    }
+
+    #[test]
+    fn debug_prints_extra_env_names_but_never_their_values() {
+        let config = AdapterConfig::new(CLAUDE_ADAPTER, "default").extra_env(vec![(
+            "SECRET_TOKEN".to_string(),
+            "sk-live-DEADBEEF".to_string(),
+        )]);
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("SECRET_TOKEN"),
+            "the name is diagnostic: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-live-DEADBEEF"),
+            "a per-agent secret must not render: {rendered}"
+        );
     }
 
     #[test]

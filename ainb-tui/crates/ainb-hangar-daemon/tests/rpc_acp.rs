@@ -572,6 +572,31 @@ async fn acp_session_create_is_gated_idempotent_and_transactional() {
         "and left the incumbent untouched"
     );
 
+    // A5: `task:` belongs to the task executor. A chat session squatting a real
+    // task's scope would make that task's later run fail `ScopeHeld` - terminal,
+    // no retry - and would make the pool stamp this session's approvals with the
+    // task's workspace.
+    let squat = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            serde_json::json!({
+                "provider": ainb_acp::config::CLAUDE_ADAPTER,
+                "cwd": harness.dir.to_string_lossy(),
+                "scope_key": "task:01JABCDEF",
+            }),
+        )
+        .await;
+    assert_eq!(
+        squat["error"]["code"], -32602,
+        "the task scope namespace is reserved: {squat}"
+    );
+    let squatted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fleet_acp_session WHERE scope_key LIKE 'task:%'")
+            .fetch_one(harness.store.pool())
+            .await
+            .expect("count task scopes");
+    assert_eq!(squatted, 0, "and nothing was written under it");
+
     // BOTH rows, under ONE key, from ONE transaction.
     let (provider, cwd, state): (String, String, String) =
         sqlx::query_as("SELECT provider, cwd, state FROM fleet_acp_session WHERE session_key = ?")

@@ -97,26 +97,115 @@ use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
 
+/// The enumerated delivery-detail vocabulary, as a TYPE.
+///
+/// The `DELIVERY_*` constants below are its wire spellings and are derived from
+/// it, so the two cannot drift. It exists as an enum for one reason: every
+/// reader of this taxonomy matches on it exhaustively, so adding a token here
+/// without deciding what it means for a task run is a COMPILE ERROR rather than
+/// a silent fall-through. The reader that matters is
+/// [`crate::acp_task::outcome_for`], which decides whether a task finalizes
+/// `done`, `failed` or `cancelled` and whether it is retried; the previous
+/// hand-written token list let a new token reach it as contract drift, and its
+/// own regression test could not see the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryToken {
+    /// See [`DELIVERY_QUEUE_FULL`].
+    QueueFull,
+    /// See [`DELIVERY_BREAKER_OPEN`].
+    BreakerOpen,
+    /// See [`DELIVERY_ADAPTER_EXIT`].
+    AdapterExit,
+    /// See [`DELIVERY_OPERATOR_STOP`].
+    OperatorStop,
+    /// See [`DELIVERY_TURN_DEADLINE`].
+    TurnDeadline,
+    /// See [`DELIVERY_DAEMON_RESTART`].
+    DaemonRestart,
+    /// See [`DELIVERY_SPAWN_FAILED`].
+    SpawnFailed,
+    /// See [`DELIVERY_TURN_FAILED`].
+    TurnFailed,
+    /// See [`DELIVERY_TURN_UNRECORDED`].
+    TurnUnrecorded,
+    /// See [`DELIVERY_SESSION_GONE`].
+    SessionGone,
+    /// See [`DELIVERY_PROVIDER_AT_CAPACITY`].
+    ProviderAtCapacity,
+    /// See [`DELIVERY_MODE_UNPROVEN`].
+    ModeUnproven,
+}
+
+impl DeliveryToken {
+    /// Every variant, so a test enumerating the vocabulary reads it from here
+    /// instead of a hand-written list that falls behind in silence.
+    ///
+    /// ponytail: a variant added to the enum but not to this array degrades to
+    /// "unparsed", which fails closed as contract drift; the exhaustive
+    /// [`Self::as_str`] and the exhaustive match in `acp_task` are what force
+    /// the author to decide its meaning.
+    pub const ALL: &'static [Self] = &[
+        Self::QueueFull,
+        Self::BreakerOpen,
+        Self::AdapterExit,
+        Self::OperatorStop,
+        Self::TurnDeadline,
+        Self::DaemonRestart,
+        Self::SpawnFailed,
+        Self::TurnFailed,
+        Self::TurnUnrecorded,
+        Self::SessionGone,
+        Self::ProviderAtCapacity,
+        Self::ModeUnproven,
+    ];
+
+    /// The wire spelling persisted in `fleet_message_delivery.detail`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+            Self::BreakerOpen => "breaker_open",
+            Self::AdapterExit => "adapter_exit",
+            Self::OperatorStop => "operator_stop",
+            Self::TurnDeadline => "turn_deadline",
+            Self::DaemonRestart => "daemon_restart",
+            Self::SpawnFailed => "spawn_failed",
+            Self::TurnFailed => "turn_failed",
+            Self::TurnUnrecorded => "turn_unrecorded",
+            Self::SessionGone => "session_gone",
+            Self::ProviderAtCapacity => "provider_at_capacity",
+            Self::ModeUnproven => "mode_unproven",
+        }
+    }
+
+    /// The token `raw` names, or `None` when it is not one of ours (free error
+    /// text, a `resume=`/`stop=` pair, or a spelling this build does not know).
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|token| token.as_str() == raw)
+    }
+}
+
 /// The per-scope FIFO was full; the prompt was never accepted.
-pub const DELIVERY_QUEUE_FULL: &str = "queue_full";
+pub const DELIVERY_QUEUE_FULL: &str = DeliveryToken::QueueFull.as_str();
 /// The provider's breaker is open; every scope routed there fails fast.
-pub const DELIVERY_BREAKER_OPEN: &str = "breaker_open";
+pub const DELIVERY_BREAKER_OPEN: &str = DeliveryToken::BreakerOpen.as_str();
 /// The adapter process went away (crash or kill).
-pub const DELIVERY_ADAPTER_EXIT: &str = "adapter_exit";
+pub const DELIVERY_ADAPTER_EXIT: &str = DeliveryToken::AdapterExit.as_str();
 /// An operator stopped the session while the adapter was alive.
 ///
 /// DISTINCT from [`DELIVERY_ADAPTER_EXIT`] on purpose: the runbook's first
 /// question is "did the adapter exit", and answering it `yes` for a warm
 /// process would inflate every crash count by every operator interrupt.
-pub const DELIVERY_OPERATOR_STOP: &str = "operator_stop";
+pub const DELIVERY_OPERATOR_STOP: &str = DeliveryToken::OperatorStop.as_str();
 /// The turn outlived its wall-clock deadline and was cancelled.
-pub const DELIVERY_TURN_DEADLINE: &str = "turn_deadline";
+pub const DELIVERY_TURN_DEADLINE: &str = DeliveryToken::TurnDeadline.as_str();
 /// Convergence ran at boot: the daemon that owned this turn is gone.
-pub const DELIVERY_DAEMON_RESTART: &str = "daemon_restart";
+pub const DELIVERY_DAEMON_RESTART: &str = DeliveryToken::DaemonRestart.as_str();
 /// The adapter could not be started at all.
-pub const DELIVERY_SPAWN_FAILED: &str = "spawn_failed";
+pub const DELIVERY_SPAWN_FAILED: &str = DeliveryToken::SpawnFailed.as_str();
 /// The turn ended with an adapter-reported failure (refusal, cancel).
-pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
+pub const DELIVERY_TURN_FAILED: &str = DeliveryToken::TurnFailed.as_str();
 /// The turn could not be RECORDED, so it was never issued (I16).
 ///
 /// Both convergence paths key off the persisted `open_turn_id`: the deadline
@@ -125,20 +214,20 @@ pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
 /// failed would be invisible to both, so a hung adapter would never be swept
 /// and a dying one would resolve the leg with no marker. Nothing reached the
 /// adapter, so FAILED is honest and an operator can resend.
-pub const DELIVERY_TURN_UNRECORDED: &str = "turn_unrecorded";
+pub const DELIVERY_TURN_UNRECORDED: &str = DeliveryToken::TurnUnrecorded.as_str();
 /// The recipient exists but its session row is gone or dead.
-pub const DELIVERY_SESSION_GONE: &str = "session_gone";
+pub const DELIVERY_SESSION_GONE: &str = DeliveryToken::SessionGone.as_str();
 /// The provider's process is at its session cap and every tenant is busy.
 ///
 /// Terminal, never requeued: the cap is a standing ceiling, not a transient
 /// fault, and a retry that ignored it would put the process one tenant over the
 /// maximum an operator configured. An operator resends once a turn ends.
-pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
+pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = DeliveryToken::ProviderAtCapacity.as_str();
 /// The pinned permission mode could not be proven for the session (I13).
 ///
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
-pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
+pub const DELIVERY_MODE_UNPROVEN: &str = DeliveryToken::ModeUnproven.as_str();
 /// Prefix of the token a leg carries when the turn stopped for a reason worth
 /// naming: `stop=<reason>`, in the ACP wire spelling ([`stop_reason_token`]),
 /// so `stop=max_tokens`, `stop=max_turn_requests`, `stop=refusal`.
@@ -2673,7 +2762,15 @@ impl SessionActor {
             id: attention_id.clone(),
             session_id: self.session_key.clone(),
             cwd: self.cwd.clone(),
-            workspace_id: None,
+            // A TASK's session knows its workspace through its scope, and an
+            // unscoped approval misses every workspace-filtered inbox, which
+            // is every operator surface an ACP task's permission has to reach.
+            // A chat session's scope names no workspace, so it stays `None`.
+            workspace_id: crate::acp_task::workspace_for_scope(
+                self.pool.store.pool(),
+                &self.scope_key,
+            )
+            .await,
             kind: ainb_hangar_store::repo::attention::AttentionKind::Approval,
             payload: payload.to_string(),
             degraded: false,
