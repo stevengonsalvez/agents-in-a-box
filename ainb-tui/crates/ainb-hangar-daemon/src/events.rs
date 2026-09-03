@@ -84,6 +84,13 @@ pub struct EventBroker {
     /// polls afterwards and a dropped `TaskFinished` pins a run banner at
     /// "running" forever. Partitioned, a burst can only evict transcript lines,
     /// which the `board_card_timeline` re-read backfills.
+    ///
+    /// ponytail: this confines the RING, not the connection's outbound queue.
+    /// Both forwarders clone the same 64-deep `out_tx` and await on it, so a
+    /// transcript flood can still head-of-line-block the lifecycle forwarder and
+    /// stop it draining `tx`. Closing that needs a per-stream outbound queue or a
+    /// lossy transcript send, which is A6-scale work; the ring split is what makes
+    /// the common case (a slow reader, not a stopped one) safe.
     task_stream_tx: broadcast::Sender<ScopedEvent>,
     /// The FLEET-WIDE attention channel (spec P2). Attention events are NOT
     /// workspace-partitioned — the control centre answers for the whole host, and
@@ -417,7 +424,7 @@ pub fn encode_notification_frame(method: &str, params: &serde_json::Value) -> Ve
 mod tests {
     use super::*;
     use ainb_hangar_core::ids::TaskId;
-    use ainb_hangar_proto::events::TaskResult;
+    use ainb_hangar_proto::events::{MessageKind, TaskResult};
 
     fn finished(task: &str) -> HangarEvent {
         HangarEvent::TaskFinished {
@@ -559,6 +566,57 @@ mod tests {
             outbox_rx.recv().await.unwrap().event,
             HangarEvent::TaskFinished { .. }
         ));
+    }
+
+    /// `emit_live` must land on the TRANSCRIPT stream and NOT on the workspace
+    /// broadcast. Reverting it to `self.tx.send(...)` leaves every other test in
+    /// the suite green (both forwarders feed one socket, so the tripwire cannot
+    /// tell, and the `event_log` assertion only catches a revert to `emit`), which
+    /// would silently restore the eviction the split exists to prevent.
+    ///
+    /// `try_recv` rather than `recv`, deliberately: both sends complete before the
+    /// first check, so an empty channel is a decided answer, not a slow one. A
+    /// revert fails on the first line instead of hanging the suite.
+    #[test]
+    fn emit_live_lands_on_the_transcript_stream_and_not_the_workspace_one() {
+        let (broker, mut outbox_rx) = EventBroker::with_outbox();
+        let mut transcript = broker.subscribe_task_stream();
+        let mut workspace = broker.subscribe();
+
+        broker.sink().emit_live(
+            "ws-a",
+            HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1".to_string()).unwrap(),
+                kind: MessageKind::Agent,
+                body: "a streamed line".into(),
+            },
+        );
+        // The sentinel proves the other two channels are EMPTY of the line rather
+        // than merely behind it.
+        broker.sink().emit("ws-a", finished("t1"));
+
+        let got = transcript.try_recv().expect("the transcript stream carries the line");
+        assert_eq!(got.workspace_id, "ws-a");
+        assert!(matches!(got.event, HangarEvent::TaskMessage { .. }));
+        assert!(
+            transcript.try_recv().is_err(),
+            "the workspace sentinel must NOT ride the transcript stream"
+        );
+
+        assert!(
+            matches!(
+                workspace.try_recv().unwrap().event,
+                HangarEvent::TaskFinished { .. }
+            ),
+            "the workspace stream's first item is the sentinel, not the transcript line"
+        );
+        assert!(
+            matches!(
+                outbox_rx.try_recv().unwrap().event,
+                HangarEvent::TaskFinished { .. }
+            ),
+            "the durable outbox never carries a transcript line"
+        );
     }
 
     /// A wakeup with no live subscriber is dropped, never an error: the
