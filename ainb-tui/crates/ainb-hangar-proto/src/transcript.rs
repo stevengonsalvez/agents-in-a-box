@@ -46,10 +46,16 @@ const SUMMARY_MAX: usize = 84;
 /// is free to emit a megabyte of prose or a base64 blob in one block, and since
 /// A2 every classified body is also a live `TaskMessage` held in a bounded
 /// broadcast ring and framed to every subscriber, so an uncapped body is an
-/// unbounded allocation on the hot path. Applied in [`push_lines`], through which
-/// BOTH the live producer and the durable re-read classify, so the two stay
-/// byte-identical. No real transcript line comes close.
+/// unbounded allocation on the hot path. No real transcript line comes close.
 const BODY_MAX: usize = 8192;
+
+/// Ceiling on the entries ONE transcript line may classify into.
+///
+/// A single JSON line carrying a multi-line text block yields one entry per
+/// line, so the per-body cap above bounds each entry without bounding their
+/// count. Same backstop reasoning: a megabyte of newlines is a megabyte of
+/// `TaskMessage`s.
+const ENTRIES_PER_LINE_MAX: usize = 512;
 
 /// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
 /// issues a handful per message; this is a leak backstop, not a working limit.
@@ -118,6 +124,17 @@ impl StreamJsonClassifier {
     pub fn classify_value(&mut self, line: &Value) -> Vec<(MessageKind, String)> {
         let mut out = Vec::new();
         self.fold(line, &mut out);
+        // The ONE place every entry passes through, so the backstops live here
+        // rather than at the six `out.push` sites: a tool `name` and a `subtype`
+        // are provider strings too, and capping only the prose in `push_lines`
+        // left those uncapped. Both live producer and durable re-read classify
+        // through this function, so the two stay byte-identical.
+        out.truncate(ENTRIES_PER_LINE_MAX);
+        for (_, body) in &mut out {
+            if body.chars().count() > BODY_MAX {
+                *body = truncate_chars(body, BODY_MAX);
+            }
+        }
         out
     }
 
@@ -325,7 +342,7 @@ fn push_lines(out: &mut Vec<(MessageKind, String)>, kind: MessageKind, text: &st
         if line.trim().is_empty() {
             continue;
         }
-        out.push((kind, truncate_chars(line, BODY_MAX)));
+        out.push((kind, line.to_string()));
     }
 }
 
@@ -434,6 +451,35 @@ fn short_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A tool NAME is a provider string too, and it does not go through
+    /// `push_lines`. Capping only the prose left this one uncapped.
+    #[test]
+    fn a_huge_tool_name_is_capped_too() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{
+                "type": "tool_use", "id": "t1", "name": "N".repeat(50_000), "input": {},
+            }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out[0].0, MessageKind::ToolCall);
+        assert_eq!(out[0].1.chars().count(), BODY_MAX);
+    }
+
+    /// One JSON line holding a multi-line block yields one entry per line, so the
+    /// per-body cap bounds each entry without bounding their count.
+    #[test]
+    fn one_line_cannot_classify_into_unbounded_entries() {
+        let block = "line\n".repeat(ENTRIES_PER_LINE_MAX * 3);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": block }] },
+        })
+        .to_string();
+        assert_eq!(classify_stream_json(&line).len(), ENTRIES_PER_LINE_MAX);
+    }
+
     /// The cap counts CHARS, not bytes: provider prose carries non-ASCII
     /// routinely, and a byte-index truncation would panic on a UTF-8 boundary.
     #[test]
