@@ -2,10 +2,16 @@
 //!
 //! This module exists for its PRIVACY, not for its size. `StoreWriter` is a
 //! field of [`TranscriptSink`] and nothing outside this file can name it, so
-//! `acp_pool` cannot write a durable transcript row without publishing it live
+//! `acp_pool` cannot write through the STORE WRITER without publishing live
 //! first. A doc comment on the field would not do that: Rust privacy is
 //! per-MODULE, so a sign on the door inside `acp_pool.rs` is a sign, and the
 //! same omission had already walked past it twice.
+//!
+//! **That is the exact scope of the guarantee, and it is narrower than "every
+//! durable transcript row".** `FleetProviderEventRepo::append` is public and a
+//! caller can reach the ledger without touching a `StoreWriter` at all —
+//! `converge_dirty_session` does, and no wrap here can stop it. Such a caller
+//! must publish through [`publish_repo_row`], and that one IS a convention.
 
 use std::time::Duration;
 
@@ -42,6 +48,25 @@ pub(crate) struct TranscriptSink {
     classifier: AcpClassifier,
     /// Tool calls published this turn, for the run banner's tally.
     pub(crate) tool_calls: u32,
+}
+
+/// Publish ONE row that was written straight to the repo, past the sink.
+///
+/// `converge_dirty_session` mints its `turn_interrupted` marker with
+/// `FleetProviderEventRepo::append` because it is a free function with no actor
+/// and no writer, so the sink's privacy cannot reach it — a durable row that no
+/// wrap can catch. It still has to stream, and it is the one that matters most:
+/// convergence is the operator-stop and adapter-death path, so without this the
+/// live pane ends without the interruption and re-opening the ticket shows a
+/// line that was never streamed.
+///
+/// A fresh classifier is correct here and not a shortcut: a lifecycle marker
+/// carries everything it renders, unlike a `tool_call_update` that needs the
+/// call before it.
+pub(crate) fn publish_repo_row(stream: &RunStream, event_type: &str, raw_payload: &str) {
+    for (kind, body) in AcpClassifier::default().classify_row(event_type, raw_payload) {
+        stream.line(kind, body);
+    }
 }
 
 impl TranscriptSink {

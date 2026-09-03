@@ -389,6 +389,133 @@ async fn an_acp_run_streams_the_same_transcript_it_later_re_reads() {
     );
 }
 
+/// T1 for a run that is CUT SHORT, which is where criterion (A) was still
+/// false at `925b83a3`.
+///
+/// `converge_dirty_session` mints the `turn_interrupted` marker with
+/// `FleetProviderEventRepo::append`, past the store writer and past every wrap
+/// around it, so the marker landed durably and never streamed. Unlike the two
+/// bookkeeping markers, this one RENDERS: the live pane ended without the
+/// interruption and re-opening the ticket showed a line nobody saw arrive.
+///
+/// Convergence is the operator-stop and adapter-death path, so this is exactly
+/// the run an operator is watching when they press stop.
+#[tokio::test]
+async fn a_cancelled_acp_run_streams_its_interruption() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping the acp cancel live-stream tripwire");
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+    seed_card(&pool, &ids).await;
+
+    // The turn never answers, so the cancel always races a genuinely open turn
+    // and convergence is the path that ends it.
+    let rpc_log = home.path().join("rpc.log");
+    let agent = tripwire_support::seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-live-cancel",
+        &serde_json::json!({
+            "FAKE_ACP_HANG_SESSIONS": "*",
+            "FAKE_ACP_RPC_LOG": rpc_log.display().to_string(),
+        }),
+    )
+    .await;
+    tripwire_support::write_acp_adapter_config(
+        home.path(),
+        &tripwire_support::fake_acp_adapter(),
+        "default",
+    );
+
+    let home_str = home.path().display().to_string();
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", &home_str),
+            ("HOME", &home_str),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_TASK_EXECUTOR", "acp"),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+            ("HANGAR_DAEMON_DISABLE_SANDBOX", "1"),
+        ],
+    );
+
+    let mut sub = Client::connect(&rpc_socket(home.path())).await;
+    sub.auth_from_file(home.path()).await;
+    sub.subscribe(&ids.workspace_id).await;
+
+    let task_id = "task-live-cancel";
+    enqueue_task_for(&pool, &ids, task_id, &agent).await;
+
+    let scale = u64::from(tripwire_support::budget_scale());
+    // The prompt has REACHED the adapter, so the cancel stops an open turn and
+    // convergence has a `turn_interrupted` marker to mint.
+    tripwire_support::wait_for_file(&rpc_log, Duration::from_secs(60 * scale), |log| {
+        log.contains("prompt")
+    });
+
+    let mut client = Client::connect(&rpc_socket(home.path())).await;
+    client.auth_from_file(home.path()).await;
+    let resp = client
+        .call(
+            methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            serde_json::json!({ "workspace_id": ids.workspace_id, "issue_id": ISSUE_ID }),
+        )
+        .await;
+    assert!(
+        resp["error"].is_null(),
+        "issue_cancel_active must ack: {resp}"
+    );
+
+    let run = sub.collect_run(task_id, Duration::from_secs(60 * scale)).await;
+    let _ = wait_for_db(&pool, task_id, "cancelled", Duration::from_secs(60 * scale)).await;
+    let mut live = run.transcript.clone();
+    live.extend(sub.drain_until_message(task_id, Duration::from_secs(15 * scale)).await);
+
+    let timeline = sub
+        .call(
+            methods::HANGAR_BOARD_CARD_TIMELINE,
+            serde_json::json!({
+                "workspace_id": ids.workspace_id,
+                "board_id": BOARD_ID,
+                "issue_id": ISSUE_ID,
+            }),
+        )
+        .await;
+    let pane = session.capture_pane();
+    drop(session);
+
+    assert!(
+        timeline["error"].is_null(),
+        "board_card_timeline must answer: {timeline}\ndaemon:\n{pane}"
+    );
+    let durable: ainb_hangar_proto::snapshots::BoardCardTimelineResult =
+        serde_json::from_value(timeline["result"].clone()).expect("decode timeline result");
+    let re_read: Vec<(MessageKind, String)> =
+        durable.entries.iter().map(|e| (e.kind, e.body.clone())).collect();
+
+    // POSITIVE and specific: the durable read really did get an interruption
+    // marker, so the equality below is asserting about the row this test exists
+    // for and not about an empty transcript on both sides.
+    assert!(
+        re_read
+            .iter()
+            .any(|(kind, body)| *kind == MessageKind::Error && body.contains("turn_interrupted")),
+        "the cancelled run's durable transcript must carry the interruption: {re_read:#?}"
+    );
+    assert_eq!(
+        live, re_read,
+        "a cancelled run's live stream must equal its durable re-read too\nseen: {:?}",
+        run.seen
+    );
+}
+
 /// A fake `claude` emitting a stream-json transcript that exercises every lane
 /// the classifier has: the `system` handle, assistant prose, a thinking block, a
 /// `tool_use` and its matching `tool_result` (which resolves its tool NAME only
@@ -698,6 +825,45 @@ impl Client {
                 _ => {}
             }
         }
+    }
+
+    /// Keep collecting this task's `TaskMessage`s PAST its terminal event,
+    /// until one arrives or `budget` expires.
+    ///
+    /// Only the cancelled arm needs this. A cancelled run's interruption marker
+    /// is published by `converge_dirty_session`, which runs in the pool actor
+    /// and races the cancel RPC's own terminal event, so `TaskFinished` can
+    /// legitimately overtake the last transcript line. Benign in the UI, where
+    /// the pane is still open and a late line lands; but a collector that
+    /// stopped dead at the terminal would report a stream that is merely
+    /// unfinished as one that is wrong.
+    async fn drain_until_message(
+        &mut self,
+        task_id: &str,
+        budget: Duration,
+    ) -> Vec<(MessageKind, String)> {
+        let deadline = Instant::now() + budget;
+        let mut extra = Vec::new();
+        while extra.is_empty() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let Some(frame) = self.read_frame(remaining).await else {
+                break;
+            };
+            if frame.get("id").is_some() || frame["method"] != EVENT_METHOD {
+                continue;
+            }
+            let event = &frame["params"];
+            if event["task_id"] != task_id || event["event"] != "task_message" {
+                continue;
+            }
+            let kind: MessageKind =
+                serde_json::from_value(event["kind"].clone()).expect("decode kind");
+            let body = event["body"].as_str().expect("body is a string").to_string();
+            extra.push((kind, body));
+        }
+        extra
     }
 }
 

@@ -1645,7 +1645,22 @@ pub async fn converge_dirty_session(
         // A deterministic event_id makes the SECOND convergence of the same
         // turn a no-op insert rather than a duplicate marker.
         match FleetProviderEventRepo::append(pool, &marker).await {
-            Ok(stored) => events.emit_transcript_order(session_key, stored.ingest_order),
+            Ok(stored) => {
+                events.emit_transcript_order(session_key, stored.ingest_order);
+                // This row skips the sink (no actor here, so no writer), so it
+                // publishes itself or it never streams. Convergence is the
+                // operator-stop path: the interruption is the line an operator
+                // is most likely to be watching for.
+                if let Some(stream) =
+                    bind_task_stream(pool.clone(), events.clone(), row.scope_key.clone()).await
+                {
+                    crate::acp_transcript::publish_repo_row(
+                        &stream,
+                        &marker.event_type,
+                        &marker.raw_payload,
+                    );
+                }
+            }
             Err(error) => tracing::error!(
                 %session_key,
                 %error,
@@ -1963,14 +1978,14 @@ impl SessionActor {
         }
     }
 
-    /// The ONE path a transcript chunk takes: published live, then committed
-    /// durably.
+    /// The one path a chunk takes THROUGH THE STORE WRITER: published live,
+    /// then committed durably.
     ///
-    /// Both halves in one place because they must not diverge, and three call
-    /// sites had already grown (stream chunks, the parked approval, the turn's
-    /// closing flush). A fourth that pushed straight to the writer would leave
-    /// the live view one line short of the durable re-read, silently, and the
-    /// closing flush is exactly where that first happened.
+    /// Not "the one path a transcript row takes", which was the claim until a
+    /// verify found `converge_dirty_session` appending straight to the repo.
+    /// The writer is unreachable outside [`crate::acp_transcript`] and that part
+    /// is compile-enforced; the ledger underneath it is public and that part is
+    /// not. See [`crate::acp_transcript::publish_repo_row`].
     ///
     /// Live BEFORE durable, deliberately: `writer.push` buffers and commits on a
     /// cadence, so publishing after it would hold the operator's transcript back
